@@ -2,15 +2,35 @@
 
 import asyncio
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from configuration import MachineConfiguration, MeasurementConfiguration
+from recovery import run_blocking_operation
 from models import CapturedFrame, MeasurementEvent, PublishEvent
 
 
 logger = logging.getLogger(__name__)
+
+
+def save_evidence_image(source_path: Path, image_path: Path) -> None:
+    """保存并同步图片副本，再原子发布最终证据文件。"""
+    temporary_path = image_path.with_suffix(image_path.suffix + ".partial")
+    try:
+        with source_path.open("rb") as source_file:
+            with temporary_path.open("wb") as evidence_file:
+                shutil.copyfileobj(source_file, evidence_file)
+                evidence_file.flush()
+                os.fsync(evidence_file.fileno())
+        if temporary_path.stat().st_size == 0:
+            raise ValueError("模拟图片为空。")
+        os.replace(temporary_path, image_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 @dataclass
@@ -59,7 +79,7 @@ class FolderCamera:
             image_extensions = {
                 ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".ppm",
             }
-            image_paths = await asyncio.to_thread(
+            image_paths = await run_blocking_operation(
                 lambda: sorted(
                     image_path for image_path in self.machine.image_directory.iterdir()
                     if image_path.is_file()
@@ -73,7 +93,7 @@ class FolderCamera:
             evidence_directory = (
                 self.configuration.evidence_directory / window.session_id
             )
-            await asyncio.to_thread(
+            await run_blocking_operation(
                 evidence_directory.mkdir, parents=True, exist_ok=True,
             )
             event_loop = asyncio.get_running_loop()
@@ -91,14 +111,15 @@ class FolderCamera:
                 if selected_count < self.configuration.max_frames_per_session:
                     frame_id = f"{window.capture_id}-{frame_number}"
                     image_path = evidence_directory / f"{frame_id}{source_path.suffix}"
-                    await asyncio.to_thread(shutil.copyfile, source_path, image_path)
-                    if image_path.stat().st_size == 0:
-                        raise ValueError("模拟图片为空。")
+                    await run_blocking_operation(
+                        save_evidence_image, source_path, image_path,
+                    )
 
                     # 发布带固定归属的帧，随后继续取流。
                     frame = CapturedFrame(
                         window.session_id, window.capture_id, self.machine.camera_id,
                         frame_id, captured_at, captured_monotonic, str(image_path),
+                        window.capture_id, datetime.now(timezone.utc).isoformat(),
                     )
                     await self.publish_event(MeasurementEvent(
                         "FrameSelected", self.machine.machine_id,

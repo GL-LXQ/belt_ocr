@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
+from datetime import datetime, timezone
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,15 @@ class MeasurementEvent:
     payload: Any = None
     event_id: str = field(default_factory=lambda: uuid4().hex)
     acknowledgement: asyncio.Future[None] | None = None
+    source_id: str = ""
+    source_epoch: str = ""
+    source_sequence: int = 0
+    occurred_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    received_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
 
 PublishEvent = Callable[[MeasurementEvent], Awaitable[None]]
@@ -28,6 +38,8 @@ class CapturedFrame:
     captured_at: str
     captured_monotonic: float
     image_path: str
+    source_epoch: str = ""
+    received_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -76,6 +88,13 @@ class BeltSession:
     frozen_payload: str | None = None
     payload_hash: str | None = None
     errors: list[str] = field(default_factory=list)
+    process_epoch: str = ""
+    configuration_snapshot: dict = field(default_factory=dict)
+    ocr_deadline: str = ""
+    cycle_deadline: str = ""
+    ocr_jobs: dict[str, dict] = field(default_factory=dict)
+    evidence_verified: bool = False
+    evidence_validation_pending: bool = False
 
     @property
     def ocr_done(self) -> bool:

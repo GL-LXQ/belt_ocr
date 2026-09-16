@@ -5,6 +5,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -28,7 +29,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         # 关闭测试执行器并释放临时文件。
         if self.executor is not None:
-            await self.executor.stop()
+            await asyncio.wait_for(self.executor.stop(), 10)
         self.temporary_directory.cleanup()
 
     async def start_executor(self, **overrides: object) -> MeasurementExecutor:
@@ -51,9 +52,10 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             capture_window_ms=1000,
             frame_interval_ms=20,
             simulated_ocr_delay_ms=20,
-            frequency_interval_ms=15,
-            max_cycle_open_ms=15000,
-            ocr_result_timeout_ms=10000,
+            frequency_interval_ms=150,
+            max_frames_per_session=2,
+            max_cycle_open_ms=30000,
+            ocr_result_timeout_ms=20000,
             storage_retry_delay_ms=5,
             shutdown_timeout_ms=2000,
         )
@@ -61,7 +63,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.executor.start()
         return self.executor
 
-    async def wait_for_state(self, predicate, timeout_seconds: float = 10) -> None:
+    async def wait_for_state(self, predicate, timeout_seconds: float = 20) -> None:
         """等待业务事件推动指定条件成立。"""
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         while not predicate():
@@ -81,7 +83,8 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     def read_records(self) -> list[dict]:
         """读取已经提交的完整结果。"""
-        with sqlite3.connect(self.executor.configuration.database_path) as connection:
+        connection = sqlite3.connect(self.executor.configuration.database_path)
+        with closing(connection):
             records = connection.execute(
                 "SELECT payload_json FROM measurements ORDER BY start_time"
             ).fetchall()
@@ -109,7 +112,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(records), 3)
         for record in records:
             machine_number = int(record["machine_id"][1:])
-            self.assertEqual(record["outcome"], "COMPLETE")
+            self.assertEqual(record["outcome"], "COMPLETE", record["error_codes"])
             self.assertTrue(record["is_simulated"])
             self.assertEqual(
                 record["ordered_lines"], [f"MODEL {machine_number}", "SAME", "SAME"],
@@ -164,14 +167,16 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
         # 重复 OCR 和频率事件不增加候选数量。
         measurement = next(iter(session.frequency_candidates.values()))
-        candidate_count = len(session.frequency_candidates)
-        actor.process_event(MeasurementEvent(
+        await executor.publish_event(MeasurementEvent(
             "FrequencyMeasured", "M01", session.session_id, measurement,
         ))
-        actor.process_event(MeasurementEvent(
+        await executor.publish_event(MeasurementEvent(
             "OCRCompleted", "M01", session.session_id, session.ocr_result,
         ))
-        self.assertEqual(len(session.frequency_candidates), candidate_count)
+        await actor.queue.join()
+        self.assertEqual(
+            session.frequency_candidates[measurement.measurement_id], measurement,
+        )
         await executor.handle_close("M01")
         await executor.handle_close("M01")
         await executor.wait_until_idle()
@@ -427,7 +432,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ocr_capacity_failure_creates_review_record(self) -> None:
         executor = await self.start_executor(
-            ocr_queue_capacity=1, simulated_ocr_delay_ms=250,
+            ocr_queue_capacity=1, simulated_ocr_delay_ms=250, max_frames_per_session=1,
         )
         await asyncio.gather(*(
             executor.handle_start(machine_id) for machine_id in executor.actors

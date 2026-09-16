@@ -71,6 +71,15 @@ class SimulatedFrequency:
             window = self.active_window
             if window is None:
                 continue
+            if (
+                len(window.pending_deliveries)
+                >= self.configuration.event_queue_capacity
+            ):
+                await self.publish_event(MeasurementEvent(
+                    "FrequencyFailed", self.machine.machine_id, window.session_id,
+                    "FREQUENCY_DELIVERY_CAPACITY_EXCEEDED",
+                ))
+                continue
             measured_at = datetime.now(timezone.utc).isoformat()
             measured_monotonic = asyncio.get_running_loop().time()
             task = asyncio.create_task(self.deliver_measurement(

@@ -1,6 +1,6 @@
 # 核心流程运行说明
 
-当前版本先验证三台机器独立测量、旧轮后台收尾、新轮继续开始，以及正常和异常结果保存。
+当前版本包含三机测量、跨轮后台收尾、运行检查点、自动补交、重启恢复和异常审计。
 信号统一从 `MeasurementExecutor.handle_start()` 和 `handle_close()` 进入，尚未接入现场 IO。
 
 ## 运行演示
@@ -19,6 +19,7 @@ uv run python -X utf8 main.py
 
 演示先同时启动三台机器，关闭第一轮后立即启动 M01 的第二轮，等待四条记录保存后退出。
 默认数据库为 `runtime/measurements.sqlite3`，图像副本位于 `runtime/evidence/<session_id>/`。
+独立恢复库默认为 `runtime/measurements.recovery.sqlite3`。
 重复执行演示会增加四条新记录。`runtime/` 已加入 Git 忽略列表。
 
 ## 修改模拟输入
@@ -39,7 +40,7 @@ uv run python -X utf8 main.py --config config.example.json
 | `capture_window_ms` | 启动后的最长图像采集时长，默认 1000 毫秒 |
 | `frame_interval_ms` | 模拟取帧间隔，默认 100 毫秒 |
 | `max_frames_per_session` | 每轮最多选择的帧数，默认 5；采用先到先选策略 |
-| `simulated_ocr_delay_ms` | 每轮模拟识别耗时；示例为 800 毫秒 |
+| `simulated_ocr_delay_ms` | 每帧每次模拟识别耗时；示例为 800 毫秒 |
 | `frequency_interval_ms` | 仪器产生一次新测量的间隔，默认 100 毫秒 |
 | `frequency_delivery_delay_ms` | 测量产生到事件送达的模拟延迟；示例为 50 毫秒 |
 | `frequency_drain_timeout_ms` | 关闭后等待已归属在途测量的上限，默认 2000 毫秒 |
@@ -47,13 +48,23 @@ uv run python -X utf8 main.py --config config.example.json
 | `max_cycle_open_ms` | 等待正常关闭的最大时长，默认 60000 毫秒 |
 | `minimum_frequency_hz` / `maximum_frequency_hz` | 有效频率范围，默认 0.01～10000 Hz |
 | `max_pending_sessions_per_machine` | 每台机器未完成记录上限，默认 20 |
-| `ocr_queue_capacity` | 全局 OCR 待处理及处理中任务总上限，默认 32 |
+| `ocr_queue_capacity` | 全局 OCR 待处理及处理中帧任务总上限，默认 32 |
 | `event_queue_capacity` / `storage_queue_capacity` | 单机事件队列和存储队列上限，默认 128 / 32 |
 | `storage_retry_attempts` / `storage_retry_delay_ms` | 一次提交的最大尝试次数和间隔，默认 3 次 / 100 毫秒 |
 | `shutdown_timeout_ms` | 正常退出等待后台收尾的上限，默认 10000 毫秒 |
+| `recovery_database_path` | 独立恢复库路径；省略时使用最终库同目录的 `.recovery.sqlite3` 文件 |
+| `storage_retry_interval_ms` | 一批提交失败后的自动补交间隔，默认 1000 毫秒 |
+| `maintenance_interval_ms` | 补交和容量检查间隔，默认 250 毫秒 |
+| `max_persistent_records` | 待提交记录数量达到该值时停止接收新周期，默认 1000 |
+| `minimum_free_disk_bytes` | 恢复库和证据所在磁盘的最低剩余空间，默认 100 MiB |
+| `ocr_retry_attempts` / `ocr_job_timeout_ms` | 单帧最大尝试次数和每次处理期限，默认 3 次 / 5000 毫秒 |
+| `worker_restart_attempts` | 共享工作单元最多启动次数，默认 3 次 |
+| `event_max_age_ms` | START/CLOSE 允许的最大时间偏差，默认 30000 毫秒 |
+| `initial_machine_state` | 新机器的模拟初始状态，默认 `CLOSED`；也支持 `OPEN`、`UNKNOWN` |
 
 相机按文件名排序循环读图，每次模拟取帧都会产生新的帧编号和取帧时间。
-每轮选中的图片复制到独立证据目录；源文件的修改时间不作为采集时间。
+每轮选中的图片先写入临时文件并同步，再原子发布到独立证据目录。
+源文件的修改时间不作为采集时间。
 支持 PNG、JPG、JPEG、BMP、TIF、TIFF 和 PPM 文件。
 目录不存在、没有图片、图片为空或复制失败，都会形成采集异常。
 
@@ -94,14 +105,17 @@ asyncio.run(run_measurement())
 调用方需要使用执行器所在的异步事件循环；现场线程接入、信号去抖、边沿识别和通信重连留待适配层实现。
 本版假设调用方提供按实际顺序确认的 START/CLOSE，不接受未经确认的电平变化。
 无活动周期时重复关闭、活动周期内重复启动不会产生新测量。
-仅有 `machine_id` 的入口无法辨别跨周期重放的旧关闭信号，真实接入层必须先完成去重和顺序确认。
+仅有 `machine_id` 的入口无法辨别来自硬件的跨周期旧信号，真实接入层必须先确定周期身份。
+业务事件支持 `event_id`、`source_id`、`source_epoch`、`source_sequence`、时间及 `session_id`；
+这些身份不会因重试而改变。已处理事件身份保存在恢复库，重启后仍会去重。
+带旧 Session 的关闭事件、旧来源序号、未经同步的新批次会进入审计，不关闭新周期。
 
 ## 业务处理顺序
 
 1. START 创建全局唯一 Session，绑定机器、相机和频率来源。
 2. 文件夹相机开始取流，频率适配器登记本轮接收窗口。
-3. 图像窗口到时或提前 CLOSE 后封口，完整帧清单交给共享 OCR。
-4. 一个 OCR Worker 按机器轮转，同一机器内按提交顺序处理。
+3. 图像窗口到时或提前 CLOSE 后封口，先持久登记逐帧任务，再交给共享 OCR。
+4. 一个 OCR Worker 按机器轮转，同一机器内按提交顺序处理；每帧有独立任务和尝试编号。
 5. CLOSE 释放当前活动位置；新一轮可以开始，旧一轮继续后台收尾。
 6. 频率适配器等待已绑定旧轮的在途读数，再封口并按测量序号取最后一次有效值。
 7. 正常关闭、OCR 成功、有效频率三项齐全，且证据可读取，才冻结完整结果。
@@ -127,13 +141,64 @@ ORDER BY start_time;
 - `INTERRUPTED`：周期超时或程序主动退出；不伪造正常关闭时间。
 
 达到积压上限或存储不可用时，不受理新的正常测量，并等待该轮明确关闭后重新同步。
-未受理事件尝试写入 `rejected_cycles`，存储不可用或队列满时输出报警日志。
+未受理事件先进入本地待提交区，再写入 `rejected_cycles`；日志同步记录报警。
 OCR 队列满直接将对应轮次标记为待复核，不阻塞其他机器的关闭处理。
 
-数据库写入失败时会有限重试，失败后在进程内保留冻结记录，状态为 `RETRY_PENDING`。
-恢复存储后可调用 `await executor.retry_pending_records()`，再等待结果保存。
-重试使用同一份内容；已有相同记录视为成功，内容冲突记录错误且不覆盖。
-未确认保存成功的记录不会标记完成。
+数据库写入前，冻结记录先持久保存到恢复库。内存提交队列满不会丢失这份记录。
+一批提交失败后状态为 `RETRY_PENDING`，维护任务按间隔自动补交；不必手工触发。
+`await executor.retry_pending_records()` 仍可用于主动重试。
+已有相同记录视为成功；内容冲突记录为 `CONFLICT`，保留原内容并停止自动覆盖或重试。
+未确认保存成功的记录不会标记完成。最终数据库在程序启动时不可用，也可以启动本地采集与暂存。
+
+## 恢复库与重启
+
+恢复库与最终结果库必须是不同文件；可以通过配置放在不同的可写目录。
+恢复库包含：
+
+| 表 | 内容 |
+|---|---|
+| `machine_checkpoints` | 活动周期、未完成 Session、证据清单、原配置、期限和逐帧处理进度 |
+| `pending_records` | 冻结提交内容、下一次重试时间及完整性冲突状态 |
+| `committed_records` | 已确认写入最终库的记录身份与内容哈希 |
+| `event_receipts` | 已处理的事件编号与内容哈希 |
+| `audit_entries` | 来源冲突、重复事件、迟到结果、设备故障等审计内容 |
+
+每个已确认的业务事件都有检查点。恢复库使用 SQLite 事务和 WAL；进程锁禁止两个实例同时操作同一恢复库。
+启动时按以下规则恢复：
+
+- 已确认提交：移出工作集合。
+- 已冻结未确认：提交原内容，由最终库唯一键和内容检查确认或去重。
+- 已关闭且图像、频率窗口完整：恢复未完成 OCR 帧，成功帧不会重复投票。
+- 已关闭但窗口尚未完整封口：记录缺失窗口并转为待复核，不推测丢失的在途数据。
+- 崩溃前仍打开：标记 `PROCESS_INTERRUPTED`，不补造正常 CLOSE，等待机器重新同步。
+
+恢复时使用持久化的日期时间重建期限，不使用旧进程的单调时钟继续计时。
+退出等待到期时保留本地检查点和待提交记录，下一次启动继续处理。
+请保留恢复库及 SQLite 的配套文件，不要在程序运行时手工删除或只复制其中一个文件。
+
+## 故障与重新同步
+
+机器状态由当前业务数据派生为 `INITIALIZING`、`READY`、`ACTIVE`、
+`WAIT_CYCLE_RESET`、`DEGRADED` 或 `FAULT`。
+磁盘空间或待提交容量不足时停止接收新周期；恢复容量后仍需确认被拒收周期已经关闭。
+
+```python
+# 报告相机故障及恢复，仅影响绑定机器。
+await executor.report_device_health("CAM01", healthy=False)
+await executor.report_device_health("CAM01", healthy=True)
+
+# 确认现场已经关闭后恢复接收。
+await executor.synchronize_machine("M01", observed_state="CLOSED")
+
+# 确认外部来源重连后的新批次和序号基线。
+await executor.synchronize_source("M01", "external-input", "connection-2", 0)
+await executor.synchronize_machine("M01", observed_state="CLOSED")
+```
+
+`IO`、`OCR`、`STORAGE` 作为共享来源时影响所有机器；也可显式指定 `machine_id`。
+设备报告恢复不代表已确认机器关闭，重新同步须使用真实可确认的现场状态。
+OCR/存储工作任务意外退出时会记录故障并有限重启；OCR 在途帧保留任务身份继续尝试。
+单帧超时和处理失败有有限重试；尝试次数、终态和有序文字行进入最终可追溯记录。
 
 ## 文件职责
 
@@ -148,14 +213,16 @@ OCR 队列满直接将对应轮次标记为待复核，不阻塞其他机器的�
 | `ocr.py` | 共享有界调度和模拟有序文字行输出 |
 | `frequency.py` | 持续模拟新测量、窗口归属和在途数据收尾 |
 | `storage.py` | SQLite 建表、幂等写入和有限重试 |
+| `recovery.py` | 本地运行检查点、待提交记录、事件去重、审计和实例锁 |
 | `tests/test_measurement_flow.py` | 并行、跨轮次、重复、失败和超时测试 |
+| `tests/test_recovery_and_faults.py` | 异常退出、重启恢复、自动补交、故障隔离和多轮运行测试 |
 
 ## 当前边界
 
-本版尚未实现真实 IO/相机/频率协议、真实 OCR、重启恢复和本地持久化待提交区。
-退出时会尝试保存中断及已关闭的结果；超出等待期限会记录错误并释放任务。
-未提交状态目前仅在进程内，强制终止或持久写入失败后退出可能丢失这部分状态。
-后续恢复能力需要独立实现，不能把本次模拟流程视为已经满足 README 全部生产验收条件。
+真实 IO/相机/频率协议、实际图像质量评估和 OCR 融合仍按约定保留为模拟实现。
+现场初始电平、脉冲去抖、设备时间映射和重连基线必须由真实设备适配层提供，不能用模拟结果替代现场验证。
+有限多轮及故障注入测试不代表已经完成工控机现场的持续运行和吞吐验收。
+最终库不可用时可暂存；如果本地恢复存储也不可写，则暂停接收并报警，无法承诺保存尚未确认持久化的数据。
 
 ## 测试
 

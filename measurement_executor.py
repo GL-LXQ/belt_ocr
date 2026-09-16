@@ -2,12 +2,17 @@
 
 import asyncio
 import logging
+import shutil
+from dataclasses import replace
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from camera import FolderCamera
 from configuration import MeasurementConfiguration
 from frequency import SimulatedFrequency
 from machine_actor import MachineActor
 from models import MeasurementEvent
+from recovery import run_blocking_operation, RecoveryStore
 from ocr import SimulatedOCR
 from storage import SQLiteWriter
 
@@ -20,11 +25,17 @@ class MeasurementExecutor:
         configuration.validate()
         self.configuration = configuration
         self.state_changed = asyncio.Event()
-        self.storage = SQLiteWriter(configuration, self.publish_event)
+        self.recovery = RecoveryStore(configuration.recovery_path)
+        self.storage = SQLiteWriter(configuration, self.publish_event, self.recovery)
         self.ocr = SimulatedOCR(configuration, self.publish_event)
         self.actors: dict[str, MachineActor] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
         self.accepting_signals = False
+        self.source_sequences: dict[tuple[str, str], int] = {}
+        self.process_epoch = uuid4().hex
+        self.has_started = False
+        self.stopping = False
+        self.releasing_resources = False
 
         # 为每台机器建立独立的采集器和业务处理器。
         for machine in configuration.machines:
@@ -34,27 +45,73 @@ class MeasurementExecutor:
                 machine, configuration, camera, frequency, self.ocr, self.storage,
                 self.publish_event, self.state_changed,
             )
+            self.actors[machine.machine_id].process_epoch = self.process_epoch
 
     async def start(self) -> None:
         """初始化存储并启动持续监听与处理任务。"""
-        if self.worker_tasks:
-            raise RuntimeError("测量执行器已经启动。")
+        if self.has_started:
+            raise RuntimeError("请为新一次运行创建新的测量执行器。")
         try:
-            await asyncio.to_thread(self.storage.initialize)
-            await asyncio.to_thread(
+            await run_blocking_operation(self.recovery.initialize)
+            await run_blocking_operation(
                 self.configuration.evidence_directory.mkdir,
                 parents=True, exist_ok=True,
             )
+            checkpoints = await run_blocking_operation(self.recovery.load_checkpoints)
+            if set(checkpoints) - set(self.actors):
+                raise ValueError("配置缺少恢复记录中已有的机器。")
         except Exception:
+            self.recovery.close()
             logger.exception("测量系统初始化失败")
             raise RuntimeError("测量系统初始化失败。") from None
+
+        # 最终库不可用时保留本地恢复能力。
+        try:
+            await run_blocking_operation(self.storage.initialize)
+        except Exception:
+            self.storage.available = False
+            await run_blocking_operation(
+                self.recovery.audit, "DATABASE_UNAVAILABLE_AT_STARTUP",
+            )
+            logger.exception("最终结果库暂不可用，将使用本地待提交区。")
+
+        # 恢复已关闭任务，建立模拟输入的初始状态。
+        try:
+            capacity_available = await self.check_storage_capacity()
+            for machine_id, actor in self.actors.items():
+                actor.capacity_available = capacity_available
+                checkpoint = checkpoints.get(machine_id, {})
+                if not checkpoint:
+                    checkpoint["waiting_cycle_reset"] = (
+                        self.configuration.initial_machine_state != "CLOSED"
+                    )
+                    if self.configuration.initial_machine_state == "UNKNOWN":
+                        checkpoint["device_faults"] = ["UNKNOWN_INITIAL_STATE"]
+                await actor.restore_measurements(checkpoint)
+        except Exception:
+            startup_tasks = [
+                task for actor in self.actors.values()
+                for task in (*actor.deadline_tasks.values(), *actor.background_tasks)
+            ]
+            for task in startup_tasks:
+                task.cancel()
+            await asyncio.gather(*startup_tasks, return_exceptions=True)
+            self.recovery.close()
+            logger.exception("恢复测量记录失败")
+            raise RuntimeError("恢复测量记录失败。") from None
 
         # 启动各机器事件处理和持续频率接收。
         for actor in self.actors.values():
             self.worker_tasks.append(asyncio.create_task(actor.run()))
             self.worker_tasks.append(asyncio.create_task(actor.frequency.run()))
-        self.worker_tasks.append(asyncio.create_task(self.ocr.run()))
-        self.worker_tasks.append(asyncio.create_task(self.storage.run()))
+        self.worker_tasks.append(asyncio.create_task(
+            self.supervise_worker("OCR", self.ocr.run), name="OCR",
+        ))
+        self.worker_tasks.append(asyncio.create_task(
+            self.supervise_worker("STORAGE", self.storage.run), name="STORAGE",
+        ))
+        self.worker_tasks.append(asyncio.create_task(self.maintain_system()))
+        self.has_started = True
         self.accepting_signals = True
 
     async def handle_start(self, machine_id: str) -> None:
@@ -65,7 +122,9 @@ class MeasurementExecutor:
         """处理某台皮带机正常关闭，不等待后台识别和保存。"""
         await self.send_signal("MachineClosed", machine_id)
 
-    async def send_signal(self, event_type: str, machine_id: str) -> None:
+    async def send_signal(
+        self, event_type: str, machine_id: str, payload=None
+    ) -> None:
         """把入口信号送入机器队列并等待本次业务处理完成。"""
         if not self.accepting_signals:
             raise RuntimeError("测量系统当前未接收信号。")
@@ -75,17 +134,155 @@ class MeasurementExecutor:
         # 等待 Actor 确认本次启动或关闭，不等待测量结果。
         acknowledgement = asyncio.get_running_loop().create_future()
         await self.publish_event(MeasurementEvent(
-            event_type, machine_id, acknowledgement=acknowledgement,
+            event_type, machine_id,
+            session_id=(
+                self.actors[machine_id].active_session_id
+                if event_type == "MachineClosed" else None
+            ),
+            payload=payload, acknowledgement=acknowledgement,
         ))
         await acknowledgement
 
     async def publish_event(self, event: MeasurementEvent) -> None:
         """将事件路由到对应机器的有界队列。"""
+        if self.releasing_resources:
+            if event.acknowledgement is not None:
+                event.acknowledgement.cancel()
+            return
         actor = self.actors.get(event.machine_id)
         if actor is None:
+            await run_blocking_operation(self.recovery.audit, "UNKNOWN_MACHINE", event)
             logger.warning("隔离未知机器事件 machine_id=%s", event.machine_id)
             return
+        # 为内部来源补齐事件批次、序号和接收时间。
+        if not event.source_id:
+            source_id = "business"
+            if event.event_type.startswith(("Frame", "Capture")):
+                source_id = actor.machine.camera_id
+            elif event.event_type.startswith("Frequency"):
+                source_id = actor.machine.frequency_source_id
+            elif event.event_type.startswith("OCR"):
+                source_id = "OCR"
+            elif event.event_type.startswith("Commit"):
+                source_id = "STORAGE"
+            source_key = (event.machine_id, source_id)
+            sequence = self.source_sequences.get(source_key, 0) + 1
+            self.source_sequences[source_key] = sequence
+            event = replace(
+                event, source_id=source_id, source_epoch=self.process_epoch,
+                source_sequence=sequence,
+                received_at=datetime.now(timezone.utc).isoformat(),
+            )
         await actor.queue.put(event)
+
+    async def report_device_health(
+        self, source_id: str, healthy: bool, machine_id: str | None = None
+    ) -> None:
+        """按设备绑定范围发送故障或恢复事件。"""
+        if machine_id is not None and machine_id not in self.actors:
+            raise ValueError(f"未配置机器：{machine_id}")
+        targets = [
+            actor.machine.machine_id for actor in self.actors.values()
+            if machine_id == actor.machine.machine_id
+            or (
+                machine_id is None and source_id in {
+                    "IO", "OCR", "STORAGE", actor.machine.camera_id,
+                    actor.machine.frequency_source_id,
+                }
+            )
+        ]
+        if not targets:
+            raise ValueError(f"未配置设备来源：{source_id}")
+        for target in targets:
+            await self.send_signal(
+                "DeviceRecovered" if healthy else "DeviceFault", target, source_id,
+            )
+
+    async def synchronize_machine(self, machine_id: str, observed_state: str) -> None:
+        """接收已确认的现场初始状态或重连状态。"""
+        if observed_state not in {"CLOSED", "OPEN", "UNKNOWN"}:
+            raise ValueError("机器状态必须是 CLOSED、OPEN 或 UNKNOWN。")
+        await self.send_signal("MachineSynchronized", machine_id, observed_state)
+
+    async def synchronize_source(
+        self, machine_id: str, source_id: str, source_epoch: str,
+        source_sequence: int = 0,
+    ) -> None:
+        """登记已确认的来源批次和序号基线。"""
+        if not source_id or not source_epoch or source_sequence < 0:
+            raise ValueError("来源、批次不能为空，序号不能为负数。")
+        await self.send_signal("SourceSynchronized", machine_id, {
+            "source_id": source_id, "epoch": source_epoch,
+            "sequence": source_sequence,
+        })
+
+    async def maintain_system(self) -> None:
+        """自动补交待提交记录并检查磁盘及积压容量。"""
+        while True:
+            try:
+                await self.storage.enqueue_pending_records()
+                capacity_available = await self.check_storage_capacity()
+                for actor in self.actors.values():
+                    if actor.capacity_available != capacity_available:
+                        await self.publish_event(MeasurementEvent(
+                            "CapacityChanged", actor.machine.machine_id,
+                            payload=capacity_available,
+                        ))
+                self.recovery.available = True
+            except Exception:
+                self.recovery.available = False
+                logger.exception("本地恢复库或容量检查失败，暂停接收新周期。")
+            await asyncio.sleep(self.configuration.maintenance_interval_ms / 1000)
+
+    async def check_storage_capacity(self) -> bool:
+        """检查本地待提交数量和输出目录所在磁盘的剩余空间。"""
+        pending_count = await run_blocking_operation(self.recovery.pending_count)
+        output_paths = {
+            self.configuration.recovery_path.parent,
+            self.configuration.evidence_directory,
+        }
+        disk_states = await asyncio.gather(*(
+            run_blocking_operation(shutil.disk_usage, path) for path in output_paths
+        ))
+        return (
+            pending_count < self.configuration.max_persistent_records
+            and all(
+                disk_state.free >= self.configuration.minimum_free_disk_bytes
+                for disk_state in disk_states
+            )
+        )
+
+    async def supervise_worker(self, component: str, run_worker) -> None:
+        """监督共享工作任务，有限重启异常退出的工作单元。"""
+        for attempt in range(self.configuration.worker_restart_attempts):
+            try:
+                await run_worker()
+                if self.stopping:
+                    return
+                raise RuntimeError("工作任务意外退出。")
+            except asyncio.CancelledError:
+                if self.stopping:
+                    raise
+                logger.error("工作任务意外取消 component=%s", component)
+            except Exception:
+                logger.exception("工作任务异常退出 component=%s", component)
+
+            # 记录退出事件并按影响范围限制接收。
+            for actor in self.actors.values():
+                await self.publish_event(MeasurementEvent(
+                    "DeviceFault", actor.machine.machine_id, payload=component,
+                ))
+            await run_blocking_operation(
+                self.recovery.audit, f"{component}_WORKER_EXITED",
+            )
+            if attempt + 1 < self.configuration.worker_restart_attempts:
+                await asyncio.sleep(self.configuration.storage_retry_interval_ms / 1000)
+                for actor in self.actors.values():
+                    await self.publish_event(MeasurementEvent(
+                        "DeviceRecovered", actor.machine.machine_id, payload=component,
+                    ))
+        if component == "OCR":
+            self.ocr.accepting_jobs = False
 
     async def retry_pending_records(self) -> None:
         """重新提交进程内保留的失败记录。"""
@@ -116,6 +313,7 @@ class MeasurementExecutor:
         if not self.worker_tasks:
             return
         self.accepting_signals = False
+        self.stopping = True
 
         async def drain_measurements() -> None:
             # 将尚未关闭的现场周期标记为中断。
@@ -139,7 +337,7 @@ class MeasurementExecutor:
                 drain_measurements(), self.configuration.shutdown_timeout_ms / 1000,
             )
         except asyncio.TimeoutError:
-            logger.error("退出等待超时，仍有未保存记录。当前版本不支持崩溃恢复。")
+            logger.warning("退出等待到期，未完成记录已保留在本地恢复库。")
 
         # 收集采集、在途测量和期限任务。
         background_tasks = []
@@ -147,12 +345,16 @@ class MeasurementExecutor:
             background_tasks.extend(actor.camera.tasks)
             background_tasks.extend(actor.frequency.tasks)
             background_tasks.extend(actor.deadline_tasks.values())
+            background_tasks.extend(actor.background_tasks)
             for window in actor.frequency.windows.values():
                 background_tasks.extend(window.pending_deliveries)
 
         # 取消剩余后台工作并释放持续任务。
+        self.releasing_resources = True
+        self.ocr.stopping = True
         all_tasks = background_tasks + self.worker_tasks
         for task in all_tasks:
             task.cancel()
         await asyncio.gather(*all_tasks, return_exceptions=True)
         self.worker_tasks.clear()
+        self.recovery.close()

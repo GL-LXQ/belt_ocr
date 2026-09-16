@@ -39,6 +39,22 @@ class MeasurementConfiguration:
     storage_retry_delay_ms: int = 100
     shutdown_timeout_ms: int = 10000
     configuration_version: str = "simulation-v1"
+    recovery_database_path: Path | None = None
+    maintenance_interval_ms: int = 250
+    storage_retry_interval_ms: int = 1000
+    max_persistent_records: int = 1000
+    minimum_free_disk_bytes: int = 104857600
+    ocr_retry_attempts: int = 3
+    ocr_job_timeout_ms: int = 5000
+    worker_restart_attempts: int = 3
+    event_max_age_ms: int = 30000
+    initial_machine_state: str = "CLOSED"
+
+    @property
+    def recovery_path(self) -> Path:
+        if self.recovery_database_path is not None:
+            return self.recovery_database_path
+        return self.database_path.with_suffix(".recovery.sqlite3")
 
     def validate(self) -> None:
         """检查设备绑定和运行参数。"""
@@ -58,6 +74,9 @@ class MeasurementConfiguration:
             "ocr_queue_capacity", "storage_queue_capacity",
             "max_pending_sessions_per_machine", "storage_retry_attempts",
             "shutdown_timeout_ms",
+            "maintenance_interval_ms", "storage_retry_interval_ms",
+            "max_persistent_records", "ocr_retry_attempts", "ocr_job_timeout_ms",
+            "worker_restart_attempts", "event_max_age_ms",
         )
         for parameter in positive_parameters:
             if getattr(self, parameter) <= 0:
@@ -70,6 +89,12 @@ class MeasurementConfiguration:
                 raise ValueError(f"{parameter} 不能为负数。")
         if not 0 < self.minimum_frequency_hz < self.maximum_frequency_hz:
             raise ValueError("频率范围必须是递增的正数范围。")
+        if self.minimum_free_disk_bytes < 0:
+            raise ValueError("磁盘保留空间不能为负数。")
+        if self.recovery_path.resolve() == self.database_path.resolve():
+            raise ValueError("恢复库与最终结果库必须使用不同文件。")
+        if self.initial_machine_state not in {"CLOSED", "OPEN", "UNKNOWN"}:
+            raise ValueError("初始机器状态必须是 CLOSED、OPEN 或 UNKNOWN。")
 
 
 def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
@@ -95,6 +120,10 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
     # 创建输出路径并校验完整配置。
     for path_name in ("database_path", "evidence_directory"):
         settings[path_name] = (configuration_directory / settings[path_name]).resolve()
+    if settings.get("recovery_database_path"):
+        settings["recovery_database_path"] = (
+            configuration_directory / settings["recovery_database_path"]
+        ).resolve()
     configuration = MeasurementConfiguration(machines=tuple(machines), **settings)
     configuration.validate()
     return configuration

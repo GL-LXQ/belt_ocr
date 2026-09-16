@@ -5,9 +5,11 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass
+from contextlib import closing
 
 from configuration import MeasurementConfiguration
 from models import MeasurementEvent, PublishEvent
+from recovery import run_blocking_operation, RecoveryStore
 
 
 logger = logging.getLogger(__name__)
@@ -24,7 +26,8 @@ class StorageRequest:
 
 class SQLiteWriter:
     def __init__(
-        self, configuration: MeasurementConfiguration, publish_event: PublishEvent
+        self, configuration: MeasurementConfiguration, publish_event: PublishEvent,
+        recovery: RecoveryStore,
     ) -> None:
         self.configuration = configuration
         self.publish_event = publish_event
@@ -32,11 +35,14 @@ class SQLiteWriter:
             configuration.storage_queue_capacity
         )
         self.available = True
+        self.recovery = recovery
+        self.queued_records: set[str] = set()
+        self.initialized = False
 
     def initialize(self) -> None:
         """创建数据库目录和记录表。"""
         self.configuration.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.configuration.database_path) as connection:
+        with closing(sqlite3.connect(self.configuration.database_path)) as connection:
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS measurements (
                     session_id TEXT PRIMARY KEY,
@@ -60,19 +66,36 @@ class SQLiteWriter:
                     payload_json TEXT NOT NULL
                 );
             """)
+        self.initialized = True
 
-    def submit(self, request: StorageRequest) -> bool:
+    async def submit(self, request: StorageRequest) -> bool:
         """把不可变记录加入写入队列。"""
+        # 登记本次提交身份，再持久化并进入有界队列。
+        if request.session_id in self.queued_records:
+            return True
+        self.queued_records.add(request.session_id)
         try:
+            staged = await run_blocking_operation(self.recovery.stage_record, request)
+            if not staged:
+                self.queued_records.discard(request.session_id)
+                if request.record_type == "measurement":
+                    await self.publish_event(MeasurementEvent(
+                        "CommitSucceeded", request.machine_id, request.session_id,
+                    ))
+                return True
             self.queue.put_nowait(request)
         except asyncio.QueueFull:
-            self.available = False
+            self.queued_records.discard(request.session_id)
             return False
+        except (asyncio.CancelledError, Exception):
+            self.queued_records.discard(request.session_id)
+            raise
         return True
 
     def write_record(self, request: StorageRequest) -> None:
         """在事务中检查重复记录并写入同一份冻结内容。"""
-        with sqlite3.connect(self.configuration.database_path, timeout=1) as connection:
+        connection = sqlite3.connect(self.configuration.database_path, timeout=1)
+        with closing(connection), connection:
             # 保存本轮未受理事件。
             if request.record_type == "rejected_cycle":
                 connection.execute(
@@ -117,11 +140,24 @@ class SQLiteWriter:
             try:
                 # 对同一份冻结记录执行有限次数的提交。
                 succeeded = False
+                integrity_conflict = False
                 for attempt_number in range(self.configuration.storage_retry_attempts):
                     try:
-                        await asyncio.to_thread(self.write_record, request)
+                        if not self.initialized:
+                            await run_blocking_operation(self.initialize)
+                        await run_blocking_operation(self.write_record, request)
+                        await run_blocking_operation(
+                            self.recovery.complete_record, request,
+                        )
                         succeeded = True
                         self.available = True
+                        break
+                    except ValueError:
+                        integrity_conflict = True
+                        await run_blocking_operation(
+                            self.recovery.audit, "COMMIT_INTEGRITY_CONFLICT", request,
+                        )
+                        logger.exception("提交内容冲突 session_id=%s", request.session_id)
                         break
                     except Exception:
                         self.available = False
@@ -133,11 +169,35 @@ class SQLiteWriter:
                             self.configuration.storage_retry_delay_ms / 1000
                         )
 
+                # 保存下一次自动补交时间，冲突记录停止自动重试。
+                if not succeeded:
+                    await run_blocking_operation(self.recovery.delay_record,
+                        request.session_id,
+                        self.configuration.storage_retry_interval_ms / 1000,
+                        blocked=integrity_conflict,
+                    )
+
                 # 把提交状态返回原 Session。
                 if request.record_type == "measurement":
                     await self.publish_event(MeasurementEvent(
                         "CommitSucceeded" if succeeded else "CommitFailed",
                         request.machine_id, request.session_id,
+                        {"integrity_conflict": integrity_conflict},
                     ))
             finally:
+                self.queued_records.discard(request.session_id)
                 self.queue.task_done()
+
+    async def enqueue_pending_records(self) -> None:
+        """把到期的持久化记录重新送入空闲队列。"""
+        remaining_capacity = self.queue.maxsize - self.queue.qsize()
+        records = await run_blocking_operation(
+            self.recovery.pending_records, remaining_capacity,
+        )
+        for record in records:
+            request = StorageRequest(
+                record["machine_id"], record["record_id"],
+                record["payload_json"], record["payload_hash"], record["record_type"],
+            )
+            if not await self.submit(request):
+                break
