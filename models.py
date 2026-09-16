@@ -1,0 +1,94 @@
+"""定义事件、采集结果和测量状态。"""
+
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable
+from uuid import uuid4
+
+
+@dataclass(frozen=True)
+class MeasurementEvent:
+    event_type: str
+    machine_id: str
+    session_id: str | None = None
+    payload: Any = None
+    event_id: str = field(default_factory=lambda: uuid4().hex)
+    acknowledgement: asyncio.Future[None] | None = None
+
+
+PublishEvent = Callable[[MeasurementEvent], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class CapturedFrame:
+    session_id: str
+    capture_id: str
+    camera_id: str
+    frame_id: str
+    captured_at: str
+    captured_monotonic: float
+    image_path: str
+
+
+@dataclass(frozen=True)
+class FrequencyMeasurement:
+    session_id: str
+    frequency_source_id: str
+    measurement_id: str
+    source_sequence: int
+    value_hz: float
+    measured_at: str
+    measured_monotonic: float
+    received_at: str
+
+
+@dataclass(frozen=True)
+class OCRResult:
+    ordered_lines: tuple[str, ...]
+    evidence_refs: tuple[str, ...]
+    frame_ids: tuple[str, ...]
+
+
+@dataclass
+class BeltSession:
+    session_id: str
+    machine_id: str
+    camera_id: str
+    frequency_source_id: str
+    capture_id: str
+    start_time: str
+    start_boundary: float
+    close_time: str | None = None
+    close_boundary: float | None = None
+    finish_time: str | None = None
+    cycle_state: str = "OPEN"
+    capture_sealed: bool = False
+    selected_frames: dict[str, CapturedFrame] = field(default_factory=dict)
+    skipped_frame_count: int = 0
+    ocr_state: str = "WAITING"
+    ocr_result: OCRResult | None = None
+    frequency_window_sealed: bool = False
+    frequency_candidates: dict[str, FrequencyMeasurement] = field(default_factory=dict)
+    frequency_state: str = "COLLECTING"
+    final_frequency: FrequencyMeasurement | None = None
+    outcome: str = "UNDECIDED"
+    commit_state: str = "NOT_READY"
+    frozen_payload: str | None = None
+    payload_hash: str | None = None
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ocr_done(self) -> bool:
+        return self.ocr_state == "SUCCESS"
+
+    @property
+    def frequency_done(self) -> bool:
+        return self.frequency_state == "FINAL_VALID"
+
+    @property
+    def cycle_closed(self) -> bool:
+        return self.cycle_state == "CLOSED"
+
+    @property
+    def finished(self) -> bool:
+        return self.outcome == "COMPLETE" and self.commit_state == "COMMITTED"
