@@ -93,14 +93,14 @@ class MeasurementExecutor:
             for machine_manager in self.machine_managers.values():
                 machine_manager.capacity_available = disk_capacity_available
 
-                # 按本次配置设置机器复位状态和初始故障。
+                # 判断本机器初始状态是否为CLOSED；未关闭或状态未知时，等待本轮关闭后再接收新启动信号。
                 machine_manager.waiting_cycle_reset = self.configuration.initial_machine_state != MachineState.CLOSED
                 if self.configuration.initial_machine_state == MachineState.UNKNOWN:
+                    # 初始状态未知时，登记“机器初始状态未知”故障。
                     machine_manager.device_faults.add("UNKNOWN_INITIAL_STATE")
 
-                # 标记本机初始化完成并保存本次空档案状态。
+                # 标记本机器初始化完成。
                 machine_manager.initialized = True
-                await run_blocking_operation(self.recovery.checkpoint, machine_manager)
         except Exception:
             # 初始化机器状态失败时释放恢复库并报告错误。
             self.recovery.close()
@@ -400,7 +400,7 @@ class MeasurementExecutor:
                 drain_measurements(), self.configuration.shutdown_timeout_ms / 1000,
             )
         except asyncio.TimeoutError:
-            logger.warning("退出等待到期，未完成记录已保留在本地恢复库。")
+            logger.warning("退出等待到期，放弃未完成测量；本地待提交记录将在下次启动时清理。")
 
         # 收集采集、在途测量和期限任务。
         background_tasks = []

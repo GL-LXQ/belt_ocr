@@ -15,7 +15,7 @@ from configuration import MachineConfiguration, MeasurementConfiguration
 from frequency import SimulatedFrequency
 from enums import MachineState
 from models import BeltSession, MeasurementEvent, OCRResult, PublishEvent
-from recovery import run_blocking_operation, restore_session, serialize_value
+from recovery import run_blocking_operation, serialize_value
 from ocr import OCRJob, SimulatedOCR
 from database import Database, DatabaseRequest
 
@@ -94,10 +94,9 @@ class MachineManager:
                         self.recovery.audit, "BUSINESS_PROCESSING_FAILED", event,
                     )
                     await self.close_measurement(interrupted=True)
-                    await run_blocking_operation(self.recovery.checkpoint, self)
                 except Exception:
                     self.recovery.available = False
-                    logger.exception("运行状态保存失败 machine_id=%s", event.machine_id)
+                    logger.exception("异常审计或中断处理失败 machine_id=%s", event.machine_id)
                 if event.acknowledgement is not None:
                     if not event.acknowledgement.done():
                         event.acknowledgement.set_exception(RuntimeError("测量处理失败。"))
@@ -154,8 +153,7 @@ class MachineManager:
         session.configuration_snapshot["machines"] = [serialize_value(self.machine)]
         self.active_session_id = session.session_id
 
-        # 保存本机检查点并记录本轮开始日志。
-        await run_blocking_operation(self.recovery.checkpoint, self)
+        # 记录本轮开始日志。
         logger.info(
             "开始测量 machine_id=%s session_id=%s", session.machine_id, session.session_id,
         )
@@ -206,7 +204,7 @@ class MachineManager:
         await self.try_finalize(session)
 
     async def process_event(self, event: MeasurementEvent) -> None:
-        """检查事件身份与来源顺序，持久保存处理后的状态。"""
+        """检查事件身份与来源顺序，处理业务并登记事件身份。"""
         # 检查采集结果和提交回调的来源绑定。
         expected_source = None
         if event.event_type.startswith(("Frame", "Capture")):
@@ -255,11 +253,9 @@ class MachineManager:
                 "epoch": event.source_epoch, "sequence": event.source_sequence,
             }
 
-        # 串行处理业务并原子记录状态和事件身份。
+        # 串行更新内存中的业务状态，并登记已处理事件身份。
         await self.apply_event(event)
-        await run_blocking_operation(
-            self.recovery.checkpoint, self, event, payload_hash,
-        )
+        await run_blocking_operation(self.recovery.record_event, event, payload_hash)
 
     async def apply_event(self, event: MeasurementEvent) -> None:
         """校验事件归属，按事件类型分派处理并检查本轮是否完成。
@@ -747,9 +743,8 @@ class MachineManager:
                 },
             )
 
-        # 标记本轮进入 OCR 处理阶段并保存检查点。
+        # 在内存中标记本轮进入 OCR 处理阶段。
         session.ocr_state = "RUNNING"
-        await run_blocking_operation(self.recovery.checkpoint, self)
 
         # 从本轮配置快照中取出包含模拟文字的机器配置。
         machine_settings = next(
@@ -850,77 +845,6 @@ class MachineManager:
 
         # 将本轮 OCR 标记为成功。
         session.ocr_state = "SUCCESS"
-
-    async def restore_measurements(self, checkpoint: dict) -> None:
-        """恢复已关闭任务，将无法续接的活动周期标记为中断。"""
-        self.waiting_cycle_reset = checkpoint.get("waiting_cycle_reset", False)
-        self.interrupted_session_id = checkpoint.get("interrupted_session_id")
-        if checkpoint.get("active_session_id"):
-            self.waiting_cycle_reset = True
-            self.interrupted_session_id = checkpoint["active_session_id"]
-        self.device_faults = set(checkpoint.get("device_faults", []))
-        self.source_cursors = checkpoint.get("source_cursors", {})
-        self.sessions = {
-            session_id: restore_session(payload)
-            for session_id, payload in checkpoint.get("sessions", {}).items()
-        }
-        self.active_session_id = None
-
-        # 先确认最终写入状态，再恢复识别和收尾工作。
-        for session in tuple(self.sessions.values()):
-            record_status = await run_blocking_operation(
-                self.recovery.record_status, session.session_id,
-            )
-            if record_status["committed"]:
-                self.sessions.pop(session.session_id)
-                continue
-            pending = record_status["pending"]
-            if pending:
-                session.frozen_payload = pending["payload_json"]
-                session.payload_hash = pending["payload_hash"]
-                frozen = json.loads(session.frozen_payload)
-                session.outcome = frozen["outcome"]
-                session.close_time = frozen["close_time"]
-                session.cycle_state = (
-                    "INTERRUPTED" if session.outcome == "INTERRUPTED" else "CLOSED"
-                )
-                session.commit_state = (
-                    "CONFLICT" if pending["blocked"] else "RETRY_PENDING"
-                )
-                if pending["blocked"]:
-                    self.device_faults.add("COMMIT_INTEGRITY_CONFLICT")
-                continue
-            if session.frozen_payload:
-                await self.submit_frozen_record(session)
-                continue
-            if session.cycle_state == "OPEN":
-                session.cycle_state = "INTERRUPTED"
-                session.errors.append("PROCESS_INTERRUPTED")
-                self.waiting_cycle_reset = True
-                self.interrupted_session_id = session.session_id
-            else:
-                if not session.capture_sealed:
-                    session.ocr_state = "FAILED"
-                    session.errors.append("CAPTURE_WINDOW_INCOMPLETE")
-                if not session.frequency_window_sealed:
-                    session.frequency_state = "FINAL_INVALID"
-                    session.errors.append("FREQUENCY_WINDOW_INCOMPLETE")
-
-            # 用持久化的墙上时间重建 OCR 期限。
-            if session.cycle_closed and session.capture_sealed and not session.ocr_done:
-                remaining_ms = (
-                    datetime.fromisoformat(session.ocr_deadline)
-                    - datetime.now(timezone.utc)
-                ).total_seconds() * 1000
-                if remaining_ms <= 0:
-                    session.ocr_state = "TIMED_OUT"
-                    session.errors.append("OCR_TIMEOUT")
-                elif session.ocr_state not in {"FAILED", "TIMED_OUT"}:
-                    await self.submit_ocr_frames(session)
-                    self.schedule_timeout(session, "OCRTimeout", remaining_ms)
-            await self.try_finalize(session)
-        self.initialized = True
-        await run_blocking_operation(self.recovery.checkpoint, self)
 
     async def submit_frozen_record(self, session: BeltSession) -> None:
         """提交同一份冻结记录，并保留未成功入队的记录。"""

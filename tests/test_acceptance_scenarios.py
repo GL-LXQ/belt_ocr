@@ -43,7 +43,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         return await self.start_executor(**settings)
 
     async def publish_and_wait(self, event):
-        """发布事件并等待业务状态及检查点写入完成。"""
+        """发布事件并等待业务处理及事件身份登记完成。"""
         acknowledgement = asyncio.get_running_loop().create_future()
         await self.executor.publish_event(replace(
             event, acknowledgement=acknowledgement,
@@ -603,7 +603,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             json.dumps(serialize_value(configuration)), encoding="utf-8",
         )
 
-        # 子进程暂停识别，在关闭和封口检查点落盘后直接退出。
+        # 子进程暂停识别，在关闭和封口事件处理完成后直接退出。
         script = """
 import asyncio
 import os

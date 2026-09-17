@@ -120,7 +120,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([record["session_id"] for record in self.read_records()], [new_session.session_id])
 
     async def test_startup_clears_old_work_before_capacity_check(self) -> None:
-        """验证启动先清理旧积压和检查点，并保留历史结果与审计。
+        """验证启动清理旧积压并移除旧检查点表，保留历史结果与审计。
 
         Args:
             无外部参数。
@@ -151,24 +151,67 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             executor.recovery.stage_record(DatabaseRequest("M01", record_id, "{}", record_id, record_type))
         executor.recovery.delay_record("old_conflict", 0, blocked=True)
 
-        # 保存不在本次配置中的旧机器检查点。
+        # 创建旧版本检查点表并保存旧机器状态。
         with closing(sqlite3.connect(executor.configuration.recovery_path)) as connection:
             with connection:
+                connection.execute("CREATE TABLE machine_checkpoints (machine_id TEXT PRIMARY KEY, payload_json TEXT)")
                 connection.execute("INSERT INTO machine_checkpoints VALUES (?, ?)", ("OLD_MACHINE", "{}"))
 
         # 使用低于旧积压数量的容量上限启动，确认先清理再检查容量。
         restarted = await self.restart_executor(max_persistent_records=1)
         self.assertEqual(restarted.recovery.pending_count(), 0)
         self.assertEqual(restarted.machine_managers["M01"].acceptance_state, "READY")
-        checkpoints = restarted.recovery.load_checkpoints()
-        self.assertEqual(set(checkpoints), set(restarted.machine_managers))
-        self.assertTrue(all(not checkpoint["sessions"] for checkpoint in checkpoints.values()))
+
+        # 确认旧检查点表已删除，机器档案只存在于内存。
+        with closing(sqlite3.connect(restarted.configuration.recovery_path)) as connection:
+            checkpoint_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'machine_checkpoints'"
+            ).fetchone()
+        self.assertIsNone(checkpoint_table)
+        self.assertTrue(all(not manager.sessions for manager in restarted.machine_managers.values()))
 
         # 确认历史结果、提交身份、审计和证据仍然保留。
         self.assertEqual(self.read_records(), expected_records)
         self.assertTrue(restarted.recovery.record_status(session.session_id)["committed"])
         self.assertIn("PREVIOUS_RUN_AUDIT", self.read_audit_reasons())
         self.assertTrue(all(Path(image_path).is_file() for image_path in expected_records[0]["evidence_refs"]))
+
+    async def test_machine_state_stays_in_memory_and_events_are_recorded(self) -> None:
+        """验证机器状态只保留在内存，已处理事件仍持久登记用于去重。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成断言，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 处理启动事件并取得内存中的活动档案。
+        executor = await self.start_executor()
+        event = MeasurementEvent("MachineStarted", "M01")
+        await executor.publish_event(event)
+        machine_manager = executor.machine_managers["M01"]
+        await machine_manager.queue.join()
+        session_id = machine_manager.active_session_id
+        self.assertIn(session_id, machine_manager.sessions)
+
+        # 确认事件身份已保存，运行期间未创建机器检查点表。
+        with closing(sqlite3.connect(executor.configuration.recovery_path)) as connection:
+            receipt = connection.execute(
+                "SELECT machine_id FROM event_receipts WHERE event_id = ?", (event.event_id,)
+            ).fetchone()
+            checkpoint_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'machine_checkpoints'"
+            ).fetchone()
+        self.assertEqual(receipt, ("M01",))
+        self.assertIsNone(checkpoint_table)
+
+        # 重放同一事件，确认不创建新周期并登记重复事件审计。
+        await executor.publish_event(event)
+        await machine_manager.queue.join()
+        self.assertEqual(machine_manager.active_session_id, session_id)
+        self.assertIn("DUPLICATE", self.read_audit_reasons())
 
     async def test_initial_unknown_state_requires_close_or_synchronization(self) -> None:
         """验证未知初始状态在有效关闭或关闭状态同步后接收新周期。
@@ -265,7 +308,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             json.dumps(serialize_value(configuration)), encoding="utf-8",
         )
 
-        # 子进程确认启动检查点后直接异常退出。
+        # 子进程确认启动事件处理完成后直接异常退出。
         script = """
 import asyncio
 import os
@@ -440,7 +483,7 @@ asyncio.run(crash_after_start())
                 await second_executor.start()
         self.assertTrue(executor.accepting_signals)
 
-    async def test_frame_retry_is_persisted_and_not_counted_twice(self) -> None:
+    async def test_frame_retry_keeps_attempt_and_is_not_counted_twice(self) -> None:
         executor = await self.start_executor(max_frames_per_session=1)
         original_recognize = executor.ocr.recognize_frame
         attempt_count = 0

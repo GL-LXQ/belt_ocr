@@ -1,4 +1,4 @@
-"""保存运行检查点、待提交记录、事件身份和异常审计。"""
+"""保存待提交记录、事件身份和异常审计。"""
 
 import asyncio
 import dataclasses
@@ -11,7 +11,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 
-from models import BeltSession, CapturedFrame, FrequencyMeasurement, OCRResult
+from models import MeasurementEvent
 
 
 logger = logging.getLogger(__name__)
@@ -47,31 +47,6 @@ def serialize_value(value):
     if isinstance(value, Path):
         return str(value)
     return value
-
-
-def restore_session(payload: dict) -> BeltSession:
-    """把持久化字段还原为 Session 和不可变采集结果。"""
-    # 还原帧清单和频率候选。
-    payload = payload.copy()
-    payload["selected_frames"] = {
-        frame_id: CapturedFrame(**frame)
-        for frame_id, frame in payload["selected_frames"].items()
-    }
-    payload["frequency_candidates"] = {
-        measurement_id: FrequencyMeasurement(**measurement)
-        for measurement_id, measurement in payload["frequency_candidates"].items()
-    }
-    if payload.get("final_frequency"):
-        payload["final_frequency"] = FrequencyMeasurement(**payload["final_frequency"])
-
-    # 还原最终 OCR 结果，并重新执行未完成的证据检查。
-    if payload.get("ocr_result"):
-        payload["ocr_result"] = OCRResult(**{
-            name: tuple(values) for name, values in payload["ocr_result"].items()
-        })
-    payload["evidence_validation_pending"] = False
-    payload["evidence_verified"] = False
-    return BeltSession(**payload)
 
 
 class RecoveryStore:
@@ -121,10 +96,6 @@ class RecoveryStore:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
             connection.executescript("""
-                CREATE TABLE IF NOT EXISTS machine_checkpoints (
-                    machine_id TEXT PRIMARY KEY,
-                    payload_json TEXT NOT NULL
-                );
                 CREATE TABLE IF NOT EXISTS event_receipts (
                     event_id TEXT PRIMARY KEY,
                     payload_hash TEXT NOT NULL,
@@ -155,9 +126,10 @@ class RecoveryStore:
                 PRAGMA user_version=1;
             """)
 
-            # 在同一事务中清理旧机器检查点和全部待提交记录。
+            # 删除旧版本检查点表，并清理上次运行的全部待提交记录。
             with connection:
-                connection.execute("DELETE FROM machine_checkpoints")
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("DROP TABLE IF EXISTS machine_checkpoints")
                 connection.execute("DELETE FROM pending_records")
 
         # 保持本次运行的恢复库连接。
@@ -165,7 +137,7 @@ class RecoveryStore:
             self.database_path, check_same_thread=False,
         )
         self.anchor_connection.execute(
-            "SELECT COUNT(*) FROM machine_checkpoints"
+            "SELECT COUNT(*) FROM event_receipts"
         ).fetchone()
 
     def close(self) -> None:
@@ -206,35 +178,25 @@ class RecoveryStore:
             payload_hash,
         )
 
-    def checkpoint(self, machine_manager, event=None, payload_hash: str = "") -> None:
-        """原子保存本机运行状态和已处理事件身份。"""
-        payload = {
-            "active_session_id": machine_manager.active_session_id,
-            "waiting_cycle_reset": machine_manager.waiting_cycle_reset,
-            "interrupted_session_id": machine_manager.interrupted_session_id,
-            "device_faults": sorted(machine_manager.device_faults),
-            "source_cursors": machine_manager.source_cursors,
-            "sessions": serialize_value(machine_manager.sessions),
-        }
+    def record_event(self, event: MeasurementEvent, payload_hash: str) -> None:
+        """保存已处理事件的编号和内容摘要，用于后续事件去重。
+
+        Args:
+            event: 已完成业务处理的事件。
+            payload_hash: 事件内容的摘要。
+
+        Returns:
+            None: 完成事件身份登记，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 在事务中登记事件编号、内容摘要和所属机器。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
             with connection:
                 connection.execute(
-                    "INSERT OR REPLACE INTO machine_checkpoints VALUES (?, ?)",
-                    (machine_manager.machine.machine_id, json.dumps(payload, ensure_ascii=False)),
+                    "INSERT OR IGNORE INTO event_receipts VALUES (?, ?, ?)",
+                    (event.event_id, payload_hash, event.machine_id),
                 )
-                if event is not None:
-                    connection.execute(
-                        "INSERT OR IGNORE INTO event_receipts VALUES (?, ?, ?)",
-                        (event.event_id, payload_hash, event.machine_id),
-                    )
-
-    def load_checkpoints(self) -> dict:
-        """读取所有机器的持久化检查点。"""
-        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
-            rows = connection.execute(
-                "SELECT machine_id, payload_json FROM machine_checkpoints"
-            ).fetchall()
-        return {machine_id: json.loads(payload) for machine_id, payload in rows}
 
     def audit(self, reason: str, event=None, machine_id: str = "") -> None:
         """保存异常原因以及对应的事件内容。"""
