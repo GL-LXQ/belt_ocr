@@ -316,6 +316,10 @@ import sys
 from pathlib import Path
 from configuration import load_configuration
 from app import App
+import app as application_module
+sys.path.insert(0, "tests")
+from fake_mvs import FakeMvsSdk
+application_module.load_mvs_sdk = FakeMvsSdk
 
 async def crash_after_start():
     app = App(load_configuration(Path(sys.argv[1])))

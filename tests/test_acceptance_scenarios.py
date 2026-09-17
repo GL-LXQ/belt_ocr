@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import test_measurement_flow as flow_support
 import test_recovery_and_faults as recovery_support
-from models import CapturedFrame, FrequencyMeasurement, MeasurementEvent
+from models import CapturedFrame, CaptureSummary, FrequencyMeasurement, MeasurementEvent
 from recovery import serialize_value
 
 
@@ -27,7 +27,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def start_controlled_app(self, **overrides):
         """暂停自动图像与频率输入，由测试按确定顺序发布事件。"""
         for target in (
-            "camera.FolderCamera.start_capture",
+            "camera.SessionCamera.start_capture",
             "frequency.SimulatedFrequency.open_window",
         ):
             replacement = patch(target)
@@ -90,7 +90,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         """正常关闭当前周期，并发布图像和频率封口事件。"""
         await self.app.handle_close(session.machine_id)
         await self.publish_and_wait(MeasurementEvent(
-            "CaptureSealed", session.machine_id, session.session_id, 0,
+            "CaptureSealed", session.machine_id, session.session_id, CaptureSummary(session.capture_id),
         ))
         await self.publish_and_wait(MeasurementEvent(
             "FrequencyWindowSealed", session.machine_id, session.session_id,
@@ -266,7 +266,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
                 "FrequencyMeasured", "M01", session.session_id, first_measurement,
             ))
             await self.publish_and_wait(MeasurementEvent(
-                "CaptureSealed", "M01", session.session_id, 0,
+                "CaptureSealed", "M01", session.session_id, CaptureSummary(session.capture_id),
             ))
             await self.wait_for_state(lambda: session.ocr_done)
             await machine_manager.queue.join()
@@ -297,7 +297,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         close_event = MeasurementEvent("MachineClosed", "M01", first_session.session_id)
         await self.publish_and_wait(close_event)
         await self.publish_and_wait(MeasurementEvent(
-            "CaptureSealed", "M01", first_session.session_id, 0,
+            "CaptureSealed", "M01", first_session.session_id, CaptureSummary(first_session.capture_id),
         ))
         await self.publish_and_wait(MeasurementEvent(
             "FrequencyWindowSealed", "M01", first_session.session_id,
@@ -420,7 +420,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         # 为两轮分别完成已有的有效输入，不把无归属读数写入任何记录。
         await self.publish_and_wait(MeasurementEvent(
-            "CaptureSealed", "M01", first_session.session_id, 0,
+            "CaptureSealed", "M01", first_session.session_id, CaptureSummary(first_session.capture_id),
         ))
         await self.publish_and_wait(MeasurementEvent(
             "FrequencyWindowSealed", "M01", first_session.session_id,
@@ -572,7 +572,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         expected_frames = {frame.frame_id, delayed_frame.frame_id}
         self.assertEqual(set(first_session.selected_frames), expected_frames)
         await self.publish_and_wait(MeasurementEvent(
-            "CaptureSealed", "M01", first_session.session_id, 0,
+            "CaptureSealed", "M01", first_session.session_id, CaptureSummary(first_session.capture_id),
         ))
         self.assertFalse(second_session.capture_sealed)
         self.assertEqual(machine_manager.active_session_id, second_session.session_id)
@@ -632,6 +632,10 @@ import sys
 from pathlib import Path
 from configuration import load_configuration
 from app import App
+import app as application_module
+sys.path.insert(0, "tests")
+from fake_mvs import FakeMvsSdk
+application_module.load_mvs_sdk = FakeMvsSdk
 
 async def crash_after_close():
     app = App(load_configuration(Path(sys.argv[1])))
@@ -685,7 +689,7 @@ asyncio.run(crash_after_close())
         # 在同一应用实例上分别验证三个证据保存阶段。
         app = await self.start_app()
         failure_targets = (
-            "camera.shutil.copyfileobj", "camera.os.fsync", "camera.os.replace",
+            "camera.save_evidence_image", "camera.os.fsync", "camera.os.replace",
         )
         for target in failure_targets:
             with self.subTest(operation=target):
@@ -718,7 +722,7 @@ asyncio.run(crash_after_close())
         session = machine_manager.sessions[machine_manager.active_session_id]
         frame, measurement = await self.supply_valid_inputs(session)
         await self.publish_and_wait(MeasurementEvent(
-            "CaptureSealed", "M01", session.session_id, 0,
+            "CaptureSealed", "M01", session.session_id, CaptureSummary(session.capture_id),
         ))
         await self.wait_for_state(lambda: session.ocr_done)
 
@@ -764,7 +768,7 @@ asyncio.run(crash_after_close())
 
             # 重复图像封口同样跳过完成检查。
             session.capture_sealed = True
-            await self.publish_and_wait(MeasurementEvent("CaptureSealed", "M01", session.session_id, 0))
+            await self.publish_and_wait(MeasurementEvent("CaptureSealed", "M01", session.session_id, CaptureSummary(session.capture_id)))
             finalize.assert_not_awaited()
 
         # 保留原图片、频率和识别状态。

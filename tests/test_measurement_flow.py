@@ -14,6 +14,7 @@ from configuration import MachineConfiguration, MeasurementConfiguration
 from app import App
 from models import MeasurementEvent
 from database import DatabaseRequest
+from fake_mvs import FakeMvsSdk
 
 
 class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -21,13 +22,15 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         # 按正式程序的非调试模式执行异步流程和期限测试。
         asyncio.get_running_loop().set_debug(False)
 
-        # 创建每次测试独立的图片目录和数据库位置。
+        # 创建每次测试独立的证据目录和数据库位置。
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.output_directory = Path(self.temporary_directory.name)
-        self.image_directory = self.output_directory / "images"
-        self.image_directory.mkdir()
-        self.image_directory.joinpath("frame.ppm").write_bytes(b"P3\n1 1\n255\n1 2 3\n")
         self.app = None
+
+        # 仅在测试中替换 SDK，业务相机适配器仍使用正式实现。
+        replacement = patch("app.load_mvs_sdk", side_effect=FakeMvsSdk)
+        replacement.start()
+        self.addCleanup(replacement.stop)
 
     async def asyncTearDown(self) -> None:
         # 关闭测试应用实例并释放临时文件。
@@ -42,7 +45,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                 machine_id=f"M{machine_number:02}",
                 camera_id=f"CAM{machine_number:02}",
                 frequency_source_id=f"FREQ{machine_number:02}",
-                image_directory=self.image_directory,
+                camera_serial=f"SERIAL{machine_number:02}",
                 simulated_lines=(f"MODEL {machine_number}", "SAME", "SAME"),
                 simulated_frequencies_hz=(40.0, 40.0, 43.0),
             )
@@ -52,8 +55,8 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             machines=machines,
             database_path=self.output_directory / "measurements.sqlite3",
             evidence_directory=self.output_directory / "evidence",
+            mvs_development_directory=Path("test-sdk"),
             capture_window_ms=1000,
-            frame_interval_ms=20,
             simulated_ocr_delay_ms=20,
             frequency_interval_ms=150,
             max_frames_per_session=2,
@@ -222,7 +225,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_close("M01")
         await app.handle_start("M01")
         second_session = machine_manager.sessions[machine_manager.active_session_id]
-        machine_manager.camera.seal_capture(first_session.capture_id)
+        await machine_manager.camera.seal_capture(first_session.capture_id)
         await self.wait_for_state(lambda: bool(second_session.frequency_candidates))
         self.assertFalse(second_session.capture_sealed)
         self.assertLess(len(first_session.selected_frames), 5)
@@ -321,11 +324,11 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["outcome"], "REVIEW_REQUIRED")
         self.assertIn("OCR_NO_VALID_TEXT", record["error_codes"])
 
-    async def test_empty_image_folder_saves_review_record(self) -> None:
+    async def test_camera_acquisition_failure_saves_review_record(self) -> None:
         app = await self.start_app()
-        self.image_directory.joinpath("frame.ppm").unlink()
+        app.machine_managers["M01"].camera.device.handle.failure = True
 
-        # 空文件夹作为本轮取流失败处理。
+        # SDK 取帧失败时保存本轮待复核记录。
         with self.assertLogs("camera", level="ERROR"):
             await app.handle_start("M01")
             machine_manager = app.machine_managers["M01"]

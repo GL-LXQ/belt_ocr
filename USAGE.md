@@ -3,7 +3,7 @@
 当前版本包含三机测量、跨轮后台收尾、内存机器状态、本次运行内自动补交、重启清理和异常审计。
 信号统一从 `App.handle_start()` 和 `handle_close()` 进入，尚未接入现场 IO。
 
-独立海康 MVS 流式采集模块的设备配置、逐帧回调、停止与统计接口见 [MVS 采集说明](MVS_CAPTURE.md)。该模块尚未接入 App，本文的演示仍使用文件夹相机。
+海康 MVS 采集已接入 App，文件夹模拟相机已删除。设备配置及底层接口见 [MVS 采集说明](MVS_CAPTURE.md)。没有相机、未填写序列号或 SDK 加载失败时，对应机器为 FAULT，不创建正常采集 Session；其他可用机器仍可运行。
 
 ## 运行演示
 
@@ -19,12 +19,12 @@ uv run python -X utf8 main.py
 .\.venv\Scripts\python.exe -X utf8 main.py
 ```
 
-演示先同时启动三台机器，关闭第一轮后立即启动 M01 的第二轮，等待四条记录保存后退出。
+演示向所有可用机器发送启动和关闭信号，再向第一台可用机器发送第二轮信号并等待结果。三台相机都可用时共保存四条记录；没有可用相机时输出提示并退出，不生成模拟图片。
 默认数据库为 `runtime/measurements.sqlite3`，图像副本位于 `runtime/evidence/<session_id>/`。
 独立恢复库默认为 `runtime/measurements.recovery.sqlite3`。
-重复执行演示会增加四条新记录。`runtime/` 已加入 Git 忽略列表。
+重复执行演示会为可用机器增加新记录。`runtime/` 已加入 Git 忽略列表。
 
-## 修改模拟输入
+## 配置相机与测量输入
 
 复制并编辑 `config.example.json`，然后指定配置文件：
 
@@ -36,11 +36,14 @@ uv run python -X utf8 main.py --config config.example.json
 
 | 配置 | 含义 |
 |---|---|
-| `machines[].image_directory` | 当前机器的图片文件夹，可以为三台机器设置不同文件夹 |
+| `mvs_development_directory` / `mvs_dll_directory` | 官方 Development 目录及可选 DLL 目录 |
+| `machines[].camera_serial` | 真实相机序列号；示例留空，设备到货后填写 |
+| `machines[].camera_pixel_format` | 可选像素格式，省略时保留设备设置 |
+| `machines[].camera_exposure_time_us` / `camera_gain` | 可选手动曝光和增益 |
 | `machines[].simulated_lines` | 模拟筛选后的文字行，保留行顺序和重复文字 |
 | `machines[].simulated_frequencies_hz` | 连续循环产生的模拟新测量；空列表表示没有有效测量 |
 | `capture_window_ms` | 启动后的最长图像采集时长，默认 1000 毫秒 |
-| `frame_interval_ms` | 模拟取帧间隔，默认 100 毫秒 |
+| `camera_queue_capacity` / `camera_timeout_ms` | 每轮帧队列容量与单次等帧超时，默认 32 帧 / 50 毫秒 |
 | `max_frames_per_session` | 每轮最多选择的帧数，默认 5；采用先到先选策略 |
 | `simulated_ocr_delay_ms` | 每帧每次模拟识别耗时；示例为 800 毫秒 |
 | `frequency_interval_ms` | 仪器产生一次新测量的间隔，默认 100 毫秒 |
@@ -64,15 +67,9 @@ uv run python -X utf8 main.py --config config.example.json
 | `event_max_age_ms` | START/CLOSE 允许的最大时间偏差，默认 30000 毫秒 |
 | `initial_machine_state` | 新机器的模拟初始状态，默认 `CLOSED`；也支持 `OPEN`、`UNKNOWN` |
 
-相机按文件名排序循环读图，每次模拟取帧都会产生新的帧编号和取帧时间。
-每轮选中的图片先写入临时文件并同步，再原子发布到独立证据目录。
-源文件的修改时间不作为采集时间。
-支持 PNG、JPG、JPEG、BMP、TIF、TIFF 和 PPM 文件。
-目录不存在、没有图片、图片为空或复制失败，都会形成采集异常。
-
-仓库附带的小型 PPM 仅用于演示取流。当前不执行图像解码、清晰度判断、文字检测或跨帧融合，
-`simulated_lines` 直接代表这些步骤完成后的输出，并不保证与图片内容一致。
-所有数据库记录都有 `is_simulated = 1`，不可作为真实设备测量结果使用。
+相机使用 Continuous / Free Run 模式。图像复制到独立内存后立即归还 SDK Buffer，队满时丢弃新帧并统计；消费者同时处理已入队图片。原始帧由 MVS SDK 转换为 BMP 证据，以临时文件同步写盘后原子发布，每轮保存采集和处理统计到 `capture_statistics`。
+当前按主机收到图像的单调时间校验 START/CLOSE 及窗口边界，不把设备时间戳直接作为主机时间；SDK 停止可能略晚于请求边界，越过业务边界的帧不进入选帧清单。
+OCR 和频率仍使用模拟输入，所有测量保留 `is_simulated = 1`，不可作为已验证的真实测量结果。
 
 ## 调用业务入口
 
@@ -102,7 +99,7 @@ async def run_measurement() -> None:
 asyncio.run(run_measurement())
 ```
 
-两个入口返回 `None`，仅等待本次信号被业务处理器处理，不等待 OCR 或数据库提交。
+两个入口返回 `None`；START 等待业务受理，CLOSE 等待本轮停止生产再释放活动位置，不等待证据排空、OCR 或数据库提交。
 示例中的 `sleep` 只用于模拟机器运行时间，未来由真实的启动、关闭信号替换。
 调用方需要使用应用实例所在的异步事件循环；现场线程接入、信号去抖、边沿识别和通信重连留待适配层实现。
 本版假设调用方提供按实际顺序确认的 START/CLOSE，不接受未经确认的电平变化。
@@ -115,10 +112,10 @@ asyncio.run(run_measurement())
 ## 业务处理顺序
 
 1. START 创建全局唯一 Session，绑定机器、相机和频率来源。
-2. 文件夹相机开始取流，频率适配器登记本轮接收窗口。
-3. 图像窗口到时或提前 CLOSE 后封口，先在内存登记逐帧任务，再交给共享 OCR。
+2. MVS 相机开始连续取流，频率适配器登记本轮接收窗口。
+3. 消费者逐帧保存并发布图片；窗口到时或提前 CLOSE 后停止取流，全部帧交付后封口，再交给共享 OCR。
 4. 一个 OCR Worker 按机器轮转，同一机器内按提交顺序处理；每帧有独立任务和尝试编号。
-5. CLOSE 释放当前活动位置；新一轮可以开始，旧一轮继续后台收尾。
+5. CLOSE 等待本轮 Grabber 停止后释放活动位置；新一轮可以开始，旧一轮继续后台保存和识别。
 6. 频率适配器等待已绑定旧轮的在途读数，再封口并按测量序号取最后一次有效值。
 7. 正常关闭、OCR 成功、有效频率三项齐全，且证据可读取，才冻结完整结果。
 8. SQLite 写入成功并确认后完成；旧轮回调始终不修改新轮活动位置。
@@ -191,7 +188,7 @@ await app.synchronize_machine("M01", observed_state="CLOSED")
 ```
 
 `IO`、`OCR`、`STORAGE` 作为共享来源时影响所有机器；也可显式指定 `machine_id`。
-设备报告恢复不代表已确认机器关闭，重新同步须使用真实可确认的现场状态。
+设备报告恢复不代表已确认机器关闭，重新同步须使用真实可确认的现场状态。相机未打开或取流故障时，仅报告健康恢复不能重新打开设备；第一版需要排除故障后重启应用。
 OCR/存储工作任务意外退出时会记录故障并有限重启；OCR 在途帧保留任务身份继续尝试。
 单帧超时和处理失败有有限重试；尝试次数、终态和有序文字行进入最终可追溯记录。
 
@@ -204,7 +201,7 @@ OCR/存储工作任务意外退出时会记录故障并有限重启；OCR 在途
 | `machine_manager.py` | 每台机器的唯一业务状态修改入口 |
 | `models.py` | Session、不可变事件和采集结果 |
 | `configuration.py` | 配置读取、绑定及参数检查 |
-| `camera.py` | 文件夹模拟取流、图片副本和图像窗口封口 |
+| `camera.py` | MVS 与 Session 适配、证据保存、线程事件桥接和封口 |
 | `mvs_sdk.py` | 官方 MVS 绑定、设备管理和独立帧内存复制 |
 | `mvs_capture.py` | 固定窗口流式采集、独立有界队列、逐帧回调和统计 |
 | `ocr.py` | 共享有界调度和模拟有序文字行输出 |
@@ -217,7 +214,7 @@ OCR/存储工作任务意外退出时会记录故障并有限重启；OCR 在途
 
 ## 当前边界
 
-App 的 IO/相机/频率适配、实际图像质量评估和 OCR 融合仍保留为模拟实现；独立 MVS 模块已经调用官方 SDK，尚待真机验证及业务接入。
+App 已接入官方 MVS 相机；IO、频率、图像质量评估和 OCR 融合尚未完成真实设备或算法接入。没有真实相机时仅能执行假 SDK 自动化验证。
 现场初始电平、脉冲去抖、设备时间映射和重连基线必须由真实设备适配层提供，不能用模拟结果替代现场验证。
 有限多轮及故障注入测试不代表已经完成工控机现场的持续运行和吞吐验收。
 最终库不可用时可暂存；如果本地恢复存储也不可写，则暂停接收并报警，无法承诺保存尚未确认持久化的数据。
@@ -230,3 +227,5 @@ App 的 IO/相机/频率适配、实际图像质量评估和 OCR 融合仍保留
 
 完整测试需要 pytest。现有业务测试使用临时图片和独立 SQLite 文件，不修改演示数据库；MVS 测试使用假 SDK，不需要连接相机。
 README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTANCE.md)。
+
+退出时业务等待受 shutdown_timeout_ms 限制，但已持有原始图像的消费线程仍须排空后才能释放 SDK，不能强行销毁它正在使用的设备句柄。证据写盘或 SDK 操作长期不返回时，资源退出也可能延后。

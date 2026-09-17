@@ -59,6 +59,16 @@ class OCRResult:
     frame_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class CaptureSummary:
+    """携带本轮采集统计、跳帧数和失败原因。"""
+
+    capture_id: str
+    skipped_frame_count: int = 0
+    statistics: dict = field(default_factory=dict)
+    errors: tuple[str, ...] = ()
+
+
 @dataclass
 class BeltSession:
     session_id: str
@@ -75,6 +85,7 @@ class BeltSession:
     capture_sealed: bool = False
     selected_frames: dict[str, CapturedFrame] = field(default_factory=dict)
     skipped_frame_count: int = 0
+    capture_statistics: dict = field(default_factory=dict)
     ocr_state: str = "WAITING"
     ocr_result: OCRResult | None = None
     frequency_window_sealed: bool = False

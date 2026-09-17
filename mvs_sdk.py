@@ -44,6 +44,7 @@ class MvsCamera:
     received_frame_count: int = 0
     capture_lock: object = field(default_factory=threading.Lock)
     buffer_lock: object = field(default_factory=threading.Lock)
+    encoding_lock: object = field(default_factory=threading.Lock)
 
     def start_grabbing(self) -> None:
         """清理历史缓存并启动本轮连续取流。
@@ -126,6 +127,47 @@ class MvsCamera:
                     self.faulted = True
                     raise MvsError(f"FreeImageBuffer: 0x{return_code:08X}")
             return frame
+
+    def encode_image(self, frame: CameraFrame) -> tuple[str, bytes]:
+        """通过 MVS SDK 将独立原始帧编码成 BMP 图片。
+
+        Args:
+            frame: 已复制到程序内存的图像及像素格式信息。
+
+        Returns:
+            (
+                ".bmp",  # 证据图片扩展名
+                b"BM...",  # 完整 BMP 文件字节，示例省略图片内容
+            )
+        """
+        # 为当前帧建立输入缓存和 BMP 输出缓存。
+        source_buffer = (ctypes.c_ubyte * len(frame.data)).from_buffer_copy(frame.data)
+        output_capacity = frame.width * frame.height * 4 + 2048
+        output_buffer = (ctypes.c_ubyte * output_capacity)()
+        parameters = self.binding.parameters.MV_SAVE_IMAGE_PARAM_EX3()
+        parameters.pData = ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_ubyte))
+        parameters.nDataLen = len(frame.data)
+        parameters.enPixelType = frame.pixel_type
+        parameters.nWidth = frame.width
+        parameters.nHeight = frame.height
+
+        # 设置 BMP 文件输出和 Bayer 插值参数。
+        parameters.pImageBuffer = ctypes.cast(output_buffer, ctypes.POINTER(ctypes.c_ubyte))
+        parameters.nBufferSize = output_capacity
+        parameters.enImageType = self.binding.parameters.MV_Image_Bmp
+        parameters.iMethodValue = 1
+
+        # 串行执行同一设备的图片编码，不占用取帧锁。
+        with self.encoding_lock:
+            return_code = self.handle.MV_CC_SaveImageEx3(parameters)
+        if return_code != self.binding.errors.MV_OK:
+            raise MvsError(f"SaveImageEx3(BMP): 0x{return_code:08X}")
+        if parameters.nImageLen == 0:
+            raise MvsError("SaveImageEx3(BMP) 未返回图片内容")
+        return (
+            ".bmp",
+            ctypes.string_at(output_buffer, parameters.nImageLen),
+        )
 
     def stop_grabbing(self) -> None:
         """等待当前 Buffer 操作完成并停止相机取流。

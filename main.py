@@ -1,4 +1,4 @@
-"""运行三台机器的模拟测量演示。"""
+"""使用真实相机执行启停信号演示，OCR 和频率仍为模拟输入。"""
 
 import argparse
 import asyncio
@@ -16,8 +16,16 @@ async def run_measurement_demo(configuration_path: Path) -> None:
     app = App(configuration)
     await app.start()
     try:
-        # 同时启动各机器的第一轮测量。
-        machine_ids = [machine.machine_id for machine in configuration.machines]
+        # 选择相机可用的机器，没有设备时仅报告状态。
+        machine_ids = [
+            identifier for identifier, manager in app.machine_managers.items()
+            if manager.acceptance_state == "READY"
+        ]
+        if not machine_ids:
+            logging.warning("没有可测量的机器，请配置真实相机序列号并连接设备。")
+            return
+
+        # 同时启动已连接机器的第一轮测量。
         await asyncio.gather(*(
             app.handle_start(machine_id) for machine_id in machine_ids
         ))
@@ -43,7 +51,7 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    argument_parser = argparse.ArgumentParser(description="多皮带机模拟测量")
+    argument_parser = argparse.ArgumentParser(description="MVS 相机测量信号演示，OCR 和频率为模拟输入")
     argument_parser.add_argument(
         "--config", type=Path, default=Path(__file__).with_name("config.example.json"),
     )

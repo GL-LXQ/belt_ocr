@@ -1,32 +1,40 @@
-"""从文件夹循环读取图片，模拟每台相机的独立取流。"""
+"""将 MVS 流式采集接入 Session、证据保存和业务事件。"""
 
 import asyncio
 import logging
 import os
-import shutil
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from configuration import MachineConfiguration, MeasurementConfiguration
-from recovery import run_blocking_operation
-from models import CapturedFrame, MeasurementEvent, PublishEvent
+from models import CapturedFrame, CaptureSummary, MeasurementEvent, PublishEvent
+from mvs_capture import CaptureFrame, CaptureTask, start_capture
+from mvs_sdk import MvsCamera
 
 
 logger = logging.getLogger(__name__)
 
 
-def save_evidence_image(source_path: Path, image_path: Path) -> None:
-    """保存并同步图片副本，再原子发布最终证据文件。"""
+def save_evidence_image(image_data: bytes, image_path: Path) -> None:
+    """将编码后的图片同步写盘并原子发布。
+
+    Args:
+        image_data: 完整图片文件字节。
+        image_path: 本轮证据文件路径。
+
+    Returns:
+        None  # 图片已保存，失败时抛出文件操作异常
+    """
     temporary_path = image_path.with_suffix(image_path.suffix + ".partial")
     try:
-        with source_path.open("rb") as source_file:
-            with temporary_path.open("wb") as evidence_file:
-                shutil.copyfileobj(source_file, evidence_file)
-                evidence_file.flush()
-                os.fsync(evidence_file.fileno())
-        if temporary_path.stat().st_size == 0:
-            raise ValueError("模拟图片为空。")
+        # 将本帧内容写入临时文件并同步到磁盘。
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        with temporary_path.open("wb") as evidence_file:
+            evidence_file.write(image_data)
+            evidence_file.flush()
+            os.fsync(evidence_file.fileno())
         os.replace(temporary_path, image_path)
     finally:
         if temporary_path.exists():
@@ -35,128 +43,212 @@ def save_evidence_image(source_path: Path, image_path: Path) -> None:
 
 @dataclass
 class CaptureWindow:
+    """记录单轮采集边界与任务。"""
+
     session_id: str
     capture_id: str
     start_boundary: float
-    stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
+    close_boundary: float | None = None
+    task: CaptureTask | None = None
+    selected_count: int = 0
+    skipped_count: int = 0
 
 
-class FolderCamera:
+class SessionCamera:
+    """把真实相机帧转换成属于指定 Session 的图片事件。"""
+
     def __init__(
         self,
         machine: MachineConfiguration,
         configuration: MeasurementConfiguration,
         publish_event: PublishEvent,
     ) -> None:
+        """登记设备绑定、事件入口和本轮任务集合。
+
+        Args:
+            machine: 当前机器及相机配置。
+            configuration: 采集窗口、队列和证据保存配置。
+            publish_event: 应用事件发布入口。
+
+        Returns:
+            None  # 相机适配器已创建，设备由 App.start 打开
+        """
         self.machine = machine
         self.configuration = configuration
         self.publish_event = publish_event
+        self.device: MvsCamera | None = None
         self.windows: dict[str, CaptureWindow] = {}
-        self.tasks: set[asyncio.Task[None]] = set()
+        self.tasks: set[asyncio.Task] = set()
+        self.event_loop = None
 
-    def start_capture(
-        self, session_id: str, capture_id: str, start_boundary: float
-    ) -> None:
-        """登记采集窗口并启动独立取流任务。"""
+    @property
+    def available(self) -> bool:
+        """返回设备是否已打开且未发生取流故障。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            True  # 可采集；不可用时返回 False
+        """
+        return self.device is not None and not self.device.closed and not self.device.faulted
+
+    @property
+    def is_capturing(self) -> bool:
+        """返回设备是否仍被现场采集占用。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            True  # 仍在采集；空闲时返回 False
+        """
+        return self.device is not None and self.device.capture_lock.locked()
+
+    def start_capture(self, session_id: str, capture_id: str, start_boundary: float) -> None:
+        """创建本轮 MVS 任务并安排异步收尾。
+
+        Args:
+            session_id: 本轮测量编号。
+            capture_id: 本轮采集编号。
+            start_boundary: 业务启动的主机单调时间。
+
+        Returns:
+            None  # 已启动后台采集，不等待图片保存或 OCR
+        """
+        # 固定业务身份及事件循环，并建立本轮独立采集任务。
+        self.event_loop = asyncio.get_running_loop()
         window = CaptureWindow(session_id, capture_id, start_boundary)
+        window.task = start_capture(
+            self.device,
+            lambda frame: self.process_frame(window, frame),
+            session_id,
+            duration_seconds=self.configuration.capture_window_ms / 1000,
+            queue_capacity=self.configuration.camera_queue_capacity,
+            timeout_ms=self.configuration.camera_timeout_ms,
+            capture_id=capture_id,
+        )
         self.windows[capture_id] = window
-        task = asyncio.create_task(self.capture_images(window))
+
+        # 在事件循环中等待本轮消费结束，随后发布封口。
+        task = asyncio.create_task(self.finish_capture(window))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
-    def seal_capture(self, capture_id: str) -> None:
-        """通知指定采集窗口结束取流。"""
+    def process_frame(self, window: CaptureWindow, frame: CaptureFrame) -> None:
+        """筛选本轮图像、保存证据并送回业务事件队列。
+
+        Args:
+            window: 本轮窗口和选帧统计。
+            frame: 具有独立内存及本轮身份的相机帧。
+
+        Returns:
+            None  # 证据和 FrameSelected 已交付，跳过帧仅累计数量
+        """
+        # 按主机接收边界和现有先到先选上限选择帧。
+        received_time = frame.image.received_monotonic
+        deadline = window.start_boundary + self.configuration.capture_window_ms / 1000
+        if (
+            received_time > deadline
+            or (window.close_boundary is not None and received_time > window.close_boundary)
+            or window.selected_count >= self.configuration.max_frames_per_session
+        ):
+            window.skipped_count += 1
+            return
+
+        # 编码并保存本轮证据，文件名同时包含窗口身份和 SDK 帧号。
+        frame_id = f"{window.capture_id}-{frame.image.frame_number}"
+        extension, image_data = self.device.encode_image(frame.image)
+        image_path = self.configuration.evidence_directory / window.session_id / f"{frame_id}{extension}"
+        save_evidence_image(image_data, image_path)
+        captured_at = datetime.now(timezone.utc) - timedelta(seconds=time.monotonic() - received_time)
+        captured_frame = CapturedFrame(
+            session_id=window.session_id,
+            capture_id=window.capture_id,
+            camera_id=self.machine.camera_id,
+            frame_id=frame_id,
+            captured_at=captured_at.isoformat(),
+            captured_monotonic=received_time,
+            image_path=str(image_path),
+            source_epoch=window.capture_id,
+            received_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        # 从消费线程投递事件，并等待事件进入本机业务队列。
+        event = MeasurementEvent("FrameSelected", self.machine.machine_id, window.session_id, captured_frame)
+        asyncio.run_coroutine_threadsafe(self.publish_event(event), self.event_loop).result()
+        window.selected_count += 1
+
+    async def seal_capture(self, capture_id: str, close_boundary: float | None = None) -> None:
+        """停止指定窗口的生产，等待抓帧退出后释放现场采集位置。
+
+        Args:
+            capture_id: 需要停止的采集编号。
+            close_boundary: 业务关闭的单调时间，省略时使用当前时间。
+
+        Returns:
+            None  # 本轮已停止入队，消费者可能仍在保存证据
+        """
         window = self.windows.get(capture_id)
-        if window is not None:
-            window.stop_requested.set()
+        if window is None:
+            return
+        # 固定关闭边界，停止本轮生产并等待最后入队完成。
+        if window.close_boundary is None:
+            window.close_boundary = close_boundary if close_boundary is not None else time.monotonic()
+        window.task.stop_requested.set()
+        await asyncio.shield(asyncio.wrap_future(window.task.acquisition_future))
 
-    async def capture_images(self, window: CaptureWindow) -> None:
-        """读取图片、保存本轮副本并按顺序发布帧和封口事件。"""
-        selected_count = 0
-        skipped_count = 0
-        try:
-            # 获取文件夹中的模拟图像列表。
-            image_extensions = {
-                ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".ppm",
-            }
-            image_paths = await run_blocking_operation(
-                lambda: sorted(
-                    image_path for image_path in self.machine.image_directory.iterdir()
-                    if image_path.is_file()
-                    and image_path.suffix.lower() in image_extensions
-                )
-            )
-            if not image_paths:
-                raise ValueError("模拟图片文件夹中没有图片。")
+    async def finish_capture(self, window: CaptureWindow) -> None:
+        """等待消费结束，保存本轮统计并发布最后的封口事件。
 
-            # 建立本轮证据目录和采集截止时间。
-            evidence_directory = (
-                self.configuration.evidence_directory / window.session_id
-            )
-            await run_blocking_operation(
-                evidence_directory.mkdir, parents=True, exist_ok=True,
-            )
-            event_loop = asyncio.get_running_loop()
-            deadline = (
-                window.start_boundary + self.configuration.capture_window_ms / 1000
-            )
-            frame_number = 0
+        Args:
+            window: 待收尾的采集窗口。
 
-            # 按固定间隔取帧，超过选帧上限时记录跳帧数量。
-            while not window.stop_requested.is_set() and event_loop.time() < deadline:
-                captured_monotonic = event_loop.time()
-                captured_at = datetime.now(timezone.utc).isoformat()
-                source_path = image_paths[frame_number % len(image_paths)]
-                frame_number += 1
-                if selected_count < self.configuration.max_frames_per_session:
-                    frame_id = f"{window.capture_id}-{frame_number}"
-                    image_path = evidence_directory / f"{frame_id}{source_path.suffix}"
-                    await run_blocking_operation(
-                        save_evidence_image, source_path, image_path,
-                    )
+        Returns:
+            None  # 统计和封口已发布，本轮窗口已移除
+        """
+        result = await asyncio.shield(asyncio.wrap_future(window.task.completion_future))
+        # 整理采集和证据交付统计，保留处理失败信息。
+        statistics = {
+            "capture_duration_seconds": result.capture_duration_seconds,
+            "received_frame_count": result.received_frame_count,
+            "enqueued_frame_count": result.enqueued_frame_count,
+            "dropped_frame_count": result.dropped_frame_count,
+            "processed_frame_count": result.processed_frame_count,
+            "failed_frame_count": result.failed_frame_count,
+            "selected_frame_count": window.selected_count,
+            "camera_stopped": result.camera_stopped,
+            "has_error": result.has_error,
+            "capture_errors": list(result.capture_errors),
+            "processing_errors": [frame.error for frame in result.frame_results if frame.error],
+        }
+        if result.has_error:
+            logger.error("相机采集或证据保存失败 machine_id=%s statistics=%s", self.machine.machine_id, statistics)
+        summary = CaptureSummary(
+            capture_id=window.capture_id,
+            skipped_frame_count=window.skipped_count + result.dropped_frame_count,
+            statistics=statistics,
+            errors=("CAPTURE_FAILED",) if result.has_error else (),
+        )
 
-                    # 发布带固定归属的帧，随后继续取流。
-                    frame = CapturedFrame(
-                        window.session_id, window.capture_id, self.machine.camera_id,
-                        frame_id, captured_at, captured_monotonic, str(image_path),
-                        window.capture_id, datetime.now(timezone.utc).isoformat(),
-                    )
-                    await self.publish_event(MeasurementEvent(
-                        "FrameSelected", self.machine.machine_id,
-                        window.session_id, frame,
-                    ))
-                    selected_count += 1
-                else:
-                    skipped_count += 1
-
-                # 等待下一帧或本轮提前关闭。
-                remaining_seconds = deadline - event_loop.time()
-                if remaining_seconds <= 0:
-                    break
-                try:
-                    await asyncio.wait_for(
-                        window.stop_requested.wait(),
-                        min(
-                            self.configuration.frame_interval_ms / 1000,
-                            remaining_seconds,
-                        ),
-                    )
-                except asyncio.TimeoutError:
-                    pass
-        except Exception:
-            logger.exception(
-                "模拟取流失败 machine_id=%s session_id=%s",
-                self.machine.machine_id, window.session_id,
-            )
-            await self.publish_event(MeasurementEvent(
-                "CaptureFailed", self.machine.machine_id, window.session_id,
-                "CAPTURE_FAILED",
-            ))
-        finally:
-            # 清理本轮采集窗口。
-            self.windows.pop(window.capture_id, None)
-
-        # 在所有帧发布后发送封口事件。
+        # 所有帧事件已入队后发布封口，并移除本轮窗口。
         await self.publish_event(MeasurementEvent(
-            "CaptureSealed", self.machine.machine_id, window.session_id, skipped_count,
+            "CaptureSealed", self.machine.machine_id, window.session_id, summary,
         ))
+        self.windows.pop(window.capture_id, None)
+
+    async def stop(self) -> None:
+        """请求所有采集任务停止，并等待证据和事件交付结束。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 所有相机任务已结束，可释放设备和 SDK
+        """
+        # 一次性通知所有尚未结束的窗口停止生产。
+        for window in tuple(self.windows.values()):
+            window.task.stop_requested.set()
+        # 保持事件循环可用，等待各消费者完成最后的事件投递。
+        if self.tasks:
+            await asyncio.gather(*tuple(self.tasks))

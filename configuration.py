@@ -1,4 +1,4 @@
-"""读取模拟采集和业务流程配置。"""
+"""读取 MVS 相机和测量业务配置。"""
 
 import json
 from dataclasses import dataclass
@@ -12,9 +12,12 @@ class MachineConfiguration:
     machine_id: str
     camera_id: str
     frequency_source_id: str
-    image_directory: Path
     simulated_lines: tuple[str, ...]
     simulated_frequencies_hz: tuple[float, ...]
+    camera_serial: str = ""
+    camera_pixel_format: str | None = None
+    camera_exposure_time_us: float | None = None
+    camera_gain: float | None = None
 
 
 @dataclass(frozen=True)
@@ -22,8 +25,10 @@ class MeasurementConfiguration:
     machines: tuple[MachineConfiguration, ...]
     database_path: Path
     evidence_directory: Path
+    mvs_development_directory: Path
     capture_window_ms: int = 1000
-    frame_interval_ms: int = 100
+    camera_queue_capacity: int = 32
+    camera_timeout_ms: int = 50
     max_frames_per_session: int = 5
     simulated_ocr_delay_ms: int = 500
     frequency_interval_ms: int = 100
@@ -51,6 +56,7 @@ class MeasurementConfiguration:
     worker_restart_attempts: int = 3
     event_max_age_ms: int = 30000
     initial_machine_state: MachineState = MachineState.CLOSED
+    mvs_dll_directory: Path | None = None
 
     @property
     def recovery_path(self) -> Path:
@@ -68,9 +74,14 @@ class MeasurementConfiguration:
             if not all(identifiers) or len(set(identifiers)) != len(identifiers):
                 raise ValueError(f"{attribute} 必须非空且不能重复。")
 
+        # 检查已填写的真实相机序列号是否重复。
+        serials = [machine.camera_serial for machine in self.machines if machine.camera_serial]
+        if len(serials) != len(set(serials)):
+            raise ValueError("已配置的 camera_serial 不能重复。")
+
         # 检查等待期限、采集间隔和队列容量。
         positive_parameters = (
-            "capture_window_ms", "frame_interval_ms", "max_frames_per_session",
+            "capture_window_ms", "camera_queue_capacity", "camera_timeout_ms", "max_frames_per_session",
             "frequency_interval_ms", "frequency_drain_timeout_ms",
             "ocr_result_timeout_ms", "max_cycle_open_ms", "event_queue_capacity",
             "ocr_queue_capacity", "storage_queue_capacity",
@@ -107,12 +118,9 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
     with configuration_path.open(encoding="utf-8") as configuration_file:
         settings = json.load(configuration_file)
 
-    # 创建每台机器的独立模拟输入配置。
+    # 创建各机器的相机绑定及 OCR、频率配置。
     machines = []
     for machine_settings in settings.pop("machines"):
-        machine_settings["image_directory"] = (
-            configuration_directory / machine_settings["image_directory"]
-        ).resolve()
         machine_settings["simulated_lines"] = tuple(machine_settings["simulated_lines"])
         machine_settings["simulated_frequencies_hz"] = tuple(
             machine_settings["simulated_frequencies_hz"]
@@ -123,12 +131,14 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
     settings["initial_machine_state"] = MachineState(settings.get("initial_machine_state", MachineState.CLOSED))
 
     # 创建输出路径并校验完整配置。
-    for path_name in ("database_path", "evidence_directory"):
+    for path_name in ("database_path", "evidence_directory", "mvs_development_directory"):
         settings[path_name] = (configuration_directory / settings[path_name]).resolve()
     if settings.get("recovery_database_path"):
         settings["recovery_database_path"] = (
             configuration_directory / settings["recovery_database_path"]
         ).resolve()
+    if settings.get("mvs_dll_directory"):
+        settings["mvs_dll_directory"] = (configuration_directory / settings["mvs_dll_directory"]).resolve()
     configuration = MeasurementConfiguration(machines=tuple(machines), **settings)
     configuration.validate()
     return configuration

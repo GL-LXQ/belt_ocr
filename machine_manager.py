@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from camera import FolderCamera
+from camera import SessionCamera
 from configuration import MachineConfiguration, MeasurementConfiguration
 from frequency import SimulatedFrequency
 from enums import MachineState
@@ -28,7 +28,7 @@ class MachineManager:
         self,
         machine: MachineConfiguration,
         configuration: MeasurementConfiguration,
-        camera: FolderCamera,
+        camera: SessionCamera,
         frequency: SimulatedFrequency,
         ocr: SimulatedOCR,
         database: Database,
@@ -62,13 +62,13 @@ class MachineManager:
     def acceptance_state(self) -> str:
         if not self.initialized:
             return "INITIALIZING"
-        if self.device_faults or not self.recovery.available:
+        if self.device_faults or not self.recovery.available or not self.camera.available:
             return "FAULT"
         if self.waiting_cycle_reset:
             return "WAIT_CYCLE_RESET"
         if self.active_session_id is not None:
             return "ACTIVE"
-        if not self.capacity_available:
+        if not self.capacity_available or self.camera.is_capturing:
             return "DEGRADED"
         return "READY"
 
@@ -140,6 +140,8 @@ class MachineManager:
             or not self.capacity_available
             or self.device_faults
             or not self.recovery.available
+            or not self.camera.available
+            or self.camera.is_capturing
         ):
             # 标记等待周期复位，组装本轮未受理记录。
             self.waiting_cycle_reset = True
@@ -212,7 +214,7 @@ class MachineManager:
             session.close_time = datetime.now(timezone.utc).isoformat()
 
         # 封闭本轮窗口并释放本机活动位置。
-        self.camera.seal_capture(session.capture_id)
+        await self.camera.seal_capture(session.capture_id, session.close_boundary)
         self.frequency.seal_window(session.session_id)
         self.active_session_id = None
         deadline_task = self.deadline_tasks.pop(
@@ -468,8 +470,16 @@ class MachineManager:
         # 忽略重复封口，登记本轮跳帧数量。
         if session.capture_sealed:
             return False
+        summary = event.payload
+        if summary.capture_id != session.capture_id:
+            await run_blocking_operation(self.recovery.audit, "CAPTURE_IDENTITY_CONFLICT", event)
+            return False
         session.capture_sealed = True
-        session.skipped_frame_count = event.payload
+        session.skipped_frame_count = summary.skipped_frame_count
+        session.capture_statistics = summary.statistics
+        if summary.errors:
+            session.ocr_state = "FAILED"
+            session.errors.extend(summary.errors)
 
         # 等待识别时提交已选图片，没有图片则标记失败。
         if session.ocr_state == "WAITING":
@@ -653,6 +663,7 @@ class MachineManager:
                 for measurement in session.frequency_candidates.values()
             ],
             "skipped_frame_count": session.skipped_frame_count,
+            "capture_statistics": session.capture_statistics,
             "outcome": session.outcome,
             "error_codes": session.errors.copy(),
             "is_simulated": True,

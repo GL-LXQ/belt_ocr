@@ -4,6 +4,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -61,6 +62,8 @@ class CaptureTask:
     stop_requested: threading.Event = field(default_factory=threading.Event)
     acquisition_finished: threading.Event = field(default_factory=threading.Event)
     completed: threading.Event = field(default_factory=threading.Event)
+    acquisition_future: Future = field(default_factory=Future)
+    completion_future: Future = field(default_factory=Future)
     controller_thread: threading.Thread | None = None
     result: CaptureResult | None = None
     _enqueued_count: int = 0
@@ -176,6 +179,7 @@ class CaptureTask:
             received_count = self.camera.received_frame_count - initial_frame_count
             self.camera.capture_lock.release()
             self.acquisition_finished.set()
+            self.acquisition_future.set_result(None)
 
         # 等待消费者退出，确认没有排队帧或正在处理的帧。
         if consumer_started:
@@ -197,6 +201,7 @@ class CaptureTask:
             frame_results=tuple(self._frame_results),
         )
         self.completed.set()
+        self.completion_future.set_result(self.result)
 
     def wait(self, timeout_seconds: float | None = None) -> CaptureResult:
         """等待本轮采集与消费全部结束，返回封闭结果。
@@ -246,6 +251,7 @@ def start_capture(
     duration_seconds: float = 1.0,
     queue_capacity: int = 32,
     timeout_ms: int = 50,
+    capture_id: str | None = None,
 ) -> CaptureTask:
     """响应采集信号，创建独立任务、队列和后台控制线程。
 
@@ -256,6 +262,7 @@ def start_capture(
         duration_seconds: 固定采集窗口秒数。
         queue_capacity: 本轮最大排队帧数，队满丢新帧。
         timeout_ms: 单次 SDK 等帧上限，单位毫秒。
+        capture_id: 调用方的采集编号，省略时自动生成。
 
     Returns:
         task  # CaptureTask 任务句柄；通过 wait() 取得完整 CaptureResult
@@ -275,6 +282,7 @@ def start_capture(
             frame_queue=queue.Queue(maxsize=queue_capacity),
             timeout_ms=timeout_ms,
             session_id=session_id,
+            capture_id=capture_id or uuid4().hex,
         )
 
         # 启动本轮控制线程，立即返回任务句柄。

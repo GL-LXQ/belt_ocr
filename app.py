@@ -7,7 +7,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from camera import FolderCamera
+from camera import SessionCamera
+from mvs_sdk import load_mvs_sdk
 from configuration import MeasurementConfiguration
 from frequency import SimulatedFrequency
 from machine_manager import MachineManager
@@ -36,10 +37,11 @@ class App:
         self.has_started = False
         self.stopping = False
         self.releasing_resources = False
+        self.camera_sdk = None
 
         # 为每台机器建立独立的采集器和业务处理器。
         for machine in configuration.machines:
-            camera = FolderCamera(machine, configuration, self.publish_event)
+            camera = SessionCamera(machine, configuration, self.publish_event)
             frequency = SimulatedFrequency(machine, configuration, self.publish_event)
             self.machine_managers[machine.machine_id] = MachineManager(
                 machine, configuration, camera, frequency, self.ocr, self.database,
@@ -86,6 +88,36 @@ class App:
             )
             logger.exception("最终结果库暂不可用，将使用本地待提交区。")
 
+        # 加载共享 MVS SDK，失败时保留应用并禁止相机测量。
+        try:
+            self.camera_sdk = await run_blocking_operation(
+                load_mvs_sdk,
+                self.configuration.mvs_development_directory,
+                self.configuration.mvs_dll_directory,
+            )
+        except Exception:
+            logger.exception("MVS SDK 加载失败，相机测量不可用。")
+
+        # 按真实序列号打开各相机，分别登记不可用设备。
+        for machine_manager in self.machine_managers.values():
+            machine = machine_manager.machine
+            try:
+                if self.camera_sdk is None or not machine.camera_serial:
+                    raise RuntimeError("SDK 不可用或尚未配置 camera_serial。")
+                machine_manager.camera.device = await run_blocking_operation(
+                    self.camera_sdk.open_camera,
+                    machine.camera_serial,
+                    pixel_format=machine.camera_pixel_format,
+                    exposure_time_us=machine.camera_exposure_time_us,
+                    gain=machine.camera_gain,
+                )
+            except Exception:
+                machine_manager.device_faults.add(machine.camera_id)
+                await run_blocking_operation(
+                    self.recovery.audit, "CAMERA_UNAVAILABLE", machine_id=machine.machine_id,
+                )
+                logger.exception("相机不可用 machine_id=%s serial=%s", machine.machine_id, machine.camera_serial)
+
         try:
             # 检查磁盘剩余空间，设置各机器的初始容量状态。
             disk_capacity_available = await self.check_disk_capacity()
@@ -102,6 +134,8 @@ class App:
                 machine_manager.initialized = True
         except Exception:
             # 初始化机器状态失败时释放恢复库并报告错误。
+            if self.camera_sdk is not None:
+                await run_blocking_operation(self.camera_sdk.close)
             self.recovery.close()
             logger.exception("初始化机器状态失败")
             raise RuntimeError("初始化机器状态失败。") from None
@@ -425,10 +459,14 @@ class App:
         except asyncio.TimeoutError:
             logger.warning("退出等待到期，放弃未完成测量；本地待提交记录将在下次启动时清理。")
 
-        # 收集采集、在途测量和期限任务。
+        # 保持事件处理器运行，先停止并排空所有相机任务。
+        await asyncio.gather(*(
+            machine_manager.camera.stop() for machine_manager in self.machine_managers.values()
+        ))
+
+        # 收集在途测量和期限任务。
         background_tasks = []
         for machine_manager in self.machine_managers.values():
-            background_tasks.extend(machine_manager.camera.tasks)
             background_tasks.extend(machine_manager.frequency.tasks)
             background_tasks.extend(machine_manager.deadline_tasks.values())
             background_tasks.extend(machine_manager.background_tasks)
@@ -443,4 +481,9 @@ class App:
             task.cancel()
         await asyncio.gather(*all_tasks, return_exceptions=True)
         self.worker_tasks.clear()
-        self.recovery.close()
+        # 最后关闭相机设备与共享 SDK，再释放恢复库。
+        try:
+            if self.camera_sdk is not None:
+                await run_blocking_operation(self.camera_sdk.close)
+        finally:
+            self.recovery.close()

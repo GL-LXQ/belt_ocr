@@ -1,6 +1,6 @@
 # 海康 MVS 固定窗口流式采集
 
-第一版是独立模块，通过同步逐帧回调交付图像。现有 `App`、文件夹相机、模拟 OCR 和数据库流程尚未接入此模块。
+底层通过同步逐帧回调交付图像，并已由 `camera.SessionCamera` 接入 App 和 Session。正式流程只使用 MVS 相机，文件夹模拟采集已删除；OCR 和频率仍为模拟实现。
 实现参考 `mvs_tennis/packages/mvs/src/mvs/capture/grab.py`、`capture/pipeline.py` 和 `sdk/camera.py`，
 沿用官方 Python 绑定、独立 Grabber、Buffer 复制和释放顺序，不包含同步组包或网球业务。
 
@@ -10,6 +10,7 @@
 |---|---|
 | `mvs_sdk.py` | 加载官方 SDK、枚举和打开相机、配置参数、复制帧、释放设备 |
 | `mvs_capture.py` | 独立任务队列、生产消费线程、采集计时、排空和统计 |
+| `camera.py` | Session 适配、先到先选、证据保存、FrameSelected 和 CaptureSealed |
 | `load_mvs_sdk(...)` | 加载并初始化 SDK，每个应用使用一个实例 |
 | `sdk.enumerate_devices()` | 返回 SDK 设备列表及序列号、传输类型 |
 | `sdk.open_camera(serial, ...)` | 按真实序列号打开相机并配置 Continuous / TriggerMode Off |
@@ -152,3 +153,15 @@ Grabber 执行 `GetImageBuffer → ctypes.string_at 复制 → FreeImageBuffer �
 测试使用可控假 SDK，覆盖 Buffer 释放后覆盖、采集消费并行、队满丢新帧、固定期限、在途复制、
 旧轮消费与新轮采集重叠、回调失败和资源释放。真实 SDK 加载和枚举已在本机执行，但未枚举到相机，
 尚未完成真机采集、帧率和现场长时间运行验证。
+
+## App 接入
+
+`App.start()` 按配置打开相机；未配置或未找到设备时单机进入 FAULT。START 使用业务创建的 capture_id 启动取流。CLOSE 只等待生产停止，不等待旧轮证据保存。适配器将图片与含统计的 CaptureSummary 顺序交付机器事件队列。OCR 仍在采集封口后提交。`App.stop()` 先停止并排空相机任务，再关闭 SDK。
+
+## BMP 证据保存
+
+Session 消费线程调用 `MvsCamera.encode_image`，通过官方 `MV_CC_SaveImageEx3` 和 `MV_Image_Bmp` 将独立原始帧转换为 BMP，返回扩展名和文件字节。转换采用帧内的原始像素格式，Bayer 插值参数为 SDK 的均衡模式。同一设备的编码串行执行，使用独立编码锁，不占用取帧锁。
+
+`camera.py` 将 BMP 写入本 Session 目录的临时文件，执行同步并原子替换后才发布 `FrameSelected`。编码失败时记录该帧处理错误，继续处理后续帧，最终生成含 `CAPTURE_FAILED` 的待复核记录。
+
+假 SDK 测试现在仅替换底层 API，经过正式 `encode_image` 和完整 Session 流程，检查 BMP 文件头、尺寸、像素及错误结果。实际 SDK 编码需要有效设备句柄，仍需相机到货后验证真实像素格式转换与取流。
