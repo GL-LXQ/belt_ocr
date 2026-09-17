@@ -88,10 +88,10 @@ class MeasurementExecutor:
             logger.exception("最终结果库暂不可用，将使用本地待提交区。")
 
         try:
-            # 检查磁盘和待提交积压，设置各机器的容量状态。
-            capacity_available = await self.check_storage_capacity()
+            # 检查磁盘剩余空间，设置各机器的初始容量状态。
+            disk_capacity_available = await self.check_disk_capacity()
             for machine_manager in self.machine_managers.values():
-                machine_manager.capacity_available = capacity_available
+                machine_manager.capacity_available = disk_capacity_available
 
                 # 按本次配置设置机器复位状态和初始故障。
                 machine_manager.waiting_cycle_reset = self.configuration.initial_machine_state != MachineState.CLOSED
@@ -257,8 +257,15 @@ class MeasurementExecutor:
                 # 将已到期的待提交记录重新加入存储队列。
                 await self.database.enqueue_pending_records()
 
-                # 检查待提交记录积压数量和磁盘剩余空间。
-                capacity_available = await self.check_storage_capacity()
+                # 检查磁盘剩余空间。
+                disk_capacity_available = await self.check_disk_capacity()
+
+                # 读取本次运行的待提交数量，合并磁盘和积压检查结果。
+                pending_count = await run_blocking_operation(self.recovery.pending_count)
+                capacity_available = (
+                    disk_capacity_available
+                    and pending_count < self.configuration.max_persistent_records
+                )
 
                 # 向容量状态发生变化的机器管理员发送更新事件。
                 for machine_manager in self.machine_managers.values():
@@ -281,22 +288,31 @@ class MeasurementExecutor:
             # 等待配置的维护间隔，再开始下一轮处理。
             await asyncio.sleep(self.configuration.maintenance_interval_ms / 1000)
 
-    async def check_storage_capacity(self) -> bool:
-        """检查本地待提交数量和输出目录所在磁盘的剩余空间。"""
-        pending_count = await run_blocking_operation(self.recovery.pending_count)
+    async def check_disk_capacity(self) -> bool:
+        """检查本地运行库和证据目录所在磁盘的剩余空间。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            bool: 所有检查目录所在磁盘均达到最低剩余空间时返回 True。
+            返回示例：
+                True  # 所有检查目录所在磁盘空间充足
+                False  # 至少一个检查目录所在磁盘空间不足
+        """
+        # 收集本地运行库和证据目录的路径。
         output_paths = {
             self.configuration.recovery_path.parent,
             self.configuration.evidence_directory,
         }
+        # 在线程中读取各目录所在磁盘的容量信息。
         disk_states = await asyncio.gather(*(
             run_blocking_operation(shutil.disk_usage, path) for path in output_paths
         ))
-        return (
-            pending_count < self.configuration.max_persistent_records
-            and all(
-                disk_state.free >= self.configuration.minimum_free_disk_bytes
-                for disk_state in disk_states
-            )
+        # 检查所有磁盘的剩余空间是否达到配置下限。
+        return all(
+            disk_state.free >= self.configuration.minimum_free_disk_bytes
+            for disk_state in disk_states
         )
 
     async def supervise_worker(self, component: str, run_worker) -> None:
