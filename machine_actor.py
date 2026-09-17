@@ -626,13 +626,27 @@ class MachineActor:
         ))
 
     async def submit_ocr_frames(self, session: BeltSession) -> None:
-        """先登记逐帧任务，再把未完成任务提交给共享调度器。"""
+        """登记逐帧任务并将未完成任务提交给共享 OCR 调度器。
+
+        Args:
+            session: 本轮测量档案，包含已选图片、OCR 任务进度和配置快照。
+
+        Returns:
+            None: 不返回数据，更新档案中的 OCR 状态并提交任务。
+            返回示例：
+                None  # 无返回数据
+        """
         # 为每张图片登记 OCR 任务，保留已有任务的处理进度。
         for frame in session.selected_frames.values():
-            session.ocr_jobs.setdefault(frame.frame_id, {
-                "job_id": uuid4().hex, "state": "WAITING", "attempt": 0,
-                "ordered_lines": [],
-            })
+            session.ocr_jobs.setdefault(
+                frame.frame_id,
+                {
+                    "job_id": uuid4().hex,
+                    "state": "WAITING",
+                    "attempt": 0,
+                    "ordered_lines": [],
+                },
+            )
 
         # 标记本轮进入 OCR 处理阶段并保存检查点。
         session.ocr_state = "RUNNING"
@@ -656,9 +670,12 @@ class MachineActor:
 
             # 组装携带机器、档案、任务编号和图片信息的 OCR 任务。
             job = OCRJob(
-                session.machine_id, session.session_id, job_state["job_id"],
+                session.machine_id,
+                session.session_id,
+                job_state["job_id"],
                 session.selected_frames[frame_id],
-                tuple(machine_settings["simulated_lines"]), job_state["attempt"],
+                tuple(machine_settings["simulated_lines"]),
+                job_state["attempt"],
             )
 
             # 提交到共享 OCR 队列，队列满时标记失败并停止提交。
