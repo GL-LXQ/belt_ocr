@@ -780,52 +780,72 @@ class MachineActor:
                 session.errors.append("OCR_QUEUE_FULL")
                 break
 
-    async def settle_ocr_frame(
-        self, session: BeltSession, event: MeasurementEvent
-    ) -> None:
-        """校验任务和尝试编号，在全部帧结算后组装模拟结果。"""
+    async def settle_ocr_frame(self, session: BeltSession, event: MeasurementEvent) -> None:
+        """登记单帧识别进度和结果，并在全部帧结算后更新本轮 OCR 状态。
+
+        Args:
+            session: 当前事件所属的测量档案，保存图片任务和本轮 OCR 状态。
+            event: 包含事件类型、帧编号、任务编号、尝试次数和识别结果的事件。
+
+        Returns:
+            None: 更新测量档案中的任务记录和 OCR 状态，不返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 读取事件数据，找到对应图片的任务记录。
         payload = event.payload
         job_state = session.ocr_jobs.get(payload["frame_id"])
+
+        # 计算当前事件应携带的尝试次数。
         expected_attempt = (
             job_state["attempt"] + (event.event_type == "OCRFrameStarted")
-            if job_state is not None else None
+            if job_state is not None
+            else None
         )
+
+        # 核对本轮状态、任务身份和尝试次数，记录并忽略不匹配的事件。
         if (
-            session.ocr_state != "RUNNING" or job_state is None
+            session.ocr_state != "RUNNING"
+            or job_state is None
             or job_state["job_id"] != payload["job_id"]
             or job_state["state"] in {"SUCCESS", "FAILED"}
             or payload["attempt"] != expected_attempt
         ):
-            await run_blocking_operation(
-                self.recovery.audit, "STALE_OCR_ATTEMPT", event,
-            )
+            await run_blocking_operation(self.recovery.audit, "STALE_OCR_ATTEMPT", event)
             return
+
+        # 更新尝试次数，收到开始事件时登记运行状态并返回。
         job_state["attempt"] = payload["attempt"]
         if event.event_type == "OCRFrameStarted":
             job_state["state"] = "RUNNING"
             return
-        job_state["state"] = (
-            "SUCCESS" if event.event_type == "OCRFrameCompleted" else "FAILED"
-        )
+
+        # 登记单帧最终状态和识别文字。
+        job_state["state"] = "SUCCESS" if event.event_type == "OCRFrameCompleted" else "FAILED"
         job_state["ordered_lines"] = payload.get("ordered_lines", [])
+
+        # 将单帧识别失败的错误码写入本轮档案。
         if event.event_type == "OCRFrameFailed":
             session.errors.append(payload["error_code"])
-        if any(
-            job["state"] not in {"SUCCESS", "FAILED"}
-            for job in session.ocr_jobs.values()
-        ):
+
+        # 还有图片未结算时，等待后续识别事件。
+        if any(job["state"] not in {"SUCCESS", "FAILED"} for job in session.ocr_jobs.values()):
             return
+
+        # 全部图片结算后，只要存在失败任务就标记本轮 OCR 失败。
         if any(job["state"] == "FAILED" for job in session.ocr_jobs.values()):
             session.ocr_state = "FAILED"
             return
 
-        # 使用模拟模块已经筛选好的有序行，不重复累计多帧文字。
+        # 取第一项任务的模拟文字，收集全部选中图片的路径和帧编号。
         first_job = next(iter(session.ocr_jobs.values()))
         session.ocr_result = OCRResult(
             tuple(first_job["ordered_lines"]),
             tuple(frame.image_path for frame in session.selected_frames.values()),
             tuple(session.selected_frames),
         )
+
+        # 将本轮 OCR 标记为成功。
         session.ocr_state = "SUCCESS"
 
     async def restore_measurements(self, checkpoint: dict) -> None:
