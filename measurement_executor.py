@@ -49,23 +49,27 @@ class MeasurementExecutor:
 
     async def start(self) -> None:
         """初始化存储并启动持续监听与处理任务。"""
+        # 拒绝重复启动同一个执行器。
         if self.has_started:
             raise RuntimeError("请为新一次运行创建新的测量执行器。")
         try:
+            # 初始化恢复库并创建证据图片目录。
             await run_blocking_operation(self.recovery.initialize)
             await run_blocking_operation(
                 self.configuration.evidence_directory.mkdir,
                 parents=True, exist_ok=True,
             )
+            # 读取旧检查点并核对机器配置。
             checkpoints = await run_blocking_operation(self.recovery.load_checkpoints)
             if set(checkpoints) - set(self.actors):
                 raise ValueError("配置缺少恢复记录中已有的机器。")
         except Exception:
+            # 初始化失败时释放恢复库并报告错误。
             self.recovery.close()
             logger.exception("测量系统初始化失败")
             raise RuntimeError("测量系统初始化失败。") from None
 
-        # 最终库不可用时保留本地恢复能力。
+        # 初始化最终结果库，失败时标记不可用并记录审计。
         try:
             await run_blocking_operation(self.storage.initialize)
         except Exception:
@@ -75,11 +79,12 @@ class MeasurementExecutor:
             )
             logger.exception("最终结果库暂不可用，将使用本地待提交区。")
 
-        # 恢复已关闭任务，建立模拟输入的初始状态。
         try:
+            # 检查磁盘和待提交积压，设置各机器的容量状态。
             capacity_available = await self.check_storage_capacity()
             for machine_id, actor in self.actors.items():
                 actor.capacity_available = capacity_available
+                # 读取本机检查点，无旧记录时设置模拟初始状态。
                 checkpoint = checkpoints.get(machine_id, {})
                 if not checkpoint:
                     checkpoint["waiting_cycle_reset"] = (
@@ -87,8 +92,10 @@ class MeasurementExecutor:
                     )
                     if self.configuration.initial_machine_state == "UNKNOWN":
                         checkpoint["device_faults"] = ["UNKNOWN_INITIAL_STATE"]
+                # 恢复本机测量档案和运行状态。
                 await actor.restore_measurements(checkpoint)
         except Exception:
+            # 恢复失败时取消已创建的任务并等待结束。
             startup_tasks = [
                 task for actor in self.actors.values()
                 for task in (*actor.deadline_tasks.values(), *actor.background_tasks)
@@ -96,21 +103,26 @@ class MeasurementExecutor:
             for task in startup_tasks:
                 task.cancel()
             await asyncio.gather(*startup_tasks, return_exceptions=True)
+            # 释放恢复库并报告恢复失败。
             self.recovery.close()
             logger.exception("恢复测量记录失败")
             raise RuntimeError("恢复测量记录失败。") from None
 
-        # 启动各机器事件处理和持续频率接收。
+        # 为每台机器安排事件处理和频率接收两个后台任务。
         for actor in self.actors.values():
             self.worker_tasks.append(asyncio.create_task(actor.run()))
             self.worker_tasks.append(asyncio.create_task(actor.frequency.run()))
+        # 启动共享 OCR 任务并监控运行状态。
         self.worker_tasks.append(asyncio.create_task(
             self.supervise_worker("OCR", self.ocr.run), name="OCR",
         ))
+        # 启动共享存储任务并监控运行状态。
         self.worker_tasks.append(asyncio.create_task(
             self.supervise_worker("STORAGE", self.storage.run), name="STORAGE",
         ))
+        # 启动定期补交待提交记录和检查存储容量的任务。
         self.worker_tasks.append(asyncio.create_task(self.maintain_system()))
+        # 标记启动完成，开放启动和关闭信号入口。
         self.has_started = True
         self.accepting_signals = True
 
