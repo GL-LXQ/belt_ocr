@@ -7,7 +7,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import test_measurement_flow as flow_support
@@ -704,6 +704,78 @@ asyncio.run(crash_after_close())
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["outcome"], "REVIEW_REQUIRED")
         self.assertIn("EVIDENCE_UNAVAILABLE", records[0]["error_codes"])
+
+
+    async def test_ignored_events_do_not_trigger_finalization(self) -> None:
+        """验证被忽略的图片、封口和 OCR 事件不会触发完成检查。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 通过断言验证事件分派结果。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 建立受控周期，登记一张有效图片和一次有效频率。
+        executor = await self.start_controlled_executor()
+        await executor.handle_start("M01")
+        actor = executor.actors["M01"]
+        session = actor.sessions[actor.active_session_id]
+        frame, measurement = await self.supply_valid_inputs(session)
+
+        # 构造来源不符图片、未运行 OCR 结果和未关闭频率封口。
+        rejected_frame = replace(frame, frame_id="rejected-frame", camera_id="CAM02")
+        events = (
+            MeasurementEvent("FrameSelected", "M01", session.session_id, rejected_frame),
+            MeasurementEvent("OCRCompleted", "M01", session.session_id),
+            MeasurementEvent("FrequencyWindowSealed", "M01", session.session_id),
+        )
+        with patch.object(actor, "try_finalize", new_callable=AsyncMock) as finalize:
+            for event in events:
+                await self.publish_and_wait(event)
+
+            # 重复图像封口同样跳过完成检查。
+            session.capture_sealed = True
+            await self.publish_and_wait(MeasurementEvent("CaptureSealed", "M01", session.session_id, 0))
+            finalize.assert_not_awaited()
+
+        # 保留原图片、频率和识别状态。
+        self.assertEqual(list(session.selected_frames), [frame.frame_id])
+        self.assertEqual(list(session.frequency_candidates), [measurement.measurement_id])
+        self.assertEqual(session.ocr_state, "WAITING")
+        self.assertFalse(session.frequency_window_sealed)
+
+    async def test_frequency_identity_conflict_still_triggers_finalization(self) -> None:
+        """验证频率周期身份冲突仍触发一次完成检查并保留无效状态。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 通过断言验证冲突状态和完成检查次数。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 建立受控周期并取得原有频率候选。
+        executor = await self.start_controlled_executor()
+        await executor.handle_start("M01")
+        actor = executor.actors["M01"]
+        session = actor.sessions[actor.active_session_id]
+        frame, measurement = await self.supply_valid_inputs(session)
+
+        # 将不同周期的测量送入原档案，验证冲突路径继续结算。
+        conflicting_measurement = replace(measurement, session_id="another-session")
+        event = MeasurementEvent("FrequencyMeasured", "M01", session.session_id, conflicting_measurement)
+        with patch.object(actor, "try_finalize", new_callable=AsyncMock) as finalize:
+            await self.publish_and_wait(event)
+            finalize.assert_awaited_once_with(session)
+
+        # 冲突测量不替换原候选，并记录无效频率和审计原因。
+        self.assertEqual(session.frequency_state, "FINAL_INVALID")
+        self.assertIn("AMBIGUOUS_MEASUREMENT", session.errors)
+        self.assertEqual(session.frequency_candidates[measurement.measurement_id], measurement)
+        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_audit_reasons())
 
 
 if __name__ == "__main__":

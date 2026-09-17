@@ -261,270 +261,366 @@ class MachineActor:
         )
 
     async def apply_event(self, event: MeasurementEvent) -> None:
-        """校验事件归属，更新状态并触发完成检查。"""
+        """校验事件归属，按事件类型分派处理并检查本轮是否完成。
+
+        Args:
+            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
+
+        Returns:
+            None: 更新业务状态，不返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 检查事件所属机器。
         if event.machine_id != self.machine.machine_id:
             await run_blocking_operation(self.recovery.audit, "MACHINE_MISMATCH", event)
             logger.warning("隔离机器归属不符事件 event_id=%s", event.event_id)
             return
 
-        # 处理不依赖已有 Session 的入口事件。
-        if event.event_type == "MachineStarted":
-            await self.start_measurement()
-            return
-        if event.event_type == "MachineClosed":
-            if event.session_id and event.session_id not in {
-                self.active_session_id, self.interrupted_session_id,
-            }:
-                await run_blocking_operation(
-                    self.recovery.audit, "CLOSE_SESSION_MISMATCH", event,
-                )
+        # 分派不依赖测量档案的机器级事件。
+        match event.event_type:
+            case "MachineStarted":
+                await self.start_measurement()
                 return
-            await self.close_measurement()
-            return
-        if event.event_type == "Shutdown":
-            await self.close_measurement(interrupted=True)
-            return
-        if event.event_type == "DeviceFault":
-            self.device_faults.add(event.payload)
-            await run_blocking_operation(self.recovery.audit, "DEVICE_FAULT", event)
-            await self.close_measurement(interrupted=True)
-            self.waiting_cycle_reset = True
-            return
-        if event.event_type == "DeviceRecovered":
-            self.device_faults.discard(event.payload)
-            await run_blocking_operation(self.recovery.audit, "DEVICE_RECOVERED", event)
-            return
-        if event.event_type == "MachineSynchronized":
-            if self.active_session_id is not None:
+            case "MachineClosed":
+                # 核对关闭信号的周期身份，再关闭当前测量。
+                if event.session_id and event.session_id not in {
+                    self.active_session_id, self.interrupted_session_id,
+                }:
+                    await run_blocking_operation(self.recovery.audit, "CLOSE_SESSION_MISMATCH", event)
+                    return
+                await self.close_measurement()
+                return
+            case "Shutdown":
                 await self.close_measurement(interrupted=True)
-            self.waiting_cycle_reset = event.payload != "CLOSED"
-            if event.payload == "CLOSED":
-                self.interrupted_session_id = None
-            self.device_faults.discard("UNKNOWN_INITIAL_STATE")
-            await run_blocking_operation(
-                self.recovery.audit, "MACHINE_SYNCHRONIZED", event,
-            )
-            return
-        if event.event_type == "SourceSynchronized":
-            await self.close_measurement(interrupted=True)
-            self.waiting_cycle_reset = True
-            self.source_cursors[event.payload["source_id"]] = {
-                "epoch": event.payload["epoch"],
-                "sequence": event.payload["sequence"],
-            }
-            await run_blocking_operation(
-                self.recovery.audit, "SOURCE_SYNCHRONIZED", event,
-            )
-            return
-        if event.event_type == "CapacityChanged":
-            self.capacity_available = event.payload
-            await run_blocking_operation(self.recovery.audit, "CAPACITY_CHANGED", event)
-            return
+                return
+            case "DeviceFault":
+                # 登记设备故障并中断当前周期。
+                self.device_faults.add(event.payload)
+                await run_blocking_operation(self.recovery.audit, "DEVICE_FAULT", event)
+                await self.close_measurement(interrupted=True)
+                self.waiting_cycle_reset = True
+                return
+            case "DeviceRecovered":
+                self.device_faults.discard(event.payload)
+                await run_blocking_operation(self.recovery.audit, "DEVICE_RECOVERED", event)
+                return
+            case "MachineSynchronized":
+                # 中断原活动周期，更新机器复位状态。
+                if self.active_session_id is not None:
+                    await self.close_measurement(interrupted=True)
+                self.waiting_cycle_reset = event.payload != "CLOSED"
+                if event.payload == "CLOSED":
+                    self.interrupted_session_id = None
+                self.device_faults.discard("UNKNOWN_INITIAL_STATE")
+                await run_blocking_operation(self.recovery.audit, "MACHINE_SYNCHRONIZED", event)
+                return
+            case "SourceSynchronized":
+                # 中断原周期，登记来源批次和序号基线。
+                await self.close_measurement(interrupted=True)
+                self.waiting_cycle_reset = True
+                self.source_cursors[event.payload["source_id"]] = {
+                    "epoch": event.payload["epoch"],
+                    "sequence": event.payload["sequence"],
+                }
+                await run_blocking_operation(self.recovery.audit, "SOURCE_SYNCHRONIZED", event)
+                return
+            case "CapacityChanged":
+                self.capacity_available = event.payload
+                await run_blocking_operation(self.recovery.audit, "CAPACITY_CHANGED", event)
+                return
 
         # 隔离没有周期身份的频率，不分配给当前或历史 Session。
         if event.event_type == "FrequencyMeasured" and not event.session_id:
-            await run_blocking_operation(
-                self.recovery.audit, "AMBIGUOUS_MEASUREMENT", event,
-            )
+            await run_blocking_operation(self.recovery.audit, "AMBIGUOUS_MEASUREMENT", event)
             return
 
         # 将异步结果定位到原 Session。
         session = self.sessions.get(event.session_id)
         if session is None:
-            await run_blocking_operation(
-                self.recovery.audit, "UNKNOWN_OR_SETTLED_SESSION", event,
-            )
+            await run_blocking_operation(self.recovery.audit, "UNKNOWN_OR_SETTLED_SESSION", event)
             logger.warning(
                 "隔离未知或已结算事件 machine_id=%s session_id=%s event=%s",
-                event.machine_id, event.session_id, event.event_type,
+                event.machine_id,
+                event.session_id,
+                event.event_type,
             )
             return
 
-        # 提交回调只更新目标档案，不修改活动位置。
-        if event.event_type in {"CommitSucceeded", "CommitFailed"}:
-            if session.commit_state not in {"COMMITTING", "RETRY_PENDING"}:
+        # 在冻结检查前处理提交回调和补交请求。
+        match event.event_type:
+            case "CommitSucceeded" | "CommitFailed":
+                await self.handle_commit_result(session, event)
                 return
-            if event.event_type == "CommitSucceeded":
-                session.commit_state = "COMMITTED"
-                logger.info(
-                    "已保存 machine_id=%s session_id=%s outcome=%s",
-                    session.machine_id, session.session_id, session.outcome,
-                )
-                self.sessions.pop(session.session_id)
-            else:
-                session.commit_state = (
-                    "CONFLICT" if event.payload.get("integrity_conflict")
-                    else "RETRY_PENDING"
-                )
-                if session.commit_state == "CONFLICT":
-                    self.device_faults.add("COMMIT_INTEGRITY_CONFLICT")
-                logger.error(
-                    "记录待重试 machine_id=%s session_id=%s",
-                    session.machine_id, session.session_id,
-                )
-            return
-        if event.event_type == "RetryCommit":
-            if session.commit_state == "RETRY_PENDING":
-                await self.submit_frozen_record(session)
-            return
+            case "RetryCommit":
+                if session.commit_state == "RETRY_PENDING":
+                    await self.submit_frozen_record(session)
+                return
+
+        # 隔离档案冻结后到达的采集和识别结果。
         if session.frozen_payload is not None:
-            await run_blocking_operation(
-                self.recovery.audit, "LATE_FROZEN_RESULT", event,
-            )
-            logger.warning(
-                "隔离冻结后的迟到事件 session_id=%s event=%s",
-                session.session_id, event.event_type,
-            )
+            await run_blocking_operation(self.recovery.audit, "LATE_FROZEN_RESULT", event)
+            logger.warning("隔离冻结后的迟到事件 session_id=%s event=%s", session.session_id, event.event_type)
             return
 
-        # 登记采集窗口内的帧，按帧编号去重。
-        if event.event_type == "FrameSelected":
-            frame = event.payload
-            if (
-                frame.session_id != session.session_id
-                or frame.camera_id != session.camera_id
-                or frame.capture_id != session.capture_id
-                or frame.captured_monotonic < session.start_boundary
-                or session.capture_sealed
-                or (
-                    session.close_boundary is not None
-                    and frame.captured_monotonic > session.close_boundary
-                )
-            ):
-                await run_blocking_operation(
-                    self.recovery.audit, "FRAME_OWNERSHIP_CONFLICT", event,
-                )
-                logger.warning("隔离归属不符图像 session_id=%s", session.session_id)
-                return
-            session.selected_frames.setdefault(frame.frame_id, frame)
-        elif event.event_type == "CaptureSealed":
-            if session.capture_sealed:
-                return
-            session.capture_sealed = True
-            session.skipped_frame_count = event.payload
-            if session.ocr_state == "WAITING":
-                if not session.selected_frames:
+        # 分派采集结果，保留各事件是否继续结算的处理决定。
+        should_finalize = True
+        match event.event_type:
+            case "FrameSelected":
+                should_finalize = await self.handle_frame_selected(session, event)
+            case "CaptureSealed":
+                should_finalize = await self.handle_capture_sealed(session, event)
+            case "OCRFrameStarted" | "OCRFrameCompleted" | "OCRFrameFailed":
+                await self.settle_ocr_frame(session, event)
+            case "OCRCompleted":
+                should_finalize = await self.handle_ocr_completed(session, event)
+            case "EvidenceValidated" | "EvidenceFailed":
+                # 结算证据校验，登记成功状态或失败原因。
+                session.evidence_validation_pending = False
+                if event.event_type == "EvidenceValidated":
+                    session.evidence_verified = True
+                else:
                     session.ocr_state = "FAILED"
-                    session.errors.append("CAPTURE_NO_FRAMES")
-                else:
-                    await self.submit_ocr_frames(session)
-
-        # 结算逐帧 OCR 的尝试和最终结果。
-        elif event.event_type in {
-            "OCRFrameStarted", "OCRFrameCompleted", "OCRFrameFailed",
-        }:
-            await self.settle_ocr_frame(session, event)
-
-        # 接收 OCR 终态结果，忽略重复或超时后的结果。
-        elif event.event_type == "OCRCompleted":
-            if session.ocr_state != "RUNNING":
-                return
-            result = event.payload
-            if (
-                not result.ordered_lines or not result.evidence_refs
-                or set(result.frame_ids) != set(session.selected_frames)
-                or result.evidence_refs != tuple(
-                    frame.image_path for frame in session.selected_frames.values()
-                )
-            ):
-                session.ocr_state = "FAILED"
-                session.errors.append("OCR_INVALID_RESULT")
-            else:
-                session.ocr_result = result
-                session.ocr_state = "SUCCESS"
-        elif event.event_type in {"EvidenceValidated", "EvidenceFailed"}:
-            session.evidence_validation_pending = False
-            if event.event_type == "EvidenceValidated":
-                session.evidence_verified = True
-            else:
-                session.ocr_state = "FAILED"
-                session.errors.append("EVIDENCE_UNAVAILABLE")
-        elif event.event_type in {"OCRFailed", "CaptureFailed", "OCRTimeout"}:
-            if session.ocr_state in {"FAILED", "TIMED_OUT"}:
-                return
-            if session.ocr_state == "SUCCESS":
-                return
-            session.ocr_state = (
-                "TIMED_OUT" if event.event_type == "OCRTimeout" else "FAILED"
-            )
-            session.errors.append(event.payload or "OCR_TIMEOUT")
-
-        # 按测量身份收集有效频率，并校验现场窗口边界。
-        elif event.event_type == "FrequencyMeasured":
-            measurement = event.payload
-            # 周期身份冲突时保留目标档案为待复核，不转交其他周期。
-            if measurement.session_id != session.session_id:
-                session.frequency_state = "FINAL_INVALID"
-                if "AMBIGUOUS_MEASUREMENT" not in session.errors:
-                    session.errors.append("AMBIGUOUS_MEASUREMENT")
-                await run_blocking_operation(
-                    self.recovery.audit, "AMBIGUOUS_MEASUREMENT", event,
-                )
-                await self.try_finalize(session)
-                return
-            if (
-                session.frequency_window_sealed
-                or measurement.frequency_source_id != session.frequency_source_id
-                or measurement.measured_monotonic < session.start_boundary
-                or (
-                    session.close_boundary is not None
-                    and measurement.measured_monotonic > session.close_boundary
-                )
-            ):
-                await run_blocking_operation(
-                    self.recovery.audit, "AMBIGUOUS_MEASUREMENT", event,
-                )
-                logger.warning("隔离归属不符频率 session_id=%s", session.session_id)
-                return
-            if math.isfinite(measurement.value_hz) and (
-                self.configuration.minimum_frequency_hz
-                <= measurement.value_hz <= self.configuration.maximum_frequency_hz
-            ):
-                previous = session.frequency_candidates.get(measurement.measurement_id)
-                if previous is not None and (
-                    previous.value_hz != measurement.value_hz
-                    or previous.source_sequence != measurement.source_sequence
-                    or previous.measured_at != measurement.measured_at
-                ):
+                    session.errors.append("EVIDENCE_UNAVAILABLE")
+            case "OCRFailed" | "CaptureFailed" | "OCRTimeout":
+                # 忽略已有 OCR 终态，登记本次失败或超时。
+                if session.ocr_state in {"FAILED", "TIMED_OUT"}:
+                    return
+                if session.ocr_state == "SUCCESS":
+                    return
+                session.ocr_state = "TIMED_OUT" if event.event_type == "OCRTimeout" else "FAILED"
+                session.errors.append(event.payload or "OCR_TIMEOUT")
+            case "FrequencyMeasured":
+                should_finalize = await self.handle_frequency_measured(session, event)
+            case "FrequencyWindowSealed":
+                should_finalize = await self.handle_frequency_window_sealed(session, event)
+            case "FrequencyFailed":
+                if session.frequency_state != "FINAL_INVALID":
                     session.frequency_state = "FINAL_INVALID"
-                    session.errors.append("AMBIGUOUS_MEASUREMENT")
-                    await run_blocking_operation(
-                        self.recovery.audit, "MEASUREMENT_ID_CONFLICT", event,
-                    )
-                else:
-                    session.frequency_candidates.setdefault(
-                        measurement.measurement_id, measurement,
-                    )
-        elif event.event_type == "FrequencyWindowSealed":
-            if session.frequency_window_sealed or session.cycle_state == "OPEN":
+                    session.errors.append(event.payload)
+            case "CycleTimeout":
+                # 仅中断对应的现场活动周期。
+                if self.active_session_id == session.session_id:
+                    session.errors.append("CYCLE_TIMEOUT")
+                    await self.close_measurement(interrupted=True)
                 return
-            session.frequency_window_sealed = True
-            if session.frequency_state != "FINAL_INVALID":
-                if session.frequency_candidates:
-                    session.final_frequency = max(
-                        session.frequency_candidates.values(),
-                        key=lambda measurement: measurement.source_sequence,
-                    )
-                    session.frequency_state = "FINAL_VALID"
-                else:
-                    session.frequency_state = "FINAL_INVALID"
-                    session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
-        elif event.event_type == "FrequencyFailed":
-            if session.frequency_state != "FINAL_INVALID":
-                session.frequency_state = "FINAL_INVALID"
-                session.errors.append(event.payload)
+            case _:
+                await run_blocking_operation(self.recovery.audit, "UNKNOWN_EVENT_TYPE", event)
 
-        # 长时间未关闭时记录中断，不生成正常 CLOSE。
-        elif event.event_type == "CycleTimeout":
-            if self.active_session_id == session.session_id:
-                session.errors.append("CYCLE_TIMEOUT")
-                await self.close_measurement(interrupted=True)
+        # 对需要继续结算的事件统一检查本轮结果。
+        if should_finalize:
+            await self.try_finalize(session)
+
+    async def handle_commit_result(self, session: BeltSession, event: MeasurementEvent) -> None:
+        """处理提交成功或失败回调，更新原测量档案的提交状态。
+
+        Args:
+            session: 事件所属的测量档案。
+            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
+
+        Returns:
+            None: 更新业务状态，不返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 忽略未处于提交或重试阶段的回调。
+        if session.commit_state not in {"COMMITTING", "RETRY_PENDING"}:
             return
-        else:
-            await run_blocking_operation(
-                self.recovery.audit, "UNKNOWN_EVENT_TYPE", event,
+
+        # 提交成功时移除原档案，失败时登记重试或冲突状态。
+        if event.event_type == "CommitSucceeded":
+            session.commit_state = "COMMITTED"
+            logger.info(
+                "已保存 machine_id=%s session_id=%s outcome=%s",
+                session.machine_id,
+                session.session_id,
+                session.outcome,
             )
-        await self.try_finalize(session)
+            self.sessions.pop(session.session_id)
+        else:
+            session.commit_state = "CONFLICT" if event.payload.get("integrity_conflict") else "RETRY_PENDING"
+            if session.commit_state == "CONFLICT":
+                self.device_faults.add("COMMIT_INTEGRITY_CONFLICT")
+            logger.error("记录待重试 machine_id=%s session_id=%s", session.machine_id, session.session_id)
+
+    async def handle_frame_selected(self, session: BeltSession, event: MeasurementEvent) -> bool:
+        """校验图片归属并按帧编号登记本轮图片。
+
+        Args:
+            session: 事件所属的测量档案。
+            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
+
+        Returns:
+            bool: 是否继续执行本轮完成检查。
+            返回示例：
+                True  # 继续检查本轮能否结算
+                False  # 忽略当前事件，不执行完成检查
+        """
+        # 检查图片的档案、设备、窗口和采集时间归属。
+        frame = event.payload
+        if (
+            frame.session_id != session.session_id
+            or frame.camera_id != session.camera_id
+            or frame.capture_id != session.capture_id
+            or frame.captured_monotonic < session.start_boundary
+            or session.capture_sealed
+            or (
+                session.close_boundary is not None
+                and frame.captured_monotonic > session.close_boundary
+            )
+        ):
+            await run_blocking_operation(self.recovery.audit, "FRAME_OWNERSHIP_CONFLICT", event)
+            logger.warning("隔离归属不符图像 session_id=%s", session.session_id)
+            return False
+
+        # 按帧编号登记图片，并继续本轮完成检查。
+        session.selected_frames.setdefault(frame.frame_id, frame)
+        return True
+
+    async def handle_capture_sealed(self, session: BeltSession, event: MeasurementEvent) -> bool:
+        """封口图像窗口并提交本轮已收集的图片任务。
+
+        Args:
+            session: 事件所属的测量档案。
+            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
+
+        Returns:
+            bool: 是否继续执行本轮完成检查。
+            返回示例：
+                True  # 继续检查本轮能否结算
+                False  # 忽略当前事件，不执行完成检查
+        """
+        # 忽略重复封口，登记本轮跳帧数量。
+        if session.capture_sealed:
+            return False
+        session.capture_sealed = True
+        session.skipped_frame_count = event.payload
+
+        # 等待识别时提交已选图片，没有图片则标记失败。
+        if session.ocr_state == "WAITING":
+            if not session.selected_frames:
+                session.ocr_state = "FAILED"
+                session.errors.append("CAPTURE_NO_FRAMES")
+            else:
+                await self.submit_ocr_frames(session)
+        return True
+
+    async def handle_ocr_completed(self, session: BeltSession, event: MeasurementEvent) -> bool:
+        """校验整轮 OCR 结果并更新识别状态。
+
+        Args:
+            session: 事件所属的测量档案。
+            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
+
+        Returns:
+            bool: 是否继续执行本轮完成检查。
+            返回示例：
+                True  # 继续检查本轮能否结算
+                False  # 忽略当前事件，不执行完成检查
+        """
+        # 仅接收正在处理中的整轮 OCR 结果。
+        if session.ocr_state != "RUNNING":
+            return False
+
+        # 核对文字、帧清单和证据路径，登记识别成功或失败。
+        result = event.payload
+        if (
+            not result.ordered_lines or not result.evidence_refs
+            or set(result.frame_ids) != set(session.selected_frames)
+            or result.evidence_refs != tuple(frame.image_path for frame in session.selected_frames.values())
+        ):
+            session.ocr_state = "FAILED"
+            session.errors.append("OCR_INVALID_RESULT")
+        else:
+            session.ocr_result = result
+            session.ocr_state = "SUCCESS"
+        return True
+
+    async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> bool:
+        """校验频率归属和测量身份并收集有效候选值。
+
+        Args:
+            session: 事件所属的测量档案。
+            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
+
+        Returns:
+            bool: 是否继续执行本轮完成检查。
+            返回示例：
+                True  # 继续检查本轮能否结算
+                False  # 忽略当前事件，不执行完成检查
+        """
+        # 读取本次频率测量。
+        measurement = event.payload
+        # 周期身份冲突时保留目标档案为待复核，不转交其他周期。
+        if measurement.session_id != session.session_id:
+            session.frequency_state = "FINAL_INVALID"
+            if "AMBIGUOUS_MEASUREMENT" not in session.errors:
+                session.errors.append("AMBIGUOUS_MEASUREMENT")
+            await run_blocking_operation(self.recovery.audit, "AMBIGUOUS_MEASUREMENT", event)
+            return True
+
+        # 隔离窗口已封口、来源不符或超出周期边界的测量。
+        if (
+            session.frequency_window_sealed
+            or measurement.frequency_source_id != session.frequency_source_id
+            or measurement.measured_monotonic < session.start_boundary
+            or (
+                session.close_boundary is not None
+                and measurement.measured_monotonic > session.close_boundary
+            )
+        ):
+            await run_blocking_operation(self.recovery.audit, "AMBIGUOUS_MEASUREMENT", event)
+            logger.warning("隔离归属不符频率 session_id=%s", session.session_id)
+            return False
+
+        # 对有效频率检查重复测量身份，登记冲突或保存候选值。
+        if math.isfinite(measurement.value_hz) and (
+            self.configuration.minimum_frequency_hz
+            <= measurement.value_hz <= self.configuration.maximum_frequency_hz
+        ):
+            previous = session.frequency_candidates.get(measurement.measurement_id)
+            if previous is not None and (
+                previous.value_hz != measurement.value_hz
+                or previous.source_sequence != measurement.source_sequence
+                or previous.measured_at != measurement.measured_at
+            ):
+                session.frequency_state = "FINAL_INVALID"
+                session.errors.append("AMBIGUOUS_MEASUREMENT")
+                await run_blocking_operation(self.recovery.audit, "MEASUREMENT_ID_CONFLICT", event)
+            else:
+                session.frequency_candidates.setdefault(measurement.measurement_id, measurement)
+        return True
+
+    async def handle_frequency_window_sealed(self, session: BeltSession, event: MeasurementEvent) -> bool:
+        """封口频率窗口并确定本轮最后一次有效测量。
+
+        Args:
+            session: 事件所属的测量档案。
+            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
+
+        Returns:
+            bool: 是否继续执行本轮完成检查。
+            返回示例：
+                True  # 继续检查本轮能否结算
+                False  # 忽略当前事件，不执行完成检查
+        """
+        # 忽略重复封口和周期尚未结束的封口事件。
+        if session.frequency_window_sealed or session.cycle_state == "OPEN":
+            return False
+
+        # 关闭频率窗口，按来源序号选取最后一次有效测量。
+        session.frequency_window_sealed = True
+        if session.frequency_state != "FINAL_INVALID":
+            if session.frequency_candidates:
+                session.final_frequency = max(
+                    session.frequency_candidates.values(),
+                    key=lambda measurement: measurement.source_sequence,
+                )
+                session.frequency_state = "FINAL_VALID"
+            else:
+                session.frequency_state = "FINAL_INVALID"
+                session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
+        return True
 
     async def try_finalize(self, session: BeltSession) -> None:
         """检查结果完整性并冻结本轮最终记录。"""
