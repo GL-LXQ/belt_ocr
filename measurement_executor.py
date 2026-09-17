@@ -62,8 +62,10 @@ class MeasurementExecutor:
         if self.has_started:
             raise RuntimeError("请为新一次运行创建新的测量执行器。")
         try:
-            # 初始化恢复库并创建证据图片目录。
+            # 锁定并初始化恢复库，清理上次运行的待处理状态。
             await run_blocking_operation(self.recovery.initialize)
+
+            # 创建本次运行使用的证据图片目录。
             await run_blocking_operation(
                 self.configuration.evidence_directory.mkdir,
                 parents=True, exist_ok=True,

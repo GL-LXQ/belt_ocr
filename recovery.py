@@ -83,7 +83,17 @@ class RecoveryStore:
         self.lock_acquired = False
 
     def initialize(self) -> None:
-        """锁定本地实例并创建恢复表。"""
+        """锁定本地实例，创建运行表并清理上次运行的待处理状态。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成本次运行的本地存储初始化，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 创建恢复库目录和实例锁文件。
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.database_path.with_suffix(".lock")
         self.lock_file = lock_path.open("a+b")
@@ -144,6 +154,13 @@ class RecoveryStore:
                 );
                 PRAGMA user_version=1;
             """)
+
+            # 在同一事务中清理旧机器检查点和全部待提交记录。
+            with connection:
+                connection.execute("DELETE FROM machine_checkpoints")
+                connection.execute("DELETE FROM pending_records")
+
+        # 保持本次运行的恢复库连接。
         self.anchor_connection = sqlite3.connect(
             self.database_path, check_same_thread=False,
         )

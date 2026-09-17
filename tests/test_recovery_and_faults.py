@@ -1,4 +1,4 @@
-"""验证持久化恢复、故障隔离、自动补交和事件审计。"""
+"""验证重启清理、故障隔离、本次运行内自动补交和事件审计。"""
 
 import asyncio
 import json
@@ -8,12 +8,14 @@ import threading
 import unittest
 from contextlib import closing
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 import test_measurement_flow as flow_support
 from measurement_executor import MeasurementExecutor
 from models import MeasurementEvent
 from recovery import serialize_value
+from storage import StorageRequest
 
 
 class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
@@ -64,8 +66,8 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.read_records()[0], json.loads(frozen_payload))
         self.assertEqual(executor.recovery.pending_count(), 0)
 
-    async def test_pending_payload_survives_shutdown_and_restart(self) -> None:
-        """验证当前阶段保留的旧待提交记录仍由维护任务补交。
+    async def test_restart_discards_pending_payload_and_accepts_new_cycle(self) -> None:
+        """验证重启清理旧待提交记录并正常保存新周期。
 
         Args:
             无外部参数。
@@ -94,13 +96,115 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
                     lambda: session.commit_state == "RETRY_PENDING",
                 )
                 await executor.stop()
-        expected_payload = json.loads(session.frozen_payload)
+        # 确认退出时旧结果仍在待提交区，并保留证据路径。
+        self.assertEqual(executor.recovery.pending_count(), 1)
+        evidence_paths = [frame.image_path for frame in session.selected_frames.values()]
         restarted = await self.restart_executor(shutdown_timeout_ms=2000)
 
-        # 等待持久化待提交记录完成补交，再检查数据库结果。
-        await self.wait_for_state(lambda: restarted.recovery.pending_count() == 0)
+        # 确认旧记录已清理，多次补交检查也不会生成旧结果。
+        self.assertEqual(restarted.recovery.pending_count(), 0)
+        self.assertEqual(restarted.machine_managers["M01"].sessions, {})
+        await restarted.storage.enqueue_pending_records()
+        await restarted.storage.enqueue_pending_records()
         await restarted.wait_until_idle(10)
-        self.assertEqual(self.read_records(), [expected_payload])
+        self.assertEqual(self.read_records(), [])
+        self.assertTrue(all(Path(image_path).is_file() for image_path in evidence_paths))
+
+        # 接收并保存本次运行的新周期。
+        await restarted.handle_start("M01")
+        machine_manager = restarted.machine_managers["M01"]
+        new_session = machine_manager.sessions[machine_manager.active_session_id]
+        await self.wait_for_state(lambda: new_session.ocr_done)
+        await restarted.handle_close("M01")
+        await restarted.wait_until_idle(10)
+        self.assertEqual([record["session_id"] for record in self.read_records()], [new_session.session_id])
+
+    async def test_startup_clears_old_work_before_capacity_check(self) -> None:
+        """验证启动先清理旧积压和检查点，并保留历史结果与审计。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成断言，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 保存一轮历史结果和审计，然后停止执行器。
+        executor = await self.start_executor()
+        await executor.handle_start("M01")
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
+        await self.wait_for_state(lambda: session.ocr_done)
+        await executor.handle_close("M01")
+        await executor.wait_until_idle(10)
+        expected_records = self.read_records()
+        executor.recovery.audit("PREVIOUS_RUN_AUDIT", machine_id="M01")
+        await executor.stop()
+
+        # 登记普通、冲突和未受理类型的旧待提交记录。
+        for record_id, record_type in (
+            ("old_measurement", "measurement"),
+            ("old_conflict", "measurement"),
+            ("old_rejection", "rejected_cycle"),
+        ):
+            executor.recovery.stage_record(StorageRequest("M01", record_id, "{}", record_id, record_type))
+        executor.recovery.delay_record("old_conflict", 0, blocked=True)
+
+        # 保存不在本次配置中的旧机器检查点。
+        with closing(sqlite3.connect(executor.configuration.recovery_path)) as connection:
+            with connection:
+                connection.execute("INSERT INTO machine_checkpoints VALUES (?, ?)", ("OLD_MACHINE", "{}"))
+
+        # 使用低于旧积压数量的容量上限启动，确认先清理再检查容量。
+        restarted = await self.restart_executor(max_persistent_records=1)
+        self.assertEqual(restarted.recovery.pending_count(), 0)
+        self.assertEqual(restarted.machine_managers["M01"].acceptance_state, "READY")
+        checkpoints = restarted.recovery.load_checkpoints()
+        self.assertEqual(set(checkpoints), set(restarted.machine_managers))
+        self.assertTrue(all(not checkpoint["sessions"] for checkpoint in checkpoints.values()))
+
+        # 确认历史结果、提交身份、审计和证据仍然保留。
+        self.assertEqual(self.read_records(), expected_records)
+        self.assertTrue(restarted.recovery.record_status(session.session_id)["committed"])
+        self.assertIn("PREVIOUS_RUN_AUDIT", self.read_audit_reasons())
+        self.assertTrue(all(Path(image_path).is_file() for image_path in expected_records[0]["evidence_refs"]))
+
+    async def test_initial_unknown_state_requires_close_or_synchronization(self) -> None:
+        """验证未知初始状态在有效关闭或关闭状态同步后接收新周期。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成断言，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 初始状态未知时忽略启动，明确关闭后清除未知状态故障。
+        executor = await self.start_executor(initial_machine_state="UNKNOWN")
+        machine_manager = executor.machine_managers["M01"]
+        await executor.handle_start("M01")
+        self.assertEqual(machine_manager.sessions, {})
+        self.assertEqual(machine_manager.acceptance_state, "FAULT")
+        await executor.handle_close("M01")
+        self.assertEqual(machine_manager.acceptance_state, "READY")
+        await executor.handle_start("M01")
+        self.assertIsNotNone(machine_manager.active_session_id)
+
+        # 其他机器同步为运行中时仍等待关闭，不创建半轮测量。
+        await executor.synchronize_machine("M02", "OPEN")
+        await executor.handle_start("M02")
+        self.assertEqual(executor.machine_managers["M02"].acceptance_state, "WAIT_CYCLE_RESET")
+        self.assertEqual(executor.machine_managers["M02"].sessions, {})
+        await executor.handle_close("M02")
+        self.assertEqual(executor.machine_managers["M02"].acceptance_state, "READY")
+
+        # 同步为关闭状态后允许下一次启动。
+        await executor.synchronize_machine("M03", "CLOSED")
+        self.assertEqual(executor.machine_managers["M03"].acceptance_state, "READY")
+        await executor.handle_start("M03")
+        self.assertIsNotNone(executor.machine_managers["M03"].active_session_id)
 
     async def test_closed_session_does_not_resume_unfinished_ocr(self) -> None:
         """验证重启后不恢复已关闭周期的 OCR 和超时任务。

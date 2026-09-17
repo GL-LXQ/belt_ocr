@@ -290,6 +290,8 @@ class MachineManager:
                     await run_blocking_operation(self.recovery.audit, "CLOSE_SESSION_MISMATCH", event)
                     return
                 await self.close_measurement()
+                # 收到有效关闭信号后清除初始状态未知的故障。
+                self.device_faults.discard("UNKNOWN_INITIAL_STATE")
                 return
             case "Shutdown":
                 await self.close_measurement(interrupted=True)
