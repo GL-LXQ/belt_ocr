@@ -216,6 +216,7 @@ OCR/存储工作任务意外退出时会记录故障并有限重启；OCR 在途
 | `recovery.py` | 本地运行检查点、待提交记录、事件去重、审计和实例锁 |
 | `tests/test_measurement_flow.py` | 并行、跨轮次、重复、失败和超时测试 |
 | `tests/test_recovery_and_faults.py` | 异常退出、重启恢复、自动补交、故障隔离和多轮运行测试 |
+| `tests/test_acceptance_scenarios.py` | 验收事件注入、跨轮回调、调度公平性、证据失败和强制崩溃测试 |
 
 ## 当前边界
 
@@ -231,3 +232,4 @@ uv run python -X utf8 -m unittest discover -s tests -v
 ```
 
 测试使用临时图片和独立 SQLite 文件，不修改演示数据库。
+README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTANCE.md)。

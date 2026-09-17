@@ -18,6 +18,9 @@ from storage import StorageRequest
 
 class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        # 按正式程序的非调试模式执行异步流程和期限测试。
+        asyncio.get_running_loop().set_debug(False)
+
         # 创建每次测试独立的图片目录和数据库位置。
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.output_directory = Path(self.temporary_directory.name)
@@ -74,12 +77,24 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                     self.executor.state_changed.wait(), remaining_seconds,
                 )
             except asyncio.TimeoutError:
+                # 输出队列和逐帧状态，定位等待未完成的业务步骤。
                 states = [
-                    (session.machine_id, session.ocr_state, session.errors)
+                    {
+                        "machine_id": session.machine_id,
+                        "ocr_state": session.ocr_state,
+                        "errors": session.errors,
+                        "ocr_jobs": session.ocr_jobs,
+                        "queued_events": actor.queue.qsize(),
+                        "device_faults": sorted(actor.device_faults),
+                    }
                     for actor in self.executor.actors.values()
                     for session in actor.sessions.values()
                 ]
-                self.fail(f"等待业务状态超时：{states}")
+                workers = [
+                    (task.get_name(), task.done(), str(task.get_coro()))
+                    for task in self.executor.worker_tasks
+                ]
+                self.fail(f"等待业务状态超时：{states}；工作任务：{workers}")
 
     def read_records(self) -> list[dict]:
         """读取已经提交的完整结果。"""
@@ -112,6 +127,18 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(records), 3)
         for record in records:
             machine_number = int(record["machine_id"][1:])
+            self.assertEqual(record["camera_id"], f"CAM{machine_number:02}")
+            self.assertEqual(record["frequency_source_id"], f"FREQ{machine_number:02}")
+            self.assertTrue(all(
+                frame["camera_id"] == record["camera_id"]
+                and frame["session_id"] == record["session_id"]
+                for frame in record["selected_frames"]
+            ))
+            self.assertTrue(all(
+                measurement["frequency_source_id"] == record["frequency_source_id"]
+                and measurement["session_id"] == record["session_id"]
+                for measurement in record["frequency_candidates"]
+            ))
             self.assertEqual(record["outcome"], "COMPLETE", record["error_codes"])
             self.assertTrue(record["is_simulated"])
             self.assertEqual(
@@ -327,16 +354,44 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ocr_timeout_does_not_block_another_machine(self) -> None:
         executor = await self.start_executor(
-            capture_window_ms=300,
-            simulated_ocr_delay_ms=1000, ocr_result_timeout_ms=600,
+            capture_window_ms=30000, ocr_job_timeout_ms=30000,
         )
-        await asyncio.gather(executor.handle_start("M01"), executor.handle_start("M02"))
-        await self.wait_for_state(lambda: all(
-            next(iter(executor.actors[machine_id].sessions.values())).capture_sealed
-            for machine_id in ("M01", "M02")
-        ))
-        await asyncio.gather(executor.handle_close("M01"), executor.handle_close("M02"))
-        await executor.wait_until_idle()
+        recognition_entered = asyncio.Event()
+        recognition_release = asyncio.Event()
+
+        # 暂停识别，先等待两台机器都取得图像和有效频率。
+        async def hold_recognition(job):
+            recognition_entered.set()
+            await recognition_release.wait()
+            return job.simulated_lines
+
+        with patch.object(executor.ocr, "recognize_frame", hold_recognition):
+            try:
+                await asyncio.gather(
+                    executor.handle_start("M01"), executor.handle_start("M02"),
+                )
+                sessions = [
+                    next(iter(executor.actors[machine_id].sessions.values()))
+                    for machine_id in ("M01", "M02")
+                ]
+                await self.wait_for_state(lambda: all(
+                    session.selected_frames and session.frequency_candidates
+                    for session in sessions
+                ))
+                await asyncio.gather(
+                    executor.handle_close("M01"), executor.handle_close("M02"),
+                )
+                await asyncio.wait_for(recognition_entered.wait(), 10)
+
+                # 使用真实期限任务触发超时，分别保存两台机器的异常结果。
+                for session in sessions:
+                    actor = executor.actors[session.machine_id]
+                    deadline_key = (session.session_id, "OCRTimeout")
+                    actor.deadline_tasks.pop(deadline_key).cancel()
+                    actor.schedule_timeout(session, "OCRTimeout", 50)
+                await executor.wait_until_idle()
+            finally:
+                recognition_release.set()
         self.assertEqual(len(self.read_records()), 2)
         self.assertTrue(all(
             "OCR_TIMEOUT" in record["error_codes"] for record in self.read_records()
@@ -406,6 +461,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                 await executor.wait_until_idle()
         self.assertEqual(attempt_count, 2)
         self.assertEqual(len(self.read_records()), 1)
+        self.assertEqual(self.read_records()[0], json.loads(session.frozen_payload))
 
     async def test_failed_commit_retains_frozen_payload_for_retry(self) -> None:
         executor = await self.start_executor(storage_retry_attempts=1)

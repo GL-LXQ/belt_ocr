@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 import sys
+import threading
 import unittest
 from contextlib import closing
 from dataclasses import replace
@@ -342,13 +343,16 @@ asyncio.run(crash_after_start())
         self.assertEqual(self.read_records()[0]["outcome"], "COMPLETE")
 
     async def test_storage_queue_full_keeps_all_records_durable(self) -> None:
-        executor = await self.start_executor(storage_queue_capacity=1)
+        executor = await self.start_executor(
+            storage_queue_capacity=1, max_frames_per_session=1,
+        )
         original_write = executor.storage.write_record
+        write_release = threading.Event()
 
-        # 放慢最终库提交，制造三个机器同时提交的积压。
-        def slow_write(request):
-            import time
-            time.sleep(0.2)
+        # 暂停真实写库，等待三份记录全部进入持久化待提交区。
+        def hold_write(request):
+            if not write_release.wait(30):
+                raise TimeoutError("测试写入等待超时。")
             original_write(request)
 
         await asyncio.gather(*(
@@ -358,10 +362,25 @@ asyncio.run(crash_after_start())
             next(iter(actor.sessions.values())).ocr_done
             for actor in executor.actors.values()
         ))
-        with patch.object(executor.storage, "write_record", slow_write):
-            await asyncio.gather(*(
-                executor.handle_close(machine_id) for machine_id in executor.actors
-            ))
+        with patch.object(executor.storage, "write_record", hold_write):
+            try:
+                await asyncio.gather(*(
+                    executor.handle_close(machine_id) for machine_id in executor.actors
+                ))
+                await self.wait_for_state(lambda: (
+                    executor.recovery.pending_count() == 3
+                    and any(
+                        session.commit_state == "RETRY_PENDING"
+                        for actor in executor.actors.values()
+                        for session in actor.sessions.values()
+                    )
+                ))
+                self.assertEqual(executor.storage.queue.qsize(), 1)
+                self.assertEqual(self.read_records(), [])
+            finally:
+                write_release.set()
+
+            # 释放写库后，内存队列外的记录也会自动补交。
             await executor.wait_until_idle(10)
         self.assertEqual(len(self.read_records()), 3)
         self.assertEqual(executor.recovery.pending_count(), 0)

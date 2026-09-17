@@ -313,6 +313,13 @@ class MachineActor:
             await run_blocking_operation(self.recovery.audit, "CAPACITY_CHANGED", event)
             return
 
+        # 隔离没有周期身份的频率，不分配给当前或历史 Session。
+        if event.event_type == "FrequencyMeasured" and not event.session_id:
+            await run_blocking_operation(
+                self.recovery.audit, "AMBIGUOUS_MEASUREMENT", event,
+            )
+            return
+
         # 将异步结果定位到原 Session。
         session = self.sessions.get(event.session_id)
         if session is None:
@@ -437,9 +444,18 @@ class MachineActor:
         # 按测量身份收集有效频率，并校验现场窗口边界。
         elif event.event_type == "FrequencyMeasured":
             measurement = event.payload
+            # 周期身份冲突时保留目标档案为待复核，不转交其他周期。
+            if measurement.session_id != session.session_id:
+                session.frequency_state = "FINAL_INVALID"
+                if "AMBIGUOUS_MEASUREMENT" not in session.errors:
+                    session.errors.append("AMBIGUOUS_MEASUREMENT")
+                await run_blocking_operation(
+                    self.recovery.audit, "AMBIGUOUS_MEASUREMENT", event,
+                )
+                await self.try_finalize(session)
+                return
             if (
                 session.frequency_window_sealed
-                or measurement.session_id != session.session_id
                 or measurement.frequency_source_id != session.frequency_source_id
                 or measurement.measured_monotonic < session.start_boundary
                 or (
