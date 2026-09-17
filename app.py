@@ -137,39 +137,70 @@ class App:
         """处理某台皮带机正常关闭，不等待后台识别和保存。"""
         await self.send_signal("MachineClosed", machine_id)
 
-    async def send_signal(
-        self, event_type: str, machine_id: str, payload=None
-    ) -> None:
-        """把入口信号送入机器队列并等待本次业务处理完成。"""
+    async def send_signal(self, event_type: str, machine_id: str, payload=None) -> None:
+        """把入口信号送入对应机器队列，并等待本次事件处理回执。
+
+        Args:
+            event_type: 事件类型，例如 MachineStarted 或 MachineClosed。
+            machine_id: 接收信号的机器编号，例如 M01。
+            payload: 随事件传递的业务数据，默认值为 None。
+
+        Returns:
+            None: 本次事件处理完成，无返回数据，不等待后台 OCR 和结果保存。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 检查信号入口是否开放，以及机器是否已配置。
         if not self.accepting_signals:
             raise RuntimeError("测量系统当前未接收信号。")
         if machine_id not in self.machine_managers:
             raise ValueError(f"未配置机器：{machine_id}")
 
-        # 等待 机器管理员 确认本次启动或关闭，不等待测量结果。
+        # 创建本次事件的处理回执。
         acknowledgement = asyncio.get_running_loop().create_future()
-        await self.publish_event(MeasurementEvent(
-            event_type, machine_id,
-            session_id=(
-                self.machine_managers[machine_id].active_session_id
-                if event_type == "MachineClosed" else None
-            ),
-            payload=payload, acknowledgement=acknowledgement,
-        ))
+
+        # 将信号和回执送入机器队列，关闭事件携带当前活动 Session 编号。
+        await self.publish_event(
+            MeasurementEvent(
+                event_type,
+                machine_id,
+                session_id=(
+                    self.machine_managers[machine_id].active_session_id
+                    if event_type == "MachineClosed" else None
+                ),
+                payload=payload,
+                acknowledgement=acknowledgement,
+            )
+        )
+
+        # 等待机器管理员确认本次事件处理完成。
         await acknowledgement
 
     async def publish_event(self, event: MeasurementEvent) -> None:
-        """将事件路由到对应机器的有界队列。"""
+        """补齐内部事件的来源信息，并将事件送入对应机器的有界队列。
+
+        Args:
+            event: 待分发的测量事件，包含事件类型、机器编号及相关业务数据。
+
+        Returns:
+            None: 事件入队或提前结束分发，无返回数据，不等待机器管理员处理。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 释放资源期间取消事件回执，结束本次分发。
         if self.releasing_resources:
             if event.acknowledgement is not None:
                 event.acknowledgement.cancel()
             return
+
+        # 查找对应机器管理员，登记并隔离未知机器的事件。
         machine_manager = self.machine_managers.get(event.machine_id)
         if machine_manager is None:
             await run_blocking_operation(self.recovery.audit, "UNKNOWN_MACHINE", event)
             logger.warning("隔离未知机器事件 machine_id=%s", event.machine_id)
             return
-        # 为内部来源补齐事件批次、序号和接收时间。
+
+        # 为未指定来源的内部事件选择业务模块或设备编号。
         if not event.source_id:
             source_id = "business"
             if event.event_type.startswith(("Frame", "Capture")):
@@ -180,14 +211,22 @@ class App:
                 source_id = "OCR"
             elif event.event_type.startswith("Commit"):
                 source_id = "STORAGE"
+
+            # 按机器编号和来源编号递增事件序号。
             source_key = (event.machine_id, source_id)
             sequence = self.source_sequences.get(source_key, 0) + 1
             self.source_sequences[source_key] = sequence
+
+            # 复制事件并补齐来源、本次运行批次、序号和接收时间。
             event = replace(
-                event, source_id=source_id, source_epoch=self.process_epoch,
+                event,
+                source_id=source_id,
+                source_epoch=self.process_epoch,
                 source_sequence=sequence,
                 received_at=datetime.now(timezone.utc).isoformat(),
             )
+
+        # 将事件放入对应机器队列，队列满时等待空位。
         await machine_manager.queue.put(event)
 
     async def report_device_health(

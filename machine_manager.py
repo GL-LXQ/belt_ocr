@@ -88,7 +88,7 @@ class MachineManager:
             # 等待并取出本机队列中的下一个事件。
             event = await self.queue.get()
             try:
-                # 处理事件并向等待方确认处理完成。
+                # 处理事件后，如果有回执，而且回执还没结束，就通知等待方：处理完成了。
                 await self.process_event(event)
                 if event.acknowledgement is not None:
                     if not event.acknowledgement.done():
@@ -220,8 +220,17 @@ class MachineManager:
         await self.try_finalize(session)
 
     async def process_event(self, event: MeasurementEvent) -> None:
-        """检查事件身份与来源顺序，处理业务并登记事件身份。"""
-        # 检查采集结果和提交回调的来源绑定。
+        """检查事件身份与来源顺序，处理业务并持久登记事件去重身份。
+
+        Args:
+            event: 待处理的测量事件，包含事件身份、来源信息和业务数据。
+
+        Returns:
+            None: 完成业务处理和事件身份登记，或隔离事件后提前结束。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 根据事件类型确定采集结果和提交回调的预期来源。
         expected_source = None
         if event.event_type.startswith(("Frame", "Capture")):
             expected_source = self.machine.camera_id
@@ -231,46 +240,47 @@ class MachineManager:
             expected_source = "OCR"
         elif event.event_type.startswith("Commit"):
             expected_source = "STORAGE"
+
+        # 登记并隔离来源与设备或模块绑定不符的事件。
         if expected_source and event.source_id != expected_source:
-            await run_blocking_operation(
-                self.recovery.audit, "EVENT_SOURCE_MISMATCH", event,
-            )
+            await run_blocking_operation(self.recovery.audit, "EVENT_SOURCE_MISMATCH", event)
             return
-        status, payload_hash = await run_blocking_operation(
-            self.recovery.inspect_event, event,
-        )
+
+        # 检查事件编号和内容摘要，登记并隔离重复或身份冲突的事件。
+        status, payload_hash = await run_blocking_operation(self.recovery.inspect_event, event)
         if status != "NEW":
             await run_blocking_operation(self.recovery.audit, status, event)
             return
 
-        # 检查来源批次、来源顺序以及启动关闭事件的新鲜性。
+        # 检查来源批次和递增序号，登记并隔离不符合来源顺序的事件。
         cursor = self.source_cursors.get(event.source_id)
         if event.source_id and cursor:
             if cursor["epoch"] != event.source_epoch:
                 if event.source_epoch != self.process_epoch:
-                    await run_blocking_operation(
-                        self.recovery.audit, "SOURCE_EPOCH_MISMATCH", event,
-                    )
+                    await run_blocking_operation(self.recovery.audit, "SOURCE_EPOCH_MISMATCH", event)
                     return
             elif event.source_sequence <= cursor["sequence"]:
-                await run_blocking_operation(
-                    self.recovery.audit, "STALE_SOURCE_SEQUENCE", event,
-                )
+                await run_blocking_operation(self.recovery.audit, "STALE_SOURCE_SEQUENCE", event)
                 return
+
+        # 检查启动和关闭事件的发生时间，登记并隔离超出时限的事件。
         if event.event_type in {"MachineStarted", "MachineClosed"}:
             age = datetime.now(timezone.utc) - datetime.fromisoformat(event.occurred_at)
             if abs(age.total_seconds()) * 1000 > self.configuration.event_max_age_ms:
-                await run_blocking_operation(
-                    self.recovery.audit, "STALE_CONTROL_EVENT", event,
-                )
+                await run_blocking_operation(self.recovery.audit, "STALE_CONTROL_EVENT", event)
                 return
+
+        # 更新内存中该来源的批次和序号。
         if event.source_id:
             self.source_cursors[event.source_id] = {
-                "epoch": event.source_epoch, "sequence": event.source_sequence,
+                "epoch": event.source_epoch,
+                "sequence": event.source_sequence,
             }
 
-        # 串行更新内存中的业务状态，并登记已处理事件身份。
+        # 分派事件并更新内存中的业务状态。
         await self.apply_event(event)
+
+        # 持久登记已处理事件的编号和内容摘要。
         await run_blocking_operation(self.recovery.record_event, event, payload_hash)
 
     async def apply_event(self, event: MeasurementEvent) -> None:
