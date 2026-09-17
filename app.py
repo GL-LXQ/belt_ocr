@@ -21,7 +21,7 @@ from database import Database
 logger = logging.getLogger(__name__)
 
 
-class MeasurementExecutor:
+class App:
     def __init__(self, configuration: MeasurementConfiguration) -> None:
         configuration.validate()
         self.configuration = configuration
@@ -59,9 +59,9 @@ class MeasurementExecutor:
             返回示例：
                 None  # 无返回数据
         """
-        # 拒绝重复启动同一个执行器。
+        # 拒绝重复启动同一个应用实例。
         if self.has_started:
-            raise RuntimeError("请为新一次运行创建新的测量执行器。")
+            raise RuntimeError("请为新一次运行创建新的测量应用实例。")
         try:
             # 锁定并初始化恢复库，清理上次运行的待处理状态。
             await run_blocking_operation(self.recovery.initialize)

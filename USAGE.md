@@ -1,7 +1,7 @@
 # 核心流程运行说明
 
 当前版本包含三机测量、跨轮后台收尾、内存机器状态、本次运行内自动补交、重启清理和异常审计。
-信号统一从 `MeasurementExecutor.handle_start()` 和 `handle_close()` 进入，尚未接入现场 IO。
+信号统一从 `App.handle_start()` 和 `handle_close()` 进入，尚未接入现场 IO。
 
 ## 运行演示
 
@@ -79,22 +79,22 @@ import asyncio
 from pathlib import Path
 
 from configuration import load_configuration
-from measurement_executor import MeasurementExecutor
+from app import App
 
 
 async def run_measurement() -> None:
-    # 读取配置并初始化执行器。
+    # 读取配置并初始化应用实例。
     configuration = load_configuration(Path("config.example.json"))
-    executor = MeasurementExecutor(configuration)
-    await executor.start()
+    app = App(configuration)
+    await app.start()
     try:
         # 接收一次启动和正常关闭，等待本轮结果保存。
-        await executor.handle_start(machine_id="M01")
+        await app.handle_start(machine_id="M01")
         await asyncio.sleep(1.2)
-        await executor.handle_close(machine_id="M01")
-        await executor.wait_until_idle()
+        await app.handle_close(machine_id="M01")
+        await app.wait_until_idle()
     finally:
-        await executor.stop()
+        await app.stop()
 
 
 asyncio.run(run_measurement())
@@ -102,7 +102,7 @@ asyncio.run(run_measurement())
 
 两个入口返回 `None`，仅等待本次信号被业务处理器处理，不等待 OCR 或数据库提交。
 示例中的 `sleep` 只用于模拟机器运行时间，未来由真实的启动、关闭信号替换。
-调用方需要使用执行器所在的异步事件循环；现场线程接入、信号去抖、边沿识别和通信重连留待适配层实现。
+调用方需要使用应用实例所在的异步事件循环；现场线程接入、信号去抖、边沿识别和通信重连留待适配层实现。
 本版假设调用方提供按实际顺序确认的 START/CLOSE，不接受未经确认的电平变化。
 无活动周期时重复关闭、活动周期内重复启动不会产生新测量。
 仅有 `machine_id` 的入口无法辨别来自硬件的跨周期旧信号，真实接入层必须先确定周期身份。
@@ -146,7 +146,7 @@ OCR 队列满直接将对应轮次标记为待复核，不阻塞其他机器的�
 
 数据库写入前，冻结记录先持久保存到恢复库。内存提交队列满不会丢失这份记录。
 本次运行中，一批提交失败后状态为 `RETRY_PENDING`，维护任务按间隔自动补交；不必手工触发。项目重启后放弃旧待提交记录。
-`await executor.retry_pending_records()` 仍可用于主动重试。
+`await app.retry_pending_records()` 仍可用于主动重试。
 已有相同记录视为成功；内容冲突记录为 `CONFLICT`，保留原内容并停止自动覆盖或重试。
 未确认保存成功的记录不会标记完成。最终数据库在程序启动时不可用，也可以启动本地采集与暂存。
 
@@ -182,15 +182,15 @@ OCR 队列满直接将对应轮次标记为待复核，不阻塞其他机器的�
 
 ```python
 # 报告相机故障及恢复，仅影响绑定机器。
-await executor.report_device_health("CAM01", healthy=False)
-await executor.report_device_health("CAM01", healthy=True)
+await app.report_device_health("CAM01", healthy=False)
+await app.report_device_health("CAM01", healthy=True)
 
 # 确认现场已经关闭后恢复接收。
-await executor.synchronize_machine("M01", observed_state="CLOSED")
+await app.synchronize_machine("M01", observed_state="CLOSED")
 
 # 确认外部来源重连后的新批次和序号基线。
-await executor.synchronize_source("M01", "external-input", "connection-2", 0)
-await executor.synchronize_machine("M01", observed_state="CLOSED")
+await app.synchronize_source("M01", "external-input", "connection-2", 0)
+await app.synchronize_machine("M01", observed_state="CLOSED")
 ```
 
 `IO`、`OCR`、`STORAGE` 作为共享来源时影响所有机器；也可显式指定 `machine_id`。
@@ -203,7 +203,7 @@ OCR/存储工作任务意外退出时会记录故障并有限重启；OCR 在途
 | 文件 | 职责 |
 |---|---|
 | `main.py` | 串联初始化、模拟启动关闭、结果等待和退出 |
-| `measurement_executor.py` | 信号入口、事件路由和整体任务生命周期 |
+| `app.py` | 信号入口、事件路由和整体任务生命周期 |
 | `machine_manager.py` | 每台机器的唯一业务状态修改入口 |
 | `models.py` | Session、不可变事件和采集结果 |
 | `configuration.py` | 配置读取、绑定及参数检查 |

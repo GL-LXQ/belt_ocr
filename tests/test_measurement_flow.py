@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from configuration import MachineConfiguration, MeasurementConfiguration
-from measurement_executor import MeasurementExecutor
+from app import App
 from models import MeasurementEvent
 from database import DatabaseRequest
 
@@ -27,16 +27,16 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.image_directory = self.output_directory / "images"
         self.image_directory.mkdir()
         self.image_directory.joinpath("frame.ppm").write_bytes(b"P3\n1 1\n255\n1 2 3\n")
-        self.executor = None
+        self.app = None
 
     async def asyncTearDown(self) -> None:
-        # 关闭测试执行器并释放临时文件。
-        if self.executor is not None:
-            await asyncio.wait_for(self.executor.stop(), 10)
+        # 关闭测试应用实例并释放临时文件。
+        if self.app is not None:
+            await asyncio.wait_for(self.app.stop(), 10)
         self.temporary_directory.cleanup()
 
-    async def start_executor(self, **overrides: object) -> MeasurementExecutor:
-        """创建三台机器的测试配置并启动执行器。"""
+    async def start_app(self, **overrides: object) -> App:
+        """创建三台机器的测试配置并启动应用实例。"""
         machines = tuple(
             MachineConfiguration(
                 machine_id=f"M{machine_number:02}",
@@ -62,19 +62,19 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             storage_retry_delay_ms=5,
             shutdown_timeout_ms=2000,
         )
-        self.executor = MeasurementExecutor(replace(configuration, **overrides))
-        await self.executor.start()
-        return self.executor
+        self.app = App(replace(configuration, **overrides))
+        await self.app.start()
+        return self.app
 
     async def wait_for_state(self, predicate, timeout_seconds: float = 20) -> None:
         """等待业务事件推动指定条件成立。"""
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         while not predicate():
-            self.executor.state_changed.clear()
+            self.app.state_changed.clear()
             remaining_seconds = deadline - asyncio.get_running_loop().time()
             try:
                 await asyncio.wait_for(
-                    self.executor.state_changed.wait(), remaining_seconds,
+                    self.app.state_changed.wait(), remaining_seconds,
                 )
             except asyncio.TimeoutError:
                 # 输出队列和逐帧状态，定位等待未完成的业务步骤。
@@ -87,18 +87,18 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                         "queued_events": machine_manager.queue.qsize(),
                         "device_faults": sorted(machine_manager.device_faults),
                     }
-                    for machine_manager in self.executor.machine_managers.values()
+                    for machine_manager in self.app.machine_managers.values()
                     for session in machine_manager.sessions.values()
                 ]
                 workers = [
                     (task.get_name(), task.done(), str(task.get_coro()))
-                    for task in self.executor.worker_tasks
+                    for task in self.app.worker_tasks
                 ]
                 self.fail(f"等待业务状态超时：{states}；工作任务：{workers}")
 
     def read_records(self) -> list[dict]:
         """读取已经提交的完整结果。"""
-        connection = sqlite3.connect(self.executor.configuration.database_path)
+        connection = sqlite3.connect(self.app.configuration.database_path)
         with closing(connection):
             records = connection.execute(
                 "SELECT payload_json FROM measurements ORDER BY start_time"
@@ -106,21 +106,21 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         return [json.loads(record[0]) for record in records]
 
     async def test_three_machines_save_independent_records(self) -> None:
-        executor = await self.start_executor()
+        app = await self.start_app()
 
         # 同时采集三台机器并等待各自的 OCR 完成。
         await asyncio.gather(*(
-            executor.handle_start(machine_id) for machine_id in executor.machine_managers
+            app.handle_start(machine_id) for machine_id in app.machine_managers
         ))
         await self.wait_for_state(lambda: all(
             next(iter(machine_manager.sessions.values())).ocr_done
-            for machine_manager in executor.machine_managers.values()
+            for machine_manager in app.machine_managers.values()
         ))
         self.assertEqual(self.read_records(), [])
         await asyncio.gather(*(
-            executor.handle_close(machine_id) for machine_id in executor.machine_managers
+            app.handle_close(machine_id) for machine_id in app.machine_managers
         ))
-        await executor.wait_until_idle()
+        await app.wait_until_idle()
 
         # 检查每条记录的机器、文字、频率身份和证据归属。
         records = self.read_records()
@@ -160,15 +160,15 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             ))
 
     async def test_old_ocr_and_commit_do_not_clear_new_active_session(self) -> None:
-        executor = await self.start_executor(simulated_ocr_delay_ms=250)
-        machine_manager = executor.machine_managers["M01"]
+        app = await self.start_app(simulated_ocr_delay_ms=250)
+        machine_manager = app.machine_managers["M01"]
 
         # 在第一轮 OCR 结束前关闭并立即启动第二轮。
-        await executor.handle_start("M01")
+        await app.handle_start("M01")
         first_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: first_session.capture_sealed)
-        await executor.handle_close("M01")
-        await executor.handle_start("M01")
+        await app.handle_close("M01")
+        await app.handle_start("M01")
         second_session_id = machine_manager.active_session_id
         self.assertNotEqual(first_session.session_id, second_session_id)
         await self.wait_for_state(lambda: first_session.commit_state == "COMMITTED")
@@ -176,74 +176,74 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         # 第一轮提交成功后，第二轮仍保持活动状态。
         self.assertEqual(machine_manager.active_session_id, second_session_id)
         self.assertEqual(self.read_records()[0]["session_id"], first_session.session_id)
-        await executor.handle_close("M01")
-        await executor.wait_until_idle()
+        await app.handle_close("M01")
+        await app.wait_until_idle()
         self.assertEqual(len(self.read_records()), 2)
 
     async def test_duplicate_signals_and_results_are_idempotent(self) -> None:
-        executor = await self.start_executor()
-        machine_manager = executor.machine_managers["M01"]
+        app = await self.start_app()
+        machine_manager = app.machine_managers["M01"]
 
         # 重复启动不会覆盖原来的 Session。
-        await executor.handle_start("M01")
+        await app.handle_start("M01")
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await executor.handle_start("M01")
+        await app.handle_start("M01")
         self.assertEqual(machine_manager.active_session_id, session.session_id)
         self.assertEqual(len(machine_manager.sessions), 1)
         await self.wait_for_state(lambda: session.ocr_done)
 
         # 重复 OCR 和频率事件不增加候选数量。
         measurement = next(iter(session.frequency_candidates.values()))
-        await executor.publish_event(MeasurementEvent(
+        await app.publish_event(MeasurementEvent(
             "FrequencyMeasured", "M01", session.session_id, measurement,
         ))
-        await executor.publish_event(MeasurementEvent(
+        await app.publish_event(MeasurementEvent(
             "OCRCompleted", "M01", session.session_id, session.ocr_result,
         ))
         await machine_manager.queue.join()
         self.assertEqual(
             session.frequency_candidates[measurement.measurement_id], measurement,
         )
-        await executor.handle_close("M01")
-        await executor.handle_close("M01")
-        await executor.wait_until_idle()
+        await app.handle_close("M01")
+        await app.handle_close("M01")
+        await app.wait_until_idle()
         self.assertEqual(len(self.read_records()), 1)
 
     async def test_early_close_seals_only_the_old_capture(self) -> None:
-        executor = await self.start_executor(capture_window_ms=800)
-        machine_manager = executor.machine_managers["M01"]
+        app = await self.start_app(capture_window_ms=800)
+        machine_manager = app.machine_managers["M01"]
 
         # 采到第一帧和频率后提前关闭，再立即打开新窗口。
-        await executor.handle_start("M01")
+        await app.handle_start("M01")
         first_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: (
             first_session.selected_frames and first_session.frequency_candidates
         ))
-        await executor.handle_close("M01")
-        await executor.handle_start("M01")
+        await app.handle_close("M01")
+        await app.handle_start("M01")
         second_session = machine_manager.sessions[machine_manager.active_session_id]
         machine_manager.camera.seal_capture(first_session.capture_id)
         await self.wait_for_state(lambda: bool(second_session.frequency_candidates))
         self.assertFalse(second_session.capture_sealed)
         self.assertLess(len(first_session.selected_frames), 5)
-        await executor.handle_close("M01")
-        await executor.wait_until_idle()
+        await app.handle_close("M01")
+        await app.wait_until_idle()
         self.assertEqual(len(self.read_records()), 2)
 
     async def test_delayed_frequency_stays_with_original_session(self) -> None:
-        executor = await self.start_executor(frequency_delivery_delay_ms=1000)
-        machine_manager = executor.machine_managers["M01"]
+        app = await self.start_app(frequency_delivery_delay_ms=1000)
+        machine_manager = app.machine_managers["M01"]
 
         # 在读数尚未送达时关闭第一轮并打开第二轮。
-        await executor.handle_start("M01")
+        await app.handle_start("M01")
         first_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: (
             first_session.selected_frames
             and machine_manager.frequency.active_window.pending_deliveries
         ))
         self.assertEqual(first_session.frequency_candidates, {})
-        await executor.handle_close("M01")
-        await executor.handle_start("M01")
+        await app.handle_close("M01")
+        await app.handle_start("M01")
         second_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: first_session.commit_state == "COMMITTED")
 
@@ -255,8 +255,8 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             for measurement in first_record["frequency_candidates"]
         ))
         self.assertEqual(machine_manager.active_session_id, second_session.session_id)
-        await executor.handle_close("M01")
-        await executor.wait_until_idle()
+        await app.handle_close("M01")
+        await app.wait_until_idle()
         measurement_ids = [
             {
                 measurement["measurement_id"]
@@ -267,18 +267,18 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(measurement_ids[0] & measurement_ids[1])
 
     async def test_equal_frequency_values_have_different_measurement_ids(self) -> None:
-        executor = await self.start_executor()
-        machine_manager = executor.machine_managers["M01"]
+        app = await self.start_app()
+        machine_manager = app.machine_managers["M01"]
         machine_manager.frequency.machine = replace(
             machine_manager.machine, simulated_frequencies_hz=(42.0,),
         )
 
         # 收集数值相同但身份不同的新测量。
-        await executor.handle_start("M01")
+        await app.handle_start("M01")
         session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: len(session.frequency_candidates) >= 3)
-        await executor.handle_close("M01")
-        await executor.wait_until_idle()
+        await app.handle_close("M01")
+        await app.wait_until_idle()
         candidates = self.read_records()[0]["frequency_candidates"]
         self.assertEqual(
             {measurement["value_hz"] for measurement in candidates}, {42.0},
@@ -288,72 +288,72 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_no_valid_frequency_saves_review_record(self) -> None:
-        executor = await self.start_executor()
-        machine_manager = executor.machine_managers["M01"]
+        app = await self.start_app()
+        machine_manager = app.machine_managers["M01"]
         machine_manager.frequency.machine = replace(
             machine_manager.machine, simulated_frequencies_hz=(0.0, float("nan"), -1.0),
         )
 
         # OCR 成功后关闭，确认缺频率不会补零或永久等待。
-        await executor.handle_start("M01")
+        await app.handle_start("M01")
         session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
-        await executor.handle_close("M01")
-        await executor.wait_until_idle()
+        await app.handle_close("M01")
+        await app.wait_until_idle()
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "REVIEW_REQUIRED")
         self.assertIsNone(record["final_frequency_hz"])
         self.assertIn("FREQUENCY_NO_VALID_MEASUREMENT", record["error_codes"])
 
     async def test_empty_ocr_waits_for_close_then_saves_review_record(self) -> None:
-        executor = await self.start_executor()
-        machine_manager = executor.machine_managers["M01"]
+        app = await self.start_app()
+        machine_manager = app.machine_managers["M01"]
         machine_manager.machine = replace(machine_manager.machine, simulated_lines=())
 
         # 空识别结果先保留失败状态，正常关闭后保存异常记录。
-        await executor.handle_start("M01")
+        await app.handle_start("M01")
         session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_state == "FAILED")
         self.assertEqual(self.read_records(), [])
-        await executor.handle_close("M01")
-        await executor.wait_until_idle()
+        await app.handle_close("M01")
+        await app.wait_until_idle()
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "REVIEW_REQUIRED")
         self.assertIn("OCR_NO_VALID_TEXT", record["error_codes"])
 
     async def test_empty_image_folder_saves_review_record(self) -> None:
-        executor = await self.start_executor()
+        app = await self.start_app()
         self.image_directory.joinpath("frame.ppm").unlink()
 
         # 空文件夹作为本轮取流失败处理。
         with self.assertLogs("camera", level="ERROR"):
-            await executor.handle_start("M01")
-            machine_manager = executor.machine_managers["M01"]
+            await app.handle_start("M01")
+            machine_manager = app.machine_managers["M01"]
             session = machine_manager.sessions[machine_manager.active_session_id]
             await self.wait_for_state(lambda: session.ocr_state == "FAILED")
-        await executor.handle_close("M01")
-        await executor.wait_until_idle()
+        await app.handle_close("M01")
+        await app.wait_until_idle()
         self.assertEqual(self.read_records()[0]["outcome"], "REVIEW_REQUIRED")
 
     async def test_missing_evidence_cannot_be_saved_as_complete(self) -> None:
-        executor = await self.start_executor(simulated_ocr_delay_ms=200)
-        machine_manager = executor.machine_managers["M01"]
+        app = await self.start_app(simulated_ocr_delay_ms=200)
+        machine_manager = app.machine_managers["M01"]
 
         # 在 OCR 读取前删除已采集的证据文件。
-        await executor.handle_start("M01")
+        await app.handle_start("M01")
         session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.capture_sealed)
         for frame in session.selected_frames.values():
             Path(frame.image_path).unlink()
         with self.assertLogs("ocr", level="ERROR"):
-            await executor.handle_close("M01")
-            await executor.wait_until_idle()
+            await app.handle_close("M01")
+            await app.wait_until_idle()
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "REVIEW_REQUIRED")
         self.assertIn("OCR_PROCESSING_FAILED", record["error_codes"])
 
     async def test_ocr_timeout_does_not_block_another_machine(self) -> None:
-        executor = await self.start_executor(
+        app = await self.start_app(
             capture_window_ms=30000, ocr_job_timeout_ms=30000,
         )
         recognition_entered = asyncio.Event()
@@ -365,13 +365,13 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             await recognition_release.wait()
             return job.simulated_lines
 
-        with patch.object(executor.ocr, "recognize_frame", hold_recognition):
+        with patch.object(app.ocr, "recognize_frame", hold_recognition):
             try:
                 await asyncio.gather(
-                    executor.handle_start("M01"), executor.handle_start("M02"),
+                    app.handle_start("M01"), app.handle_start("M02"),
                 )
                 sessions = [
-                    next(iter(executor.machine_managers[machine_id].sessions.values()))
+                    next(iter(app.machine_managers[machine_id].sessions.values()))
                     for machine_id in ("M01", "M02")
                 ]
                 await self.wait_for_state(lambda: all(
@@ -379,17 +379,17 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                     for session in sessions
                 ))
                 await asyncio.gather(
-                    executor.handle_close("M01"), executor.handle_close("M02"),
+                    app.handle_close("M01"), app.handle_close("M02"),
                 )
                 await asyncio.wait_for(recognition_entered.wait(), 10)
 
                 # 使用真实期限任务触发超时，分别保存两台机器的异常结果。
                 for session in sessions:
-                    machine_manager = executor.machine_managers[session.machine_id]
+                    machine_manager = app.machine_managers[session.machine_id]
                     deadline_key = (session.session_id, "OCRTimeout")
                     machine_manager.deadline_tasks.pop(deadline_key).cancel()
                     machine_manager.schedule_timeout(session, "OCRTimeout", 50)
-                await executor.wait_until_idle()
+                await app.wait_until_idle()
             finally:
                 recognition_release.set()
         self.assertEqual(len(self.read_records()), 2)
@@ -398,47 +398,47 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         ))
 
     async def test_frequency_drain_has_a_deadline(self) -> None:
-        executor = await self.start_executor(
+        app = await self.start_app(
             frequency_delivery_delay_ms=3000, frequency_drain_timeout_ms=50,
         )
-        await executor.handle_start("M01")
-        machine_manager = executor.machine_managers["M01"]
+        await app.handle_start("M01")
+        machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.capture_sealed)
-        await executor.handle_close("M01")
-        await executor.wait_until_idle()
+        await app.handle_close("M01")
+        await app.wait_until_idle()
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "REVIEW_REQUIRED")
         self.assertIn("FREQUENCY_DRAIN_TIMEOUT", record["error_codes"])
 
     async def test_cycle_timeout_requires_reset_and_never_fakes_close(self) -> None:
-        executor = await self.start_executor(max_cycle_open_ms=180)
-        await executor.handle_start("M01")
-        await executor.wait_until_idle()
+        app = await self.start_app(max_cycle_open_ms=180)
+        await app.handle_start("M01")
+        await app.wait_until_idle()
 
         # 超时记录没有正常关闭时间，并等待明确关闭后重新同步。
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "INTERRUPTED")
         self.assertIsNone(record["close_time"])
-        machine_manager = executor.machine_managers["M01"]
-        await executor.handle_start("M01")
+        machine_manager = app.machine_managers["M01"]
+        await app.handle_start("M01")
         self.assertIsNone(machine_manager.active_session_id)
-        await executor.handle_close("M01")
-        await executor.handle_start("M01")
+        await app.handle_close("M01")
+        await app.handle_start("M01")
         self.assertIsNotNone(machine_manager.active_session_id)
 
     async def test_shutdown_records_interruption(self) -> None:
-        executor = await self.start_executor()
-        await executor.handle_start("M01")
-        await executor.stop()
+        app = await self.start_app()
+        await app.handle_start("M01")
+        await app.stop()
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "INTERRUPTED")
         self.assertIsNone(record["close_time"])
-        self.assertFalse(executor.worker_tasks)
+        self.assertFalse(app.worker_tasks)
 
     async def test_lost_acknowledgement_does_not_duplicate_record(self) -> None:
-        executor = await self.start_executor()
-        original_write = executor.database.write_record
+        app = await self.start_app()
+        original_write = app.database.write_record
         attempt_count = 0
 
         # 第一次真实写入成功后模拟确认丢失。
@@ -449,58 +449,58 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             if attempt_count == 1:
                 raise OSError("模拟确认丢失")
 
-        await executor.handle_start("M01")
-        machine_manager = executor.machine_managers["M01"]
+        await app.handle_start("M01")
+        machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
         with patch.object(
-            executor.database, "write_record", write_then_lose_acknowledgement,
+            app.database, "write_record", write_then_lose_acknowledgement,
         ):
             with self.assertLogs("database", level="ERROR"):
-                await executor.handle_close("M01")
-                await executor.wait_until_idle()
+                await app.handle_close("M01")
+                await app.wait_until_idle()
         self.assertEqual(attempt_count, 2)
         self.assertEqual(len(self.read_records()), 1)
         self.assertEqual(self.read_records()[0], json.loads(session.frozen_payload))
 
     async def test_failed_commit_retains_frozen_payload_for_retry(self) -> None:
-        executor = await self.start_executor(storage_retry_attempts=1)
-        await executor.handle_start("M01")
-        machine_manager = executor.machine_managers["M01"]
+        app = await self.start_app(storage_retry_attempts=1)
+        await app.handle_start("M01")
+        machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
 
         # 写入失败后保留冻结记录，并用同一内容重新提交。
         with patch.object(
-            executor.database, "write_record", side_effect=OSError("模拟写入失败"),
+            app.database, "write_record", side_effect=OSError("模拟写入失败"),
         ):
             with self.assertLogs(level="ERROR"):
-                await executor.handle_close("M01")
+                await app.handle_close("M01")
                 await self.wait_for_state(
                     lambda: session.commit_state == "RETRY_PENDING",
                 )
         frozen_payload = session.frozen_payload
         self.assertFalse(session.finished)
-        await executor.retry_pending_records()
-        await executor.wait_until_idle()
+        await app.retry_pending_records()
+        await app.wait_until_idle()
         self.assertEqual(session.frozen_payload, frozen_payload)
         self.assertEqual(len(self.read_records()), 1)
 
     async def test_ocr_capacity_failure_creates_review_record(self) -> None:
-        executor = await self.start_executor(
+        app = await self.start_app(
             ocr_queue_capacity=1, simulated_ocr_delay_ms=250, max_frames_per_session=1,
         )
         await asyncio.gather(*(
-            executor.handle_start(machine_id) for machine_id in executor.machine_managers
+            app.handle_start(machine_id) for machine_id in app.machine_managers
         ))
         await self.wait_for_state(lambda: all(
             next(iter(machine_manager.sessions.values())).capture_sealed
-            for machine_manager in executor.machine_managers.values()
+            for machine_manager in app.machine_managers.values()
         ))
         await asyncio.gather(*(
-            executor.handle_close(machine_id) for machine_id in executor.machine_managers
+            app.handle_close(machine_id) for machine_id in app.machine_managers
         ))
-        await executor.wait_until_idle()
+        await app.wait_until_idle()
         records = self.read_records()
         self.assertEqual(sum(record["outcome"] == "COMPLETE" for record in records), 1)
         self.assertEqual(
@@ -508,9 +508,9 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_unknown_machine_returns_clear_validation_error(self) -> None:
-        executor = await self.start_executor()
+        app = await self.start_app()
         with self.assertRaisesRegex(ValueError, "未配置机器"):
-            await executor.handle_start("UNKNOWN")
+            await app.handle_start("UNKNOWN")
 
 
 if __name__ == "__main__":
