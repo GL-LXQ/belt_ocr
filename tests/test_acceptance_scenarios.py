@@ -581,7 +581,17 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             record["outcome"] == "COMPLETE" for record in records.values()
         ))
 
-    async def test_18_closed_cycle_survives_forced_process_exit(self):
+    async def test_18_closed_cycle_is_not_restored_after_forced_process_exit(self):
+        """验证强制退出后的已关闭周期不会在重启时恢复。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成断言，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
         # 为崩溃子进程准备独立的持久化配置。
         executor = await self.start_executor(simulated_ocr_delay_ms=10)
         configuration = replace(
@@ -642,17 +652,13 @@ asyncio.run(crash_after_close())
         self.assertEqual(process.returncode, 24, standard_error.decode("utf-8"))
         session_id = standard_output.decode("utf-8").strip()
 
-        # 重启后使用原 Session 和证据续办，最终只形成一条正常记录。
+        # 重启后不恢复旧 Session，也不生成旧周期的测量结果。
         restarted = await self.start_executor(simulated_ocr_delay_ms=10)
         await restarted.wait_until_idle(10)
-        records = self.read_records()
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["session_id"], session_id)
-        self.assertEqual(records[0]["outcome"], "COMPLETE")
-        self.assertIsNotNone(records[0]["close_time"])
-        self.assertTrue(all(
-            Path(path).is_file() for path in records[0]["evidence_refs"]
-        ))
+        self.assertTrue(session_id)
+        self.assertEqual(restarted.actors["M01"].sessions, {})
+        self.assertEqual(restarted.ocr.pending_count, 0)
+        self.assertEqual(self.read_records(), [])
 
     async def test_19_evidence_write_sync_and_replace_failures_require_review(self):
         # 在同一执行器上分别验证三个证据保存阶段。

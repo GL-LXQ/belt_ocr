@@ -48,7 +48,16 @@ class MeasurementExecutor:
             self.actors[machine.machine_id].process_epoch = self.process_epoch
 
     async def start(self) -> None:
-        """初始化存储并启动持续监听与处理任务。"""
+        """初始化本次运行的机器状态和存储，启动监听与处理任务。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成启动并开放信号入口，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
         # 拒绝重复启动同一个执行器。
         if self.has_started:
             raise RuntimeError("请为新一次运行创建新的测量执行器。")
@@ -59,10 +68,6 @@ class MeasurementExecutor:
                 self.configuration.evidence_directory.mkdir,
                 parents=True, exist_ok=True,
             )
-            # 读取旧检查点并核对机器配置。
-            checkpoints = await run_blocking_operation(self.recovery.load_checkpoints)
-            if set(checkpoints) - set(self.actors):
-                raise ValueError("配置缺少恢复记录中已有的机器。")
         except Exception:
             # 初始化失败时释放恢复库并报告错误。
             self.recovery.close()
@@ -82,31 +87,22 @@ class MeasurementExecutor:
         try:
             # 检查磁盘和待提交积压，设置各机器的容量状态。
             capacity_available = await self.check_storage_capacity()
-            for machine_id, actor in self.actors.items():
+            for actor in self.actors.values():
                 actor.capacity_available = capacity_available
-                # 读取本机检查点，无旧记录时设置模拟初始状态。
-                checkpoint = checkpoints.get(machine_id, {})
-                if not checkpoint:
-                    checkpoint["waiting_cycle_reset"] = (
-                        self.configuration.initial_machine_state != "CLOSED"
-                    )
-                    if self.configuration.initial_machine_state == "UNKNOWN":
-                        checkpoint["device_faults"] = ["UNKNOWN_INITIAL_STATE"]
-                # 恢复本机测量档案和运行状态。
-                await actor.restore_measurements(checkpoint)
+
+                # 按本次配置设置机器复位状态和初始故障。
+                actor.waiting_cycle_reset = self.configuration.initial_machine_state != "CLOSED"
+                if self.configuration.initial_machine_state == "UNKNOWN":
+                    actor.device_faults.add("UNKNOWN_INITIAL_STATE")
+
+                # 标记本机初始化完成并保存本次空档案状态。
+                actor.initialized = True
+                await run_blocking_operation(self.recovery.checkpoint, actor)
         except Exception:
-            # 恢复失败时取消已创建的任务并等待结束。
-            startup_tasks = [
-                task for actor in self.actors.values()
-                for task in (*actor.deadline_tasks.values(), *actor.background_tasks)
-            ]
-            for task in startup_tasks:
-                task.cancel()
-            await asyncio.gather(*startup_tasks, return_exceptions=True)
-            # 释放恢复库并报告恢复失败。
+            # 初始化机器状态失败时释放恢复库并报告错误。
             self.recovery.close()
-            logger.exception("恢复测量记录失败")
-            raise RuntimeError("恢复测量记录失败。") from None
+            logger.exception("初始化机器状态失败")
+            raise RuntimeError("初始化机器状态失败。") from None
 
         # 为每台机器安排事件处理和频率接收两个后台任务。
         for actor in self.actors.values():

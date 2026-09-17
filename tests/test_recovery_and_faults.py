@@ -65,6 +65,17 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executor.recovery.pending_count(), 0)
 
     async def test_pending_payload_survives_shutdown_and_restart(self) -> None:
+        """验证当前阶段保留的旧待提交记录仍由维护任务补交。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成断言，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 创建待写入的完整测量结果。
         executor = await self.start_executor(
             storage_retry_attempts=1, shutdown_timeout_ms=100,
         )
@@ -85,10 +96,24 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
                 await executor.stop()
         expected_payload = json.loads(session.frozen_payload)
         restarted = await self.restart_executor(shutdown_timeout_ms=2000)
+
+        # 等待持久化待提交记录完成补交，再检查数据库结果。
+        await self.wait_for_state(lambda: restarted.recovery.pending_count() == 0)
         await restarted.wait_until_idle(10)
         self.assertEqual(self.read_records(), [expected_payload])
 
-    async def test_closed_session_resumes_unfinished_ocr(self) -> None:
+    async def test_closed_session_does_not_resume_unfinished_ocr(self) -> None:
+        """验证重启后不恢复已关闭周期的 OCR 和超时任务。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成断言，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 创建已关闭但 OCR 尚未完成的测量档案。
         executor = await self.start_executor(
             simulated_ocr_delay_ms=1200, shutdown_timeout_ms=100,
         )
@@ -100,18 +125,34 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for_state(lambda: session.frequency_window_sealed)
         self.assertFalse(session.ocr_done)
 
-        # 退出期限不足以完成 OCR，重启后恢复原任务身份。
+        # 在 OCR 完成前退出，再启动新的执行器。
         with self.assertLogs(level="WARNING"):
             restarted = await self.restart_executor(
                 simulated_ocr_delay_ms=10, shutdown_timeout_ms=2000,
             )
         await restarted.wait_until_idle(10)
-        record = self.read_records()[0]
-        self.assertEqual(record["session_id"], session.session_id)
-        self.assertEqual(record["outcome"], "COMPLETE")
-        self.assertEqual(record["ordered_lines"], ["MODEL 1", "SAME", "SAME"])
 
-    async def test_process_crash_marks_open_cycle_interrupted(self) -> None:
+        # 确认旧档案和任务没有恢复，也没有生成旧周期的结果。
+        restarted_actor = restarted.actors["M01"]
+        self.assertEqual(restarted_actor.sessions, {})
+        self.assertIsNone(restarted_actor.active_session_id)
+        self.assertEqual(restarted_actor.deadline_tasks, {})
+        self.assertEqual(restarted_actor.background_tasks, set())
+        self.assertEqual(restarted.ocr.pending_count, 0)
+        self.assertEqual(self.read_records(), [])
+
+    async def test_process_crash_discards_previous_open_cycle(self) -> None:
+        """验证异常退出后不恢复旧周期，并按本次初始状态等待复位。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成断言，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 保存子进程使用的测量配置。
         executor = await self.start_executor()
         configuration = executor.configuration
         await executor.stop()
@@ -144,16 +185,20 @@ asyncio.run(crash_after_start())
         await asyncio.wait_for(process.communicate(), 15)
         self.assertEqual(process.returncode, 23)
 
-        # 进程锁自动释放，原周期恢复成中断并等待重新同步。
-        restarted = await self.restart_executor()
+        # 重启时使用运行中状态，确认不恢复旧周期。
+        restarted = await self.restart_executor(initial_machine_state="OPEN")
         await restarted.wait_until_idle(10)
-        record = self.read_records()[0]
-        self.assertEqual(record["outcome"], "INTERRUPTED")
-        self.assertIsNone(record["close_time"])
-        self.assertIn("PROCESS_INTERRUPTED", record["error_codes"])
+        self.assertEqual(self.read_records(), [])
+        self.assertEqual(restarted.actors["M01"].sessions, {})
         self.assertEqual(restarted.actors["M01"].acceptance_state, "WAIT_CYCLE_RESET")
-        await restarted.synchronize_machine("M01", "CLOSED")
+
+        # 运行中忽略启动，关闭后允许接收下一轮启动。
+        await restarted.handle_start("M01")
+        self.assertIsNone(restarted.actors["M01"].active_session_id)
+        await restarted.handle_close("M01")
         self.assertEqual(restarted.actors["M01"].acceptance_state, "READY")
+        await restarted.handle_start("M01")
+        self.assertIsNotNone(restarted.actors["M01"].active_session_id)
 
     async def test_duplicate_event_is_rejected_after_restart(self) -> None:
         executor = await self.start_executor()
