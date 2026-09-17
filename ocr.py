@@ -72,11 +72,21 @@ class SimulatedOCR:
         return True
 
     async def run(self) -> None:
-        """按机器轮转处理任务并返回模拟筛选后的文字行。"""
+        """按机器轮转执行 OCR 任务，并通过事件报告识别结果。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 正常停止时不返回数据，识别结果通过事件发送。
+            返回示例：
+                None  # 无返回数据
+        """
         while not self.stopping:
+            # 等待队列中有可处理的任务。
             await self.jobs_available.wait()
 
-            # 从下一台有任务的机器取出最早提交的 Session。
+            # 按机器轮转，从首个非空队列取出最早入队的图片任务。
             job = None
             for machine_number in range(len(self.machine_order)):
                 machine_id = self.machine_order[0]
@@ -84,74 +94,103 @@ class SimulatedOCR:
                 if self.machine_queues[machine_id]:
                     job = self.machine_queues[machine_id].popleft()
                     break
+            # 所有队列均为空时清除通知，返回等待。
             if job is None:
                 self.jobs_available.clear()
                 continue
 
+            # 初始化重新入队标记，并读取任务已完成的尝试次数。
             requeued = False
             attempt = job.completed_attempts
             try:
+                # 尝试次数已达上限时发送失败事件，跳过当前任务。
                 if attempt >= self.configuration.ocr_retry_attempts:
-                    await self.publish_event(MeasurementEvent(
-                        "OCRFrameFailed", job.machine_id, job.session_id, {
-                            "job_id": job.job_id, "frame_id": job.frame.frame_id,
-                            "attempt": attempt, "error_code": "OCR_RETRIES_EXHAUSTED",
-                        },
-                    ))
+                    await self.publish_event(
+                        MeasurementEvent(
+                            "OCRFrameFailed",
+                            job.machine_id,
+                            job.session_id,
+                            {
+                                "job_id": job.job_id,
+                                "frame_id": job.frame.frame_id,
+                                "attempt": attempt,
+                                "error_code": "OCR_RETRIES_EXHAUSTED",
+                            },
+                        )
+                    )
                     continue
-                # 为每次尝试发布任务身份，有限重试当前帧。
-                for attempt in range(
-                    job.completed_attempts + 1,
-                    self.configuration.ocr_retry_attempts + 1,
-                ):
+
+                # 从下一次尝试开始执行，最多尝试到配置上限。
+                for attempt in range(job.completed_attempts + 1, self.configuration.ocr_retry_attempts + 1):
+                    # 准备本次尝试的任务编号、帧编号和次数。
                     payload = {
-                        "job_id": job.job_id, "frame_id": job.frame.frame_id,
+                        "job_id": job.job_id,
+                        "frame_id": job.frame.frame_id,
                         "attempt": attempt,
                     }
+
+                    # 发送开始识别事件，等待机器管理员处理回执。
                     acknowledgement = asyncio.get_running_loop().create_future()
-                    await self.publish_event(MeasurementEvent(
-                        "OCRFrameStarted", job.machine_id, job.session_id, payload,
-                        acknowledgement=acknowledgement,
-                    ))
+                    await self.publish_event(
+                        MeasurementEvent(
+                            "OCRFrameStarted",
+                            job.machine_id,
+                            job.session_id,
+                            payload,
+                            acknowledgement=acknowledgement,
+                        )
+                    )
                     await acknowledgement
                     try:
+                        # 执行单帧识别，并限制本次识别的等待时长。
                         lines = await asyncio.wait_for(
                             self.recognize_frame(job),
                             self.configuration.ocr_job_timeout_ms / 1000,
                         )
+                        # 按文字是否为空组装单帧失败或完成事件的数据。
                         if not lines:
-                            payload = {**payload, "error_code": "OCR_NO_VALID_TEXT"}
+                            payload = {
+                                **payload,
+                                "error_code": "OCR_NO_VALID_TEXT",
+                            }
                             event_type = "OCRFrameFailed"
                         else:
-                            payload = {**payload, "ordered_lines": lines}
+                            payload = {
+                                **payload,
+                                "ordered_lines": lines,
+                            }
                             event_type = "OCRFrameCompleted"
-                        await self.publish_event(MeasurementEvent(
-                            event_type, job.machine_id, job.session_id, payload,
-                        ))
+
+                        # 将结果发回原测量档案，结束当前任务的尝试循环。
+                        await self.publish_event(MeasurementEvent(event_type, job.machine_id, job.session_id, payload))
                         break
                     except Exception:
+                        # 记录本次识别异常。
                         logger.exception(
                             "模拟 OCR 失败 machine_id=%s session_id=%s job_id=%s",
-                            job.machine_id, job.session_id, job.job_id,
+                            job.machine_id,
+                            job.session_id,
+                            job.job_id,
                         )
+
+                        # 最后一次尝试失败时发布失败事件，其余情况继续重试。
                         if attempt == self.configuration.ocr_retry_attempts:
                             payload = {
-                                **payload, "error_code": "OCR_PROCESSING_FAILED",
+                                **payload,
+                                "error_code": "OCR_PROCESSING_FAILED",
                             }
-                            await self.publish_event(MeasurementEvent(
-                                "OCRFrameFailed", job.machine_id,
-                                job.session_id, payload,
-                            ))
+                            await self.publish_event(
+                                MeasurementEvent("OCRFrameFailed", job.machine_id, job.session_id, payload)
+                            )
             except (asyncio.CancelledError, Exception):
                 # 意外退出时把当前帧交给下一次工作任务继续尝试。
                 if not self.stopping:
-                    self.machine_queues[job.machine_id].appendleft(replace(
-                        job, completed_attempts=attempt,
-                    ))
+                    self.machine_queues[job.machine_id].appendleft(replace(job, completed_attempts=attempt))
                     self.pending_count += 1
                     requeued = True
                 raise
             finally:
+                # 扣除本次处理的任务计数，移除未重新入队的任务登记。
                 self.pending_count -= 1
                 if not requeued:
                     self.registered_jobs.discard(job.job_id)
