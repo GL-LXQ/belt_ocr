@@ -109,11 +109,14 @@ class MachineActor:
         # 忽略活动周期内的重复启动和未同步的启动。
         if self.active_session_id is not None or self.waiting_cycle_reset:
             return
+
+        # 检查本机积压、存储容量、设备故障和恢复库状态。
         if (
             len(self.sessions) >= self.configuration.max_pending_sessions_per_machine
             or not self.capacity_available or self.device_faults
             or not self.recovery.available
         ):
+            # 标记等待周期复位，提交本轮未受理记录。
             self.waiting_cycle_reset = True
             rejection = {
                 "occurred_at": datetime.now(timezone.utc).isoformat(),
@@ -127,7 +130,7 @@ class MachineActor:
             logger.error("本轮未受理 machine_id=%s", self.machine.machine_id)
             return
 
-        # 创建本轮档案并登记活动位置。
+        # 创建本轮档案，记录设备绑定、开始时间、配置和超时期限。
         session = BeltSession(
             session_id=uuid4().hex,
             machine_id=self.machine.machine_id,
@@ -145,19 +148,24 @@ class MachineActor:
                 milliseconds=self.configuration.max_cycle_open_ms
             )).isoformat(),
         )
+        # 登记本轮档案，保留本机配置并设置当前活动档案编号。
         self.sessions[session.session_id] = session
         session.configuration_snapshot["machines"] = [serialize_value(self.machine)]
         self.active_session_id = session.session_id
+
+        # 保存本机检查点并记录本轮开始日志。
         await run_blocking_operation(self.recovery.checkpoint, self)
         logger.info(
             "开始测量 machine_id=%s session_id=%s", session.machine_id, session.session_id,
         )
 
-        # 启动独立采集并设置本轮最大运行期限。
+        # 启动本轮图像采集，打开对应档案的频率窗口。
         self.camera.start_capture(
             session.session_id, session.capture_id, session.start_boundary,
         )
         self.frequency.open_window(session.session_id)
+
+        # 安排本轮运行超时和 OCR 超时事件。
         self.schedule_timeout(
             session, "CycleTimeout", self.configuration.max_cycle_open_ms,
         )
