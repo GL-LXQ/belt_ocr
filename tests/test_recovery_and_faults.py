@@ -176,8 +176,8 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("PREVIOUS_RUN_AUDIT", self.read_audit_reasons())
         self.assertTrue(all(Path(image_path).is_file() for image_path in expected_records[0]["evidence_refs"]))
 
-    async def test_machine_state_stays_in_memory_and_events_are_recorded(self) -> None:
-        """验证机器状态只保留在内存，已处理事件仍持久登记用于去重。
+    async def test_machine_state_stays_in_memory_without_event_receipts(self) -> None:
+        """验证机器状态只保留在内存，且不创建事件去重表。
 
         Args:
             无外部参数。
@@ -196,22 +196,22 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         session_id = machine_manager.active_session_id
         self.assertIn(session_id, machine_manager.sessions)
 
-        # 确认事件身份已保存，运行期间未创建机器检查点表。
+        # 确认运行期间不创建事件去重表和机器检查点表。
         with closing(sqlite3.connect(app.configuration.recovery_path)) as connection:
-            receipt = connection.execute(
-                "SELECT machine_id FROM event_receipts WHERE event_id = ?", (event.event_id,)
+            receipt_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'event_receipts'"
             ).fetchone()
             checkpoint_table = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'machine_checkpoints'"
             ).fetchone()
-        self.assertEqual(receipt, ("M01",))
+        self.assertIsNone(receipt_table)
         self.assertIsNone(checkpoint_table)
 
-        # 重放同一事件，确认不创建新周期并登记重复事件审计。
+        # 活动周期内重放启动事件，确认机器状态阻止创建新周期。
         await app.publish_event(event)
         await machine_manager.queue.join()
         self.assertEqual(machine_manager.active_session_id, session_id)
-        self.assertIn("DUPLICATE", self.read_audit_reasons())
+        self.assertNotIn("DUPLICATE", self.read_audit_reasons())
 
     async def test_initial_unknown_state_requires_close_or_synchronization(self) -> None:
         """验证未知初始状态在有效关闭或关闭状态同步后接收新周期。
@@ -347,7 +347,18 @@ asyncio.run(crash_after_start())
         await restarted.handle_start("M01")
         self.assertIsNotNone(restarted.machine_managers["M01"].active_session_id)
 
-    async def test_duplicate_event_is_rejected_after_restart(self) -> None:
+    async def test_event_identity_does_not_block_start_after_restart(self) -> None:
+        """验证重启后不会按旧事件编号拦截有效启动。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成断言，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 完成首次运行的测量并保留原启动事件。
         app = await self.start_app()
         event = MeasurementEvent("MachineStarted", "M01")
         await app.publish_event(event)
@@ -359,8 +370,8 @@ asyncio.run(crash_after_start())
         restarted = await self.restart_app()
         await restarted.publish_event(event)
         await restarted.machine_managers["M01"].queue.join()
-        self.assertIsNone(restarted.machine_managers["M01"].active_session_id)
-        self.assertIn("DUPLICATE", self.read_audit_reasons())
+        self.assertIsNotNone(restarted.machine_managers["M01"].active_session_id)
+        self.assertNotIn("DUPLICATE", self.read_audit_reasons())
         self.assertEqual(len(self.read_records()), 1)
 
     async def test_stale_close_cannot_close_a_new_cycle(self) -> None:

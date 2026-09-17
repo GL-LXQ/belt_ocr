@@ -220,13 +220,13 @@ class MachineManager:
         await self.try_finalize(session)
 
     async def process_event(self, event: MeasurementEvent) -> None:
-        """检查事件身份与来源顺序，处理业务并持久登记事件去重身份。
+        """检查事件来源与顺序，并分派处理业务。
 
         Args:
             event: 待处理的测量事件，包含事件身份、来源信息和业务数据。
 
         Returns:
-            None: 完成业务处理和事件身份登记，或隔离事件后提前结束。
+            None: 完成业务处理，或隔离事件后提前结束。
             返回示例：
                 None  # 无返回数据
         """
@@ -244,12 +244,6 @@ class MachineManager:
         # 登记并隔离来源与设备或模块绑定不符的事件。
         if expected_source and event.source_id != expected_source:
             await run_blocking_operation(self.recovery.audit, "EVENT_SOURCE_MISMATCH", event)
-            return
-
-        # 检查事件编号和内容摘要，登记并隔离重复或身份冲突的事件。
-        status, payload_hash = await run_blocking_operation(self.recovery.inspect_event, event)
-        if status != "NEW":
-            await run_blocking_operation(self.recovery.audit, status, event)
             return
 
         # 检查来源批次和递增序号，登记并隔离不符合来源顺序的事件。
@@ -279,9 +273,6 @@ class MachineManager:
 
         # 分派事件并更新内存中的业务状态。
         await self.apply_event(event)
-
-        # 持久登记已处理事件的编号和内容摘要。
-        await run_blocking_operation(self.recovery.record_event, event, payload_hash)
 
     async def apply_event(self, event: MeasurementEvent) -> None:
         """校验事件归属，按事件类型分派处理并检查本轮是否完成。

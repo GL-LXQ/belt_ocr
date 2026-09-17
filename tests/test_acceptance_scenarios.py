@@ -43,7 +43,16 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         return await self.start_app(**settings)
 
     async def publish_and_wait(self, event):
-        """发布事件并等待业务处理及事件身份登记完成。"""
+        """发布事件并等待机器管理员完成业务处理。
+
+        Args:
+            event: 待发布的测量事件。
+
+        Returns:
+            None: 收到处理回执，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
         acknowledgement = asyncio.get_running_loop().create_future()
         await self.app.publish_event(replace(
             event, acknowledgement=acknowledgement,
@@ -272,7 +281,6 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 session.ocr_result.ordered_lines, ("MODEL 1", "SAME", "SAME"),
             )
-            self.assertIn("DUPLICATE", self.read_audit_reasons())
             self.assertIn("STALE_OCR_ATTEMPT", self.read_audit_reasons())
             await self.close_controlled_cycle(session)
             await app.wait_until_idle(10)
@@ -303,7 +311,6 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(machine_manager.active_session_id, second_session.session_id)
         self.assertIsNone(second_session.close_time)
         self.assertFalse(second_session.capture_sealed)
-        self.assertIn("DUPLICATE", self.read_audit_reasons())
         self.assertIn("CLOSE_SESSION_MISMATCH", self.read_audit_reasons())
 
         # 两轮分别结算一次，旧关闭事件不生成第三条记录。
@@ -339,6 +346,16 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_10_previous_display_value_is_not_a_new_measurement(self):
+        """验证早于新周期的旧读数不能作为新周期测量。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成断言，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
         # 保存上一轮读数，并打开新的测量窗口。
         app = await self.start_controlled_app()
         await app.handle_start("M01")
@@ -348,6 +365,9 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         await self.close_controlled_cycle(first_session)
         await app.handle_start("M01")
         second_session = machine_manager.sessions[machine_manager.active_session_id]
+
+        # 将旧读数时间设为新周期开始前一秒。
+        old_measurement = replace(old_measurement, measured_monotonic=second_session.start_boundary - 1)
 
         # 旧显示值沿用旧测量时间，即使重贴新周期身份也不能成为新读数。
         await self.publish_and_wait(MeasurementEvent(

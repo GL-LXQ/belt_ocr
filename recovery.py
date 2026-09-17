@@ -1,8 +1,7 @@
-"""保存待提交记录、事件身份和异常审计。"""
+"""保存待提交记录和异常审计。"""
 
 import asyncio
 import dataclasses
-import hashlib
 import json
 import logging
 import os
@@ -10,8 +9,6 @@ import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
-
-from models import MeasurementEvent
 
 
 logger = logging.getLogger(__name__)
@@ -96,11 +93,6 @@ class RecoveryStore:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
             connection.executescript("""
-                CREATE TABLE IF NOT EXISTS event_receipts (
-                    event_id TEXT PRIMARY KEY,
-                    payload_hash TEXT NOT NULL,
-                    machine_id TEXT NOT NULL
-                );
                 CREATE TABLE IF NOT EXISTS pending_records (
                     record_id TEXT PRIMARY KEY,
                     machine_id TEXT NOT NULL,
@@ -136,9 +128,6 @@ class RecoveryStore:
         self.anchor_connection = sqlite3.connect(
             self.database_path, check_same_thread=False,
         )
-        self.anchor_connection.execute(
-            "SELECT COUNT(*) FROM event_receipts"
-        ).fetchone()
 
     def close(self) -> None:
         """释放恢复库的进程锁。"""
@@ -156,47 +145,6 @@ class RecoveryStore:
             self.lock_file.close()
             self.lock_file = None
             self.lock_acquired = False
-
-    def inspect_event(self, event) -> tuple[str, str]:
-        """检查事件编号是否重复或对应不同内容。"""
-        payload = serialize_value(event)
-        payload.pop("received_at", None)
-        payload.pop("source_sequence", None)
-        payload.pop("source_epoch", None)
-        payload_hash = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
-        ).hexdigest()
-        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
-            existing = connection.execute(
-                "SELECT payload_hash FROM event_receipts WHERE event_id = ?",
-                (event.event_id,),
-            ).fetchone()
-        if existing is None:
-            return "NEW", payload_hash
-        return (
-            "DUPLICATE" if existing[0] == payload_hash else "EVENT_ID_CONFLICT",
-            payload_hash,
-        )
-
-    def record_event(self, event: MeasurementEvent, payload_hash: str) -> None:
-        """保存已处理事件的编号和内容摘要，用于后续事件去重。
-
-        Args:
-            event: 已完成业务处理的事件。
-            payload_hash: 事件内容的摘要。
-
-        Returns:
-            None: 完成事件身份登记，无返回数据。
-            返回示例：
-                None  # 无返回数据
-        """
-        # 在事务中登记事件编号、内容摘要和所属机器。
-        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
-            with connection:
-                connection.execute(
-                    "INSERT OR IGNORE INTO event_receipts VALUES (?, ?, ?)",
-                    (event.event_id, payload_hash, event.machine_id),
-                )
 
     def audit(self, reason: str, event=None, machine_id: str = "") -> None:
         """保存异常原因以及对应的事件内容。"""
