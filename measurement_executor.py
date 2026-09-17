@@ -107,20 +107,24 @@ class MeasurementExecutor:
             logger.exception("初始化机器状态失败")
             raise RuntimeError("初始化机器状态失败。") from None
 
-        # 为每台机器安排事件处理和频率接收两个后台任务。
+        # 为每台机器安排 监听并事件处理 和 频率接收 两个后台任务。
         for machine_manager in self.machine_managers.values():
-            self.worker_tasks.append(asyncio.create_task(machine_manager.run()))
+            self.worker_tasks.append(asyncio.create_task(machine_manager.listen_and_process_events()))
             self.worker_tasks.append(asyncio.create_task(machine_manager.frequency.run()))
+
         # 启动共享 OCR 任务并监控运行状态。
         self.worker_tasks.append(asyncio.create_task(
             self.supervise_worker("OCR", self.ocr.run), name="OCR",
         ))
+
         # 启动共享存储任务并监控运行状态。
         self.worker_tasks.append(asyncio.create_task(
             self.supervise_worker("STORAGE", self.database.run), name="STORAGE",
         ))
+
         # 启动定期补交待提交记录和检查存储容量的任务。
         self.worker_tasks.append(asyncio.create_task(self.maintain_system()))
+        
         # 标记启动完成，开放启动和关闭信号入口。
         self.has_started = True
         self.accepting_signals = True

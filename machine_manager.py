@@ -73,16 +73,28 @@ class MachineManager:
             return "DEGRADED"
         return "READY"
 
-    async def run(self) -> None:
-        """按队列顺序修改本机 Session 状态。"""
+    async def listen_and_process_events(self) -> None:
+        """持续监听本机事件队列，按顺序处理事件并反馈处理结果。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 持续运行直到任务被取消，无返回数据。
+            返回值形式示例：
+                None  # 无返回数据
+        """
         while True:
+            # 等待并取出本机队列中的下一个事件。
             event = await self.queue.get()
             try:
+                # 处理事件并向等待方确认处理完成。
                 await self.process_event(event)
                 if event.acknowledgement is not None:
                     if not event.acknowledgement.done():
                         event.acknowledgement.set_result(None)
             except Exception:
+                # 登记业务处理故障并设置等待周期复位。
                 self.device_faults.add("BUSINESS_PROCESSING")
                 self.waiting_cycle_reset = True
                 logger.exception(
@@ -90,17 +102,21 @@ class MachineManager:
                     event.machine_id, event.session_id, event.event_type,
                 )
                 try:
+                    # 保存异常审计并中断当前测量。
                     await run_blocking_operation(
                         self.recovery.audit, "BUSINESS_PROCESSING_FAILED", event,
                     )
                     await self.close_measurement(interrupted=True)
                 except Exception:
+                    # 标记本地运行库不可用并记录异常。
                     self.recovery.available = False
                     logger.exception("异常审计或中断处理失败 machine_id=%s", event.machine_id)
+                # 向等待方报告本次事件处理失败。
                 if event.acknowledgement is not None:
                     if not event.acknowledgement.done():
                         event.acknowledgement.set_exception(RuntimeError("测量处理失败。"))
             finally:
+                # 通知状态已变化，并标记当前队列任务处理结束。
                 self.state_changed.set()
                 self.queue.task_done()
 
