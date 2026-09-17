@@ -55,6 +55,7 @@ class MvsCamera:
         Returns:
             None  # 相机已启动取流
         """
+        # 占用取帧锁，检查设备是否可启动。
         with self.buffer_lock:
             if self.closed or self.faulted:
                 raise MvsError(f"相机不可用：{self.serial}")
@@ -62,10 +63,12 @@ class MvsCamera:
             return_code = self.handle.MV_CC_ClearImageBuffer()
             if return_code != self.binding.errors.MV_OK:
                 raise MvsError(f"ClearImageBuffer: 0x{return_code:08X}")
+            # 启动连续取流，失败时标记设备故障。
             return_code = self.handle.MV_CC_StartGrabbing()
             if return_code != self.binding.errors.MV_OK:
                 self.faulted = True
                 raise MvsError(f"StartGrabbing: 0x{return_code:08X}")
+            # 登记设备已进入取流状态。
             self.grabbing = True
 
     def read_frame(self, stop_requested: threading.Event, timeout_ms: int) -> CameraFrame | None:
@@ -90,17 +93,21 @@ class MvsCamera:
                     data=b"\x01\x02",  # 独立图像字节
                 )
         """
+        # 串行执行取帧和停止操作，收到停止信号后不再调用 SDK 取帧。
         with self.buffer_lock:
+            # 检查是否已有人发出停止通知；已收到时直接返回，不再取下一张图。
             if stop_requested.is_set():
                 return None
             # 使用官方结构体获取 SDK 内部图像缓存。
             frame_buffer = self.binding.parameters.MV_FRAME_OUT()
             return_code = self.handle.MV_CC_GetImageBuffer(frame_buffer, timeout_ms)
+            # 无图像时返回空结果，其他 SDK 错误登记为设备故障。
             if return_code == self.binding.errors.MV_E_NODATA:
                 return None
             if return_code != self.binding.errors.MV_OK:
                 self.faulted = True
                 raise MvsError(f"GetImageBuffer: 0x{return_code:08X}")
+            # 累计 SDK 已成功交付的帧数。
             self.received_frame_count += 1
 
             # 复制图像与数值字段，再归还 SDK Buffer。
@@ -109,6 +116,7 @@ class MvsCamera:
                 frame_length = int(information.nFrameLenEx or information.nFrameLen)
                 if frame_length <= 0 or not frame_buffer.pBufAddr:
                     raise MvsError("SDK 返回空图像缓存")
+                # 复制帧元数据，并通过 string_at 将图像复制为独立 bytes。
                 frame = CameraFrame(
                     camera_serial=self.serial,
                     frame_number=int(information.nFrameNum),
@@ -122,10 +130,12 @@ class MvsCamera:
                     data=ctypes.string_at(frame_buffer.pBufAddr, frame_length),
                 )
             finally:
+                # 无论复制成功或失败，都归还本次取得的 SDK Buffer。
                 return_code = self.handle.MV_CC_FreeImageBuffer(frame_buffer)
                 if return_code != self.binding.errors.MV_OK:
                     self.faulted = True
                     raise MvsError(f"FreeImageBuffer: 0x{return_code:08X}")
+            # Buffer 归还完成后，交付程序独立持有的图像。
             return frame
 
     def encode_image(self, frame: CameraFrame) -> tuple[str, bytes]:
@@ -144,6 +154,7 @@ class MvsCamera:
         source_buffer = (ctypes.c_ubyte * len(frame.data)).from_buffer_copy(frame.data)
         output_capacity = frame.width * frame.height * 4 + 2048
         output_buffer = (ctypes.c_ubyte * output_capacity)()
+        # 填入原始图像地址、字节数、像素格式和尺寸。
         parameters = self.binding.parameters.MV_SAVE_IMAGE_PARAM_EX3()
         parameters.pData = ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_ubyte))
         parameters.nDataLen = len(frame.data)
@@ -160,10 +171,12 @@ class MvsCamera:
         # 串行执行同一设备的图片编码，不占用取帧锁。
         with self.encoding_lock:
             return_code = self.handle.MV_CC_SaveImageEx3(parameters)
+        # 检查编码状态和输出内容。
         if return_code != self.binding.errors.MV_OK:
             raise MvsError(f"SaveImageEx3(BMP): 0x{return_code:08X}")
         if parameters.nImageLen == 0:
             raise MvsError("SaveImageEx3(BMP) 未返回图片内容")
+        # 复制编码后的文件内容，并返回扩展名与图片字节。
         return (
             ".bmp",
             ctypes.string_at(output_buffer, parameters.nImageLen),
@@ -178,6 +191,7 @@ class MvsCamera:
         Returns:
             None  # 相机已停止取流
         """
+        # 等待当前取帧和 Buffer 归还结束，已停止时直接返回。
         with self.buffer_lock:
             if not self.grabbing:
                 return
@@ -186,6 +200,7 @@ class MvsCamera:
             if return_code != self.binding.errors.MV_OK:
                 self.faulted = True
                 raise MvsError(f"StopGrabbing: 0x{return_code:08X}")
+            # SDK 停止成功后更新本地取流状态。
             self.grabbing = False
 
     def close(self) -> None:

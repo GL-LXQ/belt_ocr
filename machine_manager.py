@@ -187,10 +187,12 @@ class MachineManager:
 
         # 启动本轮图像采集，打开对应档案的频率窗口。
         self.camera.start_capture(session.session_id, session.capture_id, session.start_boundary)
+        # 后台采集启动后，打开当前 Session 的频率接收窗口。
         self.frequency.open_window(session.session_id)
 
         # 安排本轮运行超时和 OCR 超时事件。
         self.schedule_timeout(session, "CycleTimeout", self.configuration.max_cycle_open_ms)
+        # 登记本轮 OCR 等待期限，此处只安排超时事件。
         self.schedule_timeout(session, "OCRTimeout", self.configuration.ocr_result_timeout_ms)
 
     async def close_measurement(self, interrupted: bool = False) -> None:
@@ -467,16 +469,19 @@ class MachineManager:
                 True  # 继续检查本轮能否结算
                 False  # 忽略当前事件，不执行完成检查
         """
-        # 忽略重复封口，登记本轮跳帧数量。
+        # 忽略本轮重复到达的采集封口事件。
         if session.capture_sealed:
             return False
+        # 校验封口摘要的采集编号，冲突事件只记录审计。
         summary = event.payload
         if summary.capture_id != session.capture_id:
             await run_blocking_operation(self.recovery.audit, "CAPTURE_IDENTITY_CONFLICT", event)
             return False
+        # 标记图像清单已封闭，保存跳帧数量和完整采集统计。
         session.capture_sealed = True
         session.skipped_frame_count = summary.skipped_frame_count
         session.capture_statistics = summary.statistics
+        # 采集或证据交付失败时，登记本轮识别失败和错误信息。
         if summary.errors:
             session.ocr_state = "FAILED"
             session.errors.extend(summary.errors)
