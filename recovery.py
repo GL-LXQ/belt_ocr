@@ -189,21 +189,21 @@ class RecoveryStore:
             payload_hash,
         )
 
-    def checkpoint(self, actor, event=None, payload_hash: str = "") -> None:
+    def checkpoint(self, machine_manager, event=None, payload_hash: str = "") -> None:
         """原子保存本机运行状态和已处理事件身份。"""
         payload = {
-            "active_session_id": actor.active_session_id,
-            "waiting_cycle_reset": actor.waiting_cycle_reset,
-            "interrupted_session_id": actor.interrupted_session_id,
-            "device_faults": sorted(actor.device_faults),
-            "source_cursors": actor.source_cursors,
-            "sessions": serialize_value(actor.sessions),
+            "active_session_id": machine_manager.active_session_id,
+            "waiting_cycle_reset": machine_manager.waiting_cycle_reset,
+            "interrupted_session_id": machine_manager.interrupted_session_id,
+            "device_faults": sorted(machine_manager.device_faults),
+            "source_cursors": machine_manager.source_cursors,
+            "sessions": serialize_value(machine_manager.sessions),
         }
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
             with connection:
                 connection.execute(
                     "INSERT OR REPLACE INTO machine_checkpoints VALUES (?, ?)",
-                    (actor.machine.machine_id, json.dumps(payload, ensure_ascii=False)),
+                    (machine_manager.machine.machine_id, json.dumps(payload, ensure_ascii=False)),
                 )
                 if event is not None:
                     connection.execute(

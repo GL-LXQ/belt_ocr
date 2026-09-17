@@ -4,7 +4,7 @@
 > 启动方法、配置说明、信号入口及当前边界见 [运行说明](USAGE.md)。
 > 下文保留完整开发规格，不表示所有生产能力均已交付。
 
-当前系统的数据流：每次启动使用新建机器管理员的空档案，按本次配置的机器初始状态设置接收条件，不读取旧检查点、不恢复旧 OCR 和超时任务；当前阶段尚未清理旧待提交记录，维护循环仍可能补交这些记录。事件按机器编号进入对应业务处理器，apply_event 校验归属并分派处理；启动创建带唯一 session_id 的测量档案，相机保存证据并登记图片，采集封口后逐帧提交共享 OCR。OCR 按机器轮转识别，通过事件将进度和结果送回原档案；settle_ocr_frame 登记单帧状态，全部帧结算后确定本轮 OCR 成败，当前模拟实现取第一项任务的文字并收集全部选中图片的路径和帧编号。频率模块同时按周期收集测量，try_finalize 结合周期状态、OCR 和频率结果检查是否收尾，正常结果还需校验证据。冻结记录先进入本地持久化待提交区，再加入存储队列；SQLiteWriter.run 取出记录，执行幂等写入和有限重试，通过提交事件通知原机器管理员更新档案。普通失败由维护循环调用 enqueue_pending_records，按队列剩余容量读取已到期且未被阻止补交的记录，使用原冻结内容重新入队；内容冲突停止自动重试。maintain_system 定期执行补交和容量检查，通过 CapacityChanged 事件通知机器管理员更新容量状态，并登记本地恢复库的可用状态。
+当前系统的数据流：每次启动使用新建机器管理员的空档案，按本次配置的机器初始状态设置接收条件，不读取旧检查点、不恢复旧 OCR 和超时任务；当前阶段尚未清理旧待提交记录，维护循环仍可能补交这些记录。事件按机器编号进入对应机器管理员 MachineManager，apply_event 校验归属并分派处理；启动创建带唯一 session_id 的测量档案，相机保存证据并登记图片，采集封口后逐帧提交共享 OCR。OCR 按机器轮转识别，通过事件将进度和结果送回原档案；settle_ocr_frame 登记单帧状态，全部帧结算后确定本轮 OCR 成败，当前模拟实现取第一项任务的文字并收集全部选中图片的路径和帧编号。频率模块同时按周期收集测量，try_finalize 结合周期状态、OCR 和频率结果检查是否收尾，正常结果还需校验证据。冻结记录先进入本地持久化待提交区，再加入存储队列；SQLiteWriter.run 取出记录，执行幂等写入和有限重试，通过提交事件通知原机器管理员更新档案。普通失败由维护循环调用 enqueue_pending_records，按队列剩余容量读取已到期且未被阻止补交的记录，使用原冻结内容重新入队；内容冲突停止自动重试。maintain_system 定期执行补交和容量检查，通过 CapacityChanged 事件通知机器管理员更新容量状态，并登记本地恢复库的可用状态。
 
 ## 1. 项目目标与边界
 
@@ -75,7 +75,7 @@ cycle_closed = True
                                       │
                   ┌───────────────────┼───────────────────┐
                   ▼                   ▼                   ▼
-             MachineActor 1      MachineActor 2      MachineActor 3
+             MachineManager 1      MachineManager 2      MachineManager 3
                   │                   │                   │
              本机 Session        本机 Session        本机 Session
                   └───────────────────┼───────────────────┘
@@ -84,7 +84,7 @@ cycle_closed = True
                                       │
                           行级识别 / 跨帧融合 / 证据选择
                                       │
-                             结果事件返回所属 Actor
+                             结果事件返回所属 机器管理员
                                       │
                               完成检查 / 冻结记录
                                       │
@@ -93,7 +93,7 @@ cycle_closed = True
                          最终测量记录 / 异常记录
 ```
 
-`MachineManager` 负责机器注册、路由和健康状态；每台 `MachineActor` 是本机所有 Session 状态的唯一修改者；`SessionManager` 是创建、状态更新、完成检查等业务规则的实现，可由各 MachineActor 调用，不再另设一套并发修改入口。
+`MachineManager` 负责机器注册、路由和健康状态；每台 `MachineManager` 是本机所有 Session 状态的唯一修改者；`SessionManager` 是创建、状态更新、完成检查等业务规则的实现，可由各 MachineManager 调用，不再另设一套并发修改入口。
 
 ## 4. 设备绑定与配置
 
@@ -139,7 +139,7 @@ retry_policy
    ↓
 初始化日志、事件路由、运行记录与数据库连接
    ↓
-建立 M01 / M02 / M03 的 MachineContext 和 Actor
+建立 M01 / M02 / M03 的 MachineContext 和 机器管理员
    ↓
 连接 IO、相机、频率通道，加载 OCR 引擎
    ↓
@@ -190,7 +190,7 @@ IOAdapter 负责读取输入、通信健康判断、有效电平解释、去抖�
 
 ## 7. START：创建并启动一次测量
 
-收到 `MachineStarted(machine_id)` 后，在该机器 Actor 中按顺序执行：
+收到 `MachineStarted(machine_id)` 后，在该机器 机器管理员 中按顺序执行：
 
 1. 校验事件新鲜性、去重状态、机器同步状态和采集能力。
 2. 如果已有现场活动 Session，按重复/异常启动处理，不覆盖原 Session。
@@ -318,7 +318,7 @@ CaptureSealed 已收到
    ↓
 FrequencyMeasured(session_id, measurement_id, value_hz, ...)
    ↓
-Actor 保存候选并刷新显示值
+机器管理员 保存候选并刷新显示值
 ```
 
 有效性至少包含：可解析、有限数值、单位已明确换算为 Hz、设备报告有效，以及符合本项目配置的测量范围。除协议明确定义外，0、空值、异常码不能当有效频率。
@@ -338,7 +338,7 @@ CLOSE 后要求适配器封口。适配器将已经明确归属的在途数据�
 
 ## 12. CLOSE：关闭现场窗口，释放活动位置
 
-收到 `MachineClosed(machine_id)` 后，在对应 Actor 中执行：
+收到 `MachineClosed(machine_id)` 后，在对应 机器管理员 中执行：
 
 1. 找到本机 `active_session_id`。不存在时按重复关闭或同步事件处理，不随意关闭其他待完成 Session。
 2. 检查事件属于当前周期；重复事件不重复执行。
@@ -472,7 +472,7 @@ CommitSession(session_id, frozen_payload, payload_hash)
 
 ### 14.4 路由规则
 
-先按 machine_id 进入对应 Actor，再按 session_id 找到对象。必须校验 Session 与 machine_id、来源设备相匹配。
+先按 machine_id 进入对应 机器管理员，再按 session_id 找到对象。必须校验 Session 与 machine_id、来源设备相匹配。
 
 未知 Session、机器不匹配、来源不匹配、过期重试和已冻结结果的迟到更新进入隔离/审计处理，不随意重新分配。不得按字符串相似、队列顺序或“当前只有一台在测量”猜测归属。
 
@@ -482,11 +482,11 @@ CommitSession(session_id, frozen_payload, payload_hash)
 
 采用单进程业务协调加独立设备/计算工作单元，不为三台机器复制三套主程序。
 
-- 每台机器拥有独立 FIFO 事件队列和一个串行业务 Actor。本机活动 Session 和旧 Session 的所有业务更新都在这里执行。
+- 每台机器拥有独立 FIFO 事件队列和一个串行业务 机器管理员。本机活动 Session 和旧 Session 的所有业务更新都在这里执行。
 - CameraWorker 按相机独立运行；同一相机的采集命令按顺序、按 capture_id 执行。
 - IO 接收与频率接收独立于 OCR；硬件 SDK 的阻塞调用放在专属执行单元，不能阻塞业务事件循环。
 - OCR 使用有界调度器与受控数量的 Worker，工作单元只接收不可变任务参数/图像引用。
-- DBWriter 独立处理事务与重试，以结果事件通知 Actor。
+- DBWriter 独立处理事务与重试，以结果事件通知 机器管理员。
 
 控制事件与大图像数据分开传输。事件包含图像引用，不在公共控制队列里无限堆积大图像。队列满必须有明确的失败/背压分支；START/CLOSE 不得静默丢弃。
 
@@ -679,7 +679,7 @@ app/
     results.py
   application/
     machine_manager.py
-    machine_actor.py
+    machine_manager.py
     session_manager.py
     event_router.py
     deadline_scheduler.py
@@ -715,7 +715,7 @@ app/
 按下列顺序实现，每层提供明确接口与测试：
 
 1. 配置模型、事件模型、MachineContext、BeltSession 与状态派生。
-2. MachineActor、事件路由、Session 创建/关闭/完成检查与去重。
+2. MachineManager、事件路由、Session 创建/关闭/完成检查与去重。
 3. 设备适配器与真实设备读写接口集成，保留原有设备控制边界。
 4. 独立图像采集、图像清单与封口机制。
 5. OCR 有界调度、行级识别、跨帧后处理和证据保存。

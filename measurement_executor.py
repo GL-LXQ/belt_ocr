@@ -10,7 +10,7 @@ from uuid import uuid4
 from camera import FolderCamera
 from configuration import MeasurementConfiguration
 from frequency import SimulatedFrequency
-from machine_actor import MachineActor
+from machine_manager import MachineManager
 from models import MeasurementEvent
 from recovery import run_blocking_operation, RecoveryStore
 from ocr import SimulatedOCR
@@ -28,7 +28,7 @@ class MeasurementExecutor:
         self.recovery = RecoveryStore(configuration.recovery_path)
         self.storage = SQLiteWriter(configuration, self.publish_event, self.recovery)
         self.ocr = SimulatedOCR(configuration, self.publish_event)
-        self.actors: dict[str, MachineActor] = {}
+        self.machine_managers: dict[str, MachineManager] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
         self.accepting_signals = False
         self.source_sequences: dict[tuple[str, str], int] = {}
@@ -41,11 +41,11 @@ class MeasurementExecutor:
         for machine in configuration.machines:
             camera = FolderCamera(machine, configuration, self.publish_event)
             frequency = SimulatedFrequency(machine, configuration, self.publish_event)
-            self.actors[machine.machine_id] = MachineActor(
+            self.machine_managers[machine.machine_id] = MachineManager(
                 machine, configuration, camera, frequency, self.ocr, self.storage,
                 self.publish_event, self.state_changed,
             )
-            self.actors[machine.machine_id].process_epoch = self.process_epoch
+            self.machine_managers[machine.machine_id].process_epoch = self.process_epoch
 
     async def start(self) -> None:
         """初始化本次运行的机器状态和存储，启动监听与处理任务。
@@ -87,17 +87,17 @@ class MeasurementExecutor:
         try:
             # 检查磁盘和待提交积压，设置各机器的容量状态。
             capacity_available = await self.check_storage_capacity()
-            for actor in self.actors.values():
-                actor.capacity_available = capacity_available
+            for machine_manager in self.machine_managers.values():
+                machine_manager.capacity_available = capacity_available
 
                 # 按本次配置设置机器复位状态和初始故障。
-                actor.waiting_cycle_reset = self.configuration.initial_machine_state != "CLOSED"
+                machine_manager.waiting_cycle_reset = self.configuration.initial_machine_state != "CLOSED"
                 if self.configuration.initial_machine_state == "UNKNOWN":
-                    actor.device_faults.add("UNKNOWN_INITIAL_STATE")
+                    machine_manager.device_faults.add("UNKNOWN_INITIAL_STATE")
 
                 # 标记本机初始化完成并保存本次空档案状态。
-                actor.initialized = True
-                await run_blocking_operation(self.recovery.checkpoint, actor)
+                machine_manager.initialized = True
+                await run_blocking_operation(self.recovery.checkpoint, machine_manager)
         except Exception:
             # 初始化机器状态失败时释放恢复库并报告错误。
             self.recovery.close()
@@ -105,9 +105,9 @@ class MeasurementExecutor:
             raise RuntimeError("初始化机器状态失败。") from None
 
         # 为每台机器安排事件处理和频率接收两个后台任务。
-        for actor in self.actors.values():
-            self.worker_tasks.append(asyncio.create_task(actor.run()))
-            self.worker_tasks.append(asyncio.create_task(actor.frequency.run()))
+        for machine_manager in self.machine_managers.values():
+            self.worker_tasks.append(asyncio.create_task(machine_manager.run()))
+            self.worker_tasks.append(asyncio.create_task(machine_manager.frequency.run()))
         # 启动共享 OCR 任务并监控运行状态。
         self.worker_tasks.append(asyncio.create_task(
             self.supervise_worker("OCR", self.ocr.run), name="OCR",
@@ -136,15 +136,15 @@ class MeasurementExecutor:
         """把入口信号送入机器队列并等待本次业务处理完成。"""
         if not self.accepting_signals:
             raise RuntimeError("测量系统当前未接收信号。")
-        if machine_id not in self.actors:
+        if machine_id not in self.machine_managers:
             raise ValueError(f"未配置机器：{machine_id}")
 
-        # 等待 Actor 确认本次启动或关闭，不等待测量结果。
+        # 等待 机器管理员 确认本次启动或关闭，不等待测量结果。
         acknowledgement = asyncio.get_running_loop().create_future()
         await self.publish_event(MeasurementEvent(
             event_type, machine_id,
             session_id=(
-                self.actors[machine_id].active_session_id
+                self.machine_managers[machine_id].active_session_id
                 if event_type == "MachineClosed" else None
             ),
             payload=payload, acknowledgement=acknowledgement,
@@ -157,8 +157,8 @@ class MeasurementExecutor:
             if event.acknowledgement is not None:
                 event.acknowledgement.cancel()
             return
-        actor = self.actors.get(event.machine_id)
-        if actor is None:
+        machine_manager = self.machine_managers.get(event.machine_id)
+        if machine_manager is None:
             await run_blocking_operation(self.recovery.audit, "UNKNOWN_MACHINE", event)
             logger.warning("隔离未知机器事件 machine_id=%s", event.machine_id)
             return
@@ -166,9 +166,9 @@ class MeasurementExecutor:
         if not event.source_id:
             source_id = "business"
             if event.event_type.startswith(("Frame", "Capture")):
-                source_id = actor.machine.camera_id
+                source_id = machine_manager.machine.camera_id
             elif event.event_type.startswith("Frequency"):
-                source_id = actor.machine.frequency_source_id
+                source_id = machine_manager.machine.frequency_source_id
             elif event.event_type.startswith("OCR"):
                 source_id = "OCR"
             elif event.event_type.startswith("Commit"):
@@ -181,21 +181,21 @@ class MeasurementExecutor:
                 source_sequence=sequence,
                 received_at=datetime.now(timezone.utc).isoformat(),
             )
-        await actor.queue.put(event)
+        await machine_manager.queue.put(event)
 
     async def report_device_health(
         self, source_id: str, healthy: bool, machine_id: str | None = None
     ) -> None:
         """按设备绑定范围发送故障或恢复事件。"""
-        if machine_id is not None and machine_id not in self.actors:
+        if machine_id is not None and machine_id not in self.machine_managers:
             raise ValueError(f"未配置机器：{machine_id}")
         targets = [
-            actor.machine.machine_id for actor in self.actors.values()
-            if machine_id == actor.machine.machine_id
+            machine_manager.machine.machine_id for machine_manager in self.machine_managers.values()
+            if machine_id == machine_manager.machine.machine_id
             or (
                 machine_id is None and source_id in {
-                    "IO", "OCR", "STORAGE", actor.machine.camera_id,
-                    actor.machine.frequency_source_id,
+                    "IO", "OCR", "STORAGE", machine_manager.machine.camera_id,
+                    machine_manager.machine.frequency_source_id,
                 }
             )
         ]
@@ -244,10 +244,14 @@ class MeasurementExecutor:
                 capacity_available = await self.check_storage_capacity()
 
                 # 向容量状态发生变化的机器管理员发送更新事件。
-                for actor in self.actors.values():
-                    if actor.capacity_available != capacity_available:
+                for machine_manager in self.machine_managers.values():
+                    if machine_manager.capacity_available != capacity_available:
                         await self.publish_event(
-                            MeasurementEvent("CapacityChanged", actor.machine.machine_id, payload=capacity_available)
+                            MeasurementEvent(
+                                "CapacityChanged",
+                                machine_manager.machine.machine_id,
+                                payload=capacity_available,
+                            )
                         )
 
                 # 标记本地恢复库可用。
@@ -294,18 +298,18 @@ class MeasurementExecutor:
                 logger.exception("工作任务异常退出 component=%s", component)
 
             # 记录退出事件并按影响范围限制接收。
-            for actor in self.actors.values():
+            for machine_manager in self.machine_managers.values():
                 await self.publish_event(MeasurementEvent(
-                    "DeviceFault", actor.machine.machine_id, payload=component,
+                    "DeviceFault", machine_manager.machine.machine_id, payload=component,
                 ))
             await run_blocking_operation(
                 self.recovery.audit, f"{component}_WORKER_EXITED",
             )
             if attempt + 1 < self.configuration.worker_restart_attempts:
                 await asyncio.sleep(self.configuration.storage_retry_interval_ms / 1000)
-                for actor in self.actors.values():
+                for machine_manager in self.machine_managers.values():
                     await self.publish_event(MeasurementEvent(
-                        "DeviceRecovered", actor.machine.machine_id, payload=component,
+                        "DeviceRecovered", machine_manager.machine.machine_id, payload=component,
                     ))
         if component == "OCR":
             self.ocr.accepting_jobs = False
@@ -314,11 +318,11 @@ class MeasurementExecutor:
         """重新提交进程内保留的失败记录。"""
         if not self.worker_tasks:
             raise RuntimeError("测量系统尚未启动。")
-        for actor in self.actors.values():
-            for session in tuple(actor.sessions.values()):
+        for machine_manager in self.machine_managers.values():
+            for session in tuple(machine_manager.sessions.values()):
                 if session.commit_state == "RETRY_PENDING":
                     await self.publish_event(MeasurementEvent(
-                        "RetryCommit", actor.machine.machine_id, session.session_id,
+                        "RetryCommit", machine_manager.machine.machine_id, session.session_id,
                     ))
 
     async def wait_until_idle(self, timeout_seconds: float = 30) -> None:
@@ -327,7 +331,7 @@ class MeasurementExecutor:
         while True:
             # 检查当前状态，再等待下一次状态更新。
             self.state_changed.clear()
-            if not any(actor.sessions for actor in self.actors.values()):
+            if not any(machine_manager.sessions for machine_manager in self.machine_managers.values()):
                 return
             remaining_seconds = deadline - asyncio.get_running_loop().time()
             if remaining_seconds <= 0:
@@ -343,10 +347,10 @@ class MeasurementExecutor:
 
         async def drain_measurements() -> None:
             # 将尚未关闭的现场周期标记为中断。
-            for actor in self.actors.values():
+            for machine_manager in self.machine_managers.values():
                 acknowledgement = asyncio.get_running_loop().create_future()
                 await self.publish_event(MeasurementEvent(
-                    "Shutdown", actor.machine.machine_id,
+                    "Shutdown", machine_manager.machine.machine_id,
                     acknowledgement=acknowledgement,
                 ))
                 await acknowledgement
@@ -354,8 +358,8 @@ class MeasurementExecutor:
             # 等待记录提交和已经入队的业务事件。
             await self.wait_until_idle(self.configuration.shutdown_timeout_ms / 1000)
             await self.storage.queue.join()
-            for actor in self.actors.values():
-                await actor.queue.join()
+            for machine_manager in self.machine_managers.values():
+                await machine_manager.queue.join()
 
         # 在统一退出期限内完成后台收尾。
         try:
@@ -367,12 +371,12 @@ class MeasurementExecutor:
 
         # 收集采集、在途测量和期限任务。
         background_tasks = []
-        for actor in self.actors.values():
-            background_tasks.extend(actor.camera.tasks)
-            background_tasks.extend(actor.frequency.tasks)
-            background_tasks.extend(actor.deadline_tasks.values())
-            background_tasks.extend(actor.background_tasks)
-            for window in actor.frequency.windows.values():
+        for machine_manager in self.machine_managers.values():
+            background_tasks.extend(machine_manager.camera.tasks)
+            background_tasks.extend(machine_manager.frequency.tasks)
+            background_tasks.extend(machine_manager.deadline_tasks.values())
+            background_tasks.extend(machine_manager.background_tasks)
+            for window in machine_manager.frequency.windows.values():
                 background_tasks.extend(window.pending_deliveries)
 
         # 取消剩余后台工作并释放持续任务。

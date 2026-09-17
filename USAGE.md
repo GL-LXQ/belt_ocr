@@ -206,7 +206,7 @@ OCR/存储工作任务意外退出时会记录故障并有限重启；OCR 在途
 |---|---|
 | `main.py` | 串联初始化、模拟启动关闭、结果等待和退出 |
 | `measurement_executor.py` | 信号入口、事件路由和整体任务生命周期 |
-| `machine_actor.py` | 每台机器的唯一业务状态修改入口 |
+| `machine_manager.py` | 每台机器的唯一业务状态修改入口 |
 | `models.py` | Session、不可变事件和采集结果 |
 | `configuration.py` | 配置读取、绑定及参数检查 |
 | `camera.py` | 文件夹模拟取流、图片副本和图像窗口封口 |

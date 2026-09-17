@@ -22,7 +22,7 @@ from storage import SQLiteWriter, StorageRequest
 logger = logging.getLogger(__name__)
 
 
-class MachineActor:
+class MachineManager:
     def __init__(
         self,
         machine: MachineConfiguration,

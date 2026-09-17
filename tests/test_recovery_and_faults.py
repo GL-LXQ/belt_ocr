@@ -43,8 +43,8 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             storage_retry_attempts=1, storage_retry_interval_ms=100,
         )
         await executor.handle_start("M01")
-        actor = executor.actors["M01"]
-        session = actor.sessions[actor.active_session_id]
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
 
         # 暂时禁止最终库写入，确认记录先进入本地待提交区。
@@ -80,8 +80,8 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             storage_retry_attempts=1, shutdown_timeout_ms=100,
         )
         await executor.handle_start("M01")
-        actor = executor.actors["M01"]
-        session = actor.sessions[actor.active_session_id]
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
 
         # 持续写入失败后退出，保存同一份冻结内容。
@@ -118,8 +118,8 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             simulated_ocr_delay_ms=1200, shutdown_timeout_ms=100,
         )
         await executor.handle_start("M01")
-        actor = executor.actors["M01"]
-        session = actor.sessions[actor.active_session_id]
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.capture_sealed)
         await executor.handle_close("M01")
         await self.wait_for_state(lambda: session.frequency_window_sealed)
@@ -133,11 +133,11 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await restarted.wait_until_idle(10)
 
         # 确认旧档案和任务没有恢复，也没有生成旧周期的结果。
-        restarted_actor = restarted.actors["M01"]
-        self.assertEqual(restarted_actor.sessions, {})
-        self.assertIsNone(restarted_actor.active_session_id)
-        self.assertEqual(restarted_actor.deadline_tasks, {})
-        self.assertEqual(restarted_actor.background_tasks, set())
+        restarted_machine_manager = restarted.machine_managers["M01"]
+        self.assertEqual(restarted_machine_manager.sessions, {})
+        self.assertIsNone(restarted_machine_manager.active_session_id)
+        self.assertEqual(restarted_machine_manager.deadline_tasks, {})
+        self.assertEqual(restarted_machine_manager.background_tasks, set())
         self.assertEqual(restarted.ocr.pending_count, 0)
         self.assertEqual(self.read_records(), [])
 
@@ -189,52 +189,52 @@ asyncio.run(crash_after_start())
         restarted = await self.restart_executor(initial_machine_state="OPEN")
         await restarted.wait_until_idle(10)
         self.assertEqual(self.read_records(), [])
-        self.assertEqual(restarted.actors["M01"].sessions, {})
-        self.assertEqual(restarted.actors["M01"].acceptance_state, "WAIT_CYCLE_RESET")
+        self.assertEqual(restarted.machine_managers["M01"].sessions, {})
+        self.assertEqual(restarted.machine_managers["M01"].acceptance_state, "WAIT_CYCLE_RESET")
 
         # 运行中忽略启动，关闭后允许接收下一轮启动。
         await restarted.handle_start("M01")
-        self.assertIsNone(restarted.actors["M01"].active_session_id)
+        self.assertIsNone(restarted.machine_managers["M01"].active_session_id)
         await restarted.handle_close("M01")
-        self.assertEqual(restarted.actors["M01"].acceptance_state, "READY")
+        self.assertEqual(restarted.machine_managers["M01"].acceptance_state, "READY")
         await restarted.handle_start("M01")
-        self.assertIsNotNone(restarted.actors["M01"].active_session_id)
+        self.assertIsNotNone(restarted.machine_managers["M01"].active_session_id)
 
     async def test_duplicate_event_is_rejected_after_restart(self) -> None:
         executor = await self.start_executor()
         event = MeasurementEvent("MachineStarted", "M01")
         await executor.publish_event(event)
-        await executor.actors["M01"].queue.join()
+        await executor.machine_managers["M01"].queue.join()
         await executor.handle_close("M01")
         await executor.wait_until_idle(10)
 
         # 重放上次运行已确认的启动事件。
         restarted = await self.restart_executor()
         await restarted.publish_event(event)
-        await restarted.actors["M01"].queue.join()
-        self.assertIsNone(restarted.actors["M01"].active_session_id)
+        await restarted.machine_managers["M01"].queue.join()
+        self.assertIsNone(restarted.machine_managers["M01"].active_session_id)
         self.assertIn("DUPLICATE", self.read_audit_reasons())
         self.assertEqual(len(self.read_records()), 1)
 
     async def test_stale_close_cannot_close_a_new_cycle(self) -> None:
         executor = await self.start_executor()
         await executor.handle_start("M01")
-        old_session_id = executor.actors["M01"].active_session_id
+        old_session_id = executor.machine_managers["M01"].active_session_id
         await executor.handle_close("M01")
         await executor.handle_start("M01")
-        new_session_id = executor.actors["M01"].active_session_id
+        new_session_id = executor.machine_managers["M01"].active_session_id
 
         # 把带旧 Session 身份的关闭事件送回业务队列。
         await executor.publish_event(MeasurementEvent(
             "MachineClosed", "M01", old_session_id,
         ))
-        await executor.actors["M01"].queue.join()
-        self.assertEqual(executor.actors["M01"].active_session_id, new_session_id)
+        await executor.machine_managers["M01"].queue.join()
+        self.assertEqual(executor.machine_managers["M01"].active_session_id, new_session_id)
         self.assertIn("CLOSE_SESSION_MISMATCH", self.read_audit_reasons())
 
     async def test_source_sequence_and_epoch_require_resynchronization(self) -> None:
         executor = await self.start_executor()
-        actor = executor.actors["M01"]
+        machine_manager = executor.machine_managers["M01"]
 
         # 同一来源的旧序号和未经确认的新批次均被隔离。
         event = MeasurementEvent(
@@ -242,8 +242,8 @@ asyncio.run(crash_after_start())
             source_epoch="first", source_sequence=10,
         )
         await executor.publish_event(event)
-        await actor.queue.join()
-        first_session_id = actor.active_session_id
+        await machine_manager.queue.join()
+        first_session_id = machine_manager.active_session_id
         await executor.publish_event(MeasurementEvent(
             "MachineClosed", "M01", first_session_id, source_id="test-input",
             source_epoch="first", source_sequence=9,
@@ -252,8 +252,8 @@ asyncio.run(crash_after_start())
             "MachineClosed", "M01", first_session_id, source_id="test-input",
             source_epoch="second", source_sequence=1,
         ))
-        await actor.queue.join()
-        self.assertEqual(actor.active_session_id, first_session_id)
+        await machine_manager.queue.join()
+        self.assertEqual(machine_manager.active_session_id, first_session_id)
         self.assertIn("STALE_SOURCE_SEQUENCE", self.read_audit_reasons())
         self.assertIn("SOURCE_EPOCH_MISMATCH", self.read_audit_reasons())
 
@@ -264,15 +264,15 @@ asyncio.run(crash_after_start())
             "MachineStarted", "M01", source_id="test-input",
             source_epoch="second", source_sequence=1,
         ))
-        await actor.queue.join()
-        self.assertIsNotNone(actor.active_session_id)
-        self.assertNotEqual(actor.active_session_id, first_session_id)
+        await machine_manager.queue.join()
+        self.assertIsNotNone(machine_manager.active_session_id)
+        self.assertNotEqual(machine_manager.active_session_id, first_session_id)
 
     async def test_frequency_identity_conflict_requires_review(self) -> None:
         executor = await self.start_executor()
         await executor.handle_start("M01")
-        actor = executor.actors["M01"]
-        session = actor.sessions[actor.active_session_id]
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: bool(session.frequency_candidates))
         measurement = next(iter(session.frequency_candidates.values()))
 
@@ -292,41 +292,41 @@ asyncio.run(crash_after_start())
         executor = await self.start_executor()
         await executor.handle_start("M01")
         await executor.handle_start("M02")
-        second_session_id = executor.actors["M02"].active_session_id
+        second_session_id = executor.machine_managers["M02"].active_session_id
 
         # 单台相机故障只中断绑定机器。
         await executor.report_device_health("CAM01", False)
-        self.assertEqual(executor.actors["M01"].acceptance_state, "FAULT")
-        self.assertEqual(executor.actors["M02"].active_session_id, second_session_id)
+        self.assertEqual(executor.machine_managers["M01"].acceptance_state, "FAULT")
+        self.assertEqual(executor.machine_managers["M02"].active_session_id, second_session_id)
         await executor.report_device_health("CAM01", True)
-        self.assertEqual(executor.actors["M01"].acceptance_state, "WAIT_CYCLE_RESET")
+        self.assertEqual(executor.machine_managers["M01"].acceptance_state, "WAIT_CYCLE_RESET")
         await executor.synchronize_machine("M01", "CLOSED")
-        self.assertEqual(executor.actors["M01"].acceptance_state, "READY")
+        self.assertEqual(executor.machine_managers["M01"].acceptance_state, "READY")
 
     async def test_initial_open_state_does_not_create_midcycle_session(self) -> None:
         executor = await self.start_executor(initial_machine_state="OPEN")
         await executor.handle_start("M01")
-        self.assertIsNone(executor.actors["M01"].active_session_id)
+        self.assertIsNone(executor.machine_managers["M01"].active_session_id)
         await executor.handle_close("M01")
         await executor.handle_start("M01")
-        self.assertIsNotNone(executor.actors["M01"].active_session_id)
+        self.assertIsNotNone(executor.machine_managers["M01"].active_session_id)
 
     async def test_disk_capacity_blocks_new_cycles_and_recovers(self) -> None:
         executor = await self.start_executor(minimum_free_disk_bytes=10**30)
-        actor = executor.actors["M01"]
-        await self.wait_for_state(lambda: actor.acceptance_state == "DEGRADED")
+        machine_manager = executor.machine_managers["M01"]
+        await self.wait_for_state(lambda: machine_manager.acceptance_state == "DEGRADED")
         await executor.handle_start("M01")
-        self.assertIsNone(actor.active_session_id)
+        self.assertIsNone(machine_manager.active_session_id)
 
         # 容量恢复后仍须确认被拒收周期已经关闭。
         executor.configuration = replace(
             executor.configuration, minimum_free_disk_bytes=0,
         )
-        await self.wait_for_state(lambda: actor.capacity_available)
-        self.assertTrue(actor.waiting_cycle_reset)
+        await self.wait_for_state(lambda: machine_manager.capacity_available)
+        self.assertTrue(machine_manager.waiting_cycle_reset)
         await executor.handle_close("M01")
         await executor.handle_start("M01")
-        self.assertIsNotNone(actor.active_session_id)
+        self.assertIsNotNone(machine_manager.active_session_id)
 
     async def test_second_process_instance_cannot_share_recovery_store(self) -> None:
         executor = await self.start_executor()
@@ -352,8 +352,8 @@ asyncio.run(crash_after_start())
         with patch.object(executor.ocr, "recognize_frame", fail_once):
             with self.assertLogs("ocr", level="ERROR"):
                 await executor.handle_start("M01")
-                actor = executor.actors["M01"]
-                session = actor.sessions[actor.active_session_id]
+                machine_manager = executor.machine_managers["M01"]
+                session = machine_manager.sessions[machine_manager.active_session_id]
                 await self.wait_for_state(lambda: session.ocr_done)
             await executor.handle_close("M01")
             await executor.wait_until_idle(10)
@@ -373,8 +373,8 @@ asyncio.run(crash_after_start())
                 storage_retry_attempts=1, storage_retry_interval_ms=100,
             )
         await executor.handle_start("M01")
-        actor = executor.actors["M01"]
-        session = actor.sessions[actor.active_session_id]
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
         with self.assertLogs(level="ERROR"):
             await executor.handle_close("M01")
@@ -401,23 +401,23 @@ asyncio.run(crash_after_start())
             original_write(request)
 
         await asyncio.gather(*(
-            executor.handle_start(machine_id) for machine_id in executor.actors
+            executor.handle_start(machine_id) for machine_id in executor.machine_managers
         ))
         await self.wait_for_state(lambda: all(
-            next(iter(actor.sessions.values())).ocr_done
-            for actor in executor.actors.values()
+            next(iter(machine_manager.sessions.values())).ocr_done
+            for machine_manager in executor.machine_managers.values()
         ))
         with patch.object(executor.storage, "write_record", hold_write):
             try:
                 await asyncio.gather(*(
-                    executor.handle_close(machine_id) for machine_id in executor.actors
+                    executor.handle_close(machine_id) for machine_id in executor.machine_managers
                 ))
                 await self.wait_for_state(lambda: (
                     executor.recovery.pending_count() == 3
                     and any(
                         session.commit_state == "RETRY_PENDING"
-                        for actor in executor.actors.values()
-                        for session in actor.sessions.values()
+                        for machine_manager in executor.machine_managers.values()
+                        for session in machine_manager.sessions.values()
                     )
                 ))
                 self.assertEqual(executor.storage.queue.qsize(), 1)
@@ -433,8 +433,8 @@ asyncio.run(crash_after_start())
     async def test_conflicting_commit_is_retained_without_overwrite(self) -> None:
         executor = await self.start_executor(shutdown_timeout_ms=100)
         await executor.handle_start("M01")
-        actor = executor.actors["M01"]
-        session = actor.sessions[actor.active_session_id]
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
 
         # 模拟目标库检测到同一 Session 的不同内容。
@@ -455,8 +455,8 @@ asyncio.run(crash_after_start())
             storage_retry_interval_ms=50,
         )
         await executor.handle_start("M01")
-        actor = executor.actors["M01"]
-        session = actor.sessions[actor.active_session_id]
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_state == "RUNNING")
         await executor.handle_close("M01")
         await self.wait_for_state(lambda: session.frequency_window_sealed)
@@ -468,7 +468,7 @@ asyncio.run(crash_after_start())
         )
         with self.assertLogs(level="ERROR"):
             worker.cancel()
-            await self.wait_for_state(lambda: "OCR" in actor.device_faults)
+            await self.wait_for_state(lambda: "OCR" in machine_manager.device_faults)
         await executor.wait_until_idle(10)
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "COMPLETE")
@@ -483,15 +483,15 @@ asyncio.run(crash_after_start())
         # 连续执行多轮三机采集，并让每轮后台结果自行提交。
         for cycle_number in range(8):
             await asyncio.gather(*(
-                executor.handle_start(machine_id) for machine_id in executor.actors
+                executor.handle_start(machine_id) for machine_id in executor.machine_managers
             ))
             await self.wait_for_state(lambda: all(
-                actor.sessions[actor.active_session_id].selected_frames
-                and actor.sessions[actor.active_session_id].frequency_candidates
-                for actor in executor.actors.values()
+                machine_manager.sessions[machine_manager.active_session_id].selected_frames
+                and machine_manager.sessions[machine_manager.active_session_id].frequency_candidates
+                for machine_manager in executor.machine_managers.values()
             ))
             await asyncio.gather(*(
-                executor.handle_close(machine_id) for machine_id in executor.actors
+                executor.handle_close(machine_id) for machine_id in executor.machine_managers
             ))
             await executor.wait_until_idle(20)
         await executor.wait_until_idle(20)

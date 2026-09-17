@@ -84,11 +84,11 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                         "ocr_state": session.ocr_state,
                         "errors": session.errors,
                         "ocr_jobs": session.ocr_jobs,
-                        "queued_events": actor.queue.qsize(),
-                        "device_faults": sorted(actor.device_faults),
+                        "queued_events": machine_manager.queue.qsize(),
+                        "device_faults": sorted(machine_manager.device_faults),
                     }
-                    for actor in self.executor.actors.values()
-                    for session in actor.sessions.values()
+                    for machine_manager in self.executor.machine_managers.values()
+                    for session in machine_manager.sessions.values()
                 ]
                 workers = [
                     (task.get_name(), task.done(), str(task.get_coro()))
@@ -110,15 +110,15 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
         # 同时采集三台机器并等待各自的 OCR 完成。
         await asyncio.gather(*(
-            executor.handle_start(machine_id) for machine_id in executor.actors
+            executor.handle_start(machine_id) for machine_id in executor.machine_managers
         ))
         await self.wait_for_state(lambda: all(
-            next(iter(actor.sessions.values())).ocr_done
-            for actor in executor.actors.values()
+            next(iter(machine_manager.sessions.values())).ocr_done
+            for machine_manager in executor.machine_managers.values()
         ))
         self.assertEqual(self.read_records(), [])
         await asyncio.gather(*(
-            executor.handle_close(machine_id) for machine_id in executor.actors
+            executor.handle_close(machine_id) for machine_id in executor.machine_managers
         ))
         await executor.wait_until_idle()
 
@@ -161,20 +161,20 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_old_ocr_and_commit_do_not_clear_new_active_session(self) -> None:
         executor = await self.start_executor(simulated_ocr_delay_ms=250)
-        actor = executor.actors["M01"]
+        machine_manager = executor.machine_managers["M01"]
 
         # 在第一轮 OCR 结束前关闭并立即启动第二轮。
         await executor.handle_start("M01")
-        first_session = actor.sessions[actor.active_session_id]
+        first_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: first_session.capture_sealed)
         await executor.handle_close("M01")
         await executor.handle_start("M01")
-        second_session_id = actor.active_session_id
+        second_session_id = machine_manager.active_session_id
         self.assertNotEqual(first_session.session_id, second_session_id)
         await self.wait_for_state(lambda: first_session.commit_state == "COMMITTED")
 
         # 第一轮提交成功后，第二轮仍保持活动状态。
-        self.assertEqual(actor.active_session_id, second_session_id)
+        self.assertEqual(machine_manager.active_session_id, second_session_id)
         self.assertEqual(self.read_records()[0]["session_id"], first_session.session_id)
         await executor.handle_close("M01")
         await executor.wait_until_idle()
@@ -182,14 +182,14 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_duplicate_signals_and_results_are_idempotent(self) -> None:
         executor = await self.start_executor()
-        actor = executor.actors["M01"]
+        machine_manager = executor.machine_managers["M01"]
 
         # 重复启动不会覆盖原来的 Session。
         await executor.handle_start("M01")
-        session = actor.sessions[actor.active_session_id]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await executor.handle_start("M01")
-        self.assertEqual(actor.active_session_id, session.session_id)
-        self.assertEqual(len(actor.sessions), 1)
+        self.assertEqual(machine_manager.active_session_id, session.session_id)
+        self.assertEqual(len(machine_manager.sessions), 1)
         await self.wait_for_state(lambda: session.ocr_done)
 
         # 重复 OCR 和频率事件不增加候选数量。
@@ -200,7 +200,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         await executor.publish_event(MeasurementEvent(
             "OCRCompleted", "M01", session.session_id, session.ocr_result,
         ))
-        await actor.queue.join()
+        await machine_manager.queue.join()
         self.assertEqual(
             session.frequency_candidates[measurement.measurement_id], measurement,
         )
@@ -211,18 +211,18 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_early_close_seals_only_the_old_capture(self) -> None:
         executor = await self.start_executor(capture_window_ms=800)
-        actor = executor.actors["M01"]
+        machine_manager = executor.machine_managers["M01"]
 
         # 采到第一帧和频率后提前关闭，再立即打开新窗口。
         await executor.handle_start("M01")
-        first_session = actor.sessions[actor.active_session_id]
+        first_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: (
             first_session.selected_frames and first_session.frequency_candidates
         ))
         await executor.handle_close("M01")
         await executor.handle_start("M01")
-        second_session = actor.sessions[actor.active_session_id]
-        actor.camera.seal_capture(first_session.capture_id)
+        second_session = machine_manager.sessions[machine_manager.active_session_id]
+        machine_manager.camera.seal_capture(first_session.capture_id)
         await self.wait_for_state(lambda: bool(second_session.frequency_candidates))
         self.assertFalse(second_session.capture_sealed)
         self.assertLess(len(first_session.selected_frames), 5)
@@ -232,19 +232,19 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_delayed_frequency_stays_with_original_session(self) -> None:
         executor = await self.start_executor(frequency_delivery_delay_ms=1000)
-        actor = executor.actors["M01"]
+        machine_manager = executor.machine_managers["M01"]
 
         # 在读数尚未送达时关闭第一轮并打开第二轮。
         await executor.handle_start("M01")
-        first_session = actor.sessions[actor.active_session_id]
+        first_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: (
             first_session.selected_frames
-            and actor.frequency.active_window.pending_deliveries
+            and machine_manager.frequency.active_window.pending_deliveries
         ))
         self.assertEqual(first_session.frequency_candidates, {})
         await executor.handle_close("M01")
         await executor.handle_start("M01")
-        second_session = actor.sessions[actor.active_session_id]
+        second_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: first_session.commit_state == "COMMITTED")
 
         # 已结算的读数全部属于第一轮，第二轮仍然活动。
@@ -254,7 +254,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             measurement["session_id"] == first_session.session_id
             for measurement in first_record["frequency_candidates"]
         ))
-        self.assertEqual(actor.active_session_id, second_session.session_id)
+        self.assertEqual(machine_manager.active_session_id, second_session.session_id)
         await executor.handle_close("M01")
         await executor.wait_until_idle()
         measurement_ids = [
@@ -268,14 +268,14 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_equal_frequency_values_have_different_measurement_ids(self) -> None:
         executor = await self.start_executor()
-        actor = executor.actors["M01"]
-        actor.frequency.machine = replace(
-            actor.machine, simulated_frequencies_hz=(42.0,),
+        machine_manager = executor.machine_managers["M01"]
+        machine_manager.frequency.machine = replace(
+            machine_manager.machine, simulated_frequencies_hz=(42.0,),
         )
 
         # 收集数值相同但身份不同的新测量。
         await executor.handle_start("M01")
-        session = actor.sessions[actor.active_session_id]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: len(session.frequency_candidates) >= 3)
         await executor.handle_close("M01")
         await executor.wait_until_idle()
@@ -289,14 +289,14 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_valid_frequency_saves_review_record(self) -> None:
         executor = await self.start_executor()
-        actor = executor.actors["M01"]
-        actor.frequency.machine = replace(
-            actor.machine, simulated_frequencies_hz=(0.0, float("nan"), -1.0),
+        machine_manager = executor.machine_managers["M01"]
+        machine_manager.frequency.machine = replace(
+            machine_manager.machine, simulated_frequencies_hz=(0.0, float("nan"), -1.0),
         )
 
         # OCR 成功后关闭，确认缺频率不会补零或永久等待。
         await executor.handle_start("M01")
-        session = actor.sessions[actor.active_session_id]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
         await executor.handle_close("M01")
         await executor.wait_until_idle()
@@ -307,12 +307,12 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_ocr_waits_for_close_then_saves_review_record(self) -> None:
         executor = await self.start_executor()
-        actor = executor.actors["M01"]
-        actor.machine = replace(actor.machine, simulated_lines=())
+        machine_manager = executor.machine_managers["M01"]
+        machine_manager.machine = replace(machine_manager.machine, simulated_lines=())
 
         # 空识别结果先保留失败状态，正常关闭后保存异常记录。
         await executor.handle_start("M01")
-        session = actor.sessions[actor.active_session_id]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_state == "FAILED")
         self.assertEqual(self.read_records(), [])
         await executor.handle_close("M01")
@@ -328,8 +328,8 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         # 空文件夹作为本轮取流失败处理。
         with self.assertLogs("camera", level="ERROR"):
             await executor.handle_start("M01")
-            actor = executor.actors["M01"]
-            session = actor.sessions[actor.active_session_id]
+            machine_manager = executor.machine_managers["M01"]
+            session = machine_manager.sessions[machine_manager.active_session_id]
             await self.wait_for_state(lambda: session.ocr_state == "FAILED")
         await executor.handle_close("M01")
         await executor.wait_until_idle()
@@ -337,11 +337,11 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_evidence_cannot_be_saved_as_complete(self) -> None:
         executor = await self.start_executor(simulated_ocr_delay_ms=200)
-        actor = executor.actors["M01"]
+        machine_manager = executor.machine_managers["M01"]
 
         # 在 OCR 读取前删除已采集的证据文件。
         await executor.handle_start("M01")
-        session = actor.sessions[actor.active_session_id]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.capture_sealed)
         for frame in session.selected_frames.values():
             Path(frame.image_path).unlink()
@@ -371,7 +371,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                     executor.handle_start("M01"), executor.handle_start("M02"),
                 )
                 sessions = [
-                    next(iter(executor.actors[machine_id].sessions.values()))
+                    next(iter(executor.machine_managers[machine_id].sessions.values()))
                     for machine_id in ("M01", "M02")
                 ]
                 await self.wait_for_state(lambda: all(
@@ -385,10 +385,10 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
                 # 使用真实期限任务触发超时，分别保存两台机器的异常结果。
                 for session in sessions:
-                    actor = executor.actors[session.machine_id]
+                    machine_manager = executor.machine_managers[session.machine_id]
                     deadline_key = (session.session_id, "OCRTimeout")
-                    actor.deadline_tasks.pop(deadline_key).cancel()
-                    actor.schedule_timeout(session, "OCRTimeout", 50)
+                    machine_manager.deadline_tasks.pop(deadline_key).cancel()
+                    machine_manager.schedule_timeout(session, "OCRTimeout", 50)
                 await executor.wait_until_idle()
             finally:
                 recognition_release.set()
@@ -402,8 +402,8 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             frequency_delivery_delay_ms=3000, frequency_drain_timeout_ms=50,
         )
         await executor.handle_start("M01")
-        actor = executor.actors["M01"]
-        session = actor.sessions[actor.active_session_id]
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.capture_sealed)
         await executor.handle_close("M01")
         await executor.wait_until_idle()
@@ -420,12 +420,12 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "INTERRUPTED")
         self.assertIsNone(record["close_time"])
-        actor = executor.actors["M01"]
+        machine_manager = executor.machine_managers["M01"]
         await executor.handle_start("M01")
-        self.assertIsNone(actor.active_session_id)
+        self.assertIsNone(machine_manager.active_session_id)
         await executor.handle_close("M01")
         await executor.handle_start("M01")
-        self.assertIsNotNone(actor.active_session_id)
+        self.assertIsNotNone(machine_manager.active_session_id)
 
     async def test_shutdown_records_interruption(self) -> None:
         executor = await self.start_executor()
@@ -450,8 +450,8 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                 raise OSError("模拟确认丢失")
 
         await executor.handle_start("M01")
-        actor = executor.actors["M01"]
-        session = actor.sessions[actor.active_session_id]
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
         with patch.object(
             executor.storage, "write_record", write_then_lose_acknowledgement,
@@ -466,8 +466,8 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_commit_retains_frozen_payload_for_retry(self) -> None:
         executor = await self.start_executor(storage_retry_attempts=1)
         await executor.handle_start("M01")
-        actor = executor.actors["M01"]
-        session = actor.sessions[actor.active_session_id]
+        machine_manager = executor.machine_managers["M01"]
+        session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
 
         # 写入失败后保留冻结记录，并用同一内容重新提交。
@@ -491,14 +491,14 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             ocr_queue_capacity=1, simulated_ocr_delay_ms=250, max_frames_per_session=1,
         )
         await asyncio.gather(*(
-            executor.handle_start(machine_id) for machine_id in executor.actors
+            executor.handle_start(machine_id) for machine_id in executor.machine_managers
         ))
         await self.wait_for_state(lambda: all(
-            next(iter(actor.sessions.values())).capture_sealed
-            for actor in executor.actors.values()
+            next(iter(machine_manager.sessions.values())).capture_sealed
+            for machine_manager in executor.machine_managers.values()
         ))
         await asyncio.gather(*(
-            executor.handle_close(machine_id) for machine_id in executor.actors
+            executor.handle_close(machine_id) for machine_id in executor.machine_managers
         ))
         await executor.wait_until_idle()
         records = self.read_records()
