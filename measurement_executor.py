@@ -11,6 +11,7 @@ from camera import FolderCamera
 from configuration import MeasurementConfiguration
 from frequency import SimulatedFrequency
 from machine_manager import MachineManager
+from enums import MachineState
 from models import MeasurementEvent
 from recovery import run_blocking_operation, RecoveryStore
 from ocr import SimulatedOCR
@@ -93,8 +94,8 @@ class MeasurementExecutor:
                 machine_manager.capacity_available = capacity_available
 
                 # 按本次配置设置机器复位状态和初始故障。
-                machine_manager.waiting_cycle_reset = self.configuration.initial_machine_state != "CLOSED"
-                if self.configuration.initial_machine_state == "UNKNOWN":
+                machine_manager.waiting_cycle_reset = self.configuration.initial_machine_state != MachineState.CLOSED
+                if self.configuration.initial_machine_state == MachineState.UNKNOWN:
                     machine_manager.device_faults.add("UNKNOWN_INITIAL_STATE")
 
                 # 标记本机初始化完成并保存本次空档案状态。
@@ -208,11 +209,25 @@ class MeasurementExecutor:
                 "DeviceRecovered" if healthy else "DeviceFault", target, source_id,
             )
 
-    async def synchronize_machine(self, machine_id: str, observed_state: str) -> None:
-        """接收已确认的现场初始状态或重连状态。"""
-        if observed_state not in {"CLOSED", "OPEN", "UNKNOWN"}:
+    async def synchronize_machine(self, machine_id: str, observed_state: MachineState | str) -> None:
+        """将现场状态转换为枚举并发送机器同步事件。
+
+        Args:
+            machine_id: 需要同步状态的机器编号。
+            observed_state: 已确认的现场状态，支持 MachineState 或对应字符串。
+
+        Returns:
+            None: 等待机器管理员处理同步事件，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 校验现场状态并转换为机器状态枚举。
+        if observed_state not in set(MachineState):
             raise ValueError("机器状态必须是 CLOSED、OPEN 或 UNKNOWN。")
-        await self.send_signal("MachineSynchronized", machine_id, observed_state)
+        machine_state = MachineState(observed_state)
+
+        # 发送状态同步事件并等待处理完成。
+        await self.send_signal("MachineSynchronized", machine_id, machine_state)
 
     async def synchronize_source(
         self, machine_id: str, source_id: str, source_epoch: str,

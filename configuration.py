@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from enums import MachineState
+
 
 @dataclass(frozen=True)
 class MachineConfiguration:
@@ -48,7 +50,7 @@ class MeasurementConfiguration:
     ocr_job_timeout_ms: int = 5000
     worker_restart_attempts: int = 3
     event_max_age_ms: int = 30000
-    initial_machine_state: str = "CLOSED"
+    initial_machine_state: MachineState = MachineState.CLOSED
 
     @property
     def recovery_path(self) -> Path:
@@ -93,7 +95,7 @@ class MeasurementConfiguration:
             raise ValueError("磁盘保留空间不能为负数。")
         if self.recovery_path.resolve() == self.database_path.resolve():
             raise ValueError("恢复库与最终结果库必须使用不同文件。")
-        if self.initial_machine_state not in {"CLOSED", "OPEN", "UNKNOWN"}:
+        if self.initial_machine_state not in set(MachineState):
             raise ValueError("初始机器状态必须是 CLOSED、OPEN 或 UNKNOWN。")
 
 
@@ -116,6 +118,9 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
             machine_settings["simulated_frequencies_hz"]
         )
         machines.append(MachineConfiguration(**machine_settings))
+
+    # 将配置中的机器初始状态转换为枚举。
+    settings["initial_machine_state"] = MachineState(settings.get("initial_machine_state", MachineState.CLOSED))
 
     # 创建输出路径并校验完整配置。
     for path_name in ("database_path", "evidence_directory"):

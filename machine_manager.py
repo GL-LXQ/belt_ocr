@@ -13,6 +13,7 @@ from uuid import uuid4
 from camera import FolderCamera
 from configuration import MachineConfiguration, MeasurementConfiguration
 from frequency import SimulatedFrequency
+from enums import MachineState
 from models import BeltSession, MeasurementEvent, OCRResult, PublishEvent
 from recovery import run_blocking_operation, restore_session, serialize_value
 from ocr import OCRJob, SimulatedOCR
@@ -311,8 +312,8 @@ class MachineManager:
                 # 中断原活动周期，更新机器复位状态。
                 if self.active_session_id is not None:
                     await self.close_measurement(interrupted=True)
-                self.waiting_cycle_reset = event.payload != "CLOSED"
-                if event.payload == "CLOSED":
+                self.waiting_cycle_reset = event.payload != MachineState.CLOSED
+                if event.payload == MachineState.CLOSED:
                     self.interrupted_session_id = None
                 self.device_faults.discard("UNKNOWN_INITIAL_STATE")
                 await run_blocking_operation(self.recovery.audit, "MACHINE_SYNCHRONIZED", event)
