@@ -229,21 +229,39 @@ class MeasurementExecutor:
         })
 
     async def maintain_system(self) -> None:
-        """自动补交待提交记录并检查磁盘及积压容量。"""
+        """定期补交待提交记录，检查存储容量并通知机器管理员更新容量状态。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 持续运行直到任务被取消，无返回数据。
+            返回值形式示例：
+                None  # 无返回数据
+        """
         while True:
             try:
+                # 将已到期的待提交记录重新加入存储队列。
                 await self.storage.enqueue_pending_records()
+
+                # 检查待提交记录积压数量和磁盘剩余空间。
                 capacity_available = await self.check_storage_capacity()
+
+                # 向容量状态发生变化的机器管理员发送更新事件。
                 for actor in self.actors.values():
                     if actor.capacity_available != capacity_available:
-                        await self.publish_event(MeasurementEvent(
-                            "CapacityChanged", actor.machine.machine_id,
-                            payload=capacity_available,
-                        ))
+                        await self.publish_event(
+                            MeasurementEvent("CapacityChanged", actor.machine.machine_id, payload=capacity_available)
+                        )
+
+                # 标记本地恢复库可用。
                 self.recovery.available = True
             except Exception:
+                # 标记本地恢复库不可用并记录维护异常。
                 self.recovery.available = False
                 logger.exception("本地恢复库或容量检查失败，暂停接收新周期。")
+
+            # 等待配置的维护间隔，再开始下一轮处理。
             await asyncio.sleep(self.configuration.maintenance_interval_ms / 1000)
 
     async def check_storage_capacity(self) -> bool:
