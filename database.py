@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class StorageRequest:
+class DatabaseRequest:
     machine_id: str
     session_id: str
     payload_json: str
@@ -24,14 +24,14 @@ class StorageRequest:
     record_type: str = "measurement"
 
 
-class SQLiteWriter:
+class Database:
     def __init__(
         self, configuration: MeasurementConfiguration, publish_event: PublishEvent,
         recovery: RecoveryStore,
     ) -> None:
         self.configuration = configuration
         self.publish_event = publish_event
-        self.queue: asyncio.Queue[StorageRequest] = asyncio.Queue(
+        self.queue: asyncio.Queue[DatabaseRequest] = asyncio.Queue(
             configuration.storage_queue_capacity
         )
         self.available = True
@@ -68,7 +68,7 @@ class SQLiteWriter:
             """)
         self.initialized = True
 
-    async def submit(self, request: StorageRequest) -> bool:
+    async def submit(self, request: DatabaseRequest) -> bool:
         """把不可变记录加入写入队列。"""
         # 登记本次提交身份，再持久化并进入有界队列。
         if request.session_id in self.queued_records:
@@ -92,7 +92,7 @@ class SQLiteWriter:
             raise
         return True
 
-    def write_record(self, request: StorageRequest) -> None:
+    def write_record(self, request: DatabaseRequest) -> None:
         """在事务中检查重复记录并写入同一份冻结内容。"""
         connection = sqlite3.connect(self.configuration.database_path, timeout=1)
         with closing(connection), connection:
@@ -231,7 +231,7 @@ class SQLiteWriter:
 
         for record in records:
             # 使用原有冻结内容和摘要组装存储请求。
-            request = StorageRequest(
+            request = DatabaseRequest(
                 record["machine_id"],
                 record["record_id"],
                 record["payload_json"],

@@ -151,7 +151,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         confirmation_entered = asyncio.Event()
         confirmation_release = asyncio.Event()
         original_recognize = executor.ocr.recognize_frame
-        original_publish = executor.storage.publish_event
+        original_publish = executor.database.publish_event
 
         # 暂停旧轮识别和提交确认，分别检查新轮活动位置。
         async def hold_old_recognition(job):
@@ -168,7 +168,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             await original_publish(event)
 
         with patch.object(executor.ocr, "recognize_frame", hold_old_recognition):
-            with patch.object(executor.storage, "publish_event", hold_old_confirmation):
+            with patch.object(executor.database, "publish_event", hold_old_confirmation):
                 try:
                     await self.close_controlled_cycle(first_session)
                     await asyncio.wait_for(recognition_entered.wait(), 10)

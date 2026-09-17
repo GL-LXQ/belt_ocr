@@ -16,7 +16,7 @@ from frequency import SimulatedFrequency
 from models import BeltSession, MeasurementEvent, OCRResult, PublishEvent
 from recovery import run_blocking_operation, restore_session, serialize_value
 from ocr import OCRJob, SimulatedOCR
-from storage import SQLiteWriter, StorageRequest
+from database import Database, DatabaseRequest
 
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ class MachineManager:
         camera: FolderCamera,
         frequency: SimulatedFrequency,
         ocr: SimulatedOCR,
-        storage: SQLiteWriter,
+        database: Database,
         publish_event: PublishEvent,
         state_changed: asyncio.Event,
     ) -> None:
@@ -39,7 +39,7 @@ class MachineManager:
         self.camera = camera
         self.frequency = frequency
         self.ocr = ocr
-        self.storage = storage
+        self.database = database
         self.publish_event = publish_event
         self.state_changed = state_changed
         self.queue: asyncio.Queue[MeasurementEvent] = asyncio.Queue(
@@ -50,7 +50,7 @@ class MachineManager:
         self.waiting_cycle_reset = False
         self.interrupted_session_id: str | None = None
         self.deadline_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
-        self.recovery = storage.recovery
+        self.recovery = database.recovery
         self.process_epoch = uuid4().hex
         self.device_faults: set[str] = set()
         self.source_cursors: dict[str, dict] = {}
@@ -123,7 +123,7 @@ class MachineManager:
                 "reason": "CAPACITY_OR_STORAGE_UNAVAILABLE",
                 "is_simulated": True,
             }
-            await self.storage.submit(StorageRequest(
+            await self.database.submit(DatabaseRequest(
                 self.machine.machine_id, uuid4().hex,
                 json.dumps(rejection), "", "rejected_cycle",
             ))
@@ -924,11 +924,11 @@ class MachineManager:
     async def submit_frozen_record(self, session: BeltSession) -> None:
         """提交同一份冻结记录，并保留未成功入队的记录。"""
         session.commit_state = "COMMITTING"
-        request = StorageRequest(
+        request = DatabaseRequest(
             session.machine_id, session.session_id,
             session.frozen_payload, session.payload_hash,
         )
-        if not await self.storage.submit(request):
+        if not await self.database.submit(request):
             session.commit_state = "RETRY_PENDING"
             logger.error("存储队列已满 session_id=%s", session.session_id)
 

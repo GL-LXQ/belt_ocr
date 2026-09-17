@@ -15,7 +15,7 @@ import test_measurement_flow as flow_support
 from measurement_executor import MeasurementExecutor
 from models import MeasurementEvent
 from recovery import serialize_value
-from storage import StorageRequest
+from database import DatabaseRequest
 
 
 class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
@@ -51,7 +51,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
 
         # 暂时禁止最终库写入，确认记录先进入本地待提交区。
         with patch.object(
-            executor.storage, "write_record", side_effect=OSError("模拟断库"),
+            executor.database, "write_record", side_effect=OSError("模拟断库"),
         ):
             with self.assertLogs(level="ERROR"):
                 await executor.handle_close("M01")
@@ -88,7 +88,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
 
         # 持续写入失败后退出，保存同一份冻结内容。
         with patch.object(
-            executor.storage, "write_record", side_effect=OSError("模拟断库"),
+            executor.database, "write_record", side_effect=OSError("模拟断库"),
         ):
             with self.assertLogs(level="WARNING"):
                 await executor.handle_close("M01")
@@ -104,8 +104,8 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         # 确认旧记录已清理，多次补交检查也不会生成旧结果。
         self.assertEqual(restarted.recovery.pending_count(), 0)
         self.assertEqual(restarted.machine_managers["M01"].sessions, {})
-        await restarted.storage.enqueue_pending_records()
-        await restarted.storage.enqueue_pending_records()
+        await restarted.database.enqueue_pending_records()
+        await restarted.database.enqueue_pending_records()
         await restarted.wait_until_idle(10)
         self.assertEqual(self.read_records(), [])
         self.assertTrue(all(Path(image_path).is_file() for image_path in evidence_paths))
@@ -148,7 +148,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             ("old_conflict", "measurement"),
             ("old_rejection", "rejected_cycle"),
         ):
-            executor.recovery.stage_record(StorageRequest("M01", record_id, "{}", record_id, record_type))
+            executor.recovery.stage_record(DatabaseRequest("M01", record_id, "{}", record_id, record_type))
         executor.recovery.delay_record("old_conflict", 0, blocked=True)
 
         # 保存不在本次配置中的旧机器检查点。
@@ -495,7 +495,7 @@ asyncio.run(crash_after_start())
         executor = await self.start_executor(
             storage_queue_capacity=1, max_frames_per_session=1,
         )
-        original_write = executor.storage.write_record
+        original_write = executor.database.write_record
         write_release = threading.Event()
 
         # 暂停真实写库，等待三份记录全部进入持久化待提交区。
@@ -511,7 +511,7 @@ asyncio.run(crash_after_start())
             next(iter(machine_manager.sessions.values())).ocr_done
             for machine_manager in executor.machine_managers.values()
         ))
-        with patch.object(executor.storage, "write_record", hold_write):
+        with patch.object(executor.database, "write_record", hold_write):
             try:
                 await asyncio.gather(*(
                     executor.handle_close(machine_id) for machine_id in executor.machine_managers
@@ -524,7 +524,7 @@ asyncio.run(crash_after_start())
                         for session in machine_manager.sessions.values()
                     )
                 ))
-                self.assertEqual(executor.storage.queue.qsize(), 1)
+                self.assertEqual(executor.database.queue.qsize(), 1)
                 self.assertEqual(self.read_records(), [])
             finally:
                 write_release.set()
@@ -543,7 +543,7 @@ asyncio.run(crash_after_start())
 
         # 模拟目标库检测到同一 Session 的不同内容。
         with patch.object(
-            executor.storage, "write_record", side_effect=ValueError("冲突"),
+            executor.database, "write_record", side_effect=ValueError("冲突"),
         ):
             with self.assertLogs(level="ERROR"):
                 await executor.handle_close("M01")

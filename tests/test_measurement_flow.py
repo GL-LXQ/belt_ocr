@@ -13,7 +13,7 @@ from unittest.mock import patch
 from configuration import MachineConfiguration, MeasurementConfiguration
 from measurement_executor import MeasurementExecutor
 from models import MeasurementEvent
-from storage import StorageRequest
+from database import DatabaseRequest
 
 
 class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -438,11 +438,11 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_lost_acknowledgement_does_not_duplicate_record(self) -> None:
         executor = await self.start_executor()
-        original_write = executor.storage.write_record
+        original_write = executor.database.write_record
         attempt_count = 0
 
         # 第一次真实写入成功后模拟确认丢失。
-        def write_then_lose_acknowledgement(request: StorageRequest) -> None:
+        def write_then_lose_acknowledgement(request: DatabaseRequest) -> None:
             nonlocal attempt_count
             attempt_count += 1
             original_write(request)
@@ -454,9 +454,9 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: session.ocr_done)
         with patch.object(
-            executor.storage, "write_record", write_then_lose_acknowledgement,
+            executor.database, "write_record", write_then_lose_acknowledgement,
         ):
-            with self.assertLogs("storage", level="ERROR"):
+            with self.assertLogs("database", level="ERROR"):
                 await executor.handle_close("M01")
                 await executor.wait_until_idle()
         self.assertEqual(attempt_count, 2)
@@ -472,7 +472,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
         # 写入失败后保留冻结记录，并用同一内容重新提交。
         with patch.object(
-            executor.storage, "write_record", side_effect=OSError("模拟写入失败"),
+            executor.database, "write_record", side_effect=OSError("模拟写入失败"),
         ):
             with self.assertLogs(level="ERROR"):
                 await executor.handle_close("M01")

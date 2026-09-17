@@ -211,7 +211,7 @@ OCR/存储工作任务意外退出时会记录故障并有限重启；OCR 在途
 | `camera.py` | 文件夹模拟取流、图片副本和图像窗口封口 |
 | `ocr.py` | 共享有界调度和模拟有序文字行输出 |
 | `frequency.py` | 持续模拟新测量、窗口归属和在途数据收尾 |
-| `storage.py` | SQLite 建表、幂等写入和有限重试 |
+| `database.py` | SQLite 建表、幂等写入和有限重试 |
 | `recovery.py` | 本地运行检查点、待提交记录、事件去重、审计和实例锁 |
 | `tests/test_measurement_flow.py` | 并行、跨轮次、重复、失败和超时测试 |
 | `tests/test_recovery_and_faults.py` | 异常退出、重启清理、本次运行内自动补交、故障隔离和多轮运行测试 |

@@ -14,7 +14,7 @@ from machine_manager import MachineManager
 from models import MeasurementEvent
 from recovery import run_blocking_operation, RecoveryStore
 from ocr import SimulatedOCR
-from storage import SQLiteWriter
+from database import Database
 
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class MeasurementExecutor:
         self.configuration = configuration
         self.state_changed = asyncio.Event()
         self.recovery = RecoveryStore(configuration.recovery_path)
-        self.storage = SQLiteWriter(configuration, self.publish_event, self.recovery)
+        self.database = Database(configuration, self.publish_event, self.recovery)
         self.ocr = SimulatedOCR(configuration, self.publish_event)
         self.machine_managers: dict[str, MachineManager] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
@@ -42,7 +42,7 @@ class MeasurementExecutor:
             camera = FolderCamera(machine, configuration, self.publish_event)
             frequency = SimulatedFrequency(machine, configuration, self.publish_event)
             self.machine_managers[machine.machine_id] = MachineManager(
-                machine, configuration, camera, frequency, self.ocr, self.storage,
+                machine, configuration, camera, frequency, self.ocr, self.database,
                 self.publish_event, self.state_changed,
             )
             self.machine_managers[machine.machine_id].process_epoch = self.process_epoch
@@ -78,9 +78,9 @@ class MeasurementExecutor:
 
         # 初始化最终结果库，失败时标记不可用并记录审计。
         try:
-            await run_blocking_operation(self.storage.initialize)
+            await run_blocking_operation(self.database.initialize)
         except Exception:
-            self.storage.available = False
+            self.database.available = False
             await run_blocking_operation(
                 self.recovery.audit, "DATABASE_UNAVAILABLE_AT_STARTUP",
             )
@@ -116,7 +116,7 @@ class MeasurementExecutor:
         ))
         # 启动共享存储任务并监控运行状态。
         self.worker_tasks.append(asyncio.create_task(
-            self.supervise_worker("STORAGE", self.storage.run), name="STORAGE",
+            self.supervise_worker("STORAGE", self.database.run), name="STORAGE",
         ))
         # 启动定期补交待提交记录和检查存储容量的任务。
         self.worker_tasks.append(asyncio.create_task(self.maintain_system()))
@@ -240,7 +240,7 @@ class MeasurementExecutor:
         while True:
             try:
                 # 将已到期的待提交记录重新加入存储队列。
-                await self.storage.enqueue_pending_records()
+                await self.database.enqueue_pending_records()
 
                 # 检查待提交记录积压数量和磁盘剩余空间。
                 capacity_available = await self.check_storage_capacity()
@@ -359,7 +359,7 @@ class MeasurementExecutor:
 
             # 等待记录提交和已经入队的业务事件。
             await self.wait_until_idle(self.configuration.shutdown_timeout_ms / 1000)
-            await self.storage.queue.join()
+            await self.database.queue.join()
             for machine_manager in self.machine_managers.values():
                 await machine_manager.queue.join()
 
