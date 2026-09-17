@@ -69,27 +69,47 @@ class Database:
         self.initialized = True
 
     async def submit(self, request: DatabaseRequest) -> bool:
-        """把不可变记录加入写入队列。"""
-        # 登记本次提交身份，再持久化并进入有界队列。
+        """暂存提交记录并尝试加入后台写入队列。
+
+        Args:
+            request: 保存请求，包含机器编号、记录编号、JSON 内容、内容摘要和记录类型。
+
+        Returns:
+            bool: 请求已入队、已在排队或已提交成功时返回 True，队列满时返回 False。
+            返回示例：
+                True  # 请求已受理，不表示本次调用已完成最终入库
+                False  # 队列已满，记录保留在待提交区供本次运行补交
+        """
+        # 已在排队的记录直接返回，其他记录登记排队标记。
         if request.session_id in self.queued_records:
             return True
         self.queued_records.add(request.session_id)
+
         try:
+            # 检查已提交身份，并将尚未提交的记录保存到待提交区。
             staged = await run_blocking_operation(self.recovery.stage_record, request)
+
+            # 已提交成功的记录移除排队标记，测量记录发送成功回执事件。
             if not staged:
                 self.queued_records.discard(request.session_id)
                 if request.record_type == "measurement":
-                    await self.publish_event(MeasurementEvent(
-                        "CommitSucceeded", request.machine_id, request.session_id,
-                    ))
+                    await self.publish_event(
+                        MeasurementEvent("CommitSucceeded", request.machine_id, request.session_id)
+                    )
                 return True
+
+            # 将待提交记录放入后台写入队列。
             self.queue.put_nowait(request)
         except asyncio.QueueFull:
+            # 队列已满时移除排队标记，返回未入队结果。
             self.queued_records.discard(request.session_id)
             return False
         except (asyncio.CancelledError, Exception):
+            # 取消或异常时移除排队标记，并继续抛出异常。
             self.queued_records.discard(request.session_id)
             raise
+
+        # 入队成功后返回受理结果。
         return True
 
     def write_record(self, request: DatabaseRequest) -> None:

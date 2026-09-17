@@ -120,7 +120,16 @@ class MachineManager:
                 self.queue.task_done()
 
     async def start_measurement(self) -> None:
-        """检查接收条件并启动本轮图像和频率窗口。"""
+        """检查接收条件，创建本轮测量档案并启动采集窗口和超时任务。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 启动本轮测量，或在不满足接收条件时提前结束，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
         # 忽略活动周期内的重复启动和未同步的启动。
         if self.active_session_id is not None or self.waiting_cycle_reset:
             return
@@ -128,20 +137,22 @@ class MachineManager:
         # 检查本机积压、存储容量、设备故障和恢复库状态。
         if (
             len(self.sessions) >= self.configuration.max_pending_sessions_per_machine
-            or not self.capacity_available or self.device_faults
+            or not self.capacity_available
+            or self.device_faults
             or not self.recovery.available
         ):
-            # 标记等待周期复位，提交本轮未受理记录。
+            # 标记等待周期复位，组装本轮未受理记录。
             self.waiting_cycle_reset = True
             rejection = {
                 "occurred_at": datetime.now(timezone.utc).isoformat(),
                 "reason": "CAPACITY_OR_STORAGE_UNAVAILABLE",
                 "is_simulated": True,
             }
-            await self.database.submit(DatabaseRequest(
-                self.machine.machine_id, uuid4().hex,
-                json.dumps(rejection), "", "rejected_cycle",
-            ))
+
+            # 提交未受理记录，记录日志并结束本次启动处理。
+            await self.database.submit(
+                DatabaseRequest(self.machine.machine_id, uuid4().hex, json.dumps(rejection), "", "rejected_cycle")
+            )
             logger.error("本轮未受理 machine_id=%s", self.machine.machine_id)
             return
 
@@ -156,36 +167,29 @@ class MachineManager:
             start_boundary=asyncio.get_running_loop().time(),
             process_epoch=self.process_epoch,
             configuration_snapshot=serialize_value(self.configuration),
-            ocr_deadline=(datetime.now(timezone.utc) + timedelta(
-                milliseconds=self.configuration.ocr_result_timeout_ms
-            )).isoformat(),
-            cycle_deadline=(datetime.now(timezone.utc) + timedelta(
-                milliseconds=self.configuration.max_cycle_open_ms
-            )).isoformat(),
+            ocr_deadline=(
+                datetime.now(timezone.utc) + timedelta(milliseconds=self.configuration.ocr_result_timeout_ms)
+            ).isoformat(),
+            cycle_deadline=(
+                datetime.now(timezone.utc) + timedelta(milliseconds=self.configuration.max_cycle_open_ms)
+            ).isoformat(),
         )
+
         # 登记本轮档案，保留本机配置并设置当前活动档案编号。
         self.sessions[session.session_id] = session
         session.configuration_snapshot["machines"] = [serialize_value(self.machine)]
         self.active_session_id = session.session_id
 
         # 记录本轮开始日志。
-        logger.info(
-            "开始测量 machine_id=%s session_id=%s", session.machine_id, session.session_id,
-        )
+        logger.info("开始测量 machine_id=%s session_id=%s", session.machine_id, session.session_id)
 
         # 启动本轮图像采集，打开对应档案的频率窗口。
-        self.camera.start_capture(
-            session.session_id, session.capture_id, session.start_boundary,
-        )
+        self.camera.start_capture(session.session_id, session.capture_id, session.start_boundary)
         self.frequency.open_window(session.session_id)
 
         # 安排本轮运行超时和 OCR 超时事件。
-        self.schedule_timeout(
-            session, "CycleTimeout", self.configuration.max_cycle_open_ms,
-        )
-        self.schedule_timeout(
-            session, "OCRTimeout", self.configuration.ocr_result_timeout_ms,
-        )
+        self.schedule_timeout(session, "CycleTimeout", self.configuration.max_cycle_open_ms)
+        self.schedule_timeout(session, "OCRTimeout", self.configuration.ocr_result_timeout_ms)
 
     async def close_measurement(self, interrupted: bool = False) -> None:
         """关闭现场窗口、释放活动位置并检查本轮结果。"""
