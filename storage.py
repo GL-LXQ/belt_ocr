@@ -213,15 +213,32 @@ class SQLiteWriter:
                 self.queue.task_done()
 
     async def enqueue_pending_records(self) -> None:
-        """把到期的持久化记录重新送入空闲队列。"""
+        """按存储队列剩余容量读取到期的待提交记录并重新入队。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 完成本轮补交入队，无返回数据。
+            返回示例：
+                None  # 无返回数据
+        """
+        # 计算存储队列的剩余容量。
         remaining_capacity = self.queue.maxsize - self.queue.qsize()
-        records = await run_blocking_operation(
-            self.recovery.pending_records, remaining_capacity,
-        )
+
+        # 按剩余容量读取已到期且未被阻止补交的持久化记录。
+        records = await run_blocking_operation(self.recovery.pending_records, remaining_capacity)
+
         for record in records:
+            # 使用原有冻结内容和摘要组装存储请求。
             request = StorageRequest(
-                record["machine_id"], record["record_id"],
-                record["payload_json"], record["payload_hash"], record["record_type"],
+                record["machine_id"],
+                record["record_id"],
+                record["payload_json"],
+                record["payload_hash"],
+                record["record_type"],
             )
+
+            # 提交记录，队列满时结束本轮入队。
             if not await self.submit(request):
                 break
