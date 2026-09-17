@@ -627,31 +627,41 @@ class MachineActor:
 
     async def submit_ocr_frames(self, session: BeltSession) -> None:
         """先登记逐帧任务，再把未完成任务提交给共享调度器。"""
+        # 为每张图片登记 OCR 任务，保留已有任务的处理进度。
         for frame in session.selected_frames.values():
             session.ocr_jobs.setdefault(frame.frame_id, {
                 "job_id": uuid4().hex, "state": "WAITING", "attempt": 0,
                 "ordered_lines": [],
             })
+
+        # 标记本轮进入 OCR 处理阶段并保存检查点。
         session.ocr_state = "RUNNING"
         await run_blocking_operation(self.recovery.checkpoint, self)
 
-        # 从原配置快照取得本轮模拟文字。
+        # 从本轮配置快照中取出包含模拟文字的机器配置。
         machine_settings = next(
             machine for machine in session.configuration_snapshot["machines"]
             if machine["machine_id"] == session.machine_id
         )
         for frame_id, job_state in session.ocr_jobs.items():
+            # 跳过已识别成功的图片任务。
             if job_state["state"] == "SUCCESS":
                 continue
+
+            # 达到尝试次数上限时，标记本轮失败并停止提交。
             if job_state["attempt"] >= self.configuration.ocr_retry_attempts:
                 session.ocr_state = "FAILED"
                 session.errors.append("OCR_RETRIES_EXHAUSTED")
                 break
+
+            # 组装携带机器、档案、任务编号和图片信息的 OCR 任务。
             job = OCRJob(
                 session.machine_id, session.session_id, job_state["job_id"],
                 session.selected_frames[frame_id],
                 tuple(machine_settings["simulated_lines"]), job_state["attempt"],
             )
+
+            # 提交到共享 OCR 队列，队列满时标记失败并停止提交。
             if not self.ocr.submit(job):
                 session.ocr_state = "FAILED"
                 session.errors.append("OCR_QUEUE_FULL")
