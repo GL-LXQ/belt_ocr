@@ -41,17 +41,33 @@ class SimulatedOCR:
         self.stopping = False
 
     def submit(self, job: OCRJob) -> bool:
-        """把本轮全部选中帧加入共享队列。"""
+        """将单张图片的识别任务加入对应机器的 OCR 队列。
+
+        Args:
+            job: 包含机器编号、测量编号、任务编号、图片和模拟识别参数的任务。
+
+        Returns:
+            bool: 返回任务是否已受理，不表示识别是否成功。
+            返回示例：
+                True  # 任务已入队或已登记
+                False  # 已停止接收任务或未完成任务数达到上限
+        """
+        # 已登记的任务直接返回受理成功。
         if job.job_id in self.registered_jobs:
             return True
-        if (
-            not self.accepting_jobs
-            or self.pending_count >= self.configuration.ocr_queue_capacity
-        ):
+
+        # 停止接收任务或容量已满时拒收。
+        if not self.accepting_jobs or self.pending_count >= self.configuration.ocr_queue_capacity:
             return False
+
+        # 将任务追加到所属机器的 OCR 队列。
         self.machine_queues[job.machine_id].append(job)
+
+        # 更新未完成任务数量并登记任务编号。
         self.pending_count += 1
         self.registered_jobs.add(job.job_id)
+
+        # 通知后台有任务可处理，并返回受理成功。
         self.jobs_available.set()
         return True
 
