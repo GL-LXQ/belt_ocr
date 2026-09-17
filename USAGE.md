@@ -106,9 +106,9 @@ asyncio.run(run_measurement())
 本版假设调用方提供按实际顺序确认的 START/CLOSE，不接受未经确认的电平变化。
 无活动周期时重复关闭、活动周期内重复启动不会产生新测量。
 仅有 `machine_id` 的入口无法辨别来自硬件的跨周期旧信号，真实接入层必须先确定周期身份。
-业务事件支持 `event_id`、`source_id`、`source_epoch`、`source_sequence`、时间及 `session_id`；
-系统不按 event_id 持久化去重；事件处理保留来源批次、序号及 Session 归属检查，结果提交保留幂等写入。
-带旧 Session 的关闭事件、旧来源序号、未经同步的新批次会进入审计，不关闭新周期。
+业务事件支持 `event_id`、`source_id`、时间及 `session_id`；
+系统不按 event_id 持久化去重；事件处理保留启停信号时效、Session 归属及采集数据中的设备身份检查，结果提交保留幂等写入。
+带旧 Session 的关闭事件会进入审计，不关闭新周期。
 
 ## 业务处理顺序
 
@@ -185,10 +185,6 @@ await app.report_device_health("CAM01", healthy=False)
 await app.report_device_health("CAM01", healthy=True)
 
 # 确认现场已经关闭后恢复接收。
-await app.synchronize_machine("M01", observed_state="CLOSED")
-
-# 确认外部来源重连后的新批次和序号基线。
-await app.synchronize_source("M01", "external-input", "connection-2", 0)
 await app.synchronize_machine("M01", observed_state="CLOSED")
 ```
 

@@ -54,7 +54,6 @@ class MachineManager:
         self.recovery = database.recovery
         self.process_epoch = uuid4().hex
         self.device_faults: set[str] = set()
-        self.source_cursors: dict[str, dict] = {}
         self.capacity_available = True
         self.initialized = False
         self.background_tasks: set[asyncio.Task[None]] = set()
@@ -220,7 +219,7 @@ class MachineManager:
         await self.try_finalize(session)
 
     async def process_event(self, event: MeasurementEvent) -> None:
-        """检查事件来源与顺序，并分派处理业务。
+        """检查启停信号时效，并分派处理业务。
 
         Args:
             event: 待处理的测量事件，包含事件身份、来源信息和业务数据。
@@ -230,46 +229,12 @@ class MachineManager:
             返回示例：
                 None  # 无返回数据
         """
-        # 根据事件类型确定采集结果和提交回调的预期来源。
-        expected_source = None
-        if event.event_type.startswith(("Frame", "Capture")):
-            expected_source = self.machine.camera_id
-        elif event.event_type.startswith("Frequency"):
-            expected_source = self.machine.frequency_source_id
-        elif event.event_type.startswith("OCR"):
-            expected_source = "OCR"
-        elif event.event_type.startswith("Commit"):
-            expected_source = "STORAGE"
-
-        # 登记并隔离来源与设备或模块绑定不符的事件。
-        if expected_source and event.source_id != expected_source:
-            await run_blocking_operation(self.recovery.audit, "EVENT_SOURCE_MISMATCH", event)
-            return
-
-        # 检查来源批次和递增序号，登记并隔离不符合来源顺序的事件。
-        cursor = self.source_cursors.get(event.source_id)
-        if event.source_id and cursor:
-            if cursor["epoch"] != event.source_epoch:
-                if event.source_epoch != self.process_epoch:
-                    await run_blocking_operation(self.recovery.audit, "SOURCE_EPOCH_MISMATCH", event)
-                    return
-            elif event.source_sequence <= cursor["sequence"]:
-                await run_blocking_operation(self.recovery.audit, "STALE_SOURCE_SEQUENCE", event)
-                return
-
-        # 检查启动和关闭事件的发生时间，登记并隔离超出时限的事件。
+        # 检查启动和关闭事件是否超出时限，登记并隔离超出时限的事件。
         if event.event_type in {"MachineStarted", "MachineClosed"}:
             age = datetime.now(timezone.utc) - datetime.fromisoformat(event.occurred_at)
             if abs(age.total_seconds()) * 1000 > self.configuration.event_max_age_ms:
                 await run_blocking_operation(self.recovery.audit, "STALE_CONTROL_EVENT", event)
                 return
-
-        # 更新内存中该来源的批次和序号。
-        if event.source_id:
-            self.source_cursors[event.source_id] = {
-                "epoch": event.source_epoch,
-                "sequence": event.source_sequence,
-            }
 
         # 分派事件并更新内存中的业务状态。
         await self.apply_event(event)
@@ -330,16 +295,6 @@ class MachineManager:
                     self.interrupted_session_id = None
                 self.device_faults.discard("UNKNOWN_INITIAL_STATE")
                 await run_blocking_operation(self.recovery.audit, "MACHINE_SYNCHRONIZED", event)
-                return
-            case "SourceSynchronized":
-                # 中断原周期，登记来源批次和序号基线。
-                await self.close_measurement(interrupted=True)
-                self.waiting_cycle_reset = True
-                self.source_cursors[event.payload["source_id"]] = {
-                    "epoch": event.payload["epoch"],
-                    "sequence": event.payload["sequence"],
-                }
-                await run_blocking_operation(self.recovery.audit, "SOURCE_SYNCHRONIZED", event)
                 return
             case "CapacityChanged":
                 self.capacity_available = event.payload

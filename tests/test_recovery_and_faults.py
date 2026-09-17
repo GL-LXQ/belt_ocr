@@ -390,42 +390,6 @@ asyncio.run(crash_after_start())
         self.assertEqual(app.machine_managers["M01"].active_session_id, new_session_id)
         self.assertIn("CLOSE_SESSION_MISMATCH", self.read_audit_reasons())
 
-    async def test_source_sequence_and_epoch_require_resynchronization(self) -> None:
-        app = await self.start_app()
-        machine_manager = app.machine_managers["M01"]
-
-        # 同一来源的旧序号和未经确认的新批次均被隔离。
-        event = MeasurementEvent(
-            "MachineStarted", "M01", source_id="test-input",
-            source_epoch="first", source_sequence=10,
-        )
-        await app.publish_event(event)
-        await machine_manager.queue.join()
-        first_session_id = machine_manager.active_session_id
-        await app.publish_event(MeasurementEvent(
-            "MachineClosed", "M01", first_session_id, source_id="test-input",
-            source_epoch="first", source_sequence=9,
-        ))
-        await app.publish_event(MeasurementEvent(
-            "MachineClosed", "M01", first_session_id, source_id="test-input",
-            source_epoch="second", source_sequence=1,
-        ))
-        await machine_manager.queue.join()
-        self.assertEqual(machine_manager.active_session_id, first_session_id)
-        self.assertIn("STALE_SOURCE_SEQUENCE", self.read_audit_reasons())
-        self.assertIn("SOURCE_EPOCH_MISMATCH", self.read_audit_reasons())
-
-        # 确认来源新批次和机器关闭状态后允许下一轮。
-        await app.synchronize_source("M01", "test-input", "second")
-        await app.synchronize_machine("M01", "CLOSED")
-        await app.publish_event(MeasurementEvent(
-            "MachineStarted", "M01", source_id="test-input",
-            source_epoch="second", source_sequence=1,
-        ))
-        await machine_manager.queue.join()
-        self.assertIsNotNone(machine_manager.active_session_id)
-        self.assertNotEqual(machine_manager.active_session_id, first_session_id)
-
     async def test_frequency_identity_conflict_requires_review(self) -> None:
         app = await self.start_app()
         await app.handle_start("M01")

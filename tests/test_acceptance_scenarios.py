@@ -118,13 +118,13 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
                 await self.publish_and_wait(MeasurementEvent(
                     "FrameSelected", session.machine_id, session.session_id,
                     replace(frame, frame_id=uuid4().hex, camera_id="wrong-camera"),
-                    source_id=source_id, source_epoch="test", source_sequence=1,
+                    source_id=source_id,
                 ))
             for source_id in ("", "wrong-frequency"):
                 await self.publish_and_wait(MeasurementEvent(
                     "FrequencyMeasured", session.machine_id, session.session_id,
                     replace(measurement, frequency_source_id="wrong-frequency"),
-                    source_id=source_id, source_epoch="test", source_sequence=1,
+                    source_id=source_id,
                 ))
             self.assertEqual(set(session.selected_frames), {frame.frame_id})
             self.assertEqual(
@@ -146,7 +146,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
                 record["frequency_candidates"][0]["frequency_source_id"],
                 record["frequency_source_id"],
             )
-        self.assertIn("EVENT_SOURCE_MISMATCH", self.read_audit_reasons())
+        self.assertIn("FRAME_OWNERSHIP_CONFLICT", self.read_audit_reasons())
+        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_audit_reasons())
 
     async def test_03_04_05_late_ocr_and_commit_preserve_new_cycle(self):
         # 建立旧轮输入及识别、提交确认的两个等待点。

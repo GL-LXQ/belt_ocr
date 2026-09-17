@@ -32,7 +32,6 @@ class App:
         self.machine_managers: dict[str, MachineManager] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
         self.accepting_signals = False
-        self.source_sequences: dict[tuple[str, str], int] = {}
         self.process_epoch = uuid4().hex
         self.has_started = False
         self.stopping = False
@@ -212,17 +211,10 @@ class App:
             elif event.event_type.startswith("Commit"):
                 source_id = "STORAGE"
 
-            # 按机器编号和来源编号递增事件序号。
-            source_key = (event.machine_id, source_id)
-            sequence = self.source_sequences.get(source_key, 0) + 1
-            self.source_sequences[source_key] = sequence
-
-            # 复制事件并补齐来源、本次运行批次、序号和接收时间。
+            # 复制事件并补齐来源和接收时间。
             event = replace(
                 event,
                 source_id=source_id,
-                source_epoch=self.process_epoch,
-                source_sequence=sequence,
                 received_at=datetime.now(timezone.utc).isoformat(),
             )
 
@@ -271,18 +263,6 @@ class App:
 
         # 发送状态同步事件并等待处理完成。
         await self.send_signal("MachineSynchronized", machine_id, machine_state)
-
-    async def synchronize_source(
-        self, machine_id: str, source_id: str, source_epoch: str,
-        source_sequence: int = 0,
-    ) -> None:
-        """登记已确认的来源批次和序号基线。"""
-        if not source_id or not source_epoch or source_sequence < 0:
-            raise ValueError("来源、批次不能为空，序号不能为负数。")
-        await self.send_signal("SourceSynchronized", machine_id, {
-            "source_id": source_id, "epoch": source_epoch,
-            "sequence": source_sequence,
-        })
 
     async def maintain_system(self) -> None:
         """定期补交待提交记录，检查存储容量并通知机器管理员更新容量状态。
