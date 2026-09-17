@@ -134,44 +134,62 @@ class SQLiteWriter:
             )
 
     async def run(self) -> None:
-        """独立提交记录，并对临时写入失败进行有限重试。"""
+        """持续消费存储队列，执行写入和有限重试，并通过事件报告提交结果。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None: 持续运行直到任务被取消，提交结果通过事件发送，无返回数据。
+            返回值形式示例：
+                None  # 无返回数据
+        """
         while True:
+            # 等待并取出一份待写入记录。
             request = await self.queue.get()
             try:
-                # 对同一份冻结记录执行有限次数的提交。
+                # 初始化本次提交的成功状态和内容冲突标记。
                 succeeded = False
                 integrity_conflict = False
+
+                # 对同一份冻结记录执行有限次数的提交。
                 for attempt_number in range(self.configuration.storage_retry_attempts):
                     try:
+                        # 首次写入前创建数据库目录和数据表。
                         if not self.initialized:
                             await run_blocking_operation(self.initialize)
+
+                        # 写入最终记录，并登记待提交记录已完成。
                         await run_blocking_operation(self.write_record, request)
-                        await run_blocking_operation(
-                            self.recovery.complete_record, request,
-                        )
+                        await run_blocking_operation(self.recovery.complete_record, request)
+
+                        # 标记提交成功和存储可用，结束本次重试循环。
                         succeeded = True
                         self.available = True
                         break
                     except ValueError:
+                        # 登记提交内容冲突，记录审计和日志，结束本次重试循环。
                         integrity_conflict = True
-                        await run_blocking_operation(
-                            self.recovery.audit, "COMMIT_INTEGRITY_CONFLICT", request,
-                        )
+                        await run_blocking_operation(self.recovery.audit, "COMMIT_INTEGRITY_CONFLICT", request)
                         logger.exception("提交内容冲突 session_id=%s", request.session_id)
                         break
                     except Exception:
+                        # 标记存储不可用并记录本次写入异常。
                         self.available = False
                         logger.exception(
                             "保存失败 machine_id=%s session_id=%s attempt=%s",
-                            request.machine_id, request.session_id, attempt_number + 1,
+                            request.machine_id,
+                            request.session_id,
+                            attempt_number + 1,
                         )
-                        await asyncio.sleep(
-                            self.configuration.storage_retry_delay_ms / 1000
-                        )
+
+                        # 等待配置的重试间隔。
+                        await asyncio.sleep(self.configuration.storage_retry_delay_ms / 1000)
 
                 # 保存下一次自动补交时间，冲突记录停止自动重试。
                 if not succeeded:
-                    await run_blocking_operation(self.recovery.delay_record,
+                    await run_blocking_operation(
+                        self.recovery.delay_record,
                         request.session_id,
                         self.configuration.storage_retry_interval_ms / 1000,
                         blocked=integrity_conflict,
@@ -179,12 +197,18 @@ class SQLiteWriter:
 
                 # 把提交状态返回原 Session。
                 if request.record_type == "measurement":
-                    await self.publish_event(MeasurementEvent(
-                        "CommitSucceeded" if succeeded else "CommitFailed",
-                        request.machine_id, request.session_id,
-                        {"integrity_conflict": integrity_conflict},
-                    ))
+                    await self.publish_event(
+                        MeasurementEvent(
+                            "CommitSucceeded" if succeeded else "CommitFailed",
+                            request.machine_id,
+                            request.session_id,
+                            {
+                                "integrity_conflict": integrity_conflict,
+                            },
+                        )
+                    )
             finally:
+                # 移除本次排队标记，并通知队列任务已处理完毕。
                 self.queued_records.discard(request.session_id)
                 self.queue.task_done()
 
