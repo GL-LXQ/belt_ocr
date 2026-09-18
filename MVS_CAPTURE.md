@@ -1,6 +1,6 @@
 # 海康 MVS 固定窗口流式采集
 
-底层通过同步逐帧回调交付图像，并已由 `camera.SessionCamera` 接入 App 和 Session。正式流程只使用 MVS 相机，文件夹模拟采集已删除；OCR 支持手动消费内存图片批次，真实模型尚未接入；频率仍为模拟实现。
+底层通过同步逐帧回调交付图像，并已由 `camera.SessionCamera` 接入 App 和 Session。正式流程只使用 MVS 相机，文件夹模拟采集已删除；OCR 支持手动消费内存图片批次，真实模型尚未接入；频率采用待接入协议的设备黑盒接口。
 实现参考 `mvs_tennis/packages/mvs/src/mvs/capture/grab.py`、`capture/pipeline.py` 和 `sdk/camera.py`，
 沿用官方 Python 绑定、独立 Grabber、Buffer 复制和释放顺序，不包含同步组包或网球业务。
 

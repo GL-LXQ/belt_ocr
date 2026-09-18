@@ -1,12 +1,12 @@
 # 多皮带机并行采集与 OCR 系统：Codex 开发规格
 
-> 当前已接入 MVS 相机与 Session 流程；本阶段仅将图片批次送入 OCR 队列，尚未接入批次识别，频率仍为模拟实现。支持 SQLite 保存、本次运行内自动补交和故障审计；重启不恢复旧 Session。
+> 当前已接入 MVS 相机与 Session 流程；OCR 支持内存图片批次及终选占位入口；频率采用设备黑盒接口，窗口收尾与数据库结算已接通，设备协议内部待实现。支持 SQLite 保存、本次运行内自动补交和故障审计；重启不恢复旧 Session。
 > 启动方法、配置说明、信号入口及当前边界见 [运行说明](USAGE.md)。
 > 下文保留完整开发规格，不表示所有生产能力均已交付。
 
 海康 MVS 模块已接入 App，使用方法见 [运行说明](USAGE.md) 和 [MVS 采集说明](MVS_CAPTURE.md)。文件夹模拟采集已移除；测试通过假 SDK 验证真实适配器。没有配置序列号或没有可用相机时，对应机器不接受正常测量。
 
-当前系统的数据流：START 创建独立 Session，相机帧从 SDK Buffer 复制后编码为内存 BMP，不在采集阶段落盘；合格图片组批交给共享 TextRecognizer 队列，成功入队后由所属 Session.memory_frames 持有原图并增加 pending_recognition_batches。消费者将有序 BMP 字节列表交给 recognize_batch，通过 machine_id、session_id 和 frame_id 回传原始 blocks，成功或失败均结算批次数。采集封口且本轮批次全部结算后，仅调用一次 select_final_text_and_img(recognition_results, memory_frames)，由 frame_id 关联原图；文字终选、按信息量和置信度选图及最终保存仍待实现，None 不表示终选完成，当前不会保存任何采集图片。原图保留至超时、中断、记录冻结或退出清理，同时移除本轮尚未消费的批次；正在推理的图片待同步调用结束后释放，其他周期不受影响。目标为仅保存最终选中的图片，无最终文字、整轮 OCR 失败或超时不保存图片。recognize_batch 仍返回空 blocks，App 不自动启动消费者；内存图片不跨进程恢复，异常退出会丢失未保存图片，重启不恢复旧 Session。
+当前系统的数据流：START 创建独立 Session，登记频率起始边界并启动相机内存图片组批；OCR 按批次回传原始文字块，采集封口且批次结算后只触发一次文字和图片终选占位入口，当前不保存图片。frequency_adapter.py 中的 FrequencyAdapter 由 frequency_adapter 对象调用，负责读取、有效性判断、测量去重和窗口归属，业务层将 FrequencyMeasured 追加到 measurement_frequencies 并按统一时钟下的测量时间排序，时间相同按来源序号排序。CLOSE 固定频率截止时间并请求黑盒收齐本轮在途数据，FrequencyWindowSealed 后取列表最后一条为 final_frequency_hz；空列表、失败或收尾超时保留明细但最终值为空。正常关闭后的记录冻结必须等待频率终态，即使 OCR 已失败也不提前截断频率明细；最终明细 JSON、最终频率和完整 payload 在同一 SQLite 事务中写入。监听和收尾黑盒未实现时报告明确故障，不生成测量或成功封口；数据库启动时升级旧库明细列，保留历史冻结内容及哈希，重启仍不恢复旧 Session。
 
 ## 1. 项目目标与边界
 
@@ -305,6 +305,10 @@ CaptureSealed 已收到
 
 ## 11. 频率采集与归属
 
+当前设备黑盒入口为 `FrequencyAdapter.listen_measurements()` 和 `drain_measurements(window)`，内部协议逻辑待实现。前者负责连接、持续读取、有效性检查、去重、时间映射、归属及资源释放；后者确认关闭前测量已全部交付后才返回。业务层信任这些前置约束，仅隔离终态后的迟到事件，不重复判断数值范围或测量身份。`finish_frequency_window()` 负责有限等待、成功封口或失败交付及窗口释放。
+
+数据库 `measurements.measurement_frequencies` 为按时间排序的完整测量对象 JSON 列表，`final_frequency_hz` 为最终数值。新记录的 payload_json 同步保存相同明细。旧库升级从历史 frequency_candidates 回填新列，不改写已有 payload、最终值和哈希。
+
 频率适配器始终接收设备数据，先完成协议解析、来源识别、新测量识别和有效性校验，再向业务层发布事件。
 
 ```text
@@ -336,7 +340,7 @@ FrequencyMeasured(session_id, measurement_id, value_hz, ...)
 
 CLOSE 后要求适配器封口。适配器将已经明确归属的在途数据按序发完，再发送 `FrequencyWindowSealed`。设置有限封口等待上限，但等待只针对已发生且归属可确认的测量，不延长现场测量窗口。
 
-封口后选择本周期最后一次有效测量，生成最终频率并置 `frequency_done = True`。若没有有效值或存在未解决的归属冲突，标记失败/待复核，不无限等待。
+成功封口后按统一时钟下的测量时间排序，选择本周期最后一次有效测量，生成最终频率并置 `frequency_done = True`。若没有有效值或存在未解决的归属冲突，标记失败/待复核，不无限等待。
 
 ## 12. CLOSE：关闭现场窗口，释放活动位置
 
@@ -409,7 +413,7 @@ ocr_state: WAITING | RUNNING | SUCCESS | FAILED | TIMED_OUT
 ocr_result, evidence_refs
 
 frequency_window_sealed
-frequency_candidates
+measurement_frequencies
 frequency_state: WAITING | COLLECTING | FINAL_VALID | FINAL_INVALID
 final_frequency_hz, final_measurement_id
 

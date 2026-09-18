@@ -15,6 +15,7 @@ from app import App
 from models import MeasurementEvent
 from database import DatabaseRequest
 from fake_mvs import FakeMvsSdk
+from fake_frequency import FakeFrequency
 
 
 class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -31,6 +32,11 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         replacement = patch("app.load_mvs_sdk", side_effect=FakeMvsSdk)
         replacement.start()
         self.addCleanup(replacement.stop)
+
+        # 以测试设备替身提供频率输入，生产适配器保留黑盒接口。
+        frequency_replacement = patch("app.FrequencyAdapter", side_effect=FakeFrequency)
+        frequency_replacement.start()
+        self.addCleanup(frequency_replacement.stop)
 
     async def asyncTearDown(self) -> None:
         # 关闭测试应用实例并释放临时文件。
@@ -212,7 +218,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         first_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: (
             first_session.selected_frames
-            and machine_manager.frequency.active_window.pending_deliveries
+            and machine_manager.frequency_adapter.active_window.pending_deliveries
         ))
         self.assertEqual(first_session.frequency_candidates, {})
         await app.handle_close("M01")
@@ -242,7 +248,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_equal_frequency_values_have_different_measurement_ids(self) -> None:
         app = await self.start_app()
         machine_manager = app.machine_managers["M01"]
-        machine_manager.frequency.machine = replace(
+        machine_manager.frequency_adapter.machine = replace(
             machine_manager.machine, simulated_frequencies_hz=(42.0,),
         )
 
@@ -263,7 +269,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_valid_frequency_saves_review_record(self) -> None:
         app = await self.start_app()
         machine_manager = app.machine_managers["M01"]
-        machine_manager.frequency.machine = replace(
+        machine_manager.frequency_adapter.machine = replace(
             machine_manager.machine, simulated_frequencies_hz=(0.0, float("nan"), -1.0),
         )
 

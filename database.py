@@ -40,9 +40,17 @@ class Database:
         self.initialized = False
 
     def initialize(self) -> None:
-        """创建数据库目录和记录表。"""
+        """创建记录表并升级历史库中的频率明细字段。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 数据库已就绪，历史记录保留原始提交内容和哈希
+        """
+        # 创建存储目录和当前版本的测量、未受理记录表。
         self.configuration.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(self.configuration.database_path)) as connection:
+        with closing(sqlite3.connect(self.configuration.database_path)) as connection, connection:
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS measurements (
                     session_id TEXT PRIMARY KEY,
@@ -52,6 +60,7 @@ class Database:
                     finish_time TEXT NOT NULL,
                     ordered_lines TEXT NOT NULL,
                     final_frequency_hz REAL,
+                    measurement_frequencies TEXT NOT NULL DEFAULT '[]',
                     final_measurement_id TEXT,
                     evidence_refs TEXT NOT NULL,
                     outcome TEXT NOT NULL,
@@ -66,6 +75,26 @@ class Database:
                     payload_json TEXT NOT NULL
                 );
             """)
+            # 检查旧库字段，首次升级时增加频率明细列并回填已有记录。
+            column_names = {column[1] for column in connection.execute("PRAGMA table_info(measurements)")}
+            if "measurement_frequencies" not in column_names:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "ALTER TABLE measurements ADD COLUMN measurement_frequencies TEXT NOT NULL DEFAULT '[]'"
+                )
+                # 按测量时间回填旧明细，仅更新新增查询列。
+                for session_id, payload_json in connection.execute(
+                    "SELECT session_id, payload_json FROM measurements"
+                ).fetchall():
+                    payload = json.loads(payload_json)
+                    frequencies = payload.get("frequency_candidates", [])
+                    frequencies.sort(key=lambda measurement: (
+                        measurement["measured_monotonic"], measurement["source_sequence"],
+                    ))
+                    connection.execute(
+                        "UPDATE measurements SET measurement_frequencies = ? WHERE session_id = ?",
+                        (json.dumps(frequencies, ensure_ascii=False), session_id),
+                    )
         self.initialized = True
 
     async def submit(self, request: DatabaseRequest) -> bool:
@@ -113,7 +142,14 @@ class Database:
         return True
 
     def write_record(self, request: DatabaseRequest) -> None:
-        """在事务中检查重复记录并写入同一份冻结内容。"""
+        """在事务中幂等写入冻结记录及频率明细和最终值。
+
+        Args:
+            request: 包含记录身份、冻结 JSON 和内容哈希的提交请求。
+
+        Returns:
+            None  # 记录已写入或已存在相同内容，冲突时抛出异常
+        """
         connection = sqlite3.connect(self.configuration.database_path, timeout=1)
         with closing(connection), connection:
             # 保存本轮未受理事件。
@@ -139,8 +175,11 @@ class Database:
             # 写入查询字段和完整冻结内容。
             payload = json.loads(request.payload_json)
             connection.execute(
-                "INSERT INTO measurements VALUES "
-                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO measurements ("
+                "session_id, machine_id, start_time, close_time, finish_time, ordered_lines, "
+                "final_frequency_hz, final_measurement_id, evidence_refs, outcome, error_codes, "
+                "is_simulated, payload_json, payload_hash, measurement_frequencies) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     request.session_id, request.machine_id, payload["start_time"],
                     payload["close_time"], payload["finish_time"],
@@ -150,6 +189,7 @@ class Database:
                     payload["outcome"], json.dumps(payload["error_codes"]),
                     int(payload["is_simulated"]), request.payload_json,
                     request.payload_hash,
+                    json.dumps(payload["measurement_frequencies"], ensure_ascii=False),
                 ),
             )
 

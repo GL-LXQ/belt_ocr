@@ -1,4 +1,4 @@
-"""持续产生模拟新测量，按打开的窗口确定测量归属。"""
+"""为业务测试提供独立的频率设备替身。"""
 
 import asyncio
 import math
@@ -17,13 +17,24 @@ class FrequencyWindow:
     pending_deliveries: set[asyncio.Task[None]] = field(default_factory=set)
 
 
-class SimulatedFrequency:
+class FakeFrequency:
     def __init__(
         self,
         machine: MachineConfiguration,
         configuration: MeasurementConfiguration,
         publish_event: PublishEvent,
     ) -> None:
+        """准备测试设备绑定和在途交付任务集合。
+
+        Args:
+            machine: 测试机器和频率数据配置。
+            configuration: 测试交付间隔、延迟及容量配置。
+            publish_event: 测量和封口事件发布入口。
+
+        Returns:
+            None  # 测试设备已初始化
+        """
+        # 保存测试配置、事件入口和周期任务集合。
         self.machine = machine
         self.configuration = configuration
         self.publish_event = publish_event
@@ -32,14 +43,30 @@ class SimulatedFrequency:
         self.windows: dict[str, FrequencyWindow] = {}
         self.tasks: set[asyncio.Task[None]] = set()
 
-    def open_window(self, session_id: str) -> None:
-        """登记本轮频率窗口。"""
+    def open_window(self, session_id: str, start_boundary: float) -> None:
+        """登记本轮频率窗口。
+
+        Args:
+            session_id: 本轮测试测量编号。
+            start_boundary: 业务入口提供的开始边界。
+
+        Returns:
+            None  # 本轮窗口已打开
+        """
         window = FrequencyWindow(session_id)
         self.windows[session_id] = window
         self.active_window = window
 
-    def seal_window(self, session_id: str) -> None:
-        """关闭指定窗口并启动在途测量结算。"""
+    def seal_window(self, session_id: str, close_boundary: float) -> None:
+        """关闭指定窗口并启动在途测量结算。
+
+        Args:
+            session_id: 需要关闭的测试周期编号。
+            close_boundary: 业务入口提供的关闭边界。
+
+        Returns:
+            None  # 已安排本轮测试数据收尾
+        """
         window = self.windows.get(session_id)
         if window is None:
             return
@@ -50,7 +77,14 @@ class SimulatedFrequency:
         task.add_done_callback(self.tasks.discard)
 
     async def run(self) -> None:
-        """持续模拟仪器产生的新测量。"""
+        """持续产生测试设备的新测量。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 持续交付测试测量，直至任务取消
+        """
         source_sequence = 0
         frequency_values = cycle(self.machine.simulated_frequencies_hz)
         while True:
@@ -93,7 +127,18 @@ class SimulatedFrequency:
         self, session_id: str, source_sequence: int, value_hz: float,
         measured_at: str, measured_monotonic: float,
     ) -> None:
-        """模拟传输延迟后发布具有固定归属的测量。"""
+        """延迟交付具有固定周期归属的测试测量。
+
+        Args:
+            session_id: 测量所属周期编号。
+            source_sequence: 测量顺序编号。
+            value_hz: 测量频率值。
+            measured_at: UTC 测量时间。
+            measured_monotonic: 测量产生时的主机单调时间。
+
+        Returns:
+            None  # 测量事件已交付
+        """
         await asyncio.sleep(self.configuration.frequency_delivery_delay_ms / 1000)
         measurement = FrequencyMeasurement(
             session_id, self.machine.frequency_source_id,
@@ -106,7 +151,14 @@ class SimulatedFrequency:
         ))
 
     async def drain_window(self, window: FrequencyWindow) -> None:
-        """等待已归属的在途数据，再发送窗口封口事件。"""
+        """等待已归属的测试数据，再发送窗口封口事件。
+
+        Args:
+            window: 待收尾的测试周期窗口。
+
+        Returns:
+            None  # 在途任务已结算并交付终态
+        """
         try:
             # 有限时间内结算本轮已经产生的测量。
             if window.pending_deliveries:

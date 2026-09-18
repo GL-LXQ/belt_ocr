@@ -1,4 +1,4 @@
-"""使用真实相机执行启停信号演示，OCR 和频率仍为模拟输入。"""
+"""执行相机启停信号演示，频率设备由黑盒适配接口提供。"""
 
 import argparse
 import asyncio
@@ -51,7 +51,7 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    argument_parser = argparse.ArgumentParser(description="MVS 相机测量信号演示，OCR 和频率为模拟输入")
+    argument_parser = argparse.ArgumentParser(description="MVS 相机测量信号演示，频率设备接口待接入")
     argument_parser.add_argument(
         "--config", type=Path, default=Path(__file__).with_name("config.example.json"),
     )

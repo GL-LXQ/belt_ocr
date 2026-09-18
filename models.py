@@ -93,7 +93,7 @@ class BeltSession:
     pending_recognition_batches: int = 0
     text_postprocessing_started: bool = False
     frequency_window_sealed: bool = False
-    frequency_candidates: dict[str, FrequencyMeasurement] = field(default_factory=dict)
+    measurement_frequencies: list[FrequencyMeasurement] = field(default_factory=list)
     frequency_state: str = "COLLECTING"
     final_frequency: FrequencyMeasurement | None = None
     outcome: str = "UNDECIDED"

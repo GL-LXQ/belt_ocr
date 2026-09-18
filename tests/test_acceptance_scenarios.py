@@ -28,7 +28,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         """暂停自动图像与频率输入，由测试按确定顺序发布事件。"""
         for target in (
             "camera.SessionCamera.start_capture",
-            "frequency.SimulatedFrequency.open_window",
+            "fake_frequency.FakeFrequency.open_window",
         ):
             replacement = patch(target)
             replacement.start()

@@ -21,7 +21,7 @@ uv run python -X utf8 main.py
 .\.venv\Scripts\python.exe -X utf8 main.py
 ```
 
-演示向所有可用机器发送启动和关闭信号，再向第一台可用机器发送第二轮信号并等待结果。三台相机都可用时共保存四条记录；没有可用相机时输出提示并退出，不生成模拟图片。
+演示向所有可用机器发送启动和关闭信号，再向第一台可用机器发送第二轮信号并等待结果。测量需要相机和频率设备接口均可用；频率黑盒未实现时报告设备故障，不生成虚构读数。
 默认数据库为 `runtime/measurements.sqlite3`，终选图片的预留目录为 `runtime/evidence/<session_id>/`，当前不写入采集图片。
 独立恢复库默认为 `runtime/measurements.recovery.sqlite3`。
 重复执行演示会为可用机器增加新记录。`runtime/` 已加入 Git 忽略列表。
@@ -43,13 +43,13 @@ uv run python -X utf8 main.py --config config.example.json
 | `machines[].camera_pixel_format` | 可选像素格式，省略时保留设备设置 |
 | `machines[].camera_exposure_time_us` / `camera_gain` | 可选手动曝光和增益 |
 | `machines[].simulated_lines` | 模拟筛选后的文字行，保留行顺序和重复文字 |
-| `machines[].simulated_frequencies_hz` | 连续循环产生的模拟新测量；空列表表示没有有效测量 |
+| `machines[].simulated_frequencies_hz` | 旧频率配置，生产适配器不再读取 |
 | `capture_window_ms` | 启动后的最长图像采集时长，默认 1000 毫秒 |
 | `camera_queue_capacity` / `camera_timeout_ms` | 每轮帧队列容量与单次等帧超时，默认 32 帧 / 50 毫秒 |
 | `max_frames_per_session` | 每轮最多选择的帧数，默认 5；采用先到先选策略 |
 | `simulated_ocr_delay_ms` | 旧模拟识别配置，当前不再使用 |
-| `frequency_interval_ms` | 仪器产生一次新测量的间隔，默认 100 毫秒 |
-| `frequency_delivery_delay_ms` | 测量产生到事件送达的模拟延迟；示例为 50 毫秒 |
+| `frequency_interval_ms` | 旧频率配置，生产适配器不再读取 |
+| `frequency_delivery_delay_ms` | 旧频率配置，生产适配器不再读取 |
 | `frequency_drain_timeout_ms` | 关闭后等待已归属在途测量的上限，默认 2000 毫秒 |
 | `ocr_result_timeout_ms` | 从启动到本轮 OCR 完成的期限，默认 30000 毫秒 |
 | `max_cycle_open_ms` | 等待正常关闭的最大时长，默认 60000 毫秒 |
@@ -71,7 +71,7 @@ uv run python -X utf8 main.py --config config.example.json
 
 相机使用 Continuous / Free Run 模式。图像复制到独立内存后立即归还 SDK Buffer，队满时丢弃新帧并统计；消费者同时处理已入队图片。原始帧由 MVS SDK 转换为内存 BMP，不在采集和批次识别阶段落盘，每轮保存采集和处理统计到 `capture_statistics`。
 当前按主机收到图像的单调时间校验 START/CLOSE 及窗口边界，不把设备时间戳直接作为主机时间；SDK 停止可能略晚于请求边界，越过业务边界的帧不进入选帧清单。
-OCR 和频率仍使用模拟输入，所有测量保留 `is_simulated = 1`，不可作为已验证的真实测量结果。
+频率设备采用黑盒接口，监听及协议收尾内部待实现；未实现时报告故障。数据库历史标记 `is_simulated` 本次不调整，真实设备验收后另行确定。
 
 ## 调用业务入口
 
@@ -118,13 +118,13 @@ asyncio.run(run_measurement())
 3. 消费者在内存中编码图片，满 8 帧交付一批；窗口到时或提前 CLOSE 后交付尾批并封口。MachineManager 收到批次即直接提交 OCR 队列。
 4. App 不自动启动 OCR 消费者；手动启动后按批次读取内存 BMP，结果通过 frame_id 关联 Session 持有的原图。
 5. CLOSE 等待本轮 Grabber 停止后释放活动位置；新一轮可以开始，旧一轮继续后台编码和识别。
-6. 频率适配器等待已绑定旧轮的在途读数，再封口并按测量序号取最后一次有效值。
+6. 频率适配器等待已绑定旧轮的在途读数，再封口并按测量时间取最后一次有效值，序号仅用于同一时间的排序。
 7. 正常关闭、OCR 成功、有效频率三项齐全，且证据可读取，才冻结完整结果。
 8. SQLite 写入成功并确认后完成；旧轮回调始终不修改新轮活动位置。
 
-频率模拟器持续运行，不会在每次 START 时重新连接或重置测量序号。
+频率设备监听接口持续运行，START 只登记窗口，不重新建立连接。
 相同数值的新测量拥有不同身份；无活动窗口的测量直接忽略，不会补给下一轮。
-传输延迟不延长现场窗口，测量归属在产生时固定。
+传输延迟不延长现场窗口，黑盒必须确认测量时间和周期归属，无法确认时报告失败。
 
 ## 保存与异常
 
@@ -132,12 +132,12 @@ asyncio.run(run_measurement())
 `payload_json` 保存完整内容，包括文字行、频率候选、测量身份、帧清单、证据引用、错误码和版本。
 
 ```sql
-SELECT machine_id, session_id, outcome, ordered_lines, final_frequency_hz
+SELECT machine_id, session_id, measurement_frequencies, final_frequency_hz, outcome
 FROM measurements
 ORDER BY start_time;
 ```
 
-- `COMPLETE`：本轮模拟业务信息完整，正常关闭后保存。
+- `COMPLETE`：本轮业务信息完整，正常关闭后保存。
 - `REVIEW_REQUIRED`：OCR、频率、采集或证据异常，正常关闭后保存待复核记录。
 - `INTERRUPTED`：周期超时或程序主动退出；不伪造正常关闭时间。
 
@@ -206,7 +206,7 @@ await app.synchronize_machine("M01", observed_state="CLOSED")
 | `mvs_sdk.py` | 官方 MVS 绑定、设备管理和独立帧内存复制 |
 | `mvs_capture.py` | 固定窗口流式采集、独立有界队列、逐帧回调和统计 |
 | `text_recognition.py` | 批次接收、监听、整批模型调用和原始结果回传；模型接口待实现 |
-| `frequency.py` | 持续模拟新测量、窗口归属和在途数据收尾 |
+| `frequency_adapter.py` | 设备黑盒契约、窗口边界、在途收尾期限和终态交付 |
 | `database.py` | SQLite 建表、幂等写入和有限重试 |
 | `recovery.py` | 本地待提交记录、审计和实例锁 |
 | `tests/test_measurement_flow.py` | 并行、跨轮次、重复、失败和超时测试 |
@@ -234,7 +234,7 @@ README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTAN
 ## 当前阶段验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_text_postprocessing.py tests/test_text_recognition.py tests/test_ocr_batch_delivery.py tests/test_mvs_capture.py tests/test_machine_state.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_frequency_pipeline.py tests/test_text_postprocessing.py tests/test_text_recognition.py tests/test_ocr_batch_delivery.py tests/test_mvs_capture.py tests/test_machine_state.py -q
 ```
 
 该命令验证满批与尾批交付、队列拒收、封口不重复提交、底层采集和配置。直接依赖旧逐帧模拟识别实现的测试已删除；独立的采集、频率、存储和重启测试保留。其余依赖完整识别结果的历史场景仍待后续接通，当前未宣称全套测试通过。
@@ -252,3 +252,13 @@ README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTAN
 文字终选、按保留文字信息量和置信度选图以及保存选中图片均待实现。占位函数返回 None 不表示终选完成，也不将 OCR 标记成功；当前采集和 OCR 阶段都不落盘，因此本阶段没有新的图片证据文件。目标规则为无最终文字、整轮 OCR 失败或超时时不保存图片。
 
 整轮失败、超时、中断、结果冻结和退出时释放 Session 持有的原图并移除本轮未消费批次；正在推理的图片由消费者持有至同步调用结束。正常 CLOSE 不提前释放原图，下一周期可独立采集。每轮帧数、待处理周期数及队列容量仍受配置限制；队满丢帧保留统计。断电、进程崩溃和强制退出会丢失未保存的内存图片。
+
+## 频率黑盒与存储
+
+`open_window(session_id, start_boundary)` 登记 START 的主机单调时间；`seal_window(session_id, close_boundary)` 固定 CLOSE 边界并安排独立收尾，不等待旧周期结果就能开启下一周期。设备监听黑盒负责交付已通过有效性、测量身份去重和归属检查的 FrequencyMeasured。测量数据使用现有 FrequencyMeasurement，包括测量身份、频率值、UTC 测量时间、同一主机时钟下的测量时间和接收时间。
+
+`drain_measurements(window)` 必须等待本轮所有已发生测量交付后才返回；关闭后产生的数据不能进入旧周期。封口成功时按测量时间排序并取最后一条作为最终频率。收尾失败或超过 frequency_drain_timeout_ms 时封闭列表，保留已收到明细、最终频率为空并记录错误。周期正常关闭后，即使 OCR 已失败，也须等到频率成功或失败终态后才能冻结记录；周期明确中断仍走原有异常路径。
+
+`measurement_frequencies` 为 measurements 表中的 JSON 文本列，每项保留完整测量对象，`final_frequency_hz` 为最终频率数值；两个字段与 payload_json 一起事务写入。旧库首次启动会新增并回填明细列，不改变历史 payload_json 和 payload_hash。无需手工删除数据库。
+
+黑盒内部尚未接入设备协议，监听未实现会报告 DeviceFault，收尾未实现会报告 FrequencyFailed。当前没有自动生成的频率数据。测试通过独立设备替身提供输入，不代表设备接口已实现。

@@ -12,8 +12,8 @@ class MachineConfiguration:
     machine_id: str
     camera_id: str
     frequency_source_id: str
-    simulated_lines: tuple[str, ...]
-    simulated_frequencies_hz: tuple[float, ...]
+    simulated_lines: tuple[str, ...] = ()
+    simulated_frequencies_hz: tuple[float, ...] = ()
     camera_serial: str = ""
     camera_pixel_format: str | None = None
     camera_exposure_time_us: float | None = None
@@ -121,9 +121,9 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
     # 创建各机器的相机绑定及 OCR、频率配置。
     machines = []
     for machine_settings in settings.pop("machines"):
-        machine_settings["simulated_lines"] = tuple(machine_settings["simulated_lines"])
+        machine_settings["simulated_lines"] = tuple(machine_settings.get("simulated_lines", ()))
         machine_settings["simulated_frequencies_hz"] = tuple(
-            machine_settings["simulated_frequencies_hz"]
+            machine_settings.get("simulated_frequencies_hz", ())
         )
         machines.append(MachineConfiguration(**machine_settings))
 

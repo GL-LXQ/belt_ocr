@@ -10,7 +10,7 @@ from uuid import uuid4
 from camera import SessionCamera
 from mvs_sdk import load_mvs_sdk
 from configuration import MeasurementConfiguration
-from frequency import SimulatedFrequency
+from frequency_adapter import FrequencyAdapter
 from machine_manager import MachineManager
 from enums import MachineState
 from models import MeasurementEvent
@@ -42,12 +42,12 @@ class App:
         # 为每台机器建立独立的采集器和业务处理器。
         for machine in configuration.machines:
             camera = SessionCamera(machine, configuration, self.publish_event)
-            frequency = SimulatedFrequency(machine, configuration, self.publish_event)
+            frequency_adapter = FrequencyAdapter(machine, configuration, self.publish_event)
             self.machine_managers[machine.machine_id] = MachineManager(
                 machine,
                 configuration,
                 camera,
-                frequency,
+                frequency_adapter,
                 self.text_recognizer,
                 self.database,
                 self.publish_event,
@@ -146,10 +146,10 @@ class App:
             logger.exception("初始化机器状态失败")
             raise RuntimeError("初始化机器状态失败。") from None
 
-        # 为每台机器安排 监听并事件处理 和 频率接收 两个后台任务。
+        # 启动每台机器的 监听任务 和 频率采集器。
         for machine_manager in self.machine_managers.values():
             self.worker_tasks.append(asyncio.create_task(machine_manager.listen_and_process_events()))
-            self.worker_tasks.append(asyncio.create_task(machine_manager.frequency.run()))
+            self.worker_tasks.append(asyncio.create_task(machine_manager.frequency_adapter.run()))
 
         # 启动共享存储任务并监控运行状态。
         self.worker_tasks.append(asyncio.create_task(
@@ -453,11 +453,9 @@ class App:
         # 收集在途测量和期限任务。
         background_tasks = []
         for machine_manager in self.machine_managers.values():
-            background_tasks.extend(machine_manager.frequency.tasks)
+            background_tasks.extend(machine_manager.frequency_adapter.tasks)
             background_tasks.extend(machine_manager.deadline_tasks.values())
             background_tasks.extend(machine_manager.background_tasks)
-            for window in machine_manager.frequency.windows.values():
-                background_tasks.extend(window.pending_deliveries)
 
         # 取消剩余后台工作并释放持续任务。
         self.releasing_resources = True
