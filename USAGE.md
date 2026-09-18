@@ -5,7 +5,7 @@
 当前版本包含三机测量、跨轮后台收尾、内存机器状态、Session 四态、失败日志清理、重启清理和设备审计。
 信号统一从 `App.handle_start()` 和 `handle_close()` 进入，尚未接入现场 IO。
 
-海康 MVS 采集已接入 App，文件夹模拟相机已删除。设备配置及底层接口见 [MVS 采集说明](MVS_CAPTURE.md)。没有相机、未填写序列号或 SDK 加载失败时，对应机器为 FAULT，不创建正常采集 Session；其他可用机器仍可运行。
+海康 MVS 采集已接入 App，文件夹模拟相机已删除。设备配置及底层接口见 [MVS 采集说明](MVS_CAPTURE.md)。任一已配置机器没有相机、未填写序列号或 SDK 加载失败时，记录错误并终止整个程序，已打开的设备会被释放。
 
 ## 运行演示
 
@@ -55,12 +55,10 @@ uv run python -X utf8 main.py --config config.example.json
 | `event_queue_capacity` / `storage_queue_capacity` | 单机事件队列和存储队列上限，默认 128 / 32 |
 | `shutdown_timeout_ms` | 正常退出等待后台收尾的上限，默认 10000 毫秒 |
 | `recovery_database_path` | 独立恢复库路径；省略时使用最终库同目录的 `.recovery.sqlite3` 文件 |
-| `storage_retry_interval_ms` | 共享工作任务异常重启的间隔，默认 1000 毫秒；不再用于提交补交 |
 | `maintenance_interval_ms` | 容量检查间隔，默认 250 毫秒 |
 | `max_persistent_records` | 正在排队或写入的记录数量达到该值时停止接收新周期，默认 1000 |
 | `minimum_free_disk_bytes` | 恢复库和证据所在磁盘的最低剩余空间，默认 100 MiB |
 | `ocr_job_timeout_ms` | 证据文件读取期限 |
-| `worker_restart_attempts` | 共享工作单元最多启动次数，默认 3 次 |
 | `event_max_age_ms` | 兼容旧配置保留，当前不再用于过滤 START/CLOSE |
 | `initial_machine_state` | 新机器的模拟初始状态，默认 `CLOSED`；也支持 `OPEN`、`UNKNOWN` |
 
@@ -159,28 +157,19 @@ Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正
 - 保留最终数据库的历史结果、已提交身份、审计和证据图片。
 - 初始状态为 CLOSED 时等待新启动；OPEN 或 UNKNOWN 时等待有效关闭或明确的关闭状态同步，再接收下一次启动。
 
-当前模拟实现从 initial_machine_state 配置读取初始状态，尚未直接读取硬件状态。有效关闭仅清除初始状态未知故障，其他设备故障仍按设备恢复流程处理。
+当前模拟实现从 initial_machine_state 配置读取初始状态，尚未直接读取硬件状态。初始运行中或未知时等待关闭或现场状态同步；设备故障则退出程序，修复后手动重启。
 退出等待到期时放弃内存中的未完成测量；尚未完成的 Session 标记 FAILED，释放内存与排队请求，不保存待补交记录。已写入最终库但尚未收到确认的历史结果仍保留。
 请保留恢复库及 SQLite 的配套文件，不要在程序运行时手工删除或只复制其中一个文件。
 
-## 故障与重新同步
+## 故障退出
 
-机器状态由当前业务数据派生为 `INITIALIZING`、`READY`、`ACTIVE`、
-`WAIT_CYCLE_RESET`、`DEGRADED` 或 `FAULT`。
-磁盘空间或待提交容量不足时停止接收新周期；恢复容量后仍需确认被拒收周期已经关闭。
+任一已配置设备启动失败，或运行期间相机取流、图片编码、频率监听发生异常，程序立即记录错误和原始异常堆栈，停止接收信号并清理全部机器。主流程收到故障后中断等待，资源释放完成后以退出码 1 结束。后台任务意外返回、取消或抛出异常同样退出，不自动重启。
 
-```python
-# 报告相机故障及恢复，仅影响绑定机器。
-await app.report_device_health("CAM01", healthy=False)
-await app.report_device_health("CAM01", healthy=True)
+设备故障/恢复事件、report_device_health 接口、storage_retry_interval_ms 和 worker_restart_attempts 配置已删除，旧配置文件需删除这两个配置键。新增设备适配器可调用 `app.report_failure(error, component)`，component 应包含机器和设备身份；线程中通过事件循环的 call_soon_threadsafe 调用。使用 App 的其他主流程也应同时等待 `app.wait_for_failure()`，并在 finally 中调用 `app.stop()`。
 
-# 确认现场已经关闭后恢复接收。
-await app.synchronize_machine("M01", observed_state="CLOSED")
-```
+正常取帧超时、暂时无频率读数不是设备故障。单轮 OCR 无结果或超时、单次数据库提交失败仍按原规则失败清理，不自动补交。容量不足仍限制新周期；容量恢复后需确认被拒收周期已关闭。初始现场状态同步入口 synchronize_machine 保留，不用于设备故障恢复。
 
-`IO`、`OCR`、`STORAGE` 作为共享来源时影响所有机器；也可显式指定 `machine_id`。
-设备报告恢复不代表已确认机器关闭，重新同步须使用真实可确认的现场状态。相机未打开或取流故障时，仅报告健康恢复不能重新打开设备；第一版需要排除故障后重启应用。
-存储工作任务意外退出时会记录故障并有限重启。文字识别支持手动启动批次消费和结果回传，没有自动启动的识别任务或逐帧重试。
+修复设备后重新启动程序，不恢复旧 Session。退出会等待相机线程归还 SDK 资源；SDK 调用本身长期不返回时，资源释放仍可能延后。
 
 ## 文件职责
 
@@ -207,7 +196,7 @@ await app.synchronize_machine("M01", observed_state="CLOSED")
 App 已接入官方 MVS 相机；IO、频率、图像质量评估和 OCR 融合尚未完成真实设备或算法接入。没有真实相机时仅能执行假 SDK 自动化验证。
 现场初始电平、脉冲去抖、设备时间映射和重连基线必须由真实设备适配层提供，不能用模拟结果替代现场验证。
 有限多轮及故障注入测试不代表已经完成工控机现场的持续运行和吞吐验收。
-最终库写入失败时只打印日志并清理本轮，不暂存补交。设备与路由审计仍使用本地恢复库，该库不可用时暂停接收。
+最终库写入失败时只打印日志并清理本轮，不暂存补交。设备与路由审计仍使用本地恢复库，该库初始化或后台检查异常时退出。
 
 ## 测试
 
@@ -223,7 +212,7 @@ README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTAN
 ## 当前阶段验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_session_state.py tests/test_frequency_pipeline.py tests/test_text_postprocessing.py tests/test_text_recognition.py tests/test_ocr_batch_delivery.py tests/test_mvs_capture.py tests/test_machine_state.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_fatal_shutdown.py tests/test_session_state.py tests/test_frequency_pipeline.py tests/test_text_postprocessing.py tests/test_text_recognition.py tests/test_ocr_batch_delivery.py tests/test_mvs_capture.py tests/test_machine_state.py -q
 ```
 
 该命令验证满批与尾批交付、队列拒收、封口不重复提交、底层采集和配置。直接依赖旧逐帧模拟识别实现的测试已删除；独立的采集、频率、存储和重启测试保留。其余依赖完整识别结果的历史场景仍待后续接通，当前未宣称全套测试通过。
@@ -252,4 +241,4 @@ measurement_frequencies 只按接收顺序追加。处理 CLOSE 前已入队的�
 
 measurements 表的 measurement_frequencies 为 JSON 文本列，final_frequency_hz 为最终频率数值；两个字段与 payload_json 一起事务写入。历史库升级保留冻结内容和哈希。废弃的关闭等待、延迟交付和重试配置已删除，旧配置文件需移除对应键后加载。
 
-listen_measurements 当前按 frequency_interval_ms 循环读取 simulated_frequencies_hz，并过滤无读数、非有限值及范围外数值；相同有效值每次生成新的测量身份。真实协议尚未接入。监听异常时报告 DeviceFault，有活动周期时先报告 FrequencyFailed。程序退出只取消并等待持续监听任务，无频率收尾任务。测试使用独立设备替身，不代表设备协议已实现。
+listen_measurements 当前按 frequency_interval_ms 循环读取 simulated_frequencies_hz，并过滤无读数、非有限值及范围外数值；相同有效值每次生成新的测量身份。真实协议尚未接入。监听异常记录日志并向应用抛出，应用停止全部测量并退出。程序退出只取消并等待持续监听任务，无频率收尾任务。测试使用独立设备替身，不代表设备协议已实现。

@@ -43,30 +43,20 @@ class FrequencyAdapter:
         self.active_session_id: str | None = None
 
     async def run(self) -> None:
-        """运行持续监听入口，读取异常时交付频率失败和设备故障。
+        """运行持续监听入口，记录读取异常并向应用抛出。
 
         Args:
             无外部参数。
 
         Returns:
-            None  # 监听已结束，异常已通过业务事件交付
+            None  # 监听被取消；读取失败时抛出异常
         """
         # 调用设备黑盒，连接和持续读取由该接口完成。
         try:
             await self.listen_measurements()
         except Exception:
             logger.exception("频率设备监听失败 machine_id=%s", self.machine.machine_id)
-            # 当前周期先登记频率失败，再交付设备故障。
-            session_id = self.active_session_id
-            if session_id is not None:
-                await self.publish_event(MeasurementEvent(
-                    EventType.FREQUENCY_FAILED, self.machine.machine_id, session_id,
-                    "FREQUENCY_RECEIVE_FAILED",
-                ))
-            await self.publish_event(MeasurementEvent(
-                EventType.DEVICE_FAULT, self.machine.machine_id,
-                payload=self.machine.frequency_source_id,
-            ))
+            raise
 
     async def listen_measurements(self) -> None:
         """按配置循环产生联调频率，向当前 Session 交付新有效测量。

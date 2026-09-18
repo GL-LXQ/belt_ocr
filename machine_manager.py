@@ -51,7 +51,6 @@ class MachineManager:
         self.interrupted_session_id: str | None = None
         self.deadline_tasks: dict[tuple[str, EventType], asyncio.Task[None]] = {}
         self.recovery = database.recovery
-        self.device_faults: set[str] = set()
         self.capacity_available = True
         self.initialized = False
         self.background_tasks: set[asyncio.Task[None]] = set()
@@ -60,7 +59,7 @@ class MachineManager:
     def acceptance_state(self) -> str:
         if not self.initialized:
             return "INITIALIZING"
-        if self.device_faults or not self.recovery.available or not self.camera.available:
+        if not self.recovery.available or not self.camera.available:
             return "FAULT"
         if self.waiting_cycle_reset:
             return "WAIT_CYCLE_RESET"
@@ -90,28 +89,15 @@ class MachineManager:
                 if event.acknowledgement is not None:
                     if not event.acknowledgement.done():
                         event.acknowledgement.set_result(None)
-            except Exception:
-                # 登记业务处理故障并设置等待周期复位。
-                self.device_faults.add("BUSINESS_PROCESSING")
-                self.waiting_cycle_reset = True
+            except Exception as error:
+                # 记录事件处理异常，唤醒请求方并交给应用停止全部任务。
                 logger.exception(
                     "业务处理失败 machine_id=%s session_id=%s event=%s",
                     event.machine_id, event.session_id, event.event_type,
                 )
-                try:
-                    # 保存异常审计并中断当前测量。
-                    await run_blocking_operation(
-                        self.recovery.audit, "BUSINESS_PROCESSING_FAILED", event,
-                    )
-                    await self.handle_machine_close(interrupted=True)
-                except Exception:
-                    # 标记本地运行库不可用并记录异常。
-                    self.recovery.available = False
-                    logger.exception("异常审计或中断处理失败 machine_id=%s", event.machine_id)
-                # 向等待方报告本次事件处理失败。
-                if event.acknowledgement is not None:
-                    if not event.acknowledgement.done():
-                        event.acknowledgement.set_exception(RuntimeError("测量处理失败。"))
+                if event.acknowledgement is not None and not event.acknowledgement.done():
+                    event.acknowledgement.set_exception(error)
+                raise
             finally:
                 # 通知状态已变化，并标记当前队列任务处理结束。
                 self.state_changed.set()
@@ -136,7 +122,6 @@ class MachineManager:
         if (
             len(self.sessions) >= self.configuration.max_pending_sessions_per_machine
             or not self.capacity_available
-            or self.device_faults
             or not self.recovery.available
             or not self.camera.available
             or self.camera.is_capturing
@@ -283,22 +268,9 @@ class MachineManager:
                     await run_blocking_operation(self.recovery.audit, "CLOSE_SESSION_MISMATCH", event)
                     return
                 await self.handle_machine_close()
-                # 收到有效关闭信号后清除初始状态未知的故障。
-                self.device_faults.discard("UNKNOWN_INITIAL_STATE")
                 return
             case EventType.SHUTDOWN:
                 await self.handle_machine_close(interrupted=True)
-                return
-            case EventType.DEVICE_FAULT:
-                # 登记设备故障并中断当前周期。
-                self.device_faults.add(event.payload)
-                await run_blocking_operation(self.recovery.audit, "DEVICE_FAULT", event)
-                await self.handle_machine_close(interrupted=True)
-                self.waiting_cycle_reset = True
-                return
-            case EventType.DEVICE_RECOVERED:
-                self.device_faults.discard(event.payload)
-                await run_blocking_operation(self.recovery.audit, "DEVICE_RECOVERED", event)
                 return
             case EventType.MACHINE_SYNCHRONIZED:
                 # 中断原活动周期，更新机器复位状态。
@@ -307,7 +279,6 @@ class MachineManager:
                 self.waiting_cycle_reset = event.payload != MachineState.CLOSED
                 if event.payload == MachineState.CLOSED:
                     self.interrupted_session_id = None
-                self.device_faults.discard("UNKNOWN_INITIAL_STATE")
                 await run_blocking_operation(self.recovery.audit, "MACHINE_SYNCHRONIZED", event)
                 return
             case EventType.CAPACITY_CHANGED:

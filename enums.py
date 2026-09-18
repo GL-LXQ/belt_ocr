@@ -49,8 +49,6 @@ class EventType(str, Enum):
     MACHINE_STARTED = "MachineStarted"  # 机器启动
     MACHINE_CLOSED = "MachineClosed"  # 机器正常关闭
     SHUTDOWN = "Shutdown"  # 应用退出
-    DEVICE_FAULT = "DeviceFault"  # 设备故障
-    DEVICE_RECOVERED = "DeviceRecovered"  # 设备恢复
     MACHINE_SYNCHRONIZED = "MachineSynchronized"  # 机器现场状态同步
     CAPACITY_CHANGED = "CapacityChanged"  # 可用容量变化
     FRAME_BATCH_SELECTED = "FrameBatchSelected"  # 图片批次交付

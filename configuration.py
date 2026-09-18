@@ -42,11 +42,9 @@ class MeasurementConfiguration:
     configuration_version: str = "simulation-v1"
     recovery_database_path: Path | None = None
     maintenance_interval_ms: int = 250
-    storage_retry_interval_ms: int = 1000
     max_persistent_records: int = 1000
     minimum_free_disk_bytes: int = 104857600
     ocr_job_timeout_ms: int = 5000
-    worker_restart_attempts: int = 3
     event_max_age_ms: int = 30000
     initial_machine_state: MachineState = MachineState.CLOSED
     mvs_dll_directory: Path | None = None
@@ -80,9 +78,9 @@ class MeasurementConfiguration:
             "ocr_queue_capacity", "storage_queue_capacity",
             "max_pending_sessions_per_machine",
             "shutdown_timeout_ms",
-            "maintenance_interval_ms", "storage_retry_interval_ms",
+            "maintenance_interval_ms",
             "max_persistent_records", "ocr_job_timeout_ms",
-            "worker_restart_attempts", "event_max_age_ms",
+            "event_max_age_ms",
         )
         for parameter in positive_parameters:
             if getattr(self, parameter) <= 0:

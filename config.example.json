@@ -3,7 +3,6 @@
   "evidence_directory": "runtime/evidence",
   "recovery_database_path": "runtime/measurements.recovery.sqlite3",
   "initial_machine_state": "CLOSED",
-  "storage_retry_interval_ms": 1000,
   "minimum_free_disk_bytes": 104857600,
   "capture_window_ms": 1000,
   "max_frames_per_session": 5,

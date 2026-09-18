@@ -59,6 +59,7 @@ class CaptureTask:
     timeout_ms: int
     session_id: str
     capture_id: str = field(default_factory=lambda: uuid4().hex)
+    report_failure: Callable[[Exception], None] | None = None
     # 停止请求标记：set 发出通知，is_set 检查通知，wait 等待通知或超时。
     stop_requested: threading.Event = field(default_factory=threading.Event)
     acquisition_finished: threading.Event = field(default_factory=threading.Event)
@@ -102,6 +103,9 @@ class CaptureTask:
             # 记录采集异常，并通知控制线程提前停止取流。
             self.camera.faulted = True
             self._capture_errors.append(f"采集失败：{error}")
+            # 将原始异常通知应用，保留异常堆栈。
+            if self.report_failure is not None:
+                self.report_failure(error)
             self.stop_requested.set()
 
     def consume_frames(self) -> None:
@@ -134,6 +138,9 @@ class CaptureTask:
                 # 保存本帧失败信息并计数，随后继续消费下一帧。
                 self._frame_results.append(FrameResult(frame.image.frame_number, error=str(error)))
                 self._failed_count += 1
+                # 将原始异常通知应用，保留异常堆栈。
+                if self.report_failure is not None:
+                    self.report_failure(error)
             finally:
                 # 登记当前出队帧已经处理结束。
                 self.frame_queue.task_done()
@@ -177,6 +184,9 @@ class CaptureTask:
         except Exception as error:
             # 保存启动阶段的异常，随后进入统一停止流程。
             self._capture_errors.append(f"启动失败：{error}")
+            # 将原始异常通知应用，保留异常堆栈。
+            if self.report_failure is not None:
+                self.report_failure(error)
         finally:
             # 发出停止通知，让取帧线程不再取下一张图；正在取的那张继续完成。
             self.stop_requested.set()
@@ -188,6 +198,9 @@ class CaptureTask:
                 self.camera.faulted = True
                 camera_stopped = False
                 self._capture_errors.append(f"停止失败：{error}")
+                # 将原始异常通知应用，保留异常堆栈。
+                if self.report_failure is not None:
+                    self.report_failure(error)
             # 记录停止操作完成的时间。
             stopped_at = time.monotonic()
 
@@ -274,6 +287,7 @@ def start_capture(
     queue_capacity: int = 32,
     timeout_ms: int = 50,
     capture_id: str | None = None,
+    report_failure: Callable[[Exception], None] | None = None,
 ) -> CaptureTask:
     """响应采集信号，创建独立任务、队列和后台控制线程。
 
@@ -285,6 +299,7 @@ def start_capture(
         queue_capacity: 本轮最大排队帧数，队满丢新帧。
         timeout_ms: 单次 SDK 等帧上限，单位毫秒。
         capture_id: 调用方的采集编号，省略时自动生成。
+        report_failure: 可选的线程故障通知入口，接收采集或处理异常。
 
     Returns:
         返回已启动的 CaptureTask，以下为字段示例；线程状态及计数随后台执行更新：
@@ -296,6 +311,7 @@ def start_capture(
                 timeout_ms=50,  # 单次 SDK 取帧超时，单位毫秒
                 session_id="session-a",  # 所属测量编号
                 capture_id="capture-a",  # 本轮采集编号
+                report_failure=None,  # 线程故障通知入口
                 stop_requested=threading.Event(),  # 提前停止请求
                 acquisition_finished=threading.Event(),  # 生产端结束信号
                 completed=threading.Event(),  # 整轮生产和消费完成信号
@@ -330,6 +346,7 @@ def start_capture(
             timeout_ms=timeout_ms,
             session_id=session_id,
             capture_id=capture_id or uuid4().hex,
+            report_failure=report_failure,
         )
 
         # 启动本轮控制线程，立即返回任务句柄。

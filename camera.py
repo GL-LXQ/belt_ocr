@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -68,6 +69,7 @@ class SessionCamera:
         machine: MachineConfiguration,
         configuration: MeasurementConfiguration,
         publish_event: PublishEvent,
+        report_failure: Callable[[Exception, str], None],
     ) -> None:
         """登记设备绑定、事件入口和本轮任务集合。
 
@@ -75,6 +77,7 @@ class SessionCamera:
             machine: 当前机器及相机配置。
             configuration: 采集窗口、队列和证据保存配置。
             publish_event: 应用事件发布入口。
+            report_failure: 应用故障日志与退出入口。
 
         Returns:
             None  # 相机适配器已创建，设备由 App.start 打开
@@ -82,6 +85,7 @@ class SessionCamera:
         self.machine = machine
         self.configuration = configuration
         self.publish_event = publish_event
+        self.report_failure = report_failure
         self.device: MvsCamera | None = None
         self.windows: dict[str, CaptureWindow] = {}
         self.tasks: set[asyncio.Task] = set()
@@ -139,6 +143,11 @@ class SessionCamera:
             queue_capacity=self.configuration.camera_queue_capacity,
             timeout_ms=self.configuration.camera_timeout_ms,
             capture_id=capture_id,
+            report_failure=lambda error: self.event_loop.call_soon_threadsafe(
+                self.report_failure,
+                error,
+                f"相机 machine_id={self.machine.machine_id} camera_id={self.machine.camera_id} session_id={session_id}",
+            ),
         )
         # 按采集编号登记窗口，供关闭信号查找本轮任务。
         self.windows[capture_id] = window
@@ -148,7 +157,29 @@ class SessionCamera:
 
         # 保存收尾任务供退出时统一等待，并在任务结束后自动移除。
         self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        task.add_done_callback(self.handle_capture_task_finished)
+
+    def handle_capture_task_finished(self, task: asyncio.Task) -> None:
+        """移除采集收尾任务，并将未处理异常通知应用退出。
+
+        Args:
+            task: 已完成的采集收尾任务。
+
+        Returns:
+            None  # 任务已移除，异常已交付应用
+        """
+        # 移除任务，退出时的取消不再交付故障。
+        self.tasks.discard(task)
+        if task.cancelled():
+            return
+
+        # 取出任务异常，附带相机身份交付应用。
+        error = task.exception()
+        if error is not None:
+            self.report_failure(
+                error,
+                f"相机收尾 machine_id={self.machine.machine_id} camera_id={self.machine.camera_id}",
+            )
 
     def is_frame_qualified(self, frame: CaptureFrame) -> bool:
         """预留无字、纯黑和截断帧筛选入口，当前放行所有帧。

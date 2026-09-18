@@ -336,40 +336,26 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(records[second_session.session_id]["outcome"], "COMPLETE")
 
-    async def test_15_io_loss_interrupts_cycles_without_fabricating_close(self):
-        # 为三台运行中的机器注入共享 IO 故障。
-        app = await self.start_controlled_app()
-        for machine_id, machine_manager in app.machine_managers.items():
-            await app.handle_start(machine_id)
-            await self.supply_valid_inputs(machine_manager.sessions[machine_manager.active_session_id])
-        await app.report_device_health("IO", False)
-        await app.wait_until_idle(10)
+    async def test_15_io_loss_stops_application(self):
+        """验证共享 IO 故障停止应用且不伪造正常结果。
 
-        # IO 掉线只形成中断记录，不伪造正常关闭时间。
-        records = self.read_records()
-        self.assertEqual(len(records), 3)
-        self.assertTrue(all(
-            record["outcome"] == "INTERRUPTED" and "close_time" not in record
-            for record in records
-        ))
-        await app.report_device_health("IO", True)
-        for machine_id, machine_manager in app.machine_managers.items():
-            await app.handle_start(machine_id)
-            self.assertIsNone(machine_manager.active_session_id)
-            await app.synchronize_machine(machine_id, "OPEN")
-            await app.handle_start(machine_id)
-            self.assertIsNone(machine_manager.active_session_id)
+        Args:
+            无外部参数。
 
-            # 确认本轮结束后才能开始新的完整周期。
-            await app.handle_close(machine_id)
+        Returns:
+            None  # 全部测量已停止且无异常记录入库
+        """
+        # 启动机器并通知应用发生 IO 故障。
+        app = await self.start_app()
+        for machine_id in app.machine_managers:
             await app.handle_start(machine_id)
-            session = machine_manager.sessions[machine_manager.active_session_id]
-            await self.supply_valid_inputs(session)
-            await self.close_controlled_cycle(session)
-        await app.wait_until_idle(10)
-        self.assertEqual(sum(
-            record["outcome"] == "COMPLETE" for record in self.read_records()
-        ), 3)
+        app.report_failure(OSError("IO 连接断开"), "IO")
+
+        # 等待退出，确认不会继续恢复或接收测量。
+        await app.stop()
+        self.assertFalse(app.accepting_signals)
+        self.assertTrue(app.camera_sdk.closed)
+        self.assertEqual(self.read_records(), [])
 
     async def test_17_20_late_batches_stay_with_original_session(self):
         # 保存旧轮关闭边界，并保留新轮活动采集。

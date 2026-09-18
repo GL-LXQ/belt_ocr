@@ -43,7 +43,6 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_database_failure_is_automatically_retried(self) -> None:
         app = await self.start_app(
-            storage_retry_interval_ms=100,
         )
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
@@ -415,20 +414,26 @@ asyncio.run(crash_after_start())
         self.assertIn("AMBIGUOUS_MEASUREMENT", record["error_codes"])
         self.assertIn("MEASUREMENT_ID_CONFLICT", self.read_audit_reasons())
 
-    async def test_device_fault_isolated_to_its_machine(self) -> None:
+    async def test_device_fault_stops_all_machines(self) -> None:
+        """验证单台设备故障停止全部机器并释放资源。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 全部机器已停止，应用不可继续受理测量
+        """
+        # 启动两台机器并报告相机故障。
         app = await self.start_app()
         await app.handle_start("M01")
         await app.handle_start("M02")
-        second_session_id = app.machine_managers["M02"].active_session_id
+        app.report_failure(OSError("相机断开"), "machine_id=M01 camera_id=CAM01")
 
-        # 单台相机故障只中断绑定机器。
-        await app.report_device_health("CAM01", False)
-        self.assertEqual(app.machine_managers["M01"].acceptance_state, "FAULT")
-        self.assertEqual(app.machine_managers["M02"].active_session_id, second_session_id)
-        await app.report_device_health("CAM01", True)
-        self.assertEqual(app.machine_managers["M01"].acceptance_state, "WAIT_CYCLE_RESET")
-        await app.synchronize_machine("M01", "CLOSED")
-        self.assertEqual(app.machine_managers["M01"].acceptance_state, "READY")
+        # 等待统一清理，确认其他机器也已停止。
+        await app.stop()
+        self.assertFalse(app.accepting_signals)
+        self.assertTrue(app.camera_sdk.closed)
+        self.assertTrue(all(not manager.sessions for manager in app.machine_managers.values()))
 
     async def test_initial_open_state_does_not_create_midcycle_session(self) -> None:
         app = await self.start_app(initial_machine_state="OPEN")
@@ -470,7 +475,6 @@ asyncio.run(crash_after_start())
             app = await self.start_app(
                 database_path=blocked_directory / "measurements.sqlite3",
                 recovery_database_path=self.output_directory / "recovery.sqlite3",
-                storage_retry_interval_ms=100,
             )
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]

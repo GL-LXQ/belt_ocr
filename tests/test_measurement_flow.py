@@ -91,7 +91,6 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                         "ocr_state": session.ocr_state,
                         "errors": session.errors,
                         "queued_events": machine_manager.queue.qsize(),
-                        "device_faults": sorted(machine_manager.device_faults),
                     }
                     for machine_manager in self.app.machine_managers.values()
                     for session in machine_manager.sessions.values()

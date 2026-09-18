@@ -4,7 +4,7 @@
 > 启动方法、配置说明、信号入口及当前边界见 [运行说明](USAGE.md)。
 > 下文保留完整开发规格，不表示所有生产能力均已交付。
 
-海康 MVS 模块已接入 App，使用方法见 [运行说明](USAGE.md) 和 [MVS 采集说明](MVS_CAPTURE.md)。文件夹模拟采集已移除；测试通过假 SDK 验证真实适配器。没有配置序列号或没有可用相机时，对应机器不接受正常测量。
+海康 MVS 模块已接入 App，使用方法见 [运行说明](USAGE.md) 和 [MVS 采集说明](MVS_CAPTURE.md)。文件夹模拟采集已移除；测试通过假 SDK 验证真实适配器。任一已配置机器缺少相机序列号或无法连接相机时，整个程序启动失败。
 
 当前系统的数据流：START 创建独立 Session，登记 frequency_adapter.active_session_id 并启动相机内存图片组批；OCR 按批次回传原始文字块，采集封口且批次结算后只触发一次文字和图片终选占位入口，当前不保存图片。频率监听黑盒负责设备连接、新有效测量识别和固定接收时的周期归属，按接收顺序将 FrequencyMeasured 与 START/CLOSE 送入同一机器 FIFO 队列；业务层仅追加 measurement_frequencies，不按设备测量时间重排，也不重复校验黑盒已保证的数据。处理 CLOSE 时立即清空适配器的活动周期、封闭列表并取最后一条作为最终频率；频率状态统一使用 FrequencyState 枚举，区分 RUNNING（采集中）、SUCCESS（成功）和 FAILED（失败）；没有有效测量、频率故障或周期中断时保留明细且最终值为空。CLOSE 前入队的测量先处理，CLOSE 后不等待设备、不补收旧轮数据。频率明细 JSON、final_frequency_hz 和完整 payload 在同一 SQLite 事务中写入，整轮记录仍等待 OCR 等原有完成条件。当前 listen_measurements 按 frequency_interval_ms 循环读取 simulated_frequencies_hz 产生联调测量，每次分配独立身份，无活动 Session 时不交付；真实设备协议仍待替换，读取异常报告故障；旧库升级保留历史冻结内容和哈希，重启不恢复旧 Session。
 
@@ -17,6 +17,8 @@
 采集完成事件 CaptureSealed 由 MachineManager.handle_capture_finished 处理，登记采集结束状态、统计和错误，再进入批次结算与文字终选检查。事件类型统一由 enums.EventType 定义，发送端构造带枚举类型的 MeasurementEvent，处理端按枚举分派；枚举值保留原事件字符串，审计与序列化格式保持兼容。事件处理入口：MachineManager.listen_events 持续读取本机 FIFO 队列，将事件交给 handle_event 并反馈处理结果；MachineManager.handle_event 按 FIFO 顺序处理机器及 Session 事件并检查测量完成条件，START/CLOSE 不按事件创建时间过滤，关闭事件通过 is_close_event_for_active_session 核对当前活动或已中断周期的身份，无周期编号时允许关闭或复位，不匹配时记录审计并忽略。启停处理入口：MachineManager.handle_machine_start 接收启动处理请求，创建 Session 并启动相机采集、登记频率归属和超时任务；MachineManager.handle_machine_close 处理正常关闭或 interrupted=True 的异常中断，停止现场采集并结算频率，正常关闭后继续等待 OCR 和证据处理，结果完整后提交 SQLite，失败则记录日志并清理资源。
 
 异常处理：仅将原本全英文的 SDK 报错补充为简明中文，保留接口名和错误码；已有中文及中英混合提示保持不变。设备异常仍沿原有事件流程交付本机处理器，更新测量状态并清理资源。
+
+初版故障数据流：启动时任一已配置相机、驱动或数据库初始化失败即记录日志并释放已打开资源；运行中相机采集、编码、频率监听或后台任务异常通过 App.report_failure 记录模块、机器、设备身份和原始异常堆栈，关闭信号入口并统一停止全部机器。主流程同时等待测量完成与故障通知，故障打断等待后清理 Session、队列、线程、相机 SDK 和实例锁，命令行以退出码 1 结束。已删除设备故障/恢复事件、健康恢复接口及后台自动重启配置；正常取帧超时、暂时无频率读数不退出，单轮 OCR 失败及单次入库失败仍按原规则清理本轮。修复设备后手动重启，不续办旧 Session。
 
 ## 1. 项目目标与边界
 
@@ -196,7 +198,7 @@ IOAdapter 负责读取输入、通信健康判断、有效电平解释、去抖�
 
 输入模式必须明确：保持型状态与瞬时脉冲采用各自的解释规则，不能混用。业务层不处理电平，只处理标准化 START/CLOSE。
 
-通信超时、掉线和无效输入产生 `DeviceFault` / `InputInvalid`，绝不能转换为正常 CLOSE。重新连接后重新建立基线；无法确认期间是否发生周期变化时，进入重新同步流程，不沿用失效状态。
+现场 IO 尚未接入；接入后通信故障应直接通知 App.report_failure，记录日志并停止整个程序，不转换为正常 CLOSE，也不在本次运行中自动重连。
 
 ## 7. START：创建并启动一次测量
 
@@ -437,7 +439,6 @@ FrameBatchSelected / CaptureSealed / CaptureFailed
 OCRFrameCompleted / OCRFrameFailed
 OCRCompleted / OCRFailed
 FrequencyMeasured / FrequencyFailed
-DeviceFault / DeviceRecovered
 SessionTimeout
 CommitSucceeded / CommitFailed
 ```
@@ -545,8 +546,8 @@ Session 和正常结果待提交队列只保存在内存，不创建新的持久
 | 无有效图像/全部识别失败 | 本轮 FAILED，打印日志、释放资源；关闭前保留活动身份 |
 | 关闭后没有有效频率 | 处理 CLOSE 时立即记录缺频率，不补 0、不额外等待 |
 | 数据跨周期归属不明确 | 隔离并记录冲突，不写给“当前 Session” |
-| 相机采集失败 | 标记本次采集异常；是否影响其他机器取决于共享资源范围 |
-| IO 通信中断/无效输入 | 标记受影响机器不同步；不能生成正常 CLOSE |
+| 相机采集失败 | 记录设备身份及异常，停止全部测量并退出程序 |
+| IO 通信故障 | 接入层报告故障，停止全部测量并退出；不生成正常 CLOSE |
 | 长时间无 CLOSE | 超出 max_cycle_open_ms 后标记 FAILED 并记录中断日志，不伪造正常关闭 |
 | OCR 超时/工作进程退出 | 标记本轮 FAILED 并清理，不写异常记录 |
 | 数据库写失败 | 标记 FAILED，打印日志并清理，不自动重试或补交 |
@@ -557,7 +558,7 @@ Session 和正常结果待提交队列只保存在内存，不创建新的持久
 
 软件拒收只表示本系统不能保证本轮采集完整，不表示已经阻止实体机器启动。本轮未受理后必须跟踪到明确关闭，避免下一个事件被错接成新正常周期。
 
-单设备故障按绑定范围隔离；共享 IO、OCR 或数据库故障可能影响多台机器，不能笼统承诺任何故障只影响一台。
+初版任一设备故障均停止整个程序并释放全部设备；不提供单机故障隔离或自动恢复。
 
 ## 19. 关键时间线
 

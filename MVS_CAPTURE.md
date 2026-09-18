@@ -156,7 +156,7 @@ Grabber 执行 `GetImageBuffer → ctypes.string_at 复制 → FreeImageBuffer �
 
 ## App 接入
 
-`App.start()` 按配置打开相机；未配置或未找到设备时单机进入 FAULT。START 使用业务创建的 capture_id 启动取流。CLOSE 只等待生产停止，不等待旧轮图片编码。适配器将图片与含统计的 CaptureSummary 顺序交付机器事件队列。图片批次到达 MachineManager 后立即送入 OCR 队列，封口不再提交 OCR；App 当前不自动启动识别任务。`App.stop()` 先停止并排空相机任务，再关闭 SDK。
+`App.start()` 按配置打开相机；任一已配置相机缺少序列号或无法打开时，记录日志并释放资源，整个程序启动失败。START 使用业务创建的 capture_id 启动取流。CLOSE 只等待生产停止，不等待旧轮图片编码。适配器将图片与含统计的 CaptureSummary 顺序交付机器事件队列。图片批次到达 MachineManager 后立即送入 OCR 队列，封口不再提交 OCR；App 当前不自动启动识别任务。`App.stop()` 先停止并排空相机任务，再关闭 SDK。
 
 ## 内存 BMP 与延后保存
 
@@ -165,3 +165,7 @@ Session 消费线程调用 `MvsCamera.encode_image`，通过官方 `MV_CC_SaveIm
 `camera.py` 保留业务时间边界和选帧上限检查，再调用目前统一返回 True 的 `is_frame_qualified`。合格帧携带 image_data 进入本轮批次，不创建证据文件或临时文件。满 8 帧交付 FrameBatchSelected，消费结束后先交付尾批再发布 CaptureSealed。默认每轮最多 5 帧，因此默认只交付尾批。编码失败记录处理错误并继续消费，最终封口包含 CAPTURE_FAILED。
 
 MachineManager 将成功入队的图片保留在 Session.images_for_final_selection 中；OCR 接收 BMP 字节，结果通过 frame_id 关联原图。最终文字与图片选择、保存预留在 select_final_text_and_img 中，算法尚未实现，当前无图片落盘。整轮失败、超时、中断和退出会清理内存，正常关闭允许原图随旧 Session 继续等待。真实 SDK 像素转换、取流和现场内存容量仍需真机验证。
+
+## 初版设备故障退出
+
+App 为采集任务传入线程故障回调。启动、取帧、编码和停止异常立即通过事件循环通知 App.report_failure，记录机器、相机、周期身份和异常堆栈，并停止全部机器；采集线程仍完成缓存归还和退出。正常取帧超时不通知故障。独立使用 start_capture 时可选传入 report_failure，未传入时保留原有错误统计行为。

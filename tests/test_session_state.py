@@ -467,34 +467,29 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manager.sessions)
         self.assertEqual(self.read_records(), [])
 
-    async def test_capture_failure_waits_for_close_before_next_start(self):
-        """验证采集失败只清理本轮，真实关闭后才允许下一次启动。
+    async def test_capture_failure_stops_entire_application(self):
+        """验证相机编码故障停止整个应用，不再等待真实关闭或恢复。
 
         Args:
             无外部参数。
 
         Returns:
-            None  # 失败记录未入库，机器活动身份由真实关闭释放
+            None  # 故障已传播，全部设备关闭且没有异常测量入库
         """
-        # 注入图片编码失败，等待本轮进入失败状态。
+        # 注入图片编码故障并启动测量。
         app = await self.start_app(capture_window_ms=100)
         manager = app.machine_managers["M01"]
         manager.camera.device.handle.encoding_error = 123
         await app.handle_start("M01")
         session = manager.sessions[manager.active_session_id]
-        await self.wait_for_state(lambda: session.state == SessionState.FAILED)
-        self.assertEqual(manager.active_session_id, session.session_id)
 
-        # 失败期间重复启动不创建新周期，正常关闭后清除活动身份。
-        await app.handle_start("M01")
-        self.assertEqual(len(manager.sessions), 1)
-        await app.handle_close("M01")
-        await app.wait_until_idle()
-        self.assertIsNone(manager.active_session_id)
+        # 等待应用报告故障并完成自动退出。
+        with self.assertRaisesRegex(RuntimeError, "BMP"):
+            await asyncio.wait_for(app.wait_for_failure(), 2)
+        await asyncio.wait_for(app.stop(), 2)
+        self.assertEqual(session.state, SessionState.FAILED)
+        self.assertFalse(app.accepting_signals)
+        self.assertTrue(app.camera_sdk.closed)
+        self.assertFalse(app.worker_tasks)
         self.assertEqual(self.read_records(), [])
-
-        # 恢复编码接口并受理下一轮。
-        manager.camera.device.handle.encoding_error = 0
-        await app.handle_start("M01")
-        self.assertIsNotNone(manager.active_session_id)
-        self.assertNotEqual(manager.active_session_id, session.session_id)
+        self.assertTrue(all(not manager.sessions for manager in app.machine_managers.values()))
