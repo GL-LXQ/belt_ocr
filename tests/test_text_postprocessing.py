@@ -43,7 +43,7 @@ def recognition_context():
             frequency_source_id=f"frequency-{machine_id}",
             capture_id=f"capture-{session_number}",
             start_time="2026-09-18T00:00:00+00:00",
-            start_boundary=0,
+            capture_start_time=0,
         )
         app.machine_managers[machine_id].sessions[session.session_id] = session
         sessions.append(session)
@@ -116,7 +116,7 @@ def test_postprocessing_waits_for_seal_and_results(recognition_context, seal_fir
         await manager.apply_event(events[0])
         app.text_recognizer.select_final_text_and_img.assert_not_called()
         await manager.apply_event(events[1])
-        app.text_recognizer.select_final_text_and_img.assert_called_once_with(results, session.memory_frames)
+        app.text_recognizer.select_final_text_and_img.assert_called_once_with(results, session.images_for_final_selection)
 
         # 再次检查同一周期不会重复触发。
         await manager.apply_event(MeasurementEvent(
@@ -187,7 +187,7 @@ def test_failed_and_rejected_batches_preserve_successful_results(recognition_con
         await manager.apply_event(
             MeasurementEvent("RecognitionBatchCompleted", session.machine_id, session.session_id, results)
         )
-        app.text_recognizer.select_final_text_and_img.assert_called_once_with(results, session.memory_frames)
+        app.text_recognizer.select_final_text_and_img.assert_called_once_with(results, session.images_for_final_selection)
         assert [current.pending_recognition_batches for current in sessions] == [0, 1, 1]
         assert session.errors == ["OCR_BATCH_REJECTED", "模型失败"]
 
@@ -239,7 +239,7 @@ def test_no_usable_text_skips_postprocessing(recognition_context, completion):
         assert session.text_postprocessing_started
         assert session.pending_recognition_batches == 0
         app.text_recognizer.select_final_text_and_img.assert_called_once_with(
-            session.recognition_results, session.memory_frames
+            session.recognition_results, session.images_for_final_selection
         )
 
     asyncio.run(deliver_events())
@@ -261,14 +261,14 @@ def test_ocr_finished_check_only_returns_state(recognition_context, sealed, pend
     # 准备本轮采集状态和已触发筛选标记。
     app, sessions, frames = recognition_context
     session = sessions[0]
-    session.capture_sealed = sealed
+    session.is_capture_finished = sealed
     session.pending_recognition_batches = pending
     session.text_postprocessing_started = True
 
     # 检查判断结果，确认不改状态也不调用筛选。
     manager = app.machine_managers[session.machine_id]
     assert manager.is_session_ocr_finished(session) is finished
-    assert session.capture_sealed is sealed
+    assert session.is_capture_finished is sealed
     assert session.pending_recognition_batches == pending
     assert session.text_postprocessing_started
     app.text_recognizer.select_final_text_and_img.assert_not_called()
@@ -304,15 +304,15 @@ def test_terminal_failure_releases_only_target_images(recognition_context, failu
                 "FrameBatchSelected", current_session.machine_id,
                 current_session.session_id, (frame,),
             ))
-        assert session.memory_frames[frames[0].frame_id] is frames[0]
+        assert session.images_for_final_selection[frames[0].frame_id] is frames[0]
 
         # 本轮异常后释放图片并移除排队批次，不执行终选。
         await manager.apply_event(MeasurementEvent(
             failure_event, session.machine_id, session.session_id,
         ))
-        assert session.memory_frames == {}
+        assert session.images_for_final_selection == {}
         assert session.pending_recognition_batches == 0
-        assert sessions[1].memory_frames[frames[1].frame_id] is frames[1]
+        assert sessions[1].images_for_final_selection[frames[1].frame_id] is frames[1]
         app.text_recognizer.select_final_text_and_img.assert_not_called()
 
         # 迟到批次不再占用内存，其他周期批次仍可消费并完成队列记账。
@@ -324,6 +324,6 @@ def test_terminal_failure_releases_only_target_images(recognition_context, failu
         assert remaining_batch.session_id == sessions[1].session_id
         app.text_recognizer.batch_queue.task_done()
         await asyncio.wait_for(app.text_recognizer.batch_queue.join(), 1)
-        assert session.memory_frames == {}
+        assert session.images_for_final_selection == {}
 
     asyncio.run(deliver_failure())

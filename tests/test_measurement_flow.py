@@ -138,11 +138,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             machine_number = int(record["machine_id"][1:])
             self.assertEqual(record["camera_id"], f"CAM{machine_number:02}")
             self.assertEqual(record["frequency_source_id"], f"FREQ{machine_number:02}")
-            self.assertTrue(all(
-                frame["camera_id"] == record["camera_id"]
-                and frame["session_id"] == record["session_id"]
-                for frame in record["selected_frames"]
-            ))
+            self.assertNotIn("selected_frames", record)
             self.assertTrue(all(
                 measurement["frequency_source_id"] == record["frequency_source_id"]
                 and measurement["session_id"] == record["session_id"]
@@ -175,7 +171,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         # 在第一轮 OCR 结束前关闭并立即启动第二轮。
         await app.handle_start("M01")
         first_session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: first_session.capture_sealed)
+        await self.wait_for_state(lambda: first_session.is_capture_finished)
         await app.handle_close("M01")
         await app.handle_start("M01")
         second_session_id = machine_manager.active_session_id
@@ -197,15 +193,15 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         first_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: (
-            first_session.selected_frames and first_session.frequency_candidates
+            first_session.images_for_final_selection and first_session.frequency_candidates
         ))
         await app.handle_close("M01")
         await app.handle_start("M01")
         second_session = machine_manager.sessions[machine_manager.active_session_id]
         await machine_manager.camera.seal_capture(first_session.capture_id)
         await self.wait_for_state(lambda: bool(second_session.frequency_candidates))
-        self.assertFalse(second_session.capture_sealed)
-        self.assertLess(len(first_session.selected_frames), 5)
+        self.assertFalse(second_session.is_capture_finished)
+        self.assertLess(len(first_session.images_for_final_selection), 5)
         await app.handle_close("M01")
         await app.wait_until_idle()
         self.assertEqual(len(self.read_records()), 2)
@@ -218,7 +214,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         first_session = machine_manager.sessions[machine_manager.active_session_id]
         await self.wait_for_state(lambda: (
-            first_session.selected_frames
+            first_session.images_for_final_selection
             and machine_manager.frequency_adapter.active_window.pending_deliveries
         ))
         self.assertEqual(first_session.frequency_candidates, {})
@@ -306,7 +302,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.capture_sealed)
+        await self.wait_for_state(lambda: session.is_capture_finished)
         await app.handle_close("M01")
         await app.wait_until_idle()
         record = self.read_records()[0]
@@ -321,7 +317,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         # 超时记录没有正常关闭时间，并等待明确关闭后重新同步。
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "INTERRUPTED")
-        self.assertIsNone(record["close_time"])
+        self.assertNotIn("close_time", record)
         machine_manager = app.machine_managers["M01"]
         await app.handle_start("M01")
         self.assertIsNone(machine_manager.active_session_id)
@@ -335,7 +331,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         await app.stop()
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "INTERRUPTED")
-        self.assertIsNone(record["close_time"])
+        self.assertNotIn("close_time", record)
         self.assertFalse(app.worker_tasks)
 
     async def test_lost_acknowledgement_does_not_duplicate_record(self) -> None:
@@ -396,7 +392,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             app.handle_start(machine_id) for machine_id in app.machine_managers
         ))
         await self.wait_for_state(lambda: all(
-            next(iter(machine_manager.sessions.values())).capture_sealed
+            next(iter(machine_manager.sessions.values())).is_capture_finished
             for machine_manager in app.machine_managers.values()
         ))
         await asyncio.gather(*(

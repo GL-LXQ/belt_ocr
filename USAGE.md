@@ -69,7 +69,7 @@ uv run python -X utf8 main.py --config config.example.json
 | `event_max_age_ms` | START/CLOSE 允许的最大时间偏差，默认 30000 毫秒 |
 | `initial_machine_state` | 新机器的模拟初始状态，默认 `CLOSED`；也支持 `OPEN`、`UNKNOWN` |
 
-相机使用 Continuous / Free Run 模式。图像复制到独立内存后立即归还 SDK Buffer，队满时丢弃新帧并统计；消费者同时处理已入队图片。原始帧由 MVS SDK 转换为内存 BMP，不在采集和批次识别阶段落盘，每轮保存采集和处理统计到 `capture_statistics`。
+相机使用 Continuous / Free Run 模式。图像复制到独立内存后立即归还 SDK Buffer，队满时丢弃新帧并统计；消费者同时处理已入队图片。原始帧由 MVS SDK 转换为内存 BMP，不在采集和批次识别阶段落盘，每轮保存采集和处理统计到 `capture_summary`。
 当前按主机收到图像的单调时间校验 START/CLOSE 及窗口边界，不把设备时间戳直接作为主机时间；SDK 停止可能略晚于请求边界，越过业务边界的帧不进入选帧清单。
 频率设备采用黑盒接口，当前监听按配置循环产生联调读数，真实协议读取待替换。数据库历史标记 `is_simulated` 本次不调整，真实设备验收后另行确定。
 
@@ -241,7 +241,7 @@ README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTAN
 
 ## Session 文字和图片后处理
 
-成功入队的原图由 `Session.memory_frames` 按 frame_id 持有，批次完成后继续保留；批次拒收不登记原图。每轮采集封口且 pending_recognition_batches 归零时，设置 text_postprocessing_started 并调用一次 `select_final_text_and_img(frame_results, frames)`，传入全部成功识别结果和本轮内存图片映射。部分批次失败不阻止其余成功结果进入终选入口。
+成功入队的原图由 `Session.images_for_final_selection` 按 frame_id 持有，批次完成后继续保留；批次拒收不登记原图。每轮采集封口且 pending_recognition_batches 归零时，设置 text_postprocessing_started 并调用一次 `select_final_text_and_img(frame_results, frames)`，传入全部成功识别结果和本轮内存图片映射。部分批次失败不阻止其余成功结果进入终选入口。
 
 文字终选、按保留文字信息量和置信度选图以及保存选中图片均待实现。占位函数返回 None 不表示终选完成，也不将 OCR 标记成功；当前采集和 OCR 阶段都不落盘，因此本阶段没有新的图片证据文件。目标规则为无最终文字、整轮 OCR 失败或超时时不保存图片。
 

@@ -35,7 +35,7 @@ class TextRecognitionTests(unittest.IsolatedAsyncioTestCase):
             next(iter(app.machine_managers[machine_id].sessions.values()))
             for machine_id in ("M01", "M02")
         ]
-        await self.wait_for_state(lambda: all(session.capture_sealed for session in sessions))
+        await self.wait_for_state(lambda: all(session.is_capture_finished for session in sessions))
 
         # 准备包含重复行和空图片结果的模型替身。
         blocks = [{
@@ -99,11 +99,11 @@ class TextRecognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(results[1]["blocks"], [])
                 self.assertNotEqual(results[0]["frame_id"], results[1]["frame_id"])
                 self.assertTrue(all(
-                    result["frame_id"] in session.memory_frames for result in results
+                    result["frame_id"] in session.images_for_final_selection for result in results
                 ))
                 self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
                 self.assertIn(
-                    [session.memory_frames[result["frame_id"]].image_data for result in results],
+                    [session.images_for_final_selection[result["frame_id"]].image_data for result in results],
                     [call.args[0] for call in recognizer.recognize_batch.call_args_list],
                 )
                 self.assertEqual(session.ocr_state, OCRState.WAITING)
@@ -132,7 +132,7 @@ class TextRecognitionTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         manager = app.machine_managers["M01"]
         session = manager.sessions[manager.active_session_id]
-        await self.wait_for_state(lambda: session.capture_sealed)
+        await self.wait_for_state(lambda: session.is_capture_finished)
 
         # 第一批模拟模型异常，第二批返回两张图片的空文字结果。
         recognizer.recognize_batch = Mock(side_effect=[

@@ -5,7 +5,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,7 +14,7 @@ from configuration import MachineConfiguration, MeasurementConfiguration
 from frequency_adapter import FrequencyAdapter
 from enums import OCRState, FrequencyState, MachineState, SessionState
 from models import BeltSession, MeasurementEvent, PublishEvent
-from recovery import run_blocking_operation, serialize_value
+from recovery import run_blocking_operation
 from text_recognition import TextRecognizer
 from database import Database, DatabaseRequest
 
@@ -51,7 +51,6 @@ class MachineManager:
         self.interrupted_session_id: str | None = None
         self.deadline_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self.recovery = database.recovery
-        self.process_epoch = uuid4().hex
         self.device_faults: set[str] = set()
         self.capacity_available = True
         self.initialized = False
@@ -147,7 +146,7 @@ class MachineManager:
             logger.error("本轮未受理 machine_id=%s", self.machine.machine_id)
             return
 
-        # 创建本轮档案，记录设备绑定、开始时间、配置和超时期限。
+        # 创建本轮档案，记录设备绑定、开始时间和配置。
         session = BeltSession(
             session_id=uuid4().hex,
             machine_id=self.machine.machine_id,
@@ -155,27 +154,18 @@ class MachineManager:
             frequency_source_id=self.machine.frequency_source_id,
             capture_id=uuid4().hex,
             start_time=datetime.now(timezone.utc).isoformat(),
-            start_boundary=asyncio.get_running_loop().time(),
-            process_epoch=self.process_epoch,
-            configuration_snapshot=serialize_value(self.configuration),
-            ocr_deadline=(
-                datetime.now(timezone.utc) + timedelta(milliseconds=self.configuration.ocr_result_timeout_ms)
-            ).isoformat(),
-            cycle_deadline=(
-                datetime.now(timezone.utc) + timedelta(milliseconds=self.configuration.max_cycle_open_ms)
-            ).isoformat(),
+            capture_start_time=asyncio.get_running_loop().time(),
         )
 
-        # 登记本轮档案，保留本机配置并设置当前活动档案编号。
+        # 登记本轮档案并设置当前活动档案编号。
         self.sessions[session.session_id] = session
-        session.configuration_snapshot["machines"] = [serialize_value(self.machine)]
         self.active_session_id = session.session_id
 
         # 记录本轮开始日志。
         logger.info("开始测量 machine_id=%s session_id=%s", session.machine_id, session.session_id)
 
         # 启动本轮图像采集，打开对应档案的频率窗口。
-        self.camera.start_capture(session.session_id, session.capture_id, session.start_boundary)
+        self.camera.start_capture(session.session_id, session.capture_id, session.capture_start_time)
         # 登记频率接收的当前周期，新测量按接收顺序交给本轮。
         self.frequency_adapter.active_session_id = session.session_id
 
@@ -200,9 +190,9 @@ class MachineManager:
                 self.interrupted_session_id = None
             return
 
-        # 找到当前 Session，记录现场采集截止时刻。
+        # 找到当前 Session，记录本轮相机采集图片的停止截止时间。
         session = self.sessions[self.active_session_id]
-        session.close_boundary = asyncio.get_running_loop().time()
+        session.capture_stop_time = asyncio.get_running_loop().time()
 
         if interrupted:
             # 中断时登记错误和本轮编号，将机器设为等待关闭复位。
@@ -210,9 +200,8 @@ class MachineManager:
             self.waiting_cycle_reset = True
             self.interrupted_session_id = session.session_id
         else:
-            # 正常 CLOSE 清除中断编号，并保存本轮关闭的 UTC 时间。
+            # 正常 CLOSE 清除中断编号。
             self.interrupted_session_id = None
-            session.close_time = datetime.now(timezone.utc).isoformat()
 
         # 清空适配器的当前周期，停止向本轮交付频率；同时封闭本轮频率列表。
         self.frequency_adapter.active_session_id = None
@@ -233,7 +222,7 @@ class MachineManager:
             session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
 
         # 通知相机按本轮截止时刻停止生产，等待停采完成后清空机器的活动 Session。
-        await self.camera.seal_capture(session.capture_id, session.close_boundary)
+        await self.camera.seal_capture(session.capture_id, session.capture_stop_time)
         self.active_session_id = None
 
         # 从任务表移除本轮 CycleTimeout；任务仍存在时，取消它后续的超时通知。
@@ -397,7 +386,7 @@ class MachineManager:
                 if accepted:
                     session.pending_recognition_batches += 1
                     # 保留已受理原图，直到终选完成或周期异常结束。
-                    session.memory_frames.update(
+                    session.images_for_final_selection.update(
                         (frame.frame_id, frame) for frame in event.payload
                     )
                 else:
@@ -477,7 +466,7 @@ class MachineManager:
             session.text_postprocessing_started = True
             if session.ocr_state not in {OCRState.FAILED, OCRState.TIMED_OUT}:
                 self.text_recognizer.select_final_text_and_img(
-                    session.recognition_results, session.memory_frames
+                    session.recognition_results, session.images_for_final_selection
                 )
 
         # 文字终选检查后，继续执行原有的测量结算检查。
@@ -533,8 +522,7 @@ class MachineManager:
         )
 
         # 释放本轮图片、识别结果和未消费批次。
-        session.memory_frames.clear()
-        session.selected_frames.clear()
+        session.images_for_final_selection.clear()
         session.recognition_results.clear()
         self.text_recognizer.discard_session_batches(session.session_id)
         session.pending_recognition_batches = 0
@@ -578,7 +566,7 @@ class MachineManager:
                 False  # 忽略当前事件，不执行完成检查
         """
         # 忽略本轮重复到达的采集封口事件。
-        if session.capture_sealed:
+        if session.is_capture_finished:
             return False
 
         # 校验封口摘要的采集编号，冲突事件只记录审计。
@@ -588,9 +576,9 @@ class MachineManager:
             return False
 
         # 标记图像清单已封闭，保存跳帧数量和完整采集统计。
-        session.capture_sealed = True
+        session.is_capture_finished = True
         session.skipped_frame_count = summary.skipped_frame_count
-        session.capture_statistics = summary.statistics
+        session.capture_summary = summary.statistics
 
         # 采集或证据交付失败时，登记本轮识别失败和错误信息。
         if summary.errors:
@@ -611,7 +599,7 @@ class MachineManager:
             False  # 采集尚未封口或仍有批次等待结算
         """
         # 只判断本轮识别是否结束，不修改周期状态。
-        return session.capture_sealed and session.pending_recognition_batches <= 0
+        return session.is_capture_finished and session.pending_recognition_batches <= 0
 
     async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> bool:
         """按接收顺序保存黑盒交付的新有效测量。
@@ -657,10 +645,8 @@ class MachineManager:
             await self.fail_measurement(session)
             return
 
-        # 判断本轮是否正常关闭、采集是否封口、批次是否全部结算。
-        if session.close_time is None:
-            return
-        if not session.capture_sealed or session.pending_recognition_batches != 0:
+        # 判断采集是否封口、批次是否全部结算。
+        if not session.is_capture_finished or session.pending_recognition_batches != 0:
             return
 
         # 判断 OCR 和频率是否均已成功。
@@ -692,7 +678,6 @@ class MachineManager:
             "camera_id": session.camera_id,
             "frequency_source_id": session.frequency_source_id,
             "start_time": session.start_time,
-            "close_time": session.close_time,
             "finish_time": session.finish_time,
             "ordered_lines": list(ocr_result.ordered_lines) if ocr_result else [],
             "evidence_refs": list(ocr_result.evidence_refs) if ocr_result else [],
@@ -700,27 +685,16 @@ class MachineManager:
             "final_measurement_id": (
                 final_frequency.measurement_id if final_frequency else None
             ),
-            "selected_frames": [
-                {
-                    name: value for name, value in asdict(frame).items()
-                    if name != "image_data"
-                }
-                for frame in session.selected_frames.values()
-            ],
             "measurement_frequencies": [
                 asdict(measurement)
                 for measurement in session.measurement_frequencies
             ],
             "skipped_frame_count": session.skipped_frame_count,
-            "capture_statistics": session.capture_statistics,
+            "capture_summary": session.capture_summary,
             "outcome": "COMPLETE",
             "error_codes": session.errors.copy(),
             "is_simulated": True,
-            "configuration_version": (
-                session.configuration_snapshot["configuration_version"]
-            ),
-            "process_epoch": session.process_epoch,
-            "configuration_snapshot": session.configuration_snapshot,
+            "configuration_version": self.configuration.configuration_version,
             "model_version": None,
             "software_version": "0.1.0",
         }
@@ -731,7 +705,7 @@ class MachineManager:
             session.frozen_payload.encode()
         ).hexdigest()
         # 释放本轮内存图片并移除剩余排队批次。
-        session.memory_frames.clear()
+        session.images_for_final_selection.clear()
         session.pending_recognition_batches -= (
             self.text_recognizer.discard_session_batches(session.session_id)
         )

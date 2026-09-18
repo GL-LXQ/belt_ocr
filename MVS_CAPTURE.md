@@ -164,4 +164,4 @@ Session 消费线程调用 `MvsCamera.encode_image`，通过官方 `MV_CC_SaveIm
 
 `camera.py` 保留业务时间边界和选帧上限检查，再调用目前统一返回 True 的 `is_frame_qualified`。合格帧携带 image_data 进入本轮批次，不创建证据文件或临时文件。满 8 帧交付 FrameBatchSelected，消费结束后先交付尾批再发布 CaptureSealed。默认每轮最多 5 帧，因此默认只交付尾批。编码失败记录处理错误并继续消费，最终封口包含 CAPTURE_FAILED。
 
-MachineManager 将成功入队的图片保留在 Session.memory_frames 中；OCR 接收 BMP 字节，结果通过 frame_id 关联原图。最终文字与图片选择、保存预留在 select_final_text_and_img 中，算法尚未实现，当前无图片落盘。整轮失败、超时、中断和退出会清理内存，正常关闭允许原图随旧 Session 继续等待。真实 SDK 像素转换、取流和现场内存容量仍需真机验证。
+MachineManager 将成功入队的图片保留在 Session.images_for_final_selection 中；OCR 接收 BMP 字节，结果通过 frame_id 关联原图。最终文字与图片选择、保存预留在 select_final_text_and_img 中，算法尚未实现，当前无图片落盘。整轮失败、超时、中断和退出会清理内存，正常关闭允许原图随旧 Session 继续等待。真实 SDK 像素转换、取流和现场内存容量仍需真机验证。

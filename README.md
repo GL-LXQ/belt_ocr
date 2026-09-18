@@ -8,7 +8,11 @@
 
 当前系统的数据流：START 创建独立 Session，登记 frequency_adapter.active_session_id 并启动相机内存图片组批；OCR 按批次回传原始文字块，采集封口且批次结算后只触发一次文字和图片终选占位入口，当前不保存图片。频率监听黑盒负责设备连接、新有效测量识别和固定接收时的周期归属，按接收顺序将 FrequencyMeasured 与 START/CLOSE 送入同一机器 FIFO 队列；业务层仅追加 measurement_frequencies，不按设备测量时间重排，也不重复校验黑盒已保证的数据。处理 CLOSE 时立即清空适配器的活动周期、封闭列表并取最后一条作为最终频率；频率状态统一使用 FrequencyState 枚举，区分 RUNNING（采集中）、SUCCESS（成功）和 FAILED（失败）；没有有效测量、频率故障或周期中断时保留明细且最终值为空。CLOSE 前入队的测量先处理，CLOSE 后不等待设备、不补收旧轮数据。频率明细 JSON、final_frequency_hz 和完整 payload 在同一 SQLite 事务中写入，整轮记录仍等待 OCR 等原有完成条件。当前 listen_measurements 按 frequency_interval_ms 循环读取 simulated_frequencies_hz 产生联调测量，每次分配独立身份，无活动 Session 时不交付；真实设备协议仍待替换，读取异常报告故障；旧库升级保留历史冻结内容和哈希，重启不恢复旧 Session。
 
-结算数据流：START 创建 `SessionState.RUNNING` 的 Session，机器独立登记 `active_session_id`；CLOSE 保存本轮关闭时间、封闭频率列表并停止相机生产，释放机器活动位置，Session 仍为 RUNNING。采集封口、OCR 批次结算、OCR 与频率成功且证据验证通过后，冻结正常结果并进入 WAITING_COMMIT_DB；数据库确认成功后置 COMMITTED 并移除档案。整轮处理失败、中断、队列满或提交失败均置 FAILED，只打印日志并释放资源，不生成异常测量记录、不暂存或自动补交。关闭前失败保留本轮活动身份与关闭期限，真实 CLOSE 或周期中断后再移除；旧轮事件不改变新轮身份。
+结算数据流：START 创建 `SessionState.RUNNING` 的 Session，机器独立登记 `active_session_id`；START 受理时记录本轮相机采图起始时间 `capture_start_time`；CLOSE 记录停止截止时间 `capture_stop_time`、封闭频率列表并停止相机生产（两个时间均为主机单调时钟秒数），释放机器活动位置，Session 仍为 RUNNING。相机采图及图片批次交付结束（is_capture_finished 为 True）、OCR 批次结算、OCR 与频率成功且证据验证通过后，冻结正常结果并进入 WAITING_COMMIT_DB；数据库确认成功后置 COMMITTED 并移除档案。整轮处理失败、中断、队列满或提交失败均置 FAILED，只打印日志并释放资源，不生成异常测量记录、不暂存或自动补交。关闭前失败保留本轮活动身份与关闭期限，真实 CLOSE 或周期中断后再移除；旧轮事件不改变新轮身份。
+
+本轮采集汇总保存在 `capture_summary`；供文字和图片终选使用的原图统一保存在 `images_for_final_selection`，批次结果保存在 `recognition_results`；已移除未填充的 `selected_frames` 容器及其提交字段。OCR 与周期超时继续由 `schedule_timeout` 创建的期限任务触发，不再在 Session 中保存未读取的 `ocr_deadline`、`cycle_deadline` 时间字符串。
+
+测量数据由 START 创建 Session，经相机组批、OCR 终选和 CLOSE 频率结算，在证据验证通过后冻结并写入 SQLite。Session 和新写入的 `payload_json` 不再保存 `process_epoch`、`configuration_snapshot`，配置版本直接从应用配置读取；这两个键没有对应的独立数据库列，历史记录的 JSON 和哈希保持不变。
 
 ## 1. 项目目标与边界
 
@@ -49,19 +53,18 @@ START 后，为本次 Session 连续采集配置时长的图像。首版默认 `
 
 ### 2.3 正常完成
 
-三个业务条件全部满足才能进入正常提交：
+以下两个模块状态均成功，且采集封口、批次结算、证据验证完成后才能提交：
 
 ```text
 ocr_state == OCRState.SUCCESS
 frequency_state == FrequencyState.SUCCESS
-close_time is not None
 ```
 
 其中：
 
 - `ocr_state == OCRState.SUCCESS`：图像窗口已封口，选中的图像任务全部结算，后处理成功，最终 OCR 与证据已确认。
 - `frequency_state == FrequencyState.SUCCESS`：频率窗口已封口，最终频率已选定并通过有效性检查。
-- `close_time is not None`：收到并确认了属于本 Session 的正常关闭事件。
+频率只在正常 CLOSE 且存在有效测量时设为 SUCCESS，结算不再重复检查关闭时间。
 
 “线程已经返回”“OCR 返回空字符串”“仪器仍显示上一次读数”均不等于业务完成。
 
@@ -322,7 +325,7 @@ CaptureSealed 已收到
 
 1. 找到本机 `active_session_id`。不存在时按重复关闭或同步事件处理，不随意关闭其他待完成 Session。
 2. 检查事件属于当前周期；重复事件不重复执行。
-3. 为本 Session 记录 close_time；未失败的 Session 保持 `RUNNING`。
+3. 为本 Session 设置采集截止边界；未失败的 Session 保持 `RUNNING`。
 4. 关闭本 Session 图像窗口；已自然结束则幂等处理。
 5. 立即封闭本 Session 频率列表，按接收顺序确定最终频率。
 6. 仅当 active_session_id 仍等于该 Session ID 时清空活动位置。
@@ -377,11 +380,11 @@ last_io_sequence / device_health / queue_load
 ```text
 session_id, machine_id
 camera_id, frequency_source_id
-start_time, close_time, finish_time
-start_boundary, close_boundary, process_epoch
+start_time, finish_time
+capture_start_time, capture_stop_time
 
 state: SessionState.RUNNING | WAITING_COMMIT_DB | COMMITTED | FAILED
-capture_id, capture_sealed
+capture_id, is_capture_finished
 selected_frame_ids, pending_ocr_job_ids
 ocr_state: OCRState.WAITING | RUNNING | SUCCESS | FAILED | TIMED_OUT
 ocr_result, evidence_refs
@@ -395,7 +398,7 @@ frozen_payload, payload_hash
 errors, timestamps, deadlines
 ```
 
-Session 只维护 `state`，不再维护 `cycle_state`、`outcome` 和 `commit_state`。正常关闭由本轮 `close_time` 记录，机器是否可接受新周期由 MachineManager 独立管理。OCR 和频率仍各自使用 OCRState、FrequencyState，不能用机器当前状态判断旧 Session 是否关闭。
+Session 只维护 `state`，不再维护 `cycle_state`、`outcome` 和 `commit_state`。不再保存 Session 的关闭时间，正常关闭后才允许频率状态进入 SUCCESS；机器是否可接受新周期由 MachineManager 独立管理。OCR 和频率仍各自使用 OCRState、FrequencyState，不能用机器当前状态判断旧 Session 是否关闭。
 
 | SessionState | 含义 |
 |---|---|
@@ -404,7 +407,7 @@ Session 只维护 `state`，不再维护 `cycle_state`、`outcome` 和 `commit_s
 | COMMITTED | 正常结果已确认入库 |
 | FAILED | 整轮处理、中断或数据库提交失败，打印日志并清理 |
 
-`finished` 为 `state == SessionState.COMMITTED` 的只读属性。数据库历史字段 `outcome` 保留，新写入的正常记录固定为 `COMPLETE`，不改变历史冻结内容和哈希。
+`finished` 为 `state == SessionState.COMMITTED` 的只读属性。数据库历史字段 `outcome` 保留，新写入的正常记录固定为 `COMPLETE`；新建测量表和 payload 均不包含 `close_time`，不再记录关闭时间；已有数据库不做删除该列的迁移。
 
 业务时间用可追溯时间保存；进程内超时和排序使用单调时钟。进程重启后放弃旧任务和旧期限，不使用上一进程的单调时钟值继续计时。
 
@@ -439,7 +442,7 @@ CommitSucceeded / CommitFailed
 
 ```text
 StartCapture(machine_id, session_id, capture_id, parameters)
-SealCapture(machine_id, session_id, capture_id, close_boundary)
+SealCapture(machine_id, session_id, capture_id, capture_stop_time)
 SubmitOCRJob(job_id, machine_id, session_id, frame_id, image_ref)
 SubmitPostprocess(session_id, candidate_refs)
 CommitSession(session_id, frozen_payload, payload_hash)
@@ -493,7 +496,7 @@ RUNNING
 
 ```text
 session_id, machine_id
-start_time, close_time, finish_time
+start_time, finish_time
 camera_id, frequency_source_id
 ocr_result / ordered_lines / fusion_score
 final_frequency_hz
@@ -567,7 +570,7 @@ A 获得有效频率候选
    ↓
 M01 CLOSE
    ↓
-A.close_time = 正常关闭时间，A.state 保持 RUNNING
+A.state 保持 RUNNING
 A 频率窗口封口，冻结最后一个有效测量
 active_session_id = None
    ↓

@@ -56,7 +56,6 @@ class Database:
                     session_id TEXT PRIMARY KEY,
                     machine_id TEXT NOT NULL,
                     start_time TEXT NOT NULL,
-                    close_time TEXT,
                     finish_time TEXT NOT NULL,
                     ordered_lines TEXT NOT NULL,
                     final_frequency_hz REAL,
@@ -156,13 +155,13 @@ class Database:
             payload = json.loads(request.payload_json)
             connection.execute(
                 "INSERT INTO measurements ("
-                "session_id, machine_id, start_time, close_time, finish_time, ordered_lines, "
+                "session_id, machine_id, start_time, finish_time, ordered_lines, "
                 "final_frequency_hz, final_measurement_id, evidence_refs, outcome, error_codes, "
                 "is_simulated, payload_json, payload_hash, measurement_frequencies) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     request.session_id, request.machine_id, payload["start_time"],
-                    payload["close_time"], payload["finish_time"],
+                    payload["finish_time"],
                     json.dumps(payload["ordered_lines"], ensure_ascii=False),
                     payload["final_frequency_hz"], payload["final_measurement_id"],
                     json.dumps(payload["evidence_refs"], ensure_ascii=False),

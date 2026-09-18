@@ -51,8 +51,8 @@ class CaptureWindow:
 
     session_id: str
     capture_id: str
-    start_boundary: float
-    close_boundary: float | None = None
+    capture_start_time: float  # 本轮相机采集图片的起始时间，使用 START 受理时间，单调时钟秒数
+    capture_stop_time: float | None = None  # 本轮相机采集图片的停止截止时间，未请求停止时为 None，单调时钟秒数
     task: CaptureTask | None = None
     selected_count: int = 0
     skipped_count: int = 0
@@ -110,13 +110,13 @@ class SessionCamera:
         """
         return self.device is not None and self.device.capture_lock.locked()
 
-    def start_capture(self, session_id: str, capture_id: str, start_boundary: float) -> None:
+    def start_capture(self, session_id: str, capture_id: str, capture_start_time: float) -> None:
         """创建独立采集窗口，启动后台取流和逐帧处理，并安排采集封口。
 
         Args:
             session_id: 本轮测量编号，用于关联图片事件和证据目录。
             capture_id: 本轮采集编号，用于登记窗口和关联采集结果。
-            start_boundary: 本轮业务启动的主机单调时间，单位为秒，用于筛选窗口内的帧。
+            capture_start_time: 本轮相机采集图片的起始时间，受理 START 时记录的主机单调时钟秒数。
 
         Returns:
             None  # 无返回数据；后台采集和异步收尾已安排，不等待图片保存或 OCR
@@ -125,7 +125,7 @@ class SessionCamera:
         self.event_loop = asyncio.get_running_loop()
 
         # 创建本轮窗口，记录测量编号、采集编号和业务开始时间。
-        window = CaptureWindow(session_id, capture_id, start_boundary)
+        window = CaptureWindow(session_id, capture_id, capture_start_time)
 
         # 创建独立有界队列并启动后台采集，将采集任务保存到本轮窗口。
         window.task = start_capture(
@@ -172,11 +172,11 @@ class SessionCamera:
         """
         # 读取本帧接收时间，计算本轮业务采集截止时间。
         received_time = frame.image.received_monotonic
-        deadline = window.start_boundary + self.configuration.capture_window_ms / 1000
+        deadline = window.capture_start_time + self.configuration.capture_window_ms / 1000
         # 跳过超出采集或关闭边界的帧，以及超过选帧上限的帧。
         if (
             received_time > deadline
-            or (window.close_boundary is not None and received_time > window.close_boundary)
+            or (window.capture_stop_time is not None and received_time > window.capture_stop_time)
             or window.selected_count >= self.configuration.max_frames_per_session
         ):
             window.skipped_count += 1
@@ -219,12 +219,12 @@ class SessionCamera:
             asyncio.run_coroutine_threadsafe(self.publish_event(event), self.event_loop).result()
             window.pending_frames.clear()
 
-    async def seal_capture(self, capture_id: str, close_boundary: float | None = None) -> None:
+    async def seal_capture(self, capture_id: str, capture_stop_time: float | None = None) -> None:
         """停止指定窗口的生产，等待抓帧退出后释放现场采集位置。
 
         Args:
             capture_id: 需要停止的采集编号。
-            close_boundary: 业务关闭的单调时间，省略时使用当前时间。
+            capture_stop_time: 本轮相机采集图片的停止截止时间，主机单调时钟秒数；省略时使用当前时间。
 
         Returns:
             None  # 本轮已停止入队，消费者可能仍在编码图片
@@ -233,9 +233,9 @@ class SessionCamera:
         window = self.windows.get(capture_id)
         if window is None:
             return
-        # 固定关闭边界，停止本轮生产并等待最后入队完成。
-        if window.close_boundary is None:
-            window.close_boundary = close_boundary if close_boundary is not None else time.monotonic()
+        # 记录本轮相机采集图片的停止截止时间。
+        if window.capture_stop_time is None:
+            window.capture_stop_time = capture_stop_time if capture_stop_time is not None else time.monotonic()
         # 发出提前停止通知，唤醒控制线程执行停止取流，并通知取帧线程结束。
         window.task.stop_requested.set()
         # 等待最后取帧和入队结束；此时消费者仍可继续编码队列里的图片。

@@ -50,12 +50,11 @@ def frequency_context(tmp_path):
         frequency_source_id="FREQ01",
         capture_id="capture-frequency",
         start_time="2026-09-18T00:00:10+00:00",
-        start_boundary=10,
-        capture_sealed=True,
+        capture_start_time=10,
+        is_capture_finished=True,
         ocr_state=OCRState.SUCCESS,
         ocr_result=OCRResult(("MODEL",), (), ()),
         evidence_verified=True,
-        configuration_snapshot={"configuration_version": "test-frequency"},
     )
     manager.sessions[session.session_id] = session
     manager.active_session_id = session.session_id
@@ -323,8 +322,12 @@ def test_old_database_migration_preserves_frozen_record(frequency_context):
     with sqlite3.connect(app.configuration.database_path) as connection:
         connection.execute("ALTER TABLE measurements DROP COLUMN measurement_frequencies")
         connection.execute(
-            "INSERT INTO measurements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("old-session", "M01", "start", "close", "finish", "[]", 42, "old-reading",
+            "INSERT INTO measurements ("
+            "session_id, machine_id, start_time, finish_time, "
+            "ordered_lines, final_frequency_hz, final_measurement_id, "
+            "evidence_refs, outcome, error_codes, is_simulated, payload_json, "
+            "payload_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("old-session", "M01", "start", "finish", "[]", 42, "old-reading",
              "[]", "REVIEW_REQUIRED", "[]", 1, historical_payload, "original-hash"),
         )
 
@@ -332,6 +335,8 @@ def test_old_database_migration_preserves_frozen_record(frequency_context):
     app.database.initialize()
     app.database.initialize()
     with sqlite3.connect(app.configuration.database_path) as connection:
+        columns = connection.execute("PRAGMA table_info(measurements)").fetchall()
+        assert "close_time" not in {column[1] for column in columns}
         row = connection.execute(
             "SELECT measurement_frequencies, final_frequency_hz, payload_json, payload_hash "
             "FROM measurements WHERE session_id = 'old-session'"

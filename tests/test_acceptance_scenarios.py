@@ -119,7 +119,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
                 "FrequencyMeasured", session.machine_id, session.session_id,
                 replace(measurement, frequency_source_id="wrong-frequency"),
             ))
-            self.assertEqual(set(session.selected_frames), {frame.frame_id})
+            self.assertEqual(set(session.images_for_final_selection), {frame.frame_id})
+            self.assertEqual(session.images_for_final_selection[frame.frame_id].camera_id, session.camera_id)
             self.assertEqual(
                 set(session.frequency_candidates), {measurement.measurement_id},
             )
@@ -132,9 +133,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.read_records()), 3)
         for record in self.read_records():
             self.assertEqual(record["outcome"], "COMPLETE")
-            self.assertEqual(
-                record["selected_frames"][0]["camera_id"], record["camera_id"],
-            )
+            self.assertNotIn("selected_frames", record)
             self.assertEqual(
                 record["frequency_candidates"][0]["frequency_source_id"],
                 record["frequency_source_id"],
@@ -177,8 +176,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         await self.publish_and_wait(close_event)
         await self.publish_and_wait(replace(close_event, event_id=uuid4().hex))
         self.assertEqual(machine_manager.active_session_id, second_session.session_id)
-        self.assertIsNone(second_session.close_time)
-        self.assertFalse(second_session.capture_sealed)
+        self.assertIsNone(second_session.capture_stop_time)
+        self.assertFalse(second_session.is_capture_finished)
         self.assertIn("CLOSE_SESSION_MISMATCH", self.read_audit_reasons())
 
         # 两轮分别结算一次，旧关闭事件不生成第三条记录。
@@ -235,7 +234,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         second_session = machine_manager.sessions[machine_manager.active_session_id]
 
         # 将旧读数时间设为新周期开始前一秒。
-        old_measurement = replace(old_measurement, measured_monotonic=second_session.start_boundary - 1)
+        old_measurement = replace(old_measurement, measured_monotonic=second_session.capture_start_time - 1)
 
         # 旧显示值沿用旧测量时间，即使重贴新周期身份也不能成为新读数。
         await self.publish_and_wait(MeasurementEvent(
@@ -344,7 +343,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         records = self.read_records()
         self.assertEqual(len(records), 3)
         self.assertTrue(all(
-            record["outcome"] == "INTERRUPTED" and record["close_time"] is None
+            record["outcome"] == "INTERRUPTED" and "close_time" not in record
             for record in records
         ))
         await app.report_device_health("IO", True)
@@ -382,13 +381,13 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         await self.publish_and_wait(MeasurementEvent(
             "FrameBatchSelected", "M01", first_session.session_id, (delayed_frame,),
         ))
-        self.assertEqual(second_session.selected_frames, {})
+        self.assertEqual(second_session.images_for_final_selection, {})
         expected_frames = {frame.frame_id, delayed_frame.frame_id}
-        self.assertEqual(set(first_session.selected_frames), expected_frames)
+        self.assertEqual(set(first_session.images_for_final_selection), expected_frames)
         await self.publish_and_wait(MeasurementEvent(
             "CaptureSealed", "M01", first_session.session_id, CaptureSummary(first_session.capture_id),
         ))
-        self.assertFalse(second_session.capture_sealed)
+        self.assertFalse(second_session.is_capture_finished)
         self.assertEqual(machine_manager.active_session_id, second_session.session_id)
 
         # 尾批和采集封口完成后，继续结算旧轮频率。
@@ -399,14 +398,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         await self.close_controlled_cycle(second_session)
         await app.wait_until_idle(10)
         records = {record["session_id"]: record for record in self.read_records()}
-        self.assertEqual(
-            {
-                item["frame_id"]
-                for item in records[first_session.session_id]["selected_frames"]
-            },
-            expected_frames,
-        )
-        self.assertEqual(len(records[second_session.session_id]["selected_frames"]), 1)
+        self.assertNotIn("selected_frames", records[first_session.session_id])
+        self.assertNotIn("selected_frames", records[second_session.session_id])
         self.assertTrue(all(
             record["outcome"] == "COMPLETE" for record in records.values()
         ))
@@ -453,7 +446,7 @@ async def crash_after_close():
     await app.handle_start("M01")
     machine_manager = app.machine_managers["M01"]
     session = machine_manager.sessions[machine_manager.active_session_id]
-    while not session.capture_sealed:
+    while not session.is_capture_finished:
         app.state_changed.clear()
         await app.state_changed.wait()
     assert not app.text_recognizer.batch_queue.empty()

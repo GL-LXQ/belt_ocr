@@ -1,6 +1,7 @@
 """验证 Session 四态、机器启停隔离和失败不入库。"""
 
 import asyncio
+import json
 import sqlite3
 import threading
 import unittest
@@ -10,7 +11,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import test_measurement_flow as flow_support
 
-from enums import OCRState, SessionState
+from enums import FrequencyState, OCRState, SessionState
 from models import CapturedFrame, MeasurementEvent, OCRResult
 from test_frequency_pipeline import create_measurement, frequency_context
 
@@ -73,9 +74,20 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
 
     asyncio.run(process_measurement())
     with sqlite3.connect(app.configuration.database_path) as connection:
-        assert connection.execute("SELECT outcome FROM measurements").fetchall() == [
-            ("COMPLETE",),
-        ]
+        records = connection.execute(
+            "SELECT outcome, payload_json FROM measurements"
+        ).fetchall()
+        assert len(records) == 1
+        assert records[0][0] == "COMPLETE"
+        payload = json.loads(records[0][1])
+        assert "close_time" not in payload
+        assert "selected_frames" not in payload
+        # 检查入库内容已移除运行批次和配置快照，保留配置版本。
+        assert "process_epoch" not in payload
+        assert "configuration_snapshot" not in payload
+        assert payload["configuration_version"] == app.configuration.configuration_version
+        columns = connection.execute("PRAGMA table_info(measurements)").fetchall()
+        assert "close_time" not in {column[1] for column in columns}
     assert app.recovery.pending_count() == 0
 
 
@@ -177,7 +189,7 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
             "OCRFailed", "M01", session.session_id, "MODEL_FAILED",
         ))
         assert session.state == SessionState.FAILED
-        assert not session.memory_frames
+        assert not session.images_for_final_selection
         assert app.text_recognizer.batch_queue.empty()
         assert manager.active_session_id == session.session_id
         assert session.session_id in manager.sessions
@@ -365,7 +377,7 @@ def test_closed_session_remains_running_while_next_cycle_starts(frequency_contex
         session.measurement_frequencies.append(create_measurement(session, 1, 12, 42))
         await manager.close_measurement()
         assert session.state == SessionState.RUNNING
-        assert session.close_time is not None
+        assert session.frequency_state == FrequencyState.SUCCESS
 
         # 启动新轮，旧轮的迟到失败只清理旧轮。
         manager.camera.device = SimpleNamespace(
@@ -417,7 +429,6 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         # 退出应用，确认未伪造关闭或保存异常记录。
         await app.stop()
         self.assertEqual(session.state, SessionState.FAILED)
-        self.assertIsNone(session.close_time)
         self.assertIn("CYCLE_INTERRUPTED", session.errors)
         self.assertEqual(self.read_records(), [])
         self.assertFalse(manager.sessions)
@@ -447,7 +458,7 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         await app.stop()
         self.assertEqual(session.state, SessionState.FAILED)
         self.assertIn("SHUTDOWN_TIMEOUT", session.errors)
-        self.assertFalse(session.memory_frames)
+        self.assertFalse(session.images_for_final_selection)
         self.assertFalse(manager.sessions)
         self.assertEqual(self.read_records(), [])
 

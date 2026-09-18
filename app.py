@@ -5,7 +5,6 @@ import logging
 import shutil
 from dataclasses import replace
 from datetime import datetime, timezone
-from uuid import uuid4
 
 from camera import SessionCamera
 from mvs_sdk import load_mvs_sdk
@@ -33,7 +32,6 @@ class App:
         self.machine_managers: dict[str, MachineManager] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
         self.accepting_signals = False
-        self.process_epoch = uuid4().hex
         self.has_started = False
         self.stopping = False
         self.releasing_resources = False
@@ -53,7 +51,6 @@ class App:
                 self.publish_event,
                 self.state_changed,
             )
-            self.machine_managers[machine.machine_id].process_epoch = self.process_epoch
 
     async def start(self) -> None:
         """初始化本次运行的机器状态和存储，启动监听与处理任务。

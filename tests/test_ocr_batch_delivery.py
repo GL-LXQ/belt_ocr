@@ -32,7 +32,7 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
         session = manager.sessions[manager.active_session_id]
 
         # 等待采集封口，从 OCR 队列读取满批和尾批。
-        await self.wait_for_state(lambda: session.capture_sealed)
+        await self.wait_for_state(lambda: session.is_capture_finished)
         first_batch = app.text_recognizer.batch_queue.get_nowait()
         tail_batch = app.text_recognizer.batch_queue.get_nowait()
 
@@ -50,7 +50,7 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(frame.image_path, "")
 
         # 检查业务层持有图片但没有落盘，也没有启动或重复提交旧识别流程。
-        self.assertEqual(len(session.memory_frames), 10)
+        self.assertEqual(len(session.images_for_final_selection), 10)
         self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
         self.assertEqual(session.ocr_state, OCRState.WAITING)
         self.assertIsNone(session.ocr_result)
@@ -77,7 +77,7 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
         session = manager.sessions[manager.active_session_id]
 
         # 等待封口，检查拒收不会覆盖已入队批次。
-        await self.wait_for_state(lambda: session.capture_sealed)
+        await self.wait_for_state(lambda: session.is_capture_finished)
         self.assertEqual(app.text_recognizer.batch_queue.qsize(), 1)
         self.assertEqual(len(app.text_recognizer.batch_queue.get_nowait().frames), 8)
         self.assertEqual(session.ocr_state, OCRState.WAITING)
@@ -100,7 +100,7 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
         # 采集一轮图片，等待批次交付和封口。
         await app.handle_start("M01")
         session = manager.sessions[manager.active_session_id]
-        await self.wait_for_state(lambda: session.capture_sealed)
+        await self.wait_for_state(lambda: session.is_capture_finished)
 
         # 检查批次未入队，并记录本轮拒收错误。
         self.assertTrue(app.text_recognizer.batch_queue.empty())
@@ -121,21 +121,21 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
         manager = app.machine_managers["M01"]
         await app.handle_start("M01")
         first_session = manager.sessions[manager.active_session_id]
-        await self.wait_for_state(lambda: first_session.capture_sealed)
-        first_frame = next(iter(first_session.memory_frames.values()))
+        await self.wait_for_state(lambda: first_session.is_capture_finished)
+        first_frame = next(iter(first_session.images_for_final_selection.values()))
         await app.handle_close("M01")
 
         # 新轮独立采集，旧轮原图引用和内容保持不变。
         await app.handle_start("M01")
         next_session = manager.sessions[manager.active_session_id]
-        await self.wait_for_state(lambda: next_session.capture_sealed)
-        self.assertIs(first_session.memory_frames[first_frame.frame_id], first_frame)
-        self.assertNotIn(first_frame.frame_id, next_session.memory_frames)
+        await self.wait_for_state(lambda: next_session.is_capture_finished)
+        self.assertIs(first_session.images_for_final_selection[first_frame.frame_id], first_frame)
+        self.assertNotIn(first_frame.frame_id, next_session.images_for_final_selection)
         self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
 
         # 退出清理两个周期的内存引用和未消费批次，不产生图片文件。
         await app.stop()
-        self.assertEqual(first_session.memory_frames, {})
-        self.assertEqual(next_session.memory_frames, {})
+        self.assertEqual(first_session.images_for_final_selection, {})
+        self.assertEqual(next_session.images_for_final_selection, {})
         self.assertTrue(app.text_recognizer.batch_queue.empty())
         self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])

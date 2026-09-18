@@ -99,7 +99,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
                 await app.stop()
         # 确认退出时旧结果仍在待提交区，并保留证据路径。
         self.assertEqual(app.recovery.pending_count(), 1)
-        evidence_paths = [frame.image_path for frame in session.selected_frames.values()]
+        evidence_paths = [frame.image_path for frame in session.images_for_final_selection.values()]
         restarted = await self.restart_app(shutdown_timeout_ms=2000)
 
         # 确认旧记录已清理，多次补交检查也不会生成旧结果。
@@ -268,7 +268,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.capture_sealed)
+        await self.wait_for_state(lambda: session.is_capture_finished)
         await app.handle_close("M01")
         await self.wait_for_state(lambda: session.frequency_window_sealed)
         self.assertNotEqual(session.ocr_state, OCRState.SUCCESS)
@@ -504,7 +504,7 @@ asyncio.run(crash_after_start())
             app.handle_start(machine_id) for machine_id in app.machine_managers
         ))
         await self.wait_for_state(lambda: all(
-            next(iter(machine_manager.sessions.values())).capture_sealed
+            next(iter(machine_manager.sessions.values())).is_capture_finished
             for machine_manager in app.machine_managers.values()
         ))
 
@@ -573,7 +573,7 @@ asyncio.run(crash_after_start())
                 app.handle_start(machine_id) for machine_id in app.machine_managers
             ))
             await self.wait_for_state(lambda: all(
-                machine_manager.sessions[machine_manager.active_session_id].selected_frames
+                machine_manager.sessions[machine_manager.active_session_id].images_for_final_selection
                 and machine_manager.sessions[machine_manager.active_session_id].frequency_candidates
                 for machine_manager in app.machine_managers.values()
             ))

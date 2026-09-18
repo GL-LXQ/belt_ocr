@@ -52,7 +52,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         manager = app.machine_managers["M01"]
         session = manager.sessions[manager.active_session_id]
-        await self.wait_for_state(lambda: session.capture_sealed)
+        await self.wait_for_state(lambda: session.is_capture_finished)
         await app.handle_close("M01")
         await app.wait_until_idle()
 
@@ -64,9 +64,9 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "COMPLETE")
         self.assertTrue(record["is_simulated"])
-        self.assertEqual(record["capture_statistics"]["selected_frame_count"], 2)
-        self.assertTrue(record["capture_statistics"]["camera_stopped"])
-        self.assertGreater(record["capture_statistics"]["received_frame_count"], 0)
+        self.assertEqual(record["capture_summary"]["selected_frame_count"], 2)
+        self.assertTrue(record["capture_summary"]["camera_stopped"])
+        self.assertGreater(record["capture_summary"]["received_frame_count"], 0)
 
         # 检查证据的 BMP 文件头、尺寸和像素，确认未使用被 SDK 覆盖的内存。
         for evidence_path in record["evidence_refs"]:
@@ -94,7 +94,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("camera", level="ERROR"):
             await app.handle_start("M01")
             session = manager.sessions[manager.active_session_id]
-            await self.wait_for_state(lambda: session.capture_sealed)
+            await self.wait_for_state(lambda: session.is_capture_finished)
         await app.handle_close("M01")
         await app.wait_until_idle()
 
@@ -103,8 +103,8 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["outcome"], "REVIEW_REQUIRED")
         self.assertIn("CAPTURE_FAILED", record["error_codes"])
         self.assertEqual(record["evidence_refs"], [])
-        self.assertGreater(record["capture_statistics"]["failed_frame_count"], 0)
-        self.assertIn("SaveImageEx3(BMP)", record["capture_statistics"]["processing_errors"][0])
+        self.assertGreater(record["capture_summary"]["failed_frame_count"], 0)
+        self.assertIn("SaveImageEx3(BMP)", record["capture_summary"]["processing_errors"][0])
         self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
         self.assertEqual(list(self.output_directory.rglob("*.partial")), [])
 
@@ -126,8 +126,8 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         session = manager.sessions[manager.active_session_id]
 
         # 第一批在采集期间交付，OCR 仍等待本轮封口。
-        await self.wait_for_state(lambda: len(session.selected_frames) == 8)
-        self.assertFalse(session.capture_sealed)
+        await self.wait_for_state(lambda: len(session.images_for_final_selection) == 8)
+        self.assertFalse(session.is_capture_finished)
         self.assertTrue(manager.camera.is_capturing)
         self.assertEqual(session.ocr_state, OCRState.WAITING)
         first_batch = publisher.call_args_list[0].args[0].payload
@@ -174,7 +174,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         manager.camera.publish_event = publisher
         await app.handle_start("M01")
         session = manager.sessions[manager.active_session_id]
-        await self.wait_for_state(lambda: len(session.selected_frames) == 8)
+        await self.wait_for_state(lambda: len(session.images_for_final_selection) == 8)
 
         # 关闭并检查只产生一次批次事件和一次封口事件。
         await app.handle_close("M01")
@@ -211,11 +211,11 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(manager.camera, "is_frame_qualified", side_effect=qualify_after_first_frame):
             await app.handle_start("M01")
             session = manager.sessions[manager.active_session_id]
-            await self.wait_for_state(lambda: session.capture_sealed)
+            await self.wait_for_state(lambda: session.is_capture_finished)
 
         # 两个合格名额仍可用，第一帧没有生成图片证据。
-        self.assertEqual(len(session.selected_frames), 2)
-        self.assertTrue(all(not frame.frame_id.endswith("-1") for frame in session.selected_frames.values()))
+        self.assertEqual(len(session.images_for_final_selection), 2)
+        self.assertTrue(all(not frame.frame_id.endswith("-1") for frame in session.images_for_final_selection.values()))
         self.assertGreaterEqual(session.skipped_frame_count, 1)
         self.assertEqual(len(list(self.output_directory.rglob("*.bmp"))), 2)
 
@@ -236,7 +236,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(manager.camera, "is_frame_qualified", return_value=False):
             await app.handle_start("M01")
             session = manager.sessions[manager.active_session_id]
-            await self.wait_for_state(lambda: session.capture_sealed)
+            await self.wait_for_state(lambda: session.is_capture_finished)
 
         # 空采集只封口，不保存图片，关闭后留下待复核结果。
         self.assertEqual([call.args[0].event_type for call in publisher.call_args_list], ["CaptureSealed"])
@@ -324,10 +324,10 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(app.handle_close("M01"), 1)
                 await app.handle_start("M01")
                 second_session = manager.sessions[manager.active_session_id]
-                await self.wait_for_state(lambda: bool(second_session.selected_frames))
+                await self.wait_for_state(lambda: bool(second_session.images_for_final_selection))
 
                 # 旧轮还在保存，下一轮已经独立采集并收到自己的图片。
-                self.assertFalse(first_session.capture_sealed)
+                self.assertFalse(first_session.is_capture_finished)
                 self.assertNotEqual(first_session.capture_id, second_session.capture_id)
                 await manager.camera.seal_capture(first_session.capture_id)
                 self.assertEqual(manager.active_session_id, second_session.session_id)

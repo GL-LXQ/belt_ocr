@@ -79,18 +79,17 @@ class BeltSession:
     frequency_source_id: str
     capture_id: str
     start_time: str
-    start_boundary: float
-    close_time: str | None = None
-    close_boundary: float | None = None
+    capture_start_time: float  # 本轮相机采集图片的起始时间，受理 START 时记录，单调时钟秒数
+    capture_stop_time: float | None = None  # 本轮相机采集图片的停止截止时间，关闭或中断时记录，单调时钟秒数
     finish_time: str | None = None
     state: SessionState = SessionState.RUNNING  # 本轮任务的整体处理状态
-    capture_sealed: bool = False
-    selected_frames: dict[str, CapturedFrame] = field(default_factory=dict)
+    is_capture_finished: bool = False  # 本轮相机采图及图片批次交付是否结束，不代表采集成功或 OCR 完成
     skipped_frame_count: int = 0
-    capture_statistics: dict = field(default_factory=dict)
+    capture_summary: dict = field(default_factory=dict)  # 本轮相机采集汇总，包含帧数、耗时和错误信息
     ocr_state: OCRState = OCRState.WAITING  # 本轮文字识别状态
     ocr_result: OCRResult | None = None
-    memory_frames: dict[str, CapturedFrame] = field(default_factory=dict)
+    # 供本轮文字和图片终选使用的原图，按 frame_id 保存，仅保留 OCR 队列已受理的图片。
+    images_for_final_selection: dict[str, CapturedFrame] = field(default_factory=dict)
     recognition_results: list[dict] = field(default_factory=list)
     pending_recognition_batches: int = 0
     text_postprocessing_started: bool = False
@@ -101,10 +100,6 @@ class BeltSession:
     frozen_payload: str | None = None
     payload_hash: str | None = None
     errors: list[str] = field(default_factory=list)
-    process_epoch: str = ""
-    configuration_snapshot: dict = field(default_factory=dict)
-    ocr_deadline: str = ""
-    cycle_deadline: str = ""
     evidence_verified: bool = False
     evidence_validation_pending: bool = False
 
