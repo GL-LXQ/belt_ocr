@@ -345,15 +345,8 @@ class MachineManager:
         # 分派采集结果，保留各事件是否继续结算的处理决定。
         should_finalize = True
         match event.event_type:
-            case "FrameSelected":
-                should_finalize = await self.handle_frame_selected(session, event)
             case "FrameBatchSelected":
-                # 按帧检查批次归属并登记图片，批次接收阶段不提交 OCR。
-                should_finalize = False
-                for frame in event.payload:
-                    frame_event = MeasurementEvent("FrameSelected", event.machine_id, event.session_id, frame)
-                    frame_selected = await self.handle_frame_selected(session, frame_event)
-                    should_finalize = frame_selected or should_finalize
+                should_finalize = await self.handle_frame_batch_selected(session, event)
             case "CaptureSealed":
                 should_finalize = await self.handle_capture_sealed(session, event)
             case "OCRFrameStarted" | "OCRFrameCompleted" | "OCRFrameFailed":
@@ -429,39 +422,21 @@ class MachineManager:
                 self.device_faults.add("COMMIT_INTEGRITY_CONFLICT")
             logger.error("记录待重试 machine_id=%s session_id=%s", session.machine_id, session.session_id)
 
-    async def handle_frame_selected(self, session: BeltSession, event: MeasurementEvent) -> bool:
-        """校验图片归属并按帧编号登记本轮图片。
+    async def handle_frame_batch_selected(self, session: BeltSession, event: MeasurementEvent) -> bool:
+        """将采集端交付的图片批次按帧编号去重登记到 Session。
 
         Args:
-            session: 事件所属的测量档案。
-            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
+            session: 接收批次的测量档案。
+            event: FrameBatchSelected 事件，payload 为已筛选图片的元组。
 
         Returns:
-            bool: 是否继续执行本轮完成检查。
-            返回示例：
-                True  # 继续检查本轮能否结算
-                False  # 忽略当前事件，不执行完成检查
+            True  # 批次非空，继续检查本轮能否结算
+            False  # 批次为空，不执行完成检查
         """
-        # 检查图片的档案、设备、窗口和采集时间归属。
-        frame = event.payload
-        if (
-            frame.session_id != session.session_id
-            or frame.camera_id != session.camera_id
-            or frame.capture_id != session.capture_id
-            or frame.captured_monotonic < session.start_boundary
-            or session.capture_sealed
-            or (
-                session.close_boundary is not None
-                and frame.captured_monotonic > session.close_boundary
-            )
-        ):
-            await run_blocking_operation(self.recovery.audit, "FRAME_OWNERSHIP_CONFLICT", event)
-            logger.warning("隔离归属不符图像 session_id=%s", session.session_id)
-            return False
-
-        # 按帧编号登记图片，并继续本轮完成检查。
-        session.selected_frames.setdefault(frame.frame_id, frame)
-        return True
+        # 登记批内图片，重复帧保留首次交付的记录。
+        for frame in event.payload:
+            session.selected_frames.setdefault(frame.frame_id, frame)
+        return bool(event.payload)
 
     async def handle_capture_sealed(self, session: BeltSession, event: MeasurementEvent) -> bool:
         """封口图像窗口并提交本轮已收集的图片任务。

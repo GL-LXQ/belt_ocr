@@ -182,7 +182,7 @@ class SessionCamera:
             window.skipped_count += 1
             return
 
-        # 调用图像筛选入口，不合格帧只累计跳过数量。
+        # 调用图像筛选入口，无字、纯黑、截断不合格帧只累计跳过数量。
         if not self.is_frame_qualified(frame):
             window.skipped_count += 1
             return

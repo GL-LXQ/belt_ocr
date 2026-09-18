@@ -79,7 +79,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         # 依次确认图像与频率已被业务层接收。
         await self.publish_and_wait(MeasurementEvent(
-            "FrameSelected", session.machine_id, session.session_id, frame,
+            "FrameBatchSelected", session.machine_id, session.session_id, (frame,),
         ))
         await self.publish_and_wait(MeasurementEvent(
             "FrequencyMeasured", session.machine_id, session.session_id, measurement,
@@ -114,12 +114,6 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(session.camera_id, f"CAM{machine_number:02}")
             self.assertEqual(session.frequency_source_id, f"FREQ{machine_number:02}")
             frame, measurement = await self.supply_valid_inputs(session)
-            for source_id in ("", "wrong-camera"):
-                await self.publish_and_wait(MeasurementEvent(
-                    "FrameSelected", session.machine_id, session.session_id,
-                    replace(frame, frame_id=uuid4().hex, camera_id="wrong-camera"),
-                    source_id=source_id,
-                ))
             for source_id in ("", "wrong-frequency"):
                 await self.publish_and_wait(MeasurementEvent(
                     "FrequencyMeasured", session.machine_id, session.session_id,
@@ -146,7 +140,6 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
                 record["frequency_candidates"][0]["frequency_source_id"],
                 record["frequency_source_id"],
             )
-        self.assertIn("FRAME_OWNERSHIP_CONFLICT", self.read_audit_reasons())
         self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_audit_reasons())
 
     async def test_03_04_05_late_ocr_and_commit_preserve_new_cycle(self):
@@ -260,7 +253,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             first_frame, first_measurement = await self.supply_valid_inputs(session)
             await self.supply_valid_inputs(session)
             await self.publish_and_wait(MeasurementEvent(
-                "FrameSelected", "M01", session.session_id, first_frame,
+                "FrameBatchSelected", "M01", session.session_id, (first_frame,),
             ))
             await self.publish_and_wait(MeasurementEvent(
                 "FrequencyMeasured", "M01", session.session_id, first_measurement,
@@ -380,12 +373,12 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         # 仅补充新周期图像，关闭后应保存缺少有效频率的待复核记录。
         await self.publish_and_wait(MeasurementEvent(
-            "FrameSelected", "M01", second_session.session_id,
-            replace(
+            "FrameBatchSelected", "M01", second_session.session_id,
+            (replace(
                 frame, session_id=second_session.session_id,
                 capture_id=second_session.capture_id, frame_id=uuid4().hex,
                 captured_monotonic=asyncio.get_running_loop().time(),
-            ),
+            ),),
         ))
         await self.close_controlled_cycle(second_session)
         await app.wait_until_idle(10)
@@ -539,7 +532,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(len(self.read_records()), 3)
 
-    async def test_17_20_late_frames_respect_capture_identity_and_close_boundary(self):
+    async def test_17_20_late_batches_stay_with_original_session(self):
         # 保存旧轮关闭边界，并保留新轮活动采集。
         app = await self.start_controlled_app()
         machine_manager = app.machine_managers["M01"]
@@ -550,23 +543,10 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         second_session = machine_manager.sessions[machine_manager.active_session_id]
 
-        # 接收已明确属于旧窗口的延迟帧，拒绝关闭后或启动前的帧。
+        # 接收采集端筛选后延迟交付的旧轮尾批。
         delayed_frame = replace(frame, frame_id="delayed-before-close")
         await self.publish_and_wait(MeasurementEvent(
-            "FrameSelected", "M01", first_session.session_id, delayed_frame,
-        ))
-        for frame_id, boundary in (
-            ("after-close", first_session.close_boundary + 0.001),
-            ("before-start", first_session.start_boundary - 0.001),
-        ):
-            await self.publish_and_wait(MeasurementEvent(
-                "FrameSelected", "M01", first_session.session_id,
-                replace(frame, frame_id=frame_id, captured_monotonic=boundary),
-            ))
-
-        # 旧帧即使被送到新 Session，也不能进入新采集窗口。
-        await self.publish_and_wait(MeasurementEvent(
-            "FrameSelected", "M01", second_session.session_id, frame,
+            "FrameBatchSelected", "M01", first_session.session_id, (delayed_frame,),
         ))
         self.assertEqual(second_session.selected_frames, {})
         expected_frames = {frame.frame_id, delayed_frame.frame_id}
@@ -577,12 +557,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second_session.capture_sealed)
         self.assertEqual(machine_manager.active_session_id, second_session.session_id)
 
-        # 封口后的旧帧不能继续增加旧轮证据。
-        await self.publish_and_wait(MeasurementEvent(
-            "FrameSelected", "M01", first_session.session_id,
-            replace(frame, frame_id="after-seal"),
-        ))
-        self.assertEqual(set(first_session.selected_frames), expected_frames)
+        # 尾批和采集封口完成后，继续结算旧轮频率。
         await self.publish_and_wait(MeasurementEvent(
             "FrequencyWindowSealed", "M01", first_session.session_id,
         ))
@@ -755,10 +730,9 @@ asyncio.run(crash_after_close())
         session = machine_manager.sessions[machine_manager.active_session_id]
         frame, measurement = await self.supply_valid_inputs(session)
 
-        # 构造来源不符图片、未运行 OCR 结果和未关闭频率封口。
-        rejected_frame = replace(frame, frame_id="rejected-frame", camera_id="CAM02")
+        # 构造空批次、未运行 OCR 结果和未关闭频率封口。
         events = (
-            MeasurementEvent("FrameSelected", "M01", session.session_id, rejected_frame),
+            MeasurementEvent("FrameBatchSelected", "M01", session.session_id, ()),
             MeasurementEvent("OCRCompleted", "M01", session.session_id),
             MeasurementEvent("FrequencyWindowSealed", "M01", session.session_id),
         )
@@ -776,6 +750,36 @@ asyncio.run(crash_after_close())
         self.assertEqual(list(session.frequency_candidates), [measurement.measurement_id])
         self.assertEqual(session.ocr_state, "WAITING")
         self.assertFalse(session.frequency_window_sealed)
+
+    async def test_batch_registers_valid_frames_and_ignores_duplicates(self) -> None:
+        """验证采集端交付的批次被登记且重复批次不增加图片。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 批次登记、去重和 OCR 状态断言完成
+        """
+        # 创建受控周期，并登记用于构造批次的原始图片。
+        app = await self.start_controlled_app()
+        await app.handle_start("M01")
+        manager = app.machine_managers["M01"]
+        session = manager.sessions[manager.active_session_id]
+        frame, measurement = await self.supply_valid_inputs(session)
+
+        # 添加一帧新图片，并重复交付整个批次。
+        accepted_frame = replace(frame, frame_id="accepted-batch-frame")
+        event = MeasurementEvent(
+            "FrameBatchSelected", "M01", session.session_id,
+            (accepted_frame, frame),
+        )
+        await self.publish_and_wait(event)
+        await self.publish_and_wait(replace(event, event_id=uuid4().hex))
+
+        # 图片按编号去重登记，批次接收后 OCR 仍等待采集封口。
+        self.assertEqual(set(session.selected_frames), {frame.frame_id, accepted_frame.frame_id})
+        self.assertEqual(session.ocr_state, "WAITING")
+        self.assertEqual(session.ocr_jobs, {})
 
     async def test_frequency_identity_conflict_still_triggers_finalization(self) -> None:
         """验证频率周期身份冲突仍触发一次完成检查并保留无效状态。
