@@ -5,6 +5,8 @@ import threading
 import unittest
 from unittest.mock import Mock
 
+from enums import OCRState
+
 import test_measurement_flow as flow_support
 
 
@@ -104,7 +106,7 @@ class TextRecognitionTests(unittest.IsolatedAsyncioTestCase):
                     [session.memory_frames[result["frame_id"]].image_data for result in results],
                     [call.args[0] for call in recognizer.recognize_batch.call_args_list],
                 )
-                self.assertEqual(session.ocr_state, "WAITING")
+                self.assertEqual(session.ocr_state, OCRState.WAITING)
         finally:
             # 取消等待下一批的监听任务。
             listener.cancel()
@@ -146,7 +148,7 @@ class TextRecognitionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(recognizer.recognize_batch.call_count, 2)
             self.assertEqual(session.errors, ["测试整批推理失败"])
             self.assertEqual(len(session.recognition_results), 2)
-            self.assertEqual(session.ocr_state, "WAITING")
+            self.assertEqual(session.ocr_state, OCRState.WAITING)
         finally:
             # 取消监听任务，结束本次测试的消费流程。
             listener.cancel()

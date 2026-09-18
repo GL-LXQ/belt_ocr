@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from configuration import MachineConfiguration, MeasurementConfiguration
 from app import App
+from enums import OCRState
 from models import MeasurementEvent
 from database import DatabaseRequest
 from fake_mvs import FakeMvsSdk
@@ -121,7 +122,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             app.handle_start(machine_id) for machine_id in app.machine_managers
         ))
         await self.wait_for_state(lambda: all(
-            next(iter(machine_manager.sessions.values())).ocr_done
+            next(iter(machine_manager.sessions.values())).ocr_state == OCRState.SUCCESS
             for machine_manager in app.machine_managers.values()
         ))
         self.assertEqual(self.read_records(), [])
@@ -276,7 +277,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         # OCR 成功后关闭，确认缺频率不会补零或永久等待。
         await app.handle_start("M01")
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_done)
+        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
         await app.handle_close("M01")
         await app.wait_until_idle()
         record = self.read_records()[0]
@@ -293,7 +294,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             await app.handle_start("M01")
             machine_manager = app.machine_managers["M01"]
             session = machine_manager.sessions[machine_manager.active_session_id]
-            await self.wait_for_state(lambda: session.ocr_state == "FAILED")
+            await self.wait_for_state(lambda: session.ocr_state == OCRState.FAILED)
         await app.handle_close("M01")
         await app.wait_until_idle()
         self.assertEqual(self.read_records()[0]["outcome"], "REVIEW_REQUIRED")
@@ -353,7 +354,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_done)
+        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
         with patch.object(
             app.database, "write_record", write_then_lose_acknowledgement,
         ):
@@ -369,7 +370,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_done)
+        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
 
         # 写入失败后保留冻结记录，并用同一内容重新提交。
         with patch.object(

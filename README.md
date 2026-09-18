@@ -6,9 +6,9 @@
 
 海康 MVS 模块已接入 App，使用方法见 [运行说明](USAGE.md) 和 [MVS 采集说明](MVS_CAPTURE.md)。文件夹模拟采集已移除；测试通过假 SDK 验证真实适配器。没有配置序列号或没有可用相机时，对应机器不接受正常测量。
 
-当前系统的数据流：START 创建独立 Session，登记 frequency_adapter.active_session_id 并启动相机内存图片组批；OCR 按批次回传原始文字块，采集封口且批次结算后只触发一次文字和图片终选占位入口，当前不保存图片。频率监听黑盒负责设备连接、新有效测量识别和固定接收时的周期归属，按接收顺序将 FrequencyMeasured 与 START/CLOSE 送入同一机器 FIFO 队列；业务层仅追加 measurement_frequencies，不按设备测量时间重排，也不重复校验黑盒已保证的数据。处理 CLOSE 时立即清空适配器的活动周期、封闭列表并取最后一条作为最终频率；频率状态统一使用 FrequencyState 枚举，区分 COLLECTING（收集中）、NORMAL（正常）和 ABNORMAL（异常）；没有有效测量、频率故障或周期中断时保留明细且最终值为空。CLOSE 前入队的测量先处理，CLOSE 后不等待设备、不补收旧轮数据。频率明细 JSON、final_frequency_hz 和完整 payload 在同一 SQLite 事务中写入，整轮记录仍等待 OCR 等原有完成条件。当前 listen_measurements 按 frequency_interval_ms 循环读取 simulated_frequencies_hz 产生联调测量，每次分配独立身份，无活动 Session 时不交付；真实设备协议仍待替换，读取异常报告故障；旧库升级保留历史冻结内容和哈希，重启不恢复旧 Session。
+当前系统的数据流：START 创建独立 Session，登记 frequency_adapter.active_session_id 并启动相机内存图片组批；OCR 按批次回传原始文字块，采集封口且批次结算后只触发一次文字和图片终选占位入口，当前不保存图片。频率监听黑盒负责设备连接、新有效测量识别和固定接收时的周期归属，按接收顺序将 FrequencyMeasured 与 START/CLOSE 送入同一机器 FIFO 队列；业务层仅追加 measurement_frequencies，不按设备测量时间重排，也不重复校验黑盒已保证的数据。处理 CLOSE 时立即清空适配器的活动周期、封闭列表并取最后一条作为最终频率；频率状态统一使用 FrequencyState 枚举，区分 RUNNING（采集中）、SUCCESS（成功）和 FAILED（失败）；没有有效测量、频率故障或周期中断时保留明细且最终值为空。CLOSE 前入队的测量先处理，CLOSE 后不等待设备、不补收旧轮数据。频率明细 JSON、final_frequency_hz 和完整 payload 在同一 SQLite 事务中写入，整轮记录仍等待 OCR 等原有完成条件。当前 listen_measurements 按 frequency_interval_ms 循环读取 simulated_frequencies_hz 产生联调测量，每次分配独立身份，无活动 Session 时不交付；真实设备协议仍待替换，读取异常报告故障；旧库升级保留历史冻结内容和哈希，重启不恢复旧 Session。
 
-结算数据流：`try_finalize` 先判断周期是否结束；中断周期确定为中断结果，正常关闭周期在 OCR 未超时时等待采集封口和批次结算，再根据 OCR 与频率状态确定完整或待复核结果。完整结果通过证据验证后，与异常结果统一组装并冻结提交内容，释放内存图片和排队批次、取消剩余期限任务，最后提交存储并等待入库回调。
+结算数据流：`try_finalize` 先判断周期是否结束；中断周期确定为中断结果，正常关闭周期在 OCR 未超时时等待采集封口和批次结算，再直接根据 OCRState 枚举的 ocr_state 与 FrequencyState 枚举的 frequency_state 确定完整或待复核结果。完整结果通过证据验证后，与异常结果统一组装并冻结提交内容，释放内存图片和排队批次、取消剩余期限任务，最后提交存储并等待入库回调。
 
 ## 1. 项目目标与边界
 
@@ -45,22 +45,22 @@ START 后，为本次 Session 连续采集配置时长的图像。首版默认 `
 
 频率接收器持续运行。START 到 CLOSE 之间按程序接收顺序保存本轮所有新有效测量，最终采用最后收到的一条有效测量，不平均，也不按设备测量时间重排。相同频率值的新测量分别保留，同一测量的重发由设备黑盒过滤。
 
-关闭前的频率是候选值，可用于界面显示；处理 CLOSE 时立即封闭列表并冻结最终值，频率有效且本轮无频率故障时置 `frequency_done = True`，不设置关闭后的等待期。
+关闭前的频率是候选值，可用于界面显示；处理 CLOSE 时立即封闭列表并冻结最终值，频率有效且本轮无频率故障时置 `frequency_state = FrequencyState.SUCCESS`，不设置关闭后的等待期。
 
 ### 2.3 正常完成
 
 三个业务条件全部满足才能进入正常提交：
 
 ```text
-ocr_done = True
-frequency_done = True
+ocr_state == OCRState.SUCCESS
+frequency_state == FrequencyState.SUCCESS
 cycle_closed = True
 ```
 
 其中：
 
-- `ocr_done`：图像窗口已封口，选中的图像任务全部结算，后处理成功，最终 OCR 与证据已确认。
-- `frequency_done`：频率窗口已封口，最终频率已选定并通过有效性检查。
+- `ocr_state == OCRState.SUCCESS`：图像窗口已封口，选中的图像任务全部结算，后处理成功，最终 OCR 与证据已确认。
+- `frequency_state == FrequencyState.SUCCESS`：频率窗口已封口，最终频率已选定并通过有效性检查。
 - `cycle_closed`：收到并确认了属于本 Session 的正常关闭事件。
 
 “线程已经返回”“OCR 返回空字符串”“仪器仍显示上一次读数”均不等于业务完成。
@@ -292,7 +292,7 @@ CaptureSealed 已收到
 证据已保存并能够引用
 ```
 
-空结果、全部模糊、缺失证据、处理失败和超时均返回显式失败原因，不将 `ocr_done` 置为 True。
+空结果、全部模糊、缺失证据、处理失败和超时均返回显式失败原因，不将 `ocr_state` 置为 `OCRState.SUCCESS`。
 
 ## 10. 共享 OCR 调度
 
@@ -383,12 +383,12 @@ start_boundary, close_boundary, process_epoch
 cycle_state: OPEN | CLOSED | INTERRUPTED
 capture_id, capture_sealed
 selected_frame_ids, pending_ocr_job_ids
-ocr_state: WAITING | RUNNING | SUCCESS | FAILED | TIMED_OUT
+ocr_state: OCRState.WAITING | RUNNING | SUCCESS | FAILED | TIMED_OUT
 ocr_result, evidence_refs
 
 frequency_window_sealed
 measurement_frequencies
-frequency_state: FrequencyState.COLLECTING | NORMAL | ABNORMAL
+frequency_state: FrequencyState.RUNNING | SUCCESS | FAILED
 final_frequency_hz, final_measurement_id
 
 outcome: UNDECIDED | COMPLETE | REVIEW_REQUIRED | INTERRUPTED
@@ -397,11 +397,9 @@ frozen_payload, payload_hash
 errors, timestamps, deadlines
 ```
 
-为了避免布尔值与枚举互相矛盾，下面的字段用只读属性派生，不作为另一套可独立修改的状态：
+OCR 成功直接判断 `ocr_state == OCRState.SUCCESS`，频率正常直接判断 `frequency_state == FrequencyState.SUCCESS`。以下字段保留为只读派生属性：
 
 ```text
-ocr_done       = (ocr_state == SUCCESS)
-frequency_done = (frequency_state == FrequencyState.NORMAL)
 cycle_closed   = (cycle_state == CLOSED)
 finished       = (outcome == COMPLETE and commit_state == COMMITTED)
 ```
@@ -490,7 +488,7 @@ OCR / 频率是否存在明确失败或已到期限？
        ├─ 是 → 生成待复核/异常记录
        └─ 否
            ↓
-ocr_done && frequency_done && cycle_closed ?
+ocr_state == OCRState.SUCCESS && frequency_state == FrequencyState.SUCCESS && cycle_closed ?
        ├─ 否 → 等待下一事件
        └─ 是
            ↓
@@ -520,7 +518,7 @@ def try_finalize(session):
         submit_frozen_exception(session, outcome="REVIEW_REQUIRED")
         return
 
-    if not (session.ocr_done and session.frequency_done):
+    if session.ocr_state != OCRState.SUCCESS or session.frequency_state != FrequencyState.SUCCESS:
         return
 
     payload = validate_and_build_complete_payload(session)

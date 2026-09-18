@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import test_measurement_flow as flow_support
 import test_recovery_and_faults as recovery_support
-from enums import FrequencyState
+from enums import OCRState, FrequencyState
 from models import CapturedFrame, CaptureSummary, FrequencyMeasurement, MeasurementEvent
 from recovery import serialize_value
 
@@ -316,7 +316,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             "FrequencyMeasured", "M01", first_session.session_id,
             replace(measurement, session_id=second_session.session_id),
         ))
-        self.assertEqual(first_session.frequency_state, FrequencyState.ABNORMAL)
+        self.assertEqual(first_session.frequency_state, FrequencyState.FAILED)
         self.assertEqual(second_session.frequency_candidates, {})
         self.assertEqual(machine_manager.active_session_id, second_session.session_id)
         await self.supply_valid_inputs(second_session)
@@ -440,6 +440,7 @@ import os
 import sys
 from pathlib import Path
 from configuration import load_configuration
+from enums import OCRState
 from app import App
 import app as application_module
 sys.path.insert(0, "tests")
@@ -461,7 +462,7 @@ async def crash_after_close():
         app.state_changed.clear()
         await app.state_changed.wait()
     await machine_manager.queue.join()
-    assert session.frequency_candidates and not session.ocr_done
+    assert session.frequency_candidates and session.ocr_state != OCRState.SUCCESS
     print(session.session_id, flush=True)
     os._exit(24)
 
@@ -504,7 +505,7 @@ asyncio.run(crash_after_close())
                         await app.handle_start("M01")
                         machine_manager = app.machine_managers["M01"]
                         session = machine_manager.sessions[machine_manager.active_session_id]
-                        await self.wait_for_state(lambda: session.ocr_state == "FAILED")
+                        await self.wait_for_state(lambda: session.ocr_state == OCRState.FAILED)
                     await app.handle_close("M01")
                     await app.wait_until_idle(10)
 
@@ -529,7 +530,7 @@ asyncio.run(crash_after_close())
         await self.publish_and_wait(MeasurementEvent(
             "CaptureSealed", "M01", session.session_id, CaptureSummary(session.capture_id),
         ))
-        await self.wait_for_state(lambda: session.ocr_done)
+        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
 
         # OCR 已成功后删除证据，提交前重新读取时应转为待复核。
         Path(frame.image_path).unlink()
@@ -567,7 +568,7 @@ asyncio.run(crash_after_close())
             finalize.assert_awaited_once_with(session)
 
         # 冲突测量不替换原候选，并记录无效频率和审计原因。
-        self.assertEqual(session.frequency_state, FrequencyState.ABNORMAL)
+        self.assertEqual(session.frequency_state, FrequencyState.FAILED)
         self.assertIn("AMBIGUOUS_MEASUREMENT", session.errors)
         self.assertEqual(session.frequency_candidates[measurement.measurement_id], measurement)
         self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_audit_reasons())

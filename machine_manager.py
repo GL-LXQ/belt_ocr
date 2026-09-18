@@ -12,7 +12,7 @@ from uuid import uuid4
 from camera import SessionCamera
 from configuration import MachineConfiguration, MeasurementConfiguration
 from frequency_adapter import FrequencyAdapter
-from enums import FrequencyState, MachineState
+from enums import OCRState, FrequencyState, MachineState
 from models import BeltSession, MeasurementEvent, PublishEvent
 from recovery import run_blocking_operation, serialize_value
 from text_recognition import TextRecognizer
@@ -230,17 +230,17 @@ class MachineManager:
         session.frequency_window_sealed = True
 
         # 根据周期是否中断、频率是否异常以及已有读数，确定最终频率和状态。
-        if interrupted or session.frequency_state == FrequencyState.ABNORMAL:
+        if interrupted or session.frequency_state == FrequencyState.FAILED:
             # 周期中断或频率已异常时，最终频率为空，已收到的明细继续保留。
             session.final_frequency = None
-            session.frequency_state = FrequencyState.ABNORMAL
+            session.frequency_state = FrequencyState.FAILED
         elif session.measurement_frequencies:
             # 本轮有有效读数时，取按接收顺序保存的最后一条，标记频率正常。
             session.final_frequency = session.measurement_frequencies[-1]
-            session.frequency_state = FrequencyState.NORMAL
+            session.frequency_state = FrequencyState.SUCCESS
         else:
             # 本轮没有有效读数时，标记频率异常并记录缺少测量的错误。
-            session.frequency_state = FrequencyState.ABNORMAL
+            session.frequency_state = FrequencyState.FAILED
             session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
 
         # 通知相机按本轮截止时刻停止生产，等待停采完成后清空机器的活动 Session。
@@ -378,7 +378,7 @@ class MachineManager:
         match event.event_type:
             case "FrameBatchSelected":
                 # 丢弃已失败、超时或中断周期的迟到图片。
-                if session.ocr_state in {"FAILED", "TIMED_OUT"}:
+                if session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}:
                     return
                 if session.cycle_state == "INTERRUPTED":
                     return
@@ -431,15 +431,19 @@ class MachineManager:
                 if event.event_type == "EvidenceValidated":
                     session.evidence_verified = True
                 else:
-                    session.ocr_state = "FAILED"
+                    session.ocr_state = OCRState.FAILED
                     session.errors.append("EVIDENCE_UNAVAILABLE")
             case "OCRFailed" | "CaptureFailed" | "OCRTimeout":
                 # 忽略已有 OCR 终态，登记本次失败或超时。
-                if session.ocr_state in {"FAILED", "TIMED_OUT"}:
+                if session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}:
                     return
-                if session.ocr_state == "SUCCESS":
+                if session.ocr_state == OCRState.SUCCESS:
                     return
-                session.ocr_state = "TIMED_OUT" if event.event_type == "OCRTimeout" else "FAILED"
+                session.ocr_state = (
+                    OCRState.TIMED_OUT
+                    if event.event_type == "OCRTimeout"
+                    else OCRState.FAILED
+                )
                 session.errors.append(event.payload or "OCR_TIMEOUT")
             case "FrequencyMeasured":
                 should_finalize = await self.handle_frequency_measured(session, event)
@@ -447,7 +451,7 @@ class MachineManager:
                 # 登记本轮频率故障，保留明细但不确认最终频率。
                 if session.frequency_window_sealed:
                     return
-                session.frequency_state = FrequencyState.ABNORMAL
+                session.frequency_state = FrequencyState.FAILED
                 session.final_frequency = None
                 session.errors.append(event.payload)
             case "CycleTimeout":
@@ -464,7 +468,7 @@ class MachineManager:
             return
 
         # 整轮识别失败或超时后释放原图，清理尚未消费的批次。
-        if session.ocr_state in {"FAILED", "TIMED_OUT"}:
+        if session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}:
             session.memory_frames.clear()
             session.pending_recognition_batches -= (
                 self.text_recognizer.discard_session_batches(session.session_id)
@@ -473,7 +477,7 @@ class MachineManager:
         # 状态更新后，统一判断本 Session OCR 是否结束并触发一次文字和图片终选。
         if self.is_session_ocr_finished(session) and not session.text_postprocessing_started:
             session.text_postprocessing_started = True
-            if session.ocr_state not in {"FAILED", "TIMED_OUT"}:
+            if session.ocr_state not in {OCRState.FAILED, OCRState.TIMED_OUT}:
                 self.text_recognizer.select_final_text_and_img(
                     session.recognition_results, session.memory_frames
                 )
@@ -543,7 +547,7 @@ class MachineManager:
 
         # 采集或证据交付失败时，登记本轮识别失败和错误信息。
         if summary.errors:
-            session.ocr_state = "FAILED"
+            session.ocr_state = OCRState.FAILED
             session.errors.extend(summary.errors)
 
         # 返回封口处理结果，由事件主流程判断是否开始文字筛选。
@@ -603,18 +607,21 @@ class MachineManager:
             session.outcome = "INTERRUPTED"
         else:
             # 判断 OCR 是否超时，未超时时检查采集封口和批次结算状态。
-            if session.ocr_state != "TIMED_OUT":
+            if session.ocr_state != OCRState.TIMED_OUT:
                 if not session.capture_sealed or session.pending_recognition_batches != 0:
                     return
 
             # 判断 OCR 或频率是否异常，确定待复核结果。
             if (
-                session.ocr_state in {"FAILED", "TIMED_OUT"}
-                or session.frequency_state == FrequencyState.ABNORMAL
+                session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}
+                or session.frequency_state == FrequencyState.FAILED
             ):
                 session.outcome = "REVIEW_REQUIRED"
             # 判断 OCR 和频率是否均成功，确定完整结果。
-            elif session.ocr_done and session.frequency_done:
+            elif (
+                session.ocr_state == OCRState.SUCCESS
+                and session.frequency_state == FrequencyState.SUCCESS
+            ):
                 session.outcome = "COMPLETE"
             else:
                 return

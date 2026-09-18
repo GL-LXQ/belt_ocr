@@ -16,9 +16,19 @@ class MachineState(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class FrequencyState(str, Enum):
-    """频率采集状态。"""
+class OCRState(str, Enum):
+    """定义整个 Session 的 OCR 处理状态，不表示单个图片或批次的识别结果。"""
 
-    COLLECTING = "COLLECTING"  # 收集中
-    NORMAL = "NORMAL"  # 正常
-    ABNORMAL = "ABNORMAL"  # 异常
+    WAITING = "WAITING"  # 本 Session 等待最终 OCR 结果
+    RUNNING = "RUNNING"  # 本 Session 正在处理 OCR，尚未确定最终结果
+    SUCCESS = "SUCCESS"  # 本 Session 的最终 OCR 结果已确认成功
+    FAILED = "FAILED"  # 本 Session 的 OCR 已确定失败
+    TIMED_OUT = "TIMED_OUT"  # 本 Session 未在规定时间内完成 OCR
+
+
+class FrequencyState(str, Enum):
+    """定义整个 Session 的频率采集状态，不表示单次频率测量的结果。"""
+
+    RUNNING = "RUNNING"  # 本 Session 正在采集频率，尚未确定最终结果
+    SUCCESS = "SUCCESS"  # 本 Session 已封闭频率列表并确定有效的最终频率
+    FAILED = "FAILED"  # 本 Session 缺少有效频率、频率采集故障或周期中断

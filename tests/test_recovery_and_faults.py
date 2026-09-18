@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import test_measurement_flow as flow_support
 from app import App
+from enums import OCRState
 from models import MeasurementEvent
 from recovery import serialize_value
 from database import DatabaseRequest
@@ -47,7 +48,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_done)
+        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
 
         # 暂时禁止最终库写入，确认记录先进入本地待提交区。
         with patch.object(
@@ -84,7 +85,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_done)
+        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
 
         # 持续写入失败后退出，保存同一份冻结内容。
         with patch.object(
@@ -114,7 +115,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await restarted.handle_start("M01")
         machine_manager = restarted.machine_managers["M01"]
         new_session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: new_session.ocr_done)
+        await self.wait_for_state(lambda: new_session.ocr_state == OCRState.SUCCESS)
         await restarted.handle_close("M01")
         await restarted.wait_until_idle(10)
         self.assertEqual([record["session_id"] for record in self.read_records()], [new_session.session_id])
@@ -135,7 +136,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_done)
+        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
         await app.handle_close("M01")
         await app.wait_until_idle(10)
         expected_records = self.read_records()
@@ -270,7 +271,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for_state(lambda: session.capture_sealed)
         await app.handle_close("M01")
         await self.wait_for_state(lambda: session.frequency_window_sealed)
-        self.assertFalse(session.ocr_done)
+        self.assertNotEqual(session.ocr_state, OCRState.SUCCESS)
 
         # 在 OCR 完成前退出，再启动新的应用实例。
         with self.assertLogs(level="WARNING"):
@@ -474,7 +475,7 @@ asyncio.run(crash_after_start())
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_done)
+        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
         with self.assertLogs(level="ERROR"):
             await app.handle_close("M01")
             await self.wait_for_state(lambda: session.commit_state == "RETRY_PENDING")
@@ -547,7 +548,7 @@ asyncio.run(crash_after_start())
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_done)
+        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
 
         # 模拟目标库检测到同一 Session 的不同内容。
         with patch.object(

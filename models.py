@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 from datetime import datetime, timezone
 
-from enums import FrequencyState
+from enums import OCRState, FrequencyState
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,7 @@ class BeltSession:
     selected_frames: dict[str, CapturedFrame] = field(default_factory=dict)
     skipped_frame_count: int = 0
     capture_statistics: dict = field(default_factory=dict)
-    ocr_state: str = "WAITING"
+    ocr_state: OCRState = OCRState.WAITING  # 本轮文字识别状态
     ocr_result: OCRResult | None = None
     memory_frames: dict[str, CapturedFrame] = field(default_factory=dict)
     recognition_results: list[dict] = field(default_factory=list)
@@ -96,7 +96,7 @@ class BeltSession:
     text_postprocessing_started: bool = False
     frequency_window_sealed: bool = False
     measurement_frequencies: list[FrequencyMeasurement] = field(default_factory=list)
-    frequency_state: FrequencyState = FrequencyState.COLLECTING
+    frequency_state: FrequencyState = FrequencyState.RUNNING
     final_frequency: FrequencyMeasurement | None = None
     outcome: str = "UNDECIDED"
     commit_state: str = "NOT_READY"
@@ -109,14 +109,6 @@ class BeltSession:
     cycle_deadline: str = ""
     evidence_verified: bool = False
     evidence_validation_pending: bool = False
-
-    @property
-    def ocr_done(self) -> bool:
-        return self.ocr_state == "SUCCESS"
-
-    @property
-    def frequency_done(self) -> bool:
-        return self.frequency_state == FrequencyState.NORMAL
 
     @property
     def cycle_closed(self) -> bool:

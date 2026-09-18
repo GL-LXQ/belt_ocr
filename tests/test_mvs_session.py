@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import camera
+from enums import OCRState
+
 import test_measurement_flow as flow_support
 from app import App
 
@@ -127,7 +129,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for_state(lambda: len(session.selected_frames) == 8)
         self.assertFalse(session.capture_sealed)
         self.assertTrue(manager.camera.is_capturing)
-        self.assertEqual(session.ocr_state, "WAITING")
+        self.assertEqual(session.ocr_state, OCRState.WAITING)
         first_batch = publisher.call_args_list[0].args[0].payload
         self.assertEqual(len(first_batch), 8)
 
