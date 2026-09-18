@@ -6,7 +6,7 @@
 
 海康 MVS 模块已接入 App，使用方法见 [运行说明](USAGE.md) 和 [MVS 采集说明](MVS_CAPTURE.md)。文件夹模拟采集已移除；测试通过假 SDK 验证真实适配器。没有配置序列号或没有可用相机时，对应机器不接受正常测量。
 
-当前系统的数据流：App 初始化数据库与共享 MVS SDK，按序列号打开相机；START 创建 Session，同时启动采集和频率窗口。Grabber 复制图像并释放 SDK Buffer 后放入独立有界队列，消费者筛选并保存 BMP，每满 8 帧发布 FrameBatchSelected，采集结束时先交付尾批再发布 CaptureSealed。MachineManager 将机器编号、Session 编号和图片元组直接送入 OCR 批次队列，不重复校验或登记图片、逐帧任务；CaptureSealed 只保存封口状态、统计和采集错误，不再提交识别。当前开发阶段到批次入队为止，text_recognition.py 中的 TextRecognizer 通过 submit_batch 接收 RecognitionBatch 并保存到 batch_queue；旧逐帧模拟识别实现已删除，尚无批次消费、识别或结果回传；ocr_queue_capacity 按批次数限制队列，拒收记为 OCR_BATCH_REJECTED。队列未消费会逐渐填满，Session 不会正常完成，原有 OCR 超时及异常存储流程仍保留；退出停止批次接收，重启不恢复旧 Session。
+当前系统的数据流：App 初始化数据库与共享 MVS SDK，START 创建 Session 并启动采集和频率窗口；相机消费者筛选并保存 BMP，按 8 帧及尾批发布 FrameBatchSelected，MachineManager 将机器编号、Session 编号和图片元组直接提交到 TextRecognizer.batch_queue。手动启动 listen_and_recognize_batches 后，单消费者按批次顺序提取图片路径，在线程中一次调用 recognize_batch，再按同序结果关联 frame_id、image_path 和原始 blocks，通过 RecognitionBatchCompleted 返回所属 Session 的 recognition_results；推理异常通过 RecognitionBatchFailed 记录到所属 Session，继续下一批，不重试。recognize_batch 暂按输入数量返回独立的空 blocks，仅用于联调，不代表真实识别结果，App 不自动启动消费者。CaptureSealed 保留封口和采集统计；不增加批次 ID 或 Session 待处理计数，不进行跨帧融合、整轮成功判断或正常结果入库。队列仍按批次数限制容量，拒收记为 OCR_BATCH_REJECTED；原有超时和异常存储流程保留，重启不恢复旧 Session。
 
 ## 1. 项目目标与边界
 

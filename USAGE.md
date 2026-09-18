@@ -1,6 +1,6 @@
 # 核心流程运行说明
 
-> 当前开发阶段仅完成图片批次送入 OCR 模块。TextRecognizer 仅接收 RecognitionBatch，旧逐帧模拟识别代码已删除；批次暂存于有界队列，尚未消费或回传结果。队列满或停止接收时记录 `OCR_BATCH_REJECTED`。当前不能生成正常完整测量，原有 OCR 超时仍可能触发；下文完整测量演示和识别流程属于后续待接通行为。
+> 当前已实现 TextRecognizer 的批次接收、手动消费和原始结果回传。recognize_batch 当前为每张图片返回空 blocks 作为联调占位结果，App 不自动启动消费者。模型未接入时不可进行真实识别；当前不做跨帧融合、整轮完成判断或正常结果入库，原有超时仍可能触发。
 
 当前版本包含三机测量、跨轮后台收尾、内存机器状态、本次运行内自动补交、重启清理和异常审计。
 信号统一从 `App.handle_start()` 和 `handle_close()` 进入，尚未接入现场 IO。
@@ -205,7 +205,7 @@ await app.synchronize_machine("M01", observed_state="CLOSED")
 | `camera.py` | MVS 与 Session 适配、证据保存、线程事件桥接和封口 |
 | `mvs_sdk.py` | 官方 MVS 绑定、设备管理和独立帧内存复制 |
 | `mvs_capture.py` | 固定窗口流式采集、独立有界队列、逐帧回调和统计 |
-| `text_recognition.py` | TextRecognizer 接收 RecognitionBatch，保存到有界批次队列 |
+| `text_recognition.py` | 批次接收、监听、整批模型调用和原始结果回传；模型接口待实现 |
 | `frequency.py` | 持续模拟新测量、窗口归属和在途数据收尾 |
 | `database.py` | SQLite 建表、幂等写入和有限重试 |
 | `recovery.py` | 本地待提交记录、审计和实例锁 |
@@ -234,7 +234,15 @@ README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTAN
 ## 当前阶段验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_ocr_batch_delivery.py tests/test_mvs_capture.py tests/test_machine_state.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_text_recognition.py tests/test_ocr_batch_delivery.py tests/test_mvs_capture.py tests/test_machine_state.py -q
 ```
 
 该命令验证满批与尾批交付、队列拒收、封口不重复提交、底层采集和配置。直接依赖旧逐帧模拟识别实现的测试已删除；独立的采集、频率、存储和重启测试保留。其余依赖完整识别结果的历史场景仍待后续接通，当前未宣称全套测试通过。
+
+## 批次识别接口
+
+`recognize_batch(image_paths)` 是同步黑盒接口，接收有序图片路径列表，返回等长、同序的 `list[dict]`，每项为 `{"blocks": [...]}`。图片读取、预处理和真实模型调用在该方法中补齐。当前按输入数量返回独立的 `{"blocks": []}`，仅用于联调，不表示模型判断图片无文字；后续以真实模型实现替换。
+
+`listen_and_recognize_batches(app.publish_event)` 持续等待 `batch_queue` 并逐批处理，内部在线程中调用一次整批识别。成功事件为 `RecognitionBatchCompleted`，公共字段保留 `machine_id`、`session_id`，payload 为含 `frame_id`、`image_path` 和原始 `blocks` 的逐图结果列表。MachineManager 只追加到 `Session.recognition_results`，不更新整轮 OCR 成功状态，不触发完成检查。推理异常发送 `RecognitionBatchFailed`，只记录错误并继续下一批，无自动重试。
+
+模型或测试替身接入后，由调用方使用 `asyncio.create_task(app.text_recognizer.listen_and_recognize_batches(app.publish_event))` 手动启动，并在应用退出前取消和等待该任务；取消时会等待正在执行的同步模型调用结束。App 当前不管理或自动启动这个任务。队列的 `task_done()` 仅结算队列消费，不是 Session 待处理批次计数，也不表示识别成功。

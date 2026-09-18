@@ -88,6 +88,7 @@ class BeltSession:
     capture_statistics: dict = field(default_factory=dict)
     ocr_state: str = "WAITING"
     ocr_result: OCRResult | None = None
+    recognition_results: list[dict] = field(default_factory=list)
     frequency_window_sealed: bool = False
     frequency_candidates: dict[str, FrequencyMeasurement] = field(default_factory=dict)
     frequency_state: str = "COLLECTING"

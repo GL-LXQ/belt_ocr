@@ -364,6 +364,17 @@ class MachineManager:
 
             case "CaptureSealed":
                 should_finalize = await self.handle_capture_sealed(session, event)
+
+            case "RecognitionBatchCompleted":
+                # 保存本轮每张图片的原始识别结果。
+                session.recognition_results.extend(event.payload)
+                return
+
+            case "RecognitionBatchFailed":
+                # 记录本批识别错误，保留整轮状态等待后续处理。
+                session.errors.append(event.payload)
+                return
+
             case "EvidenceValidated" | "EvidenceFailed":
                 # 结算证据校验，登记成功状态或失败原因。
                 session.evidence_validation_pending = False
