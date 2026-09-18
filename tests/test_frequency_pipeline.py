@@ -125,14 +125,14 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
             create_measurement(session, 11, 19, 42.0),
             create_measurement(session, 2, 11, 43.0),
         ):
-            await manager.apply_event(MeasurementEvent(
+            await manager.handle_event(MeasurementEvent(
                 "FrequencyMeasured", "M01", session.session_id, measurement,
             ))
         assert len(session.measurement_frequencies) == 3
         assert session.frozen_payload is None
 
         # CLOSE 返回时频率已结算，没有等待设备或另发封口事件。
-        await manager.close_measurement()
+        await manager.handle_machine_close()
         assert manager.frequency_adapter.active_session_id is None
         assert session.frequency_window_sealed
         assert session.final_frequency.measurement_id == "reading-2"
@@ -180,17 +180,17 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
         """
         # 接收部分有效数据，读取失败事件不覆盖已有明细。
         if outcome != "empty":
-            await manager.apply_event(MeasurementEvent(
+            await manager.handle_event(MeasurementEvent(
                 "FrequencyMeasured", "M01", session.session_id,
                 create_measurement(session, 1, 12, 42.0),
             ))
         if outcome == "failure":
-            await manager.apply_event(MeasurementEvent(
+            await manager.handle_event(MeasurementEvent(
                 "FrequencyFailed", "M01", session.session_id, "FREQUENCY_RECEIVE_FAILED",
             ))
 
         # 正常关闭或明确中断均立即完成频率结算。
-        await manager.close_measurement(interrupted=outcome == "interrupted")
+        await manager.handle_machine_close(interrupted=outcome == "interrupted")
         assert manager.frequency_adapter.active_session_id is None
 
     asyncio.run(receive_and_close())
@@ -237,7 +237,7 @@ def test_fifo_includes_queued_reading_before_close_and_rejects_late_reading(freq
         ))
 
         # 启动正式串行处理器并等待三条事件全部处理。
-        listener = asyncio.create_task(manager.listen_and_process_events())
+        listener = asyncio.create_task(manager.listen_events())
         try:
             await asyncio.wait_for(manager.queue.join(), 1)
         finally:
@@ -269,10 +269,10 @@ def test_next_session_is_not_changed_by_old_frequency_event(frequency_context):
         Returns:
             None  # 新轮身份保持不变
         """
-        await manager.close_measurement()
+        await manager.handle_machine_close()
         manager.active_session_id = "next-session"
         manager.frequency_adapter.active_session_id = "next-session"
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "FrequencyMeasured", "M01", session.session_id,
             create_measurement(session, 1, 12, 42.0),
         ))

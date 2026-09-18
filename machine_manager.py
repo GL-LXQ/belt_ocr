@@ -70,7 +70,7 @@ class MachineManager:
             return "DEGRADED"
         return "READY"
 
-    async def listen_and_process_events(self) -> None:
+    async def listen_events(self) -> None:
         """持续监听本机事件队列，按顺序处理事件并反馈处理结果。
 
         Args:
@@ -86,7 +86,7 @@ class MachineManager:
             event = await self.queue.get()
             try:
                 # 处理事件后，如果有回执，而且回执还没结束，就通知等待方：处理完成了。
-                await self.process_event(event)
+                await self.handle_event(event)
                 if event.acknowledgement is not None:
                     if not event.acknowledgement.done():
                         event.acknowledgement.set_result(None)
@@ -103,7 +103,7 @@ class MachineManager:
                     await run_blocking_operation(
                         self.recovery.audit, "BUSINESS_PROCESSING_FAILED", event,
                     )
-                    await self.close_measurement(interrupted=True)
+                    await self.handle_machine_close(interrupted=True)
                 except Exception:
                     # 标记本地运行库不可用并记录异常。
                     self.recovery.available = False
@@ -117,7 +117,7 @@ class MachineManager:
                 self.state_changed.set()
                 self.queue.task_done()
 
-    async def start_measurement(self) -> None:
+    async def handle_machine_start(self) -> None:
         """检查接收条件，创建本轮测量档案并启动采集窗口和超时任务。
 
         Args:
@@ -174,7 +174,7 @@ class MachineManager:
         # 登记本轮 OCR 等待期限，此处只安排超时事件。
         self.schedule_timeout(session, "OCRTimeout", self.configuration.ocr_result_timeout_ms)
 
-    async def close_measurement(self, interrupted: bool = False) -> None:
+    async def handle_machine_close(self, interrupted: bool = False) -> None:
         """结束本轮采集，结算频率并检查完成条件。
 
         Args:
@@ -239,14 +239,14 @@ class MachineManager:
 
         # 判断本轮是否中断，中断只打印日志并清理资源。
         if interrupted:
-            await self.fail_measurement(session)
+            await self.handle_measurement_failure(session)
             return
 
         # 检查正常关闭周期的结果，条件满足时提交数据库。
         await self.try_finalize(session)
 
-    async def process_event(self, event: MeasurementEvent) -> None:
-        """检查启停信号时效，并分派处理业务。
+    async def handle_event(self, event: MeasurementEvent) -> None:
+        """检查启停信号时效和事件归属，处理业务事件并检查本轮是否完成。
 
         Args:
             event: 待处理的测量事件，包含事件身份、来源信息和业务数据。
@@ -263,20 +263,6 @@ class MachineManager:
                 await run_blocking_operation(self.recovery.audit, "STALE_CONTROL_EVENT", event)
                 return
 
-        # 分派事件并更新内存中的业务状态。
-        await self.apply_event(event)
-
-    async def apply_event(self, event: MeasurementEvent) -> None:
-        """校验事件归属，按事件类型分派处理并检查本轮是否完成。
-
-        Args:
-            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
-
-        Returns:
-            None: 更新业务状态，不返回数据。
-            返回示例：
-                None  # 无返回数据
-        """
         # 检查事件所属机器。
         if event.machine_id != self.machine.machine_id:
             await run_blocking_operation(self.recovery.audit, "MACHINE_MISMATCH", event)
@@ -286,7 +272,7 @@ class MachineManager:
         # 分派不依赖测量档案的机器级事件。
         match event.event_type:
             case "MachineStarted":
-                await self.start_measurement()
+                await self.handle_machine_start()
                 return
             case "MachineClosed":
                 # 核对关闭信号的周期身份，再关闭当前测量。
@@ -295,18 +281,18 @@ class MachineManager:
                 }:
                     await run_blocking_operation(self.recovery.audit, "CLOSE_SESSION_MISMATCH", event)
                     return
-                await self.close_measurement()
+                await self.handle_machine_close()
                 # 收到有效关闭信号后清除初始状态未知的故障。
                 self.device_faults.discard("UNKNOWN_INITIAL_STATE")
                 return
             case "Shutdown":
-                await self.close_measurement(interrupted=True)
+                await self.handle_machine_close(interrupted=True)
                 return
             case "DeviceFault":
                 # 登记设备故障并中断当前周期。
                 self.device_faults.add(event.payload)
                 await run_blocking_operation(self.recovery.audit, "DEVICE_FAULT", event)
-                await self.close_measurement(interrupted=True)
+                await self.handle_machine_close(interrupted=True)
                 self.waiting_cycle_reset = True
                 return
             case "DeviceRecovered":
@@ -316,7 +302,7 @@ class MachineManager:
             case "MachineSynchronized":
                 # 中断原活动周期，更新机器复位状态。
                 if self.active_session_id is not None:
-                    await self.close_measurement(interrupted=True)
+                    await self.handle_machine_close(interrupted=True)
                 self.waiting_cycle_reset = event.payload != MachineState.CLOSED
                 if event.payload == MachineState.CLOSED:
                     self.interrupted_session_id = None
@@ -354,7 +340,7 @@ class MachineManager:
         if event.event_type == "CycleTimeout":
             if self.active_session_id == session.session_id:
                 session.errors.append("CYCLE_TIMEOUT")
-                await self.close_measurement(interrupted=True)
+                await self.handle_machine_close(interrupted=True)
             return
 
         # 判断本轮是否仍在处理，丢弃失败或等待入库后的迟到结果。
@@ -398,7 +384,7 @@ class MachineManager:
 
             case "CaptureSealed":
                 # 更新本轮采集封口状态，被忽略的封口事件直接结束处理。
-                if not await self.handle_capture_sealed(session, event):
+                if not await self.handle_capture_finished(session, event):
                     return
 
             case "RecognitionBatchCompleted":
@@ -458,7 +444,7 @@ class MachineManager:
             session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}
             or session.frequency_state == FrequencyState.FAILED
         ):
-            await self.fail_measurement(session)
+            await self.handle_measurement_failure(session)
             return
 
         # 状态更新后，统一判断本 Session OCR 是否结束并触发一次文字和图片终选。
@@ -500,9 +486,9 @@ class MachineManager:
         else:
             # 登记提交失败原因，打印日志并清理本轮档案。
             session.errors.append(event.payload["error_code"])
-            await self.fail_measurement(session)
+            await self.handle_measurement_failure(session)
 
-    async def fail_measurement(self, session: BeltSession) -> None:
+    async def handle_measurement_failure(self, session: BeltSession) -> None:
         """标记本轮失败并清理资源，保留尚未关闭的现场周期身份。
 
         Args:
@@ -552,7 +538,7 @@ class MachineManager:
             # 移除已经结束现场阶段的失败档案。
             self.sessions.pop(session.session_id)
 
-    async def handle_capture_sealed(self, session: BeltSession, event: MeasurementEvent) -> bool:
+    async def handle_capture_finished(self, session: BeltSession, event: MeasurementEvent) -> bool:
         """封口图像窗口并保存本轮采集统计和错误。
 
         Args:
@@ -642,7 +628,7 @@ class MachineManager:
             session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}
             or session.frequency_state == FrequencyState.FAILED
         ):
-            await self.fail_measurement(session)
+            await self.handle_measurement_failure(session)
             return
 
         # 判断采集是否封口、批次是否全部结算。
@@ -761,7 +747,7 @@ class MachineManager:
             session.errors.append("DATABASE_QUEUE_FULL")
 
         # 打印失败日志并清理本轮档案。
-        await self.fail_measurement(session)
+        await self.handle_measurement_failure(session)
 
     def schedule_timeout(
         self, session: BeltSession, event_type: str, timeout_ms: int

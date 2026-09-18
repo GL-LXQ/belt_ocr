@@ -46,7 +46,7 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
         assert app.database.queue.empty()
 
         # 正常关闭不结束未完成的 OCR，结果齐全后只提交一次。
-        await manager.close_measurement()
+        await manager.handle_machine_close()
         if close_first:
             assert session.state == SessionState.RUNNING
             assert manager.active_session_id is None
@@ -63,7 +63,7 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
             assert session.state == SessionState.WAITING_COMMIT_DB
             event = manager.queue.get_nowait()
             assert event.event_type == "CommitSucceeded"
-            await manager.apply_event(event)
+            await manager.handle_event(event)
             manager.queue.task_done()
         finally:
             worker.cancel()
@@ -126,7 +126,7 @@ def test_evidence_validation_controls_commit(frequency_context, tmp_path, readab
             None  # 验证期间无重复任务，失败时无待提交记录
         """
         # 启动证据验证，重复检查不得重复创建任务。
-        await manager.close_measurement()
+        await manager.handle_machine_close()
         assert session.state == SessionState.RUNNING
         assert session.evidence_validation_pending
         await manager.try_finalize(session)
@@ -135,7 +135,7 @@ def test_evidence_validation_controls_commit(frequency_context, tmp_path, readab
         # 等待验证并将结果交付同一机器事件处理器。
         await asyncio.gather(*tuple(manager.background_tasks))
         event = manager.queue.get_nowait()
-        await manager.apply_event(event)
+        await manager.handle_event(event)
         manager.queue.task_done()
         if readable:
             assert session.state == SessionState.WAITING_COMMIT_DB
@@ -182,7 +182,7 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
             captured_monotonic=11,
             image_data=b"BM-test",
         )
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "FrameBatchSelected", "M01", session.session_id, (frame,),
         ))
         manager.schedule_timeout(session, "CycleTimeout", 60000)
@@ -190,7 +190,7 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
         deadlines = tuple(manager.deadline_tasks.values())
 
         # 整轮 OCR 失败后清理图片，保留活动编号和等待关闭的期限。
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "OCRFailed", "M01", session.session_id, "MODEL_FAILED",
         ))
         assert session.state == SessionState.FAILED
@@ -202,15 +202,15 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
         assert (session.session_id, "OCRTimeout") not in manager.deadline_tasks
 
         # 重复启动和迟到图片不得恢复失败周期或创建新周期。
-        await manager.start_measurement()
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_machine_start()
+        await manager.handle_event(MeasurementEvent(
             "FrameBatchSelected", "M01", session.session_id, (frame,),
         ))
         assert len(manager.sessions) == 1
         assert app.text_recognizer.batch_queue.empty()
 
         # 真实关闭或关闭超时释放活动身份，超时仍要求机器复位。
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             end_event, "M01", session.session_id,
         ))
         assert manager.active_session_id is None
@@ -219,7 +219,7 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
         assert manager.waiting_cycle_reset == (end_event == "CycleTimeout")
         await asyncio.gather(*deadlines, return_exceptions=True)
         if end_event == "CycleTimeout":
-            await manager.apply_event(MeasurementEvent(
+            await manager.handle_event(MeasurementEvent(
                 "MachineClosed", "M01", session.session_id,
             ))
             assert not manager.waiting_cycle_reset
@@ -266,13 +266,13 @@ def test_database_failure_is_terminal_without_retry(frequency_context, failure_m
             app.database.write_record = Mock(side_effect=error)
 
         # 正常关闭后尝试提交，入队成功时执行存储工作任务。
-        await manager.close_measurement()
+        await manager.handle_machine_close()
         if failure_mode in {"write", "conflict"}:
             worker = asyncio.create_task(app.database.run())
             try:
                 await asyncio.wait_for(app.database.queue.join(), 1)
                 event = manager.queue.get_nowait()
-                await manager.apply_event(event)
+                await manager.handle_event(event)
                 manager.queue.task_done()
             finally:
                 worker.cancel()
@@ -323,7 +323,7 @@ def test_old_commit_does_not_change_new_active_session(
         """
         # 关闭结果完整的旧轮，进入等待入库状态。
         session.measurement_frequencies.append(create_measurement(session, 1, 12, 42))
-        await manager.close_measurement()
+        await manager.handle_machine_close()
         assert session.state == SessionState.WAITING_COMMIT_DB
 
         # 使用设备替身启动新轮，保留真实业务创建与期限逻辑。
@@ -331,18 +331,18 @@ def test_old_commit_does_not_change_new_active_session(
             closed=False, faulted=False, capture_lock=threading.Lock(),
         )
         manager.camera.start_capture = Mock()
-        await manager.start_measurement()
+        await manager.handle_machine_start()
         next_session = manager.sessions[manager.active_session_id]
         deadlines = tuple(manager.deadline_tasks.values())
 
         # 交付旧轮提交回调，再交付带旧编号的关闭信号。
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "CommitSucceeded" if commit_success else "CommitFailed",
             "M01",
             session.session_id,
             None if commit_success else {"error_code": "DATABASE_WRITE_FAILED"},
         ))
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "MachineClosed", "M01", session.session_id,
         ))
         assert manager.active_session_id == next_session.session_id
@@ -351,7 +351,7 @@ def test_old_commit_does_not_change_new_active_session(
         assert session.session_id not in manager.sessions
 
         # 结束测试中新建的周期，撤销其期限任务。
-        await manager.close_measurement(interrupted=True)
+        await manager.handle_machine_close(interrupted=True)
         await asyncio.gather(*deadlines, return_exceptions=True)
 
     asyncio.run(overlap_sessions())
@@ -380,7 +380,7 @@ def test_closed_session_remains_running_while_next_cycle_starts(frequency_contex
         # 保留旧轮等待 OCR，关闭时只结算有效频率。
         session.ocr_state = OCRState.WAITING
         session.measurement_frequencies.append(create_measurement(session, 1, 12, 42))
-        await manager.close_measurement()
+        await manager.handle_machine_close()
         assert session.state == SessionState.RUNNING
         assert session.frequency_state == FrequencyState.SUCCESS
 
@@ -389,10 +389,10 @@ def test_closed_session_remains_running_while_next_cycle_starts(frequency_contex
             closed=False, faulted=False, capture_lock=threading.Lock(),
         )
         manager.camera.start_capture = Mock()
-        await manager.start_measurement()
+        await manager.handle_machine_start()
         next_session = manager.sessions[manager.active_session_id]
         deadlines = tuple(manager.deadline_tasks.values())
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "OCRFailed", "M01", session.session_id, "MODEL_FAILED",
         ))
         assert session.state == SessionState.FAILED
@@ -401,7 +401,7 @@ def test_closed_session_remains_running_while_next_cycle_starts(frequency_contex
         assert app.database.queue.empty()
 
         # 中断测试的新轮并等待期限任务取消完成。
-        await manager.close_measurement(interrupted=True)
+        await manager.handle_machine_close(interrupted=True)
         await asyncio.gather(*deadlines, return_exceptions=True)
 
     asyncio.run(close_and_start())

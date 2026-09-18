@@ -95,7 +95,7 @@ def test_postprocessing_waits_for_seal_and_results(recognition_context, seal_fir
             None  # 完成事件交付和触发检查
         """
         # 提交本轮批次并检查独立待处理数量。
-        await manager.apply_event(
+        await manager.handle_event(
             MeasurementEvent("FrameBatchSelected", session.machine_id, session.session_id, (frames[0],))
         )
         assert session.pending_recognition_batches == 1
@@ -112,13 +112,13 @@ def test_postprocessing_waits_for_seal_and_results(recognition_context, seal_fir
             events.reverse()
 
         # 第一个事件尚不足以触发，第二个事件才满足全部条件。
-        await manager.apply_event(events[0])
+        await manager.handle_event(events[0])
         app.text_recognizer.select_final_text_and_img.assert_not_called()
-        await manager.apply_event(events[1])
+        await manager.handle_event(events[1])
         app.text_recognizer.select_final_text_and_img.assert_called_once_with(results, session.images_for_final_selection)
 
         # 再次检查同一周期不会重复触发。
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "CaptureSealed", session.machine_id, session.session_id, CaptureSummary(session.capture_id),
         ))
         assert session.pending_recognition_batches == 0
@@ -153,26 +153,26 @@ def test_failed_and_rejected_batches_preserve_successful_results(recognition_con
         # 为三个周期各提交一批，再给目标周期提交第二批。
         for current_session, frame in zip(sessions, frames):
             current_manager = app.machine_managers[current_session.machine_id]
-            await current_manager.apply_event(MeasurementEvent(
+            await current_manager.handle_event(MeasurementEvent(
                 "FrameBatchSelected", current_session.machine_id, current_session.session_id, (frame,),
             ))
-        await manager.apply_event(
+        await manager.handle_event(
             MeasurementEvent("FrameBatchSelected", session.machine_id, session.session_id, (frames[0],))
         )
 
         # 拒收目标周期的额外批次，计数保持两批且不会冻结结果。
         app.text_recognizer.accepting_batches = False
-        await manager.apply_event(
+        await manager.handle_event(
             MeasurementEvent("FrameBatchSelected", session.machine_id, session.session_id, (frames[0],))
         )
         assert session.pending_recognition_batches == 2
         assert session.frozen_payload is None
 
         # 目标周期封口，一批失败后仍等待另一批结果。
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "CaptureSealed", session.machine_id, session.session_id, CaptureSummary(session.capture_id),
         ))
-        await manager.apply_event(
+        await manager.handle_event(
             MeasurementEvent("RecognitionBatchFailed", session.machine_id, session.session_id, "模型失败")
         )
         app.text_recognizer.select_final_text_and_img.assert_not_called()
@@ -182,7 +182,7 @@ def test_failed_and_rejected_batches_preserve_successful_results(recognition_con
             "frame_id": frames[0].frame_id,
             "blocks": [{"lines": [{"text": "003"}]}],
         }]
-        await manager.apply_event(
+        await manager.handle_event(
             MeasurementEvent("RecognitionBatchCompleted", session.machine_id, session.session_id, results)
         )
         app.text_recognizer.select_final_text_and_img.assert_called_once_with(results, session.images_for_final_selection)
@@ -218,20 +218,20 @@ def test_no_usable_text_skips_postprocessing(recognition_context, completion):
         """
         # 有图片时先提交并结算识别任务。
         if completion != "no_frames":
-            await manager.apply_event(MeasurementEvent(
+            await manager.handle_event(MeasurementEvent(
                 "FrameBatchSelected", session.machine_id, session.session_id, (frames[0],),
             ))
             if completion == "failed":
                 event_type, payload = "RecognitionBatchFailed", "模型失败"
             else:
                 event_type, payload = "RecognitionBatchCompleted", [{"blocks": []}]
-            await manager.apply_event(MeasurementEvent(event_type, session.machine_id, session.session_id, payload))
+            await manager.handle_event(MeasurementEvent(event_type, session.machine_id, session.session_id, payload))
 
         # 封口并重复交付封口事件，确认筛选入口只调用一次。
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "CaptureSealed", session.machine_id, session.session_id, CaptureSummary(session.capture_id),
         ))
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "CaptureSealed", session.machine_id, session.session_id, CaptureSummary(session.capture_id),
         ))
         assert session.text_postprocessing_started
@@ -298,14 +298,14 @@ def test_terminal_failure_releases_only_target_images(recognition_context, failu
         """
         # 提交两个周期图片，保留相互独立的内存引用。
         for current_session, frame in zip(sessions[:2], frames[:2]):
-            await manager.apply_event(MeasurementEvent(
+            await manager.handle_event(MeasurementEvent(
                 "FrameBatchSelected", current_session.machine_id,
                 current_session.session_id, (frame,),
             ))
         assert session.images_for_final_selection[frames[0].frame_id] is frames[0]
 
         # 本轮异常后释放图片并移除排队批次，不执行终选。
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             failure_event, session.machine_id, session.session_id,
         ))
         assert session.images_for_final_selection == {}
@@ -314,7 +314,7 @@ def test_terminal_failure_releases_only_target_images(recognition_context, failu
         app.text_recognizer.select_final_text_and_img.assert_not_called()
 
         # 迟到批次不再占用内存，其他周期批次仍可消费并完成队列记账。
-        await manager.apply_event(MeasurementEvent(
+        await manager.handle_event(MeasurementEvent(
             "FrameBatchSelected", session.machine_id, session.session_id,
             (frames[0],),
         ))

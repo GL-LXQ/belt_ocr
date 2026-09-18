@@ -145,7 +145,7 @@ class App:
 
         # 启动每台机器的 监听任务 和 频率采集器。
         for machine_manager in self.machine_managers.values():
-            self.worker_tasks.append(asyncio.create_task(machine_manager.listen_and_process_events()))
+            self.worker_tasks.append(asyncio.create_task(machine_manager.listen_events()))
             self.worker_tasks.append(asyncio.create_task(machine_manager.frequency_adapter.run()))
 
         # 启动共享存储任务并监控运行状态。
@@ -452,7 +452,7 @@ class App:
                 # 标记退出时未完成的周期，只打印日志并执行失败清理。
                 if session.state != SessionState.FAILED:
                     session.errors.append("SHUTDOWN_TIMEOUT")
-                    await machine_manager.fail_measurement(session)
+                    await machine_manager.handle_measurement_failure(session)
             # 清空退出后的周期身份与未完成档案。
             machine_manager.sessions.clear()
             machine_manager.active_session_id = None
