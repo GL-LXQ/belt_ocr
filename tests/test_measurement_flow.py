@@ -356,8 +356,19 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("OCR_PROCESSING_FAILED", record["error_codes"])
 
     async def test_ocr_timeout_does_not_block_another_machine(self) -> None:
+        """验证某台机器 OCR 超时不阻塞另一台机器结算。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 两台机器的超时隔离与独立结算断言完成
+        """
+        # 设置八帧上限，让长采集窗口在关闭前交付一个完整批次。
         app = await self.start_app(
-            capture_window_ms=30000, ocr_job_timeout_ms=30000,
+            capture_window_ms=30000,
+            ocr_job_timeout_ms=30000,
+            max_frames_per_session=8,
         )
         recognition_entered = asyncio.Event()
         recognition_release = asyncio.Event()

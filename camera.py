@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,6 +15,7 @@ from mvs_sdk import MvsCamera
 
 
 logger = logging.getLogger(__name__)
+FRAME_BATCH_SIZE = 8
 
 
 def save_evidence_image(image_data: bytes, image_path: Path) -> None:
@@ -55,6 +56,7 @@ class CaptureWindow:
     task: CaptureTask | None = None
     selected_count: int = 0
     skipped_count: int = 0
+    pending_frames: list[CapturedFrame] = field(default_factory=list)
 
 
 class SessionCamera:
@@ -147,15 +149,26 @@ class SessionCamera:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
+    def is_frame_qualified(self, frame: CaptureFrame) -> bool:
+        """预留无字、纯黑和截断帧筛选入口，当前放行所有帧。
+
+        Args:
+            frame: 待筛选的本轮相机帧。
+
+        Returns:
+            True  # 当前所有输入帧均合格
+        """
+        return True
+
     def process_frame(self, window: CaptureWindow, frame: CaptureFrame) -> None:
-        """筛选本轮图像、保存证据并送回业务事件队列。
+        """筛选本轮图像、保存证据，并在满八帧时交付批次。
 
         Args:
             window: 本轮窗口和选帧统计。
             frame: 具有独立内存及本轮身份的相机帧。
 
         Returns:
-            None  # 证据和 FrameSelected 已交付，跳过帧仅累计数量
+            None  # 合格图片已保存并组批，满批已交付，跳过帧仅累计数量
         """
         # 读取本帧接收时间，计算本轮业务采集截止时间。
         received_time = frame.image.received_monotonic
@@ -166,6 +179,11 @@ class SessionCamera:
             or (window.close_boundary is not None and received_time > window.close_boundary)
             or window.selected_count >= self.configuration.max_frames_per_session
         ):
+            window.skipped_count += 1
+            return
+
+        # 调用图像筛选入口，不合格帧只累计跳过数量。
+        if not self.is_frame_qualified(frame):
             window.skipped_count += 1
             return
 
@@ -189,11 +207,20 @@ class SessionCamera:
             received_at=datetime.now(timezone.utc).isoformat(),
         )
 
-        # 从消费线程投递事件，并等待事件进入本机业务队列。
-        event = MeasurementEvent("FrameSelected", self.machine.machine_id, window.session_id, captured_frame)
-        asyncio.run_coroutine_threadsafe(self.publish_event(event), self.event_loop).result()
-        # 图片保存且事件入队后，累计本轮成功选中数量。
+        # 将保存成功的合格帧加入本轮批次，并累计选中数量。
+        window.pending_frames.append(captured_frame)
         window.selected_count += 1
+
+        # 满八帧后从消费线程交付独立批次，交付完成后清空待组批列表。
+        if len(window.pending_frames) == FRAME_BATCH_SIZE:
+            event = MeasurementEvent(
+                "FrameBatchSelected",
+                self.machine.machine_id,
+                window.session_id,
+                tuple(window.pending_frames),
+            )
+            asyncio.run_coroutine_threadsafe(self.publish_event(event), self.event_loop).result()
+            window.pending_frames.clear()
 
     async def seal_capture(self, capture_id: str, close_boundary: float | None = None) -> None:
         """停止指定窗口的生产，等待抓帧退出后释放现场采集位置。
@@ -218,16 +245,27 @@ class SessionCamera:
         await asyncio.shield(asyncio.wrap_future(window.task.acquisition_future))
 
     async def finish_capture(self, window: CaptureWindow) -> None:
-        """等待消费结束，保存本轮统计并发布最后的封口事件。
+        """等待消费结束，交付尾批、整理统计并发布封口事件。
 
         Args:
             window: 待收尾的采集窗口。
 
         Returns:
-            None  # 统计和封口已发布，本轮窗口已移除
+            None  # 尾批、统计和封口已交付，本轮窗口已移除
         """
         # 异步等待生产和消费全部结束，取得本轮最终采集结果。
         result = await asyncio.shield(asyncio.wrap_future(window.task.completion_future))
+        # 消费结束后交付不足八帧的尾批，空批次不发送事件。
+        if window.pending_frames:
+            event = MeasurementEvent(
+                "FrameBatchSelected",
+                self.machine.machine_id,
+                window.session_id,
+                tuple(window.pending_frames),
+            )
+            await self.publish_event(event)
+            window.pending_frames.clear()
+
         # 整理采集和证据交付统计，保留处理失败信息。
         statistics = {
             "capture_duration_seconds": result.capture_duration_seconds,

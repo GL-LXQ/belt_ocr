@@ -6,7 +6,7 @@ import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import camera
 import test_measurement_flow as flow_support
@@ -21,7 +21,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
     read_records = flow_support.MeasurementFlowTests.read_records
 
     async def test_frames_precede_sealing_and_statistics_are_saved(self):
-        """验证真实适配器逐帧发布、封口和统计入库顺序。
+        """验证真实适配器尾批交付、封口和统计入库顺序。
 
         Args:
             无外部参数。
@@ -55,9 +55,10 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         await app.wait_until_idle()
 
         # 验证图片先交付，最后封口，结果保留采集统计和模拟标记。
-        self.assertEqual([event.event_type for event in events], ["FrameSelected", "FrameSelected", "CaptureSealed"])
+        self.assertEqual([event.event_type for event in events], ["FrameBatchSelected", "CaptureSealed"])
         self.assertTrue(all(event.session_id == session.session_id for event in events))
-        self.assertEqual(events[0].payload.capture_id, session.capture_id)
+        self.assertEqual(len(events[0].payload), 2)
+        self.assertTrue(all(frame.capture_id == session.capture_id for frame in events[0].payload))
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "COMPLETE")
         self.assertTrue(record["is_simulated"])
@@ -104,6 +105,143 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("SaveImageEx3(BMP)", record["capture_statistics"]["processing_errors"][0])
         self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
         self.assertEqual(list(self.output_directory.rglob("*.partial")), [])
+
+    async def test_full_batch_is_delivered_before_close_and_tail_before_sealing(self):
+        """验证满八帧立即交付、尾批不超时发送且在封口前交付。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 满批、尾批、事件顺序和 OCR 提交时机断言完成
+        """
+        # 启动较长采集窗口，记录正式适配器发布的全部事件。
+        app = await self.start_app(capture_window_ms=5000, max_frames_per_session=10)
+        manager = app.machine_managers["M01"]
+        publisher = AsyncMock(wraps=manager.camera.publish_event)
+        manager.camera.publish_event = publisher
+        await app.handle_start("M01")
+        session = manager.sessions[manager.active_session_id]
+
+        # 第一批在采集期间交付，OCR 仍等待本轮封口。
+        await self.wait_for_state(lambda: len(session.selected_frames) == 8)
+        self.assertFalse(session.capture_sealed)
+        self.assertTrue(manager.camera.is_capturing)
+        self.assertEqual(session.ocr_state, "WAITING")
+        first_batch = publisher.call_args_list[0].args[0].payload
+        self.assertEqual(len(first_batch), 8)
+
+        # 等待剩余两帧保存完成，验证未满批不会自行超时发送。
+        window = manager.camera.windows[session.capture_id]
+        for attempt_number in range(200):
+            if window.selected_count == 10:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(window.selected_count, 10)
+        await asyncio.sleep(0.1)
+        self.assertEqual(publisher.call_count, 1)
+        self.assertEqual(len(first_batch), 8)
+
+        # 提前关闭后交付尾批，再封口并完成原有 OCR 流程。
+        await app.handle_close("M01")
+        await app.wait_until_idle()
+        events = [call.args[0] for call in publisher.call_args_list]
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["FrameBatchSelected", "FrameBatchSelected", "CaptureSealed"],
+        )
+        self.assertEqual([len(event.payload) for event in events[:-1]], [8, 2])
+        frames = [frame for event in events[:-1] for frame in event.payload]
+        self.assertEqual(len({frame.frame_id for frame in frames}), 10)
+        self.assertTrue(all(frame.session_id == session.session_id for frame in frames))
+        self.assertEqual(len(self.read_records()[0]["evidence_refs"]), 10)
+
+    async def test_exact_batch_has_no_empty_tail(self):
+        """验证恰好八帧时只交付满批，不发送空尾批。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 批次数量和封口顺序断言完成
+        """
+        # 记录八帧上限采集的批次事件。
+        app = await self.start_app(capture_window_ms=2000, max_frames_per_session=8)
+        manager = app.machine_managers["M01"]
+        publisher = AsyncMock(wraps=manager.camera.publish_event)
+        manager.camera.publish_event = publisher
+        await app.handle_start("M01")
+        session = manager.sessions[manager.active_session_id]
+        await self.wait_for_state(lambda: len(session.selected_frames) == 8)
+
+        # 关闭并检查只产生一次批次事件和一次封口事件。
+        await app.handle_close("M01")
+        await app.wait_until_idle()
+        events = [call.args[0] for call in publisher.call_args_list]
+        self.assertEqual([event.event_type for event in events], ["FrameBatchSelected", "CaptureSealed"])
+        self.assertEqual(len(events[0].payload), 8)
+
+    async def test_rejected_frames_do_not_use_selected_limit(self):
+        """验证筛选拒绝帧不保存、不组批，也不占用合格帧名额。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 筛选调用、合格数量和跳过数量断言完成
+        """
+        # 拒绝第一帧，后续帧交回默认放行的筛选空壳。
+        app = await self.start_app(capture_window_ms=300)
+        manager = app.machine_managers["M01"]
+        original_filter = manager.camera.is_frame_qualified
+
+        def qualify_after_first_frame(frame):
+            """拒绝第一帧并放行后续帧。
+
+            Args:
+                frame: 当前相机帧。
+
+            Returns:
+                True  # 非首帧合格；首帧返回 False
+            """
+            return frame.image.frame_number > 1 and original_filter(frame)
+
+        with patch.object(manager.camera, "is_frame_qualified", side_effect=qualify_after_first_frame):
+            await app.handle_start("M01")
+            session = manager.sessions[manager.active_session_id]
+            await self.wait_for_state(lambda: session.capture_sealed)
+
+        # 两个合格名额仍可用，第一帧没有生成图片证据。
+        self.assertEqual(len(session.selected_frames), 2)
+        self.assertTrue(all(not frame.frame_id.endswith("-1") for frame in session.selected_frames.values()))
+        self.assertGreaterEqual(session.skipped_frame_count, 1)
+        self.assertEqual(len(list(self.output_directory.rglob("*.bmp"))), 2)
+
+    async def test_all_rejected_frames_only_publish_sealing(self):
+        """验证没有合格帧时不产生批次，沿用无帧待复核流程。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 空批次、证据和无帧错误断言完成
+        """
+        # 将筛选入口替换为全部拒绝，并记录相机事件。
+        app = await self.start_app(capture_window_ms=180)
+        manager = app.machine_managers["M01"]
+        publisher = AsyncMock(wraps=manager.camera.publish_event)
+        manager.camera.publish_event = publisher
+        with patch.object(manager.camera, "is_frame_qualified", return_value=False):
+            await app.handle_start("M01")
+            session = manager.sessions[manager.active_session_id]
+            await self.wait_for_state(lambda: session.capture_sealed)
+
+        # 空采集只封口，不保存图片，关闭后留下待复核结果。
+        self.assertEqual([call.args[0].event_type for call in publisher.call_args_list], ["CaptureSealed"])
+        self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
+        await app.handle_close("M01")
+        await app.wait_until_idle()
+        self.assertIn("CAPTURE_NO_FRAMES", self.read_records()[0]["error_codes"])
 
     async def test_missing_sdk_rejects_measurement_without_creating_session(self):
         """验证缺失 SDK 时应用可启动但不创建正常测量。

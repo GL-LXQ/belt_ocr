@@ -6,7 +6,7 @@
 
 海康 MVS 模块已接入 App，使用方法见 [运行说明](USAGE.md) 和 [MVS 采集说明](MVS_CAPTURE.md)。文件夹模拟采集已移除；测试通过假 SDK 验证真实适配器。没有配置序列号或没有可用相机时，对应机器不接受正常测量。
 
-当前系统的数据流：App 初始化恢复库、结果库和共享 MVS SDK，按配置序列号打开相机；START 由 MachineManager 创建 Session 和采集编号，camera.start_capture 登记逐帧回调、启动独立有界队列的真实取流任务并安排异步封口，返回后打开频率窗口。控制线程独立计时，Grabber 复制并释放 SDK Buffer 后非阻塞入队，队满丢弃新帧并计数；消费者按业务边界和选帧上限通过 MVS SDK 编码为 BMP，以临时文件同步写盘后原子发布证据，通过线程安全入口发布 FrameSelected；CLOSE 通知本轮停止并等待生产封口，然后释放活动位置，旧轮保存与新轮采集可以重叠。固定时间到达或提前 CLOSE 后，控制线程发出停止取帧通知并调用 SDK 停止取流，等待最后入队完成及消费者排空；全部帧交付后发布含统计与错误的 CaptureSealed，再交给共享模拟 OCR；正常关闭、OCR、频率和证据齐全后冻结结果，经本地待提交区写入 SQLite，本次运行内失败自动补交。退出先停止并排空相机任务，再释放设备和 SDK；重启清理旧待处理状态，保留历史结果、提交身份、审计和证据。
+当前系统的数据流：App 初始化数据库与共享 MVS SDK，按序列号打开相机；START 创建 Session，启动独立有界队列的采集任务并打开频率窗口。Grabber 复制图像、释放 SDK Buffer 后非阻塞入队，队满丢新帧并计数；消费者保留时间边界和选帧上限检查，再调用图像筛选空壳（当前全部放行，尚未实现无字、纯黑和截断判断），将合格帧编码为 BMP 并保存。每轮独立组批，满 8 帧发布 FrameBatchSelected，不设置等待超时；固定时长到达或 CLOSE 后停止取流并排空队列，先交付不足 8 帧的尾批，再发布 CaptureSealed。Session 按批次登记图片，仍在采集封口后提交共享模拟 OCR；正常关闭、OCR、频率和证据齐全后冻结结果，通过本地待提交区写入 SQLite，失败在本次运行内自动补交。旧轮消费与新轮采集可重叠；退出先排空采集任务再释放 SDK，重启不恢复旧 Session。
 
 ## 1. 项目目标与边界
 
@@ -451,7 +451,7 @@ START 原始事件没有 session_id，由业务层创建。其余异步业务结
 
 ```text
 MachineStarted / MachineClosed
-FrameSelected / CaptureSealed / CaptureFailed
+FrameBatchSelected / CaptureSealed / CaptureFailed
 OCRFrameCompleted / OCRFrameFailed
 OCRCompleted / OCRFailed
 FrequencyMeasured / FrequencyWindowSealed / FrequencyFailed

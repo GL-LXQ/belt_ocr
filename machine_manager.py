@@ -347,6 +347,13 @@ class MachineManager:
         match event.event_type:
             case "FrameSelected":
                 should_finalize = await self.handle_frame_selected(session, event)
+            case "FrameBatchSelected":
+                # 按帧检查批次归属并登记图片，批次接收阶段不提交 OCR。
+                should_finalize = False
+                for frame in event.payload:
+                    frame_event = MeasurementEvent("FrameSelected", event.machine_id, event.session_id, frame)
+                    frame_selected = await self.handle_frame_selected(session, frame_event)
+                    should_finalize = frame_selected or should_finalize
             case "CaptureSealed":
                 should_finalize = await self.handle_capture_sealed(session, event)
             case "OCRFrameStarted" | "OCRFrameCompleted" | "OCRFrameFailed":
