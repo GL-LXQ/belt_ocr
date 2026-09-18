@@ -466,6 +466,17 @@ class App:
             task.cancel()
         await asyncio.gather(*all_tasks, return_exceptions=True)
         self.worker_tasks.clear()
+        # 业务任务停止后释放各周期原图和剩余批次事件。
+        for machine_manager in self.machine_managers.values():
+            for session in machine_manager.sessions.values():
+                session.memory_frames.clear()
+                session.pending_recognition_batches -= (
+                    self.text_recognizer.discard_session_batches(session.session_id)
+                )
+            # 清空不再处理的事件，释放事件携带的图片引用。
+            while not machine_manager.queue.empty():
+                machine_manager.queue.get_nowait()
+                machine_manager.queue.task_done()
         # 最后关闭相机设备与共享 SDK，再释放恢复库。
         try:
             if self.camera_sdk is not None:

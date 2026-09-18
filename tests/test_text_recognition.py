@@ -54,11 +54,11 @@ class TextRecognitionTests(unittest.IsolatedAsyncioTestCase):
         event_loop_thread = threading.get_ident()
         inference_threads = []
 
-        def recognize_images(image_paths: list[str]) -> list[dict]:
+        def recognize_images(images: list[bytes]) -> list[dict]:
             """记录推理线程并返回本批两张图片的测试结果。
 
             Args:
-                image_paths: 当前批次的有序图片路径。
+                images: 当前批次的有序内存 BMP 字节。
 
             Returns:
                 [
@@ -68,7 +68,7 @@ class TextRecognitionTests(unittest.IsolatedAsyncioTestCase):
             """
             # 记录执行线程，确认模型每次接收两张图片。
             inference_threads.append(threading.get_ident())
-            self.assertEqual(len(image_paths), 2)
+            self.assertEqual(len(images), 2)
 
             # 返回保留原始行信息的结果和无文字结果。
             return [
@@ -96,9 +96,12 @@ class TextRecognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(results[0]["blocks"], blocks)
                 self.assertEqual(results[1]["blocks"], [])
                 self.assertNotEqual(results[0]["frame_id"], results[1]["frame_id"])
-                self.assertTrue(all(session.session_id in result["image_path"] for result in results))
+                self.assertTrue(all(
+                    result["frame_id"] in session.memory_frames for result in results
+                ))
+                self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
                 self.assertIn(
-                    [result["image_path"] for result in results],
+                    [session.memory_frames[result["frame_id"]].image_data for result in results],
                     [call.args[0] for call in recognizer.recognize_batch.call_args_list],
                 )
                 self.assertEqual(session.ocr_state, "WAITING")
@@ -119,7 +122,7 @@ class TextRecognitionTests(unittest.IsolatedAsyncioTestCase):
         # 检查联调接口返回独立的空结果，再准备满批和尾批的采集。
         app = await self.start_app(capture_window_ms=350, max_frames_per_session=10)
         recognizer = app.text_recognizer
-        placeholder_results = recognizer.recognize_batch(["first.bmp", "second.bmp"])
+        placeholder_results = recognizer.recognize_batch([b"first", b"second"])
         self.assertEqual(placeholder_results, [{"blocks": []}, {"blocks": []}])
         self.assertIsNot(placeholder_results[0]["blocks"], placeholder_results[1]["blocks"])
 

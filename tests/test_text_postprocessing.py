@@ -28,7 +28,9 @@ def recognition_context():
     # 加载配置并建立业务对象，不启动设备和后台任务。
     configuration = load_configuration(Path(__file__).resolve().parents[1] / "config.example.json")
     app = App(configuration)
-    app.text_recognizer.select_final_text = Mock(wraps=app.text_recognizer.select_final_text)
+    app.text_recognizer.select_final_text_and_img = Mock(
+        wraps=app.text_recognizer.select_final_text_and_img
+    )
     sessions = []
     frames = []
 
@@ -54,7 +56,7 @@ def recognition_context():
             frame_id=f"frame-{session_number}",
             captured_at=session.start_time,
             captured_monotonic=1,
-            image_path=f"{session.session_id}/frame.bmp",
+            image_data=b"BM-test-image",
         ))
 
     return (
@@ -112,9 +114,9 @@ def test_postprocessing_waits_for_seal_and_results(recognition_context, seal_fir
 
         # 第一个事件尚不足以触发，第二个事件才满足全部条件。
         await manager.apply_event(events[0])
-        app.text_recognizer.select_final_text.assert_not_called()
+        app.text_recognizer.select_final_text_and_img.assert_not_called()
         await manager.apply_event(events[1])
-        app.text_recognizer.select_final_text.assert_called_once_with(results)
+        app.text_recognizer.select_final_text_and_img.assert_called_once_with(results, session.memory_frames)
 
         # 再次检查同一周期不会重复触发。
         await manager.apply_event(MeasurementEvent(
@@ -122,7 +124,7 @@ def test_postprocessing_waits_for_seal_and_results(recognition_context, seal_fir
         ))
         assert session.pending_recognition_batches == 0
         assert session.text_postprocessing_started
-        app.text_recognizer.select_final_text.assert_called_once()
+        app.text_recognizer.select_final_text_and_img.assert_called_once()
 
     asyncio.run(deliver_events())
 
@@ -174,7 +176,7 @@ def test_failed_and_rejected_batches_preserve_successful_results(recognition_con
         await manager.apply_event(
             MeasurementEvent("RecognitionBatchFailed", session.machine_id, session.session_id, "模型失败")
         )
-        app.text_recognizer.select_final_text.assert_not_called()
+        app.text_recognizer.select_final_text_and_img.assert_not_called()
 
         # 最后一批成功结果返回后，只处理目标周期的有效文字。
         results = [{
@@ -185,7 +187,7 @@ def test_failed_and_rejected_batches_preserve_successful_results(recognition_con
         await manager.apply_event(
             MeasurementEvent("RecognitionBatchCompleted", session.machine_id, session.session_id, results)
         )
-        app.text_recognizer.select_final_text.assert_called_once_with(results)
+        app.text_recognizer.select_final_text_and_img.assert_called_once_with(results, session.memory_frames)
         assert [current.pending_recognition_batches for current in sessions] == [0, 1, 1]
         assert session.errors == ["OCR_BATCH_REJECTED", "模型失败"]
 
@@ -236,7 +238,9 @@ def test_no_usable_text_skips_postprocessing(recognition_context, completion):
         ))
         assert session.text_postprocessing_started
         assert session.pending_recognition_batches == 0
-        app.text_recognizer.select_final_text.assert_called_once_with(session.recognition_results)
+        app.text_recognizer.select_final_text_and_img.assert_called_once_with(
+            session.recognition_results, session.memory_frames
+        )
 
     asyncio.run(deliver_events())
 
@@ -267,4 +271,59 @@ def test_ocr_finished_check_only_returns_state(recognition_context, sealed, pend
     assert session.capture_sealed is sealed
     assert session.pending_recognition_batches == pending
     assert session.text_postprocessing_started
-    app.text_recognizer.select_final_text.assert_not_called()
+    app.text_recognizer.select_final_text_and_img.assert_not_called()
+
+
+@pytest.mark.parametrize("failure_event", ["OCRTimeout", "OCRFailed"])
+def test_terminal_failure_releases_only_target_images(recognition_context, failure_event):
+    """验证整轮失败和超时释放本轮图片，保留其他周期排队图片。
+
+    Args:
+        recognition_context: 应用、周期和图片测试对象。
+        failure_event: 整轮失败或超时事件名称。
+
+    Returns:
+        None  # 完成内存释放、队列记账及跨周期隔离断言
+    """
+    app, sessions, frames = recognition_context
+    session = sessions[0]
+    manager = app.machine_managers[session.machine_id]
+
+    async def deliver_failure():
+        """交付图片和失败事件并检查迟到图片被丢弃。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 已验证异常清理及剩余批次可正常结算
+        """
+        # 提交两个周期图片，保留相互独立的内存引用。
+        for current_session, frame in zip(sessions[:2], frames[:2]):
+            await manager.apply_event(MeasurementEvent(
+                "FrameBatchSelected", current_session.machine_id,
+                current_session.session_id, (frame,),
+            ))
+        assert session.memory_frames[frames[0].frame_id] is frames[0]
+
+        # 本轮异常后释放图片并移除排队批次，不执行终选。
+        await manager.apply_event(MeasurementEvent(
+            failure_event, session.machine_id, session.session_id,
+        ))
+        assert session.memory_frames == {}
+        assert session.pending_recognition_batches == 0
+        assert sessions[1].memory_frames[frames[1].frame_id] is frames[1]
+        app.text_recognizer.select_final_text_and_img.assert_not_called()
+
+        # 迟到批次不再占用内存，其他周期批次仍可消费并完成队列记账。
+        await manager.apply_event(MeasurementEvent(
+            "FrameBatchSelected", session.machine_id, session.session_id,
+            (frames[0],),
+        ))
+        remaining_batch = app.text_recognizer.batch_queue.get_nowait()
+        assert remaining_batch.session_id == sessions[1].session_id
+        app.text_recognizer.batch_queue.task_done()
+        await asyncio.wait_for(app.text_recognizer.batch_queue.join(), 1)
+        assert session.memory_frames == {}
+
+    asyncio.run(deliver_failure())

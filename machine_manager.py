@@ -346,6 +346,12 @@ class MachineManager:
         should_finalize = True
         match event.event_type:
             case "FrameBatchSelected":
+                # 丢弃已失败、超时或中断周期的迟到图片。
+                if session.ocr_state in {"FAILED", "TIMED_OUT"}:
+                    return
+                if session.cycle_state == "INTERRUPTED":
+                    return
+
                 # 将采集端交付的完整图片批次送入 OCR 队列。
                 accepted = self.text_recognizer.submit_batch(
                     machine_id=session.machine_id,
@@ -356,6 +362,10 @@ class MachineManager:
                 # 成功入队后登记本轮待处理数量，拒收批次只记录错误。
                 if accepted:
                     session.pending_recognition_batches += 1
+                    # 保留已受理原图，直到终选完成或周期异常结束。
+                    session.memory_frames.update(
+                        (frame.frame_id, frame) for frame in event.payload
+                    )
                 else:
                     session.errors.append("OCR_BATCH_REJECTED")
                     logger.error("识别批次被拒收 machine_id=%s session_id=%s", session.machine_id, session.session_id)
@@ -421,10 +431,20 @@ class MachineManager:
         if not should_finalize:
             return
 
-        # 状态更新后，统一判断本session OCR 是否结束并执行一次文字终选。
+        # 整轮识别失败或超时后释放原图，清理尚未消费的批次。
+        if session.ocr_state in {"FAILED", "TIMED_OUT"}:
+            session.memory_frames.clear()
+            session.pending_recognition_batches -= (
+                self.text_recognizer.discard_session_batches(session.session_id)
+            )
+
+        # 状态更新后，统一判断本 Session OCR 是否结束并触发一次文字和图片终选。
         if self.is_session_ocr_finished(session) and not session.text_postprocessing_started:
             session.text_postprocessing_started = True
-            self.text_recognizer.select_final_text(session.recognition_results)
+            if session.ocr_state not in {"FAILED", "TIMED_OUT"}:
+                self.text_recognizer.select_final_text_and_img(
+                    session.recognition_results, session.memory_frames
+                )
 
         # 文字终选检查后，继续执行原有的测量结算检查。
         await self.try_finalize(session)
@@ -508,7 +528,7 @@ class MachineManager:
             False  # 采集尚未封口或仍有批次等待结算
         """
         # 只判断本轮识别是否结束，不修改周期状态。
-        return session.capture_sealed and session.pending_recognition_batches == 0
+        return session.capture_sealed and session.pending_recognition_batches <= 0
 
     async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> bool:
         """校验频率归属和测量身份并收集有效候选值。
@@ -598,6 +618,12 @@ class MachineManager:
 
     async def try_finalize(self, session: BeltSession) -> None:
         """检查结果完整性并冻结本轮最终记录。"""
+        # 周期中断时释放内存图片和未消费批次。
+        if session.cycle_state == "INTERRUPTED":
+            session.memory_frames.clear()
+            session.pending_recognition_batches -= (
+                self.text_recognizer.discard_session_batches(session.session_id)
+            )
         if session.frozen_payload is not None or session.cycle_state == "OPEN":
             return
 
@@ -650,7 +676,11 @@ class MachineManager:
                 final_frequency.measurement_id if final_frequency else None
             ),
             "selected_frames": [
-                asdict(frame) for frame in session.selected_frames.values()
+                {
+                    name: value for name, value in asdict(frame).items()
+                    if name != "image_data"
+                }
+                for frame in session.selected_frames.values()
             ],
             "frequency_candidates": [
                 asdict(measurement)
@@ -675,6 +705,13 @@ class MachineManager:
         session.payload_hash = hashlib.sha256(
             session.frozen_payload.encode()
         ).hexdigest()
+        # 记录冻结后释放本轮内存图片及剩余排队批次。
+        session.memory_frames.clear()
+        session.pending_recognition_batches -= (
+            self.text_recognizer.discard_session_batches(session.session_id)
+        )
+
+        # 撤销已冻结周期的剩余期限任务。
         for deadline_key in tuple(self.deadline_tasks):
             if deadline_key[0] == session.session_id:
                 self.deadline_tasks.pop(deadline_key).cancel()

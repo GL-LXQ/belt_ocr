@@ -1,7 +1,7 @@
 """验证图片批次交付到 OCR 队列的阶段边界。"""
 
+import struct
 import unittest
-from pathlib import Path
 
 import test_measurement_flow as flow_support
 
@@ -21,7 +21,7 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
             无外部参数。
 
         Returns:
-            None  # 完成批次归属、证据文件和阶段边界断言
+            None  # 完成批次归属、内存图片和阶段边界断言
         """
         # 启动假 SDK 支持的正式采集流程，准备十张图片。
         app = await self.start_app(capture_window_ms=350, max_frames_per_session=10)
@@ -34,7 +34,7 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
         first_batch = app.text_recognizer.batch_queue.get_nowait()
         tail_batch = app.text_recognizer.batch_queue.get_nowait()
 
-        # 检查每个批次的机器、周期、图片数量和实际证据。
+        # 检查每个批次的机器、周期、图片数量和内存图片。
         self.assertEqual(len(first_batch.frames), 8)
         self.assertEqual(len(tail_batch.frames), 2)
         for batch in (first_batch, tail_batch):
@@ -42,10 +42,14 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(batch.session_id, session.session_id)
             for frame in batch.frames:
                 self.assertEqual(frame.session_id, session.session_id)
-                self.assertTrue(Path(frame.image_path).read_bytes().startswith(b"BM"))
+                self.assertTrue(frame.image_data.startswith(b"BM"))
+                self.assertEqual(struct.unpack_from("<ii", frame.image_data, 18), (2, 2))
+                self.assertEqual(frame.image_data[54:60], b"000@@@")
+                self.assertEqual(frame.image_path, "")
 
-        # 检查业务层没有登记图片和任务，也没有启动或重复提交旧识别流程。
-        self.assertEqual(session.selected_frames, {})
+        # 检查业务层持有图片但没有落盘，也没有启动或重复提交旧识别流程。
+        self.assertEqual(len(session.memory_frames), 10)
+        self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
         self.assertEqual(session.ocr_state, "WAITING")
         self.assertIsNone(session.ocr_result)
         self.assertTrue(app.text_recognizer.batch_queue.empty())
@@ -100,3 +104,36 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(app.text_recognizer.batch_queue.empty())
         self.assertEqual(session.ocr_state, "WAITING")
         self.assertIn("OCR_BATCH_REJECTED", session.errors)
+
+    async def test_close_keeps_images_until_shutdown(self) -> None:
+        """验证正常关闭和新轮启动保留旧图，退出后清空内存和队列。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 完成跨轮保留和退出释放断言
+        """
+        # 完成第一轮采集，保留一张原图用于核对跨轮内容。
+        app = await self.start_app(capture_window_ms=180, shutdown_timeout_ms=100)
+        manager = app.machine_managers["M01"]
+        await app.handle_start("M01")
+        first_session = manager.sessions[manager.active_session_id]
+        await self.wait_for_state(lambda: first_session.capture_sealed)
+        first_frame = next(iter(first_session.memory_frames.values()))
+        await app.handle_close("M01")
+
+        # 新轮独立采集，旧轮原图引用和内容保持不变。
+        await app.handle_start("M01")
+        next_session = manager.sessions[manager.active_session_id]
+        await self.wait_for_state(lambda: next_session.capture_sealed)
+        self.assertIs(first_session.memory_frames[first_frame.frame_id], first_frame)
+        self.assertNotIn(first_frame.frame_id, next_session.memory_frames)
+        self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
+
+        # 退出清理两个周期的内存引用和未消费批次，不产生图片文件。
+        await app.stop()
+        self.assertEqual(first_session.memory_frames, {})
+        self.assertEqual(next_session.memory_frames, {})
+        self.assertTrue(app.text_recognizer.batch_queue.empty())
+        self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])

@@ -34,7 +34,8 @@ class CapturedFrame:
     frame_id: str
     captured_at: str
     captured_monotonic: float
-    image_path: str
+    image_path: str = ""
+    image_data: bytes = field(default=b"", repr=False)
     source_epoch: str = ""
     received_at: str = ""
 
@@ -87,6 +88,7 @@ class BeltSession:
     capture_statistics: dict = field(default_factory=dict)
     ocr_state: str = "WAITING"
     ocr_result: OCRResult | None = None
+    memory_frames: dict[str, CapturedFrame] = field(default_factory=dict)
     recognition_results: list[dict] = field(default_factory=list)
     pending_recognition_batches: int = 0
     text_postprocessing_started: bool = False

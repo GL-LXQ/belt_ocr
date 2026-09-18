@@ -6,7 +6,7 @@
 
 海康 MVS 模块已接入 App，使用方法见 [运行说明](USAGE.md) 和 [MVS 采集说明](MVS_CAPTURE.md)。文件夹模拟采集已移除；测试通过假 SDK 验证真实适配器。没有配置序列号或没有可用相机时，对应机器不接受正常测量。
 
-当前系统的数据流：START 创建独立 Session，采集图片经过筛选、保存后组批，MachineManager 将批次交给共享 TextRecognizer 队列，成功入队即增加所属 Session 的 pending_recognition_batches，拒收仅记录日志和错误。消费者整批识别后按 machine_id、session_id 回传结果，成功保存原始文字块，失败记录日志并跳过，两者均扣减本轮待处理批次数。采集停止、筛选和尾批交付完成后发布 CaptureSealed；封口、识别成功和识别失败各自使用独立事件分支，仅更新状态或保存结果；分支处理结束后，在公共位置统一判断本 Session 的 OCR 是否结束，并执行一次最终文字筛选，不再按事件类型二次分流。条件满足先设置 text_postprocessing_started，通过纯判断函数 is_session_ocr_finished 确认结束后，将全部成功图片原始结果交给 select_final_text；筛选函数内部选出含文字块的图片，没有可用文字时记录日志并跳过，原始结果保留。后处理内部算法暂未实现，不标记整轮 OCR 成功；正常关闭后的在途结果收齐前暂缓异常冻结，超时与中断沿用原流程。recognize_batch 仍返回联调空 blocks，App 不自动启动消费者；队列无消费者时仍可能满，重启不恢复旧 Session。
+当前系统的数据流：START 创建独立 Session，相机帧从 SDK Buffer 复制后编码为内存 BMP，不在采集阶段落盘；合格图片组批交给共享 TextRecognizer 队列，成功入队后由所属 Session.memory_frames 持有原图并增加 pending_recognition_batches。消费者将有序 BMP 字节列表交给 recognize_batch，通过 machine_id、session_id 和 frame_id 回传原始 blocks，成功或失败均结算批次数。采集封口且本轮批次全部结算后，仅调用一次 select_final_text_and_img(recognition_results, memory_frames)，由 frame_id 关联原图；文字终选、按信息量和置信度选图及最终保存仍待实现，None 不表示终选完成，当前不会保存任何采集图片。原图保留至超时、中断、记录冻结或退出清理，同时移除本轮尚未消费的批次；正在推理的图片待同步调用结束后释放，其他周期不受影响。目标为仅保存最终选中的图片，无最终文字、整轮 OCR 失败或超时不保存图片。recognize_batch 仍返回空 blocks，App 不自动启动消费者；内存图片不跨进程恢复，异常退出会丢失未保存图片，重启不恢复旧 Session。
 
 ## 1. 项目目标与边界
 

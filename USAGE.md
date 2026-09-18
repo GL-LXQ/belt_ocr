@@ -22,7 +22,7 @@ uv run python -X utf8 main.py
 ```
 
 演示向所有可用机器发送启动和关闭信号，再向第一台可用机器发送第二轮信号并等待结果。三台相机都可用时共保存四条记录；没有可用相机时输出提示并退出，不生成模拟图片。
-默认数据库为 `runtime/measurements.sqlite3`，图像副本位于 `runtime/evidence/<session_id>/`。
+默认数据库为 `runtime/measurements.sqlite3`，终选图片的预留目录为 `runtime/evidence/<session_id>/`，当前不写入采集图片。
 独立恢复库默认为 `runtime/measurements.recovery.sqlite3`。
 重复执行演示会为可用机器增加新记录。`runtime/` 已加入 Git 忽略列表。
 
@@ -69,7 +69,7 @@ uv run python -X utf8 main.py --config config.example.json
 | `event_max_age_ms` | START/CLOSE 允许的最大时间偏差，默认 30000 毫秒 |
 | `initial_machine_state` | 新机器的模拟初始状态，默认 `CLOSED`；也支持 `OPEN`、`UNKNOWN` |
 
-相机使用 Continuous / Free Run 模式。图像复制到独立内存后立即归还 SDK Buffer，队满时丢弃新帧并统计；消费者同时处理已入队图片。原始帧由 MVS SDK 转换为 BMP 证据，以临时文件同步写盘后原子发布，每轮保存采集和处理统计到 `capture_statistics`。
+相机使用 Continuous / Free Run 模式。图像复制到独立内存后立即归还 SDK Buffer，队满时丢弃新帧并统计；消费者同时处理已入队图片。原始帧由 MVS SDK 转换为内存 BMP，不在采集和批次识别阶段落盘，每轮保存采集和处理统计到 `capture_statistics`。
 当前按主机收到图像的单调时间校验 START/CLOSE 及窗口边界，不把设备时间戳直接作为主机时间；SDK 停止可能略晚于请求边界，越过业务边界的帧不进入选帧清单。
 OCR 和频率仍使用模拟输入，所有测量保留 `is_simulated = 1`，不可作为已验证的真实测量结果。
 
@@ -115,9 +115,9 @@ asyncio.run(run_measurement())
 
 1. START 创建全局唯一 Session，绑定机器、相机和频率来源。
 2. MVS 相机开始连续取流，频率适配器登记本轮接收窗口。
-3. 消费者保存图片，满 8 帧交付一批；窗口到时或提前 CLOSE 后交付尾批并封口。MachineManager 收到批次即直接提交 OCR 队列。
-4. 当前到批次入队为止，不启动 OCR Worker，不登记逐帧任务；封口不再提交 OCR，后续识别和结果处理待改造。
-5. CLOSE 等待本轮 Grabber 停止后释放活动位置；新一轮可以开始，旧一轮继续后台保存和识别。
+3. 消费者在内存中编码图片，满 8 帧交付一批；窗口到时或提前 CLOSE 后交付尾批并封口。MachineManager 收到批次即直接提交 OCR 队列。
+4. App 不自动启动 OCR 消费者；手动启动后按批次读取内存 BMP，结果通过 frame_id 关联 Session 持有的原图。
+5. CLOSE 等待本轮 Grabber 停止后释放活动位置；新一轮可以开始，旧一轮继续后台编码和识别。
 6. 频率适配器等待已绑定旧轮的在途读数，再封口并按测量序号取最后一次有效值。
 7. 正常关闭、OCR 成功、有效频率三项齐全，且证据可读取，才冻结完整结果。
 8. SQLite 写入成功并确认后完成；旧轮回调始终不修改新轮活动位置。
@@ -143,7 +143,7 @@ ORDER BY start_time;
 
 达到积压上限或存储不可用时，不受理新的正常测量，并等待该轮明确关闭后重新同步。
 未受理事件先进入本地待提交区，再写入 `rejected_cycles`；日志同步记录报警。
-OCR 队列满直接将对应轮次标记为待复核，不阻塞其他机器的关闭处理。
+OCR 队列满时拒收该批次并记录错误，不持有拒收图片，也不阻塞其他机器的关闭处理。
 
 数据库写入前，冻结记录先持久保存到恢复库。内存提交队列满不会丢失这份记录。
 本次运行中，一批提交失败后状态为 `RETRY_PENDING`，维护任务按间隔自动补交；不必手工触发。项目重启后放弃旧待提交记录。
@@ -191,7 +191,7 @@ await app.synchronize_machine("M01", observed_state="CLOSED")
 
 `IO`、`OCR`、`STORAGE` 作为共享来源时影响所有机器；也可显式指定 `machine_id`。
 设备报告恢复不代表已确认机器关闭，重新同步须使用真实可确认的现场状态。相机未打开或取流故障时，仅报告健康恢复不能重新打开设备；第一版需要排除故障后重启应用。
-存储工作任务意外退出时会记录故障并有限重启。文字识别目前只接收批次，没有识别工作任务、逐帧重试或结果回传。
+存储工作任务意外退出时会记录故障并有限重启。文字识别支持手动启动批次消费和结果回传，没有自动启动的识别任务或逐帧重试。
 
 ## 文件职责
 
@@ -202,7 +202,7 @@ await app.synchronize_machine("M01", observed_state="CLOSED")
 | `machine_manager.py` | 每台机器的唯一业务状态修改入口 |
 | `models.py` | Session、不可变事件和采集结果 |
 | `configuration.py` | 配置读取、绑定及参数检查 |
-| `camera.py` | MVS 与 Session 适配、证据保存、线程事件桥接和封口 |
+| `camera.py` | MVS 与 Session 适配、内存图片组批、线程事件桥接和封口 |
 | `mvs_sdk.py` | 官方 MVS 绑定、设备管理和独立帧内存复制 |
 | `mvs_capture.py` | 固定窗口流式采集、独立有界队列、逐帧回调和统计 |
 | `text_recognition.py` | 批次接收、监听、整批模型调用和原始结果回传；模型接口待实现 |
@@ -241,14 +241,14 @@ README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTAN
 
 ## 批次识别接口
 
-`recognize_batch(image_paths)` 是同步黑盒接口，接收有序图片路径列表，返回等长、同序的 `list[dict]`，每项为 `{"blocks": [...]}`。图片读取、预处理和真实模型调用在该方法中补齐。当前按输入数量返回独立的 `{"blocks": []}`，仅用于联调，不表示模型判断图片无文字；后续以真实模型实现替换。
+`recognize_batch(images)` 接收有序 `list[bytes]`，每项为完整 BMP 文件字节，返回等长、同序的 `list[dict]`，每项为 `{"blocks": [...]}`。内存解码、预处理和真实模型调用待实现；当前仅返回独立空 blocks，不代表真实无文字。
 
-`listen_and_recognize_batches(app.publish_event)` 持续等待 `batch_queue` 并逐批处理，内部在线程中调用一次整批识别。成功事件为 `RecognitionBatchCompleted`，公共字段保留 `machine_id`、`session_id`，payload 为含 `frame_id`、`image_path` 和原始 `blocks` 的逐图结果列表。MachineManager 将结果追加到 `Session.recognition_results` 并扣减本轮待处理批次数；推理异常发送 `RecognitionBatchFailed`，记录日志和错误，同样扣减计数，跳过失败批次，无自动重试。采集封口且本轮待处理数归零时，只调用一次后处理占位函数，不更新整轮 OCR 成功状态。
+调用方手动启动 `listen_and_recognize_batches(app.publish_event)`，并在退出前取消和等待该任务；App 仍不自动管理消费者。取消或超时不会强行释放同步模型正在使用的图片，调用结束后才释放消费者引用。成功事件 `RecognitionBatchCompleted` 的逐图 payload 只含 frame_id 和 blocks，不再含 image_path；机器和周期身份仍在公共事件字段中。失败事件为 `RecognitionBatchFailed`，没有自动重试。
 
-模型或测试替身接入后，由调用方使用 `asyncio.create_task(app.text_recognizer.listen_and_recognize_batches(app.publish_event))` 手动启动，并在应用退出前取消和等待该任务；取消时会等待正在执行的同步模型调用结束。App 当前不管理或自动启动这个任务。队列的 `task_done()` 仅结算队列消费，不是 Session 待处理批次计数，也不表示识别成功。
+## Session 文字和图片后处理
 
-## Session 文字后处理触发
+成功入队的原图由 `Session.memory_frames` 按 frame_id 持有，批次完成后继续保留；批次拒收不登记原图。每轮采集封口且 pending_recognition_batches 归零时，设置 text_postprocessing_started 并调用一次 `select_final_text_and_img(frame_results, frames)`，传入全部成功识别结果和本轮内存图片映射。部分批次失败不阻止其余成功结果进入终选入口。
 
-`pending_recognition_batches` 按 Session 独立记录成功入队但尚未结算的批次数，不使用共享队列长度。拒收批次不增加计数，也不立即将本轮置为失败或冻结。`CaptureSealed`、`RecognitionBatchCompleted` 和 `RecognitionBatchFailed` 各自只更新状态，之后在事件主流程公共位置调用一次只返回布尔值的 `is_session_ocr_finished(session)`；仅在本轮已封口、计数为零且尚未触发时，将 `text_postprocessing_started` 置为 True，再调用 `select_final_text(frame_results)`。传入全部成功图片原始结果；`select_final_text()` 内部选取含非空 blocks 的图片，全部为空或没有成功结果则记日志并跳过；不增加批次身份、重复结果校验或计数修正。
+文字终选、按保留文字信息量和置信度选图以及保存选中图片均待实现。占位函数返回 None 不表示终选完成，也不将 OCR 标记成功；当前采集和 OCR 阶段都不落盘，因此本阶段没有新的图片证据文件。目标规则为无最终文字、整轮 OCR 失败或超时时不保存图片。
 
-`select_final_text()` 暂为返回 None 的占位函数，不执行去重、聚合、筛选算法，不产生最终 OCR 结果。部分批次失败不阻止其余成功结果进入该函数。正常关闭后，采集或识别仍未收尾时，原有异常记录冻结暂缓；OCR 超时和周期中断仍可按现有流程结束等待。
+整轮失败、超时、中断、结果冻结和退出时释放 Session 持有的原图并移除本轮未消费批次；正在推理的图片由消费者持有至同步调用结束。正常 CLOSE 不提前释放原图，下一周期可独立采集。每轮帧数、待处理周期数及队列容量仍受配置限制；队满丢帧保留统计。断电、进程崩溃和强制退出会丢失未保存的内存图片。

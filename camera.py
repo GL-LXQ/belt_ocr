@@ -1,4 +1,4 @@
-"""将 MVS 流式采集接入 Session、证据保存和业务事件。"""
+"""将 MVS 流式采集接入 Session、内存图片和业务事件。"""
 
 import asyncio
 import logging
@@ -130,7 +130,7 @@ class SessionCamera:
         # 创建独立有界队列并启动后台采集，将采集任务保存到本轮窗口。
         window.task = start_capture(
             self.device,
-            # 登记逐帧处理回调，消费时携带本轮窗口筛选图片、保存证据和投递事件。
+            # 登记逐帧处理回调，消费时携带本轮窗口筛选图片、编码图片和投递事件。
             lambda frame: self.process_frame(window, frame),
             session_id,
             # 将采集时长换算为秒，传入队列容量、单次取帧超时和采集编号。
@@ -161,14 +161,14 @@ class SessionCamera:
         return True
 
     def process_frame(self, window: CaptureWindow, frame: CaptureFrame) -> None:
-        """筛选本轮图像、保存证据，并在满八帧时交付批次。
+        """筛选本轮图像、保留内存 BMP，并在满八帧时交付批次。
 
         Args:
             window: 本轮窗口和选帧统计。
             frame: 具有独立内存及本轮身份的相机帧。
 
         Returns:
-            None  # 合格图片已保存并组批，满批已交付，跳过帧仅累计数量
+            None  # 合格图片已在内存中组批，满批已交付，跳过帧仅累计数量
         """
         # 读取本帧接收时间，计算本轮业务采集截止时间。
         received_time = frame.image.received_monotonic
@@ -189,11 +189,8 @@ class SessionCamera:
 
         # 用采集编号和 SDK 帧号命名图片，并将独立图像编码为 BMP。
         frame_id = f"{window.capture_id}-{frame.image.frame_number}"
-        extension, image_data = self.device.encode_image(frame.image)
-        # 将图片保存到本轮 Session 的证据目录。
-        image_path = self.configuration.evidence_directory / window.session_id / f"{frame_id}{extension}"
-        save_evidence_image(image_data, image_path)
-        # 将主机接收时间换算为 UTC 时间，整理图片身份和证据路径。
+        image_extension, image_data = self.device.encode_image(frame.image)
+        # 将主机接收时间换算为 UTC 时间，整理图片身份和内存数据。
         captured_at = datetime.now(timezone.utc) - timedelta(seconds=time.monotonic() - received_time)
         captured_frame = CapturedFrame(
             session_id=window.session_id,
@@ -202,12 +199,12 @@ class SessionCamera:
             frame_id=frame_id,
             captured_at=captured_at.isoformat(),
             captured_monotonic=received_time,
-            image_path=str(image_path),
+            image_data=image_data,
             source_epoch=window.capture_id,
             received_at=datetime.now(timezone.utc).isoformat(),
         )
 
-        # 将保存成功的合格帧加入本轮批次，并累计选中数量。
+        # 将编码成功的合格帧加入本轮批次，并累计选中数量。
         window.pending_frames.append(captured_frame)
         window.selected_count += 1
 
@@ -230,7 +227,7 @@ class SessionCamera:
             close_boundary: 业务关闭的单调时间，省略时使用当前时间。
 
         Returns:
-            None  # 本轮已停止入队，消费者可能仍在保存证据
+            None  # 本轮已停止入队，消费者可能仍在编码图片
         """
         # 查找指定采集窗口，已移除的窗口直接结束。
         window = self.windows.get(capture_id)
@@ -241,7 +238,7 @@ class SessionCamera:
             window.close_boundary = close_boundary if close_boundary is not None else time.monotonic()
         # 发出提前停止通知，唤醒控制线程执行停止取流，并通知取帧线程结束。
         window.task.stop_requested.set()
-        # 等待最后取帧和入队结束；此时消费者仍可继续保存队列里的图片。
+        # 等待最后取帧和入队结束；此时消费者仍可继续编码队列里的图片。
         await asyncio.shield(asyncio.wrap_future(window.task.acquisition_future))
 
     async def finish_capture(self, window: CaptureWindow) -> None:
@@ -266,7 +263,7 @@ class SessionCamera:
             await self.publish_event(event)
             window.pending_frames.clear()
 
-        # 整理采集和证据交付统计，保留处理失败信息。
+        # 整理采集和图片交付统计，保留处理失败信息。
         statistics = {
             "capture_duration_seconds": result.capture_duration_seconds,
             "received_frame_count": result.received_frame_count,
@@ -282,7 +279,7 @@ class SessionCamera:
         }
         # 记录本轮采集或逐帧处理异常。
         if result.has_error:
-            logger.error("相机采集或证据保存失败 machine_id=%s statistics=%s", self.machine.machine_id, statistics)
+            logger.error("相机采集或图片编码失败 machine_id=%s statistics=%s", self.machine.machine_id, statistics)
         # 合并业务跳过与队满丢帧数量，生成封口摘要。
         summary = CaptureSummary(
             capture_id=window.capture_id,
@@ -299,7 +296,7 @@ class SessionCamera:
         self.windows.pop(window.capture_id, None)
 
     async def stop(self) -> None:
-        """请求所有采集任务停止，并等待证据和事件交付结束。
+        """请求所有采集任务停止，并等待图片和事件交付结束。
 
         Args:
             无外部参数。

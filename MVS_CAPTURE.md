@@ -1,6 +1,6 @@
 # 海康 MVS 固定窗口流式采集
 
-底层通过同步逐帧回调交付图像，并已由 `camera.SessionCamera` 接入 App 和 Session。正式流程只使用 MVS 相机，文件夹模拟采集已删除；OCR 当前仅接收并暂存批次，尚未消费；频率仍为模拟实现。
+底层通过同步逐帧回调交付图像，并已由 `camera.SessionCamera` 接入 App 和 Session。正式流程只使用 MVS 相机，文件夹模拟采集已删除；OCR 支持手动消费内存图片批次，真实模型尚未接入；频率仍为模拟实现。
 实现参考 `mvs_tennis/packages/mvs/src/mvs/capture/grab.py`、`capture/pipeline.py` 和 `sdk/camera.py`，
 沿用官方 Python 绑定、独立 Grabber、Buffer 复制和释放顺序，不包含同步组包或网球业务。
 
@@ -10,7 +10,7 @@
 |---|---|
 | `mvs_sdk.py` | 加载官方 SDK、枚举和打开相机、配置参数、复制帧、释放设备 |
 | `mvs_capture.py` | 独立任务队列、生产消费线程、采集计时、排空和统计 |
-| `camera.py` | Session 适配、筛选占位、证据保存、FrameBatchSelected 和 CaptureSealed |
+| `camera.py` | Session 适配、筛选占位、内存组批、FrameBatchSelected 和 CaptureSealed |
 | `load_mvs_sdk(...)` | 加载并初始化 SDK，每个应用使用一个实例 |
 | `sdk.enumerate_devices()` | 返回 SDK 设备列表及序列号、传输类型 |
 | `sdk.open_camera(serial, ...)` | 按真实序列号打开相机并配置 Continuous / TriggerMode Off |
@@ -115,7 +115,7 @@ Grabber 执行 `GetImageBuffer → ctypes.string_at 复制 → FreeImageBuffer �
 设备时间戳按原始值保留，第一版不把它映射成业务 START/CLOSE 边界。
 
 同一相机采集中再次请求会立即抛出“相机正在采集”。A 轮生产封口后，B 轮可以开始，
-此时 A 轮消费者可能仍在工作；A 轮的停止信号和结果不会修改 B 轮。
+此时 A 轮消费者可能仍在编码图片；A 轮的停止信号和结果不会修改 B 轮。
 不同相机可以同时运行。消费者回调也可能跨任务并发，共享处理模型或输出资源由调用方管理。
 
 回调必须同步完成当前帧处理后返回，不能仅启动异步任务就返回。
@@ -156,12 +156,12 @@ Grabber 执行 `GetImageBuffer → ctypes.string_at 复制 → FreeImageBuffer �
 
 ## App 接入
 
-`App.start()` 按配置打开相机；未配置或未找到设备时单机进入 FAULT。START 使用业务创建的 capture_id 启动取流。CLOSE 只等待生产停止，不等待旧轮证据保存。适配器将图片与含统计的 CaptureSummary 顺序交付机器事件队列。图片批次到达 MachineManager 后立即送入 OCR 队列，封口不再提交 OCR；当前不启动识别任务。`App.stop()` 先停止并排空相机任务，再关闭 SDK。
+`App.start()` 按配置打开相机；未配置或未找到设备时单机进入 FAULT。START 使用业务创建的 capture_id 启动取流。CLOSE 只等待生产停止，不等待旧轮图片编码。适配器将图片与含统计的 CaptureSummary 顺序交付机器事件队列。图片批次到达 MachineManager 后立即送入 OCR 队列，封口不再提交 OCR；App 当前不自动启动识别任务。`App.stop()` 先停止并排空相机任务，再关闭 SDK。
 
-## BMP 证据保存
+## 内存 BMP 与延后保存
 
-Session 消费线程调用 `MvsCamera.encode_image`，通过官方 `MV_CC_SaveImageEx3` 和 `MV_Image_Bmp` 将独立原始帧转换为 BMP，返回扩展名和文件字节。转换采用帧内的原始像素格式，Bayer 插值参数为 SDK 的均衡模式。同一设备的编码串行执行，使用独立编码锁，不占用取帧锁。
+Session 消费线程调用 `MvsCamera.encode_image`，通过官方 `MV_CC_SaveImageEx3` 和 `MV_Image_Bmp` 将独立原始帧编码为完整 BMP 字节。此 API 在内存中编码，不写磁盘；同一设备的编码串行执行，使用独立编码锁，不占用取帧锁。
 
-`camera.py` 保留业务时间边界和选帧上限检查，再调用 `is_frame_qualified` 筛选空壳；当前统一返回 `True`，尚不判断无字、纯黑和截断。合格帧编码为 BMP，写入本 Session 目录的临时文件，执行同步并原子替换后加入本轮独立批次。满 8 帧发布 `FrameBatchSelected`，其 payload 是 `tuple[CapturedFrame, ...]`，不设置等待超时；生产停止且消费完成后，先交付不足 8 帧的尾批，再发布 `CaptureSealed`。空批次不交付，筛选拒绝或保存失败的帧不占用选帧名额。MachineManager 接收批次后直接转发机器编号、Session 编号和原图片元组，不登记或重复校验逐帧数据；事件入口仍检查 Session 是否存在及结果是否冻结。OCR 队列容量按批次计算，当前只暂存，不执行识别。默认 `max_frames_per_session=5`，因此默认配置仅交付尾批；提高该上限后可形成满批。编码失败时记录该帧处理错误，继续处理后续帧，最终生成含 `CAPTURE_FAILED` 的待复核记录。
+`camera.py` 保留业务时间边界和选帧上限检查，再调用目前统一返回 True 的 `is_frame_qualified`。合格帧携带 image_data 进入本轮批次，不创建证据文件或临时文件。满 8 帧交付 FrameBatchSelected，消费结束后先交付尾批再发布 CaptureSealed。默认每轮最多 5 帧，因此默认只交付尾批。编码失败记录处理错误并继续消费，最终封口包含 CAPTURE_FAILED。
 
-假 SDK 测试现在仅替换底层 API，经过正式 `encode_image` 和完整 Session 流程，检查 BMP 文件头、尺寸、像素及错误结果。实际 SDK 编码需要有效设备句柄，仍需相机到货后验证真实像素格式转换与取流。
+MachineManager 将成功入队的图片保留在 Session.memory_frames 中；OCR 接收 BMP 字节，结果通过 frame_id 关联原图。最终文字与图片选择、保存预留在 select_final_text_and_img 中，算法尚未实现，当前无图片落盘。整轮失败、超时、中断和退出会清理内存，正常关闭允许原图随旧 Session 继续等待。真实 SDK 像素转换、取流和现场内存容量仍需真机验证。
