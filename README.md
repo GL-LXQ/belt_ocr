@@ -14,7 +14,9 @@
 
 测量数据由 START 创建 Session，经相机内存组批、OCR 终选和 CLOSE 频率结算，在证据验证通过后冻结并写入 SQLite。Session 不再保存 `process_epoch`、`configuration_snapshot`，新写入的 `payload_json` 不再保存这两个键及 `software_version`、`model_version`、`outcome`、`is_simulated`，配置版本直接从应用配置读取；初始化旧库时删除 `outcome`、`is_simulated` 独立列，历史记录的 JSON 和哈希保持不变。图片以 `frame_id` 关联内存内容，已删除未使用的图片路径、来源批次、接收时间和 OCR 结果帧编号列表。本次仅清理字段与废弃配置，频率监听和自动启停入口另行处理。
 
-采集完成事件 CaptureSealed 由 MachineManager.handle_capture_finished 处理，登记采集结束状态、统计和错误，再进入批次结算与文字终选检查。事件类型统一由 enums.EventType 定义，发送端构造带枚举类型的 MeasurementEvent，处理端按枚举分派；枚举值保留原事件字符串，审计与序列化格式保持兼容。事件处理入口：MachineManager.listen_events 持续读取本机 FIFO 队列，将事件交给 handle_event 并反馈处理结果；MachineManager.handle_event 按顺序检查启停信号时效和事件归属，分派机器及 Session 事件并检查测量完成条件。启停处理入口：MachineManager.handle_machine_start 接收启动处理请求，创建 Session 并启动相机采集、登记频率归属和超时任务；MachineManager.handle_machine_close 处理正常关闭或 interrupted=True 的异常中断，停止现场采集并结算频率，正常关闭后继续等待 OCR 和证据处理，结果完整后提交 SQLite，失败则记录日志并清理资源。
+采集完成事件 CaptureSealed 由 MachineManager.handle_capture_finished 处理，登记采集结束状态、统计和错误，再进入批次结算与文字终选检查。事件类型统一由 enums.EventType 定义，发送端构造带枚举类型的 MeasurementEvent，处理端按枚举分派；枚举值保留原事件字符串，审计与序列化格式保持兼容。事件处理入口：MachineManager.listen_events 持续读取本机 FIFO 队列，将事件交给 handle_event 并反馈处理结果；MachineManager.handle_event 按 FIFO 顺序处理机器及 Session 事件并检查测量完成条件，START/CLOSE 不按事件创建时间过滤，关闭事件通过 is_close_event_for_active_session 核对当前活动或已中断周期的身份，无周期编号时允许关闭或复位，不匹配时记录审计并忽略。启停处理入口：MachineManager.handle_machine_start 接收启动处理请求，创建 Session 并启动相机采集、登记频率归属和超时任务；MachineManager.handle_machine_close 处理正常关闭或 interrupted=True 的异常中断，停止现场采集并结算频率，正常关闭后继续等待 OCR 和证据处理，结果完整后提交 SQLite，失败则记录日志并清理资源。
+
+异常处理：仅将原本全英文的 SDK 报错补充为简明中文，保留接口名和错误码；已有中文及中英混合提示保持不变。设备异常仍沿原有事件流程交付本机处理器，更新测量状态并清理资源。
 
 ## 1. 项目目标与边界
 
@@ -200,7 +202,7 @@ IOAdapter 负责读取输入、通信健康判断、有效电平解释、去抖�
 
 收到 `MachineStarted(machine_id)` 后，在该机器 机器管理员 中按顺序执行：
 
-1. 校验事件新鲜性、来源顺序、机器同步状态和采集能力。
+1. 按接收顺序处理启动事件，检查机器同步状态和采集能力。
 2. 如果已有现场活动 Session，按重复/异常启动处理，不覆盖原 Session。
 3. 如果设备不可用或积压超限，记录本轮未受理事件并报警，等待本轮关闭；不得假装已经采集成功。
 4. 生成全局唯一 `session_id`，创建 Session，固定 machine_id、设备绑定和开始时间。

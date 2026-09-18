@@ -62,12 +62,12 @@ class MvsCamera:
             # 清空旧缓存，然后开启本轮取流。
             return_code = self.handle.MV_CC_ClearImageBuffer()
             if return_code != self.binding.errors.MV_OK:
-                raise MvsError(f"ClearImageBuffer: 0x{return_code:08X}")
+                raise MvsError(f"清空相机图像缓存失败（ClearImageBuffer），错误码：0x{return_code:08X}")
             # 启动连续取流，失败时标记设备故障。
             return_code = self.handle.MV_CC_StartGrabbing()
             if return_code != self.binding.errors.MV_OK:
                 self.faulted = True
-                raise MvsError(f"StartGrabbing: 0x{return_code:08X}")
+                raise MvsError(f"启动相机采集失败（StartGrabbing），错误码：0x{return_code:08X}")
             # 登记设备已进入取流状态。
             self.grabbing = True
 
@@ -106,7 +106,7 @@ class MvsCamera:
                 return None
             if return_code != self.binding.errors.MV_OK:
                 self.faulted = True
-                raise MvsError(f"GetImageBuffer: 0x{return_code:08X}")
+                raise MvsError(f"读取相机图像失败（GetImageBuffer），错误码：0x{return_code:08X}")
             # 累计 SDK 已成功交付的帧数。
             self.received_frame_count += 1
 
@@ -134,7 +134,7 @@ class MvsCamera:
                 return_code = self.handle.MV_CC_FreeImageBuffer(frame_buffer)
                 if return_code != self.binding.errors.MV_OK:
                     self.faulted = True
-                    raise MvsError(f"FreeImageBuffer: 0x{return_code:08X}")
+                    raise MvsError(f"释放相机图像缓存失败（FreeImageBuffer），错误码：0x{return_code:08X}")
             # Buffer 归还完成后，交付程序独立持有的图像。
             return frame
 
@@ -173,7 +173,7 @@ class MvsCamera:
             return_code = self.handle.MV_CC_SaveImageEx3(parameters)
         # 检查编码状态和输出内容。
         if return_code != self.binding.errors.MV_OK:
-            raise MvsError(f"SaveImageEx3(BMP): 0x{return_code:08X}")
+            raise MvsError(f"图像编码为 BMP 失败（SaveImageEx3(BMP)），错误码：0x{return_code:08X}")
         if parameters.nImageLen == 0:
             raise MvsError("SaveImageEx3(BMP) 未返回图片内容")
         # 复制编码后的文件内容，并返回扩展名与图片字节。
@@ -199,7 +199,7 @@ class MvsCamera:
             return_code = self.handle.MV_CC_StopGrabbing()
             if return_code != self.binding.errors.MV_OK:
                 self.faulted = True
-                raise MvsError(f"StopGrabbing: 0x{return_code:08X}")
+                raise MvsError(f"停止相机采集失败（StopGrabbing），错误码：0x{return_code:08X}")
             # SDK 停止成功后更新本地取流状态。
             self.grabbing = False
 
@@ -226,7 +226,7 @@ class MvsCamera:
                 try:
                     return_code = operation()
                     if return_code != self.binding.errors.MV_OK:
-                        errors.append(f"{operation.__name__}: 0x{return_code:08X}")
+                        errors.append(f"关闭相机或释放连接句柄失败（{operation.__name__}），错误码：0x{return_code:08X}")
                 except Exception as error:
                     errors.append(str(error))
             self.closed = True
@@ -251,7 +251,7 @@ class MvsSdk:
         self.closed = False
         return_code = binding.camera_class.MV_CC_Initialize()
         if return_code != binding.errors.MV_OK:
-            raise MvsError(f"Initialize: 0x{return_code:08X}")
+            raise MvsError(f"初始化相机驱动失败（Initialize），错误码：0x{return_code:08X}")
 
     def enumerate_devices(self) -> tuple[object, list[dict]]:
         """枚举 GigE 和 USB 相机并返回设备列表及可读身份。
@@ -281,7 +281,7 @@ class MvsSdk:
             device_list,
         )
         if return_code != self.binding.errors.MV_OK:
-            raise MvsError(f"EnumDevices: 0x{return_code:08X}")
+            raise MvsError(f"查找相机设备失败（EnumDevices），错误码：0x{return_code:08X}")
 
         # 从设备结构体提取序列号和传输类型。
         devices = []
@@ -337,13 +337,13 @@ class MvsSdk:
         handle = self.binding.camera_class()
         return_code = handle.MV_CC_CreateHandle(information)
         if return_code != self.binding.errors.MV_OK:
-            raise MvsError(f"CreateHandle: 0x{return_code:08X}")
+            raise MvsError(f"创建相机连接句柄失败（CreateHandle），错误码：0x{return_code:08X}")
         camera = MvsCamera(self.binding, handle, serial)
         try:
             # 使用 Control 权限打开设备。
             return_code = handle.MV_CC_OpenDevice(3, 0)
             if return_code != self.binding.errors.MV_OK:
-                raise MvsError(f"OpenDevice({serial}): 0x{return_code:08X}")
+                raise MvsError(f"打开相机 {serial} 失败（OpenDevice({serial})），错误码：0x{return_code:08X}")
 
             # 设置连续采集，并关闭逐帧触发。
             enum_parameters = {
@@ -359,7 +359,7 @@ class MvsSdk:
             for name, value in enum_parameters.items():
                 return_code = handle.MV_CC_SetEnumValueByString(name, value)
                 if return_code != self.binding.errors.MV_OK:
-                    raise MvsError(f"{name}: 0x{return_code:08X}")
+                    raise MvsError(f"设置相机参数 {name} 失败，错误码：0x{return_code:08X}")
 
             # 应用手动曝光和增益参数。
             float_parameters = {
@@ -370,7 +370,7 @@ class MvsSdk:
                 if value is not None:
                     return_code = handle.MV_CC_SetFloatValue(name, value)
                     if return_code != self.binding.errors.MV_OK:
-                        raise MvsError(f"{name}: 0x{return_code:08X}")
+                        raise MvsError(f"设置相机参数 {name} 失败，错误码：0x{return_code:08X}")
 
             # 为 GigE 相机设置 SDK 推荐的网络包大小。
             if device["transport_type"] == self.binding.parameters.MV_GIGE_DEVICE:
@@ -378,7 +378,7 @@ class MvsSdk:
                 if packet_size > 0:
                     return_code = handle.MV_CC_SetIntValue("GevSCPSPacketSize", packet_size)
                     if return_code != self.binding.errors.MV_OK:
-                        raise MvsError(f"GevSCPSPacketSize: 0x{return_code:08X}")
+                        raise MvsError(f"设置相机网络包大小失败（GevSCPSPacketSize），错误码：0x{return_code:08X}")
         except Exception:
             try:
                 camera.close()
@@ -409,7 +409,7 @@ class MvsSdk:
         return_code = self.binding.camera_class.MV_CC_Finalize()
         self.closed = True
         if return_code != self.binding.errors.MV_OK:
-            errors.append(f"Finalize: 0x{return_code:08X}")
+            errors.append(f"释放相机驱动资源失败（Finalize），错误码：0x{return_code:08X}")
         if errors:
             raise MvsError("; ".join(errors))
 

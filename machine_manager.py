@@ -245,8 +245,24 @@ class MachineManager:
         # 检查正常关闭周期的结果，条件满足时提交数据库。
         await self.try_finalize(session)
 
+    def is_close_event_for_active_session(self, event: MeasurementEvent) -> bool:
+        """判断此次收到的关闭事件是否对应当前活动session或已中断的session。
+
+        Args:
+            event: 待判断的关闭事件，未携带周期编号时允许执行关闭或复位。
+
+        Returns:
+            True  # 未携带周期编号，或编号匹配当前活动或已中断的 Session
+            False  # 周期编号不匹配当前活动或已中断的 Session
+        """
+        # 未携带周期编号的关闭事件允许用于关闭或复位。
+        return not event.session_id or event.session_id in {
+            self.active_session_id,
+            self.interrupted_session_id,
+        }
+
     async def handle_event(self, event: MeasurementEvent) -> None:
-        """检查启停信号时效和事件归属，处理业务事件并检查本轮是否完成。
+        """按事件类型处理机器和测量周期业务，并检查本轮是否完成。
 
         Args:
             event: 待处理的测量事件，包含事件身份、来源信息和业务数据。
@@ -256,29 +272,14 @@ class MachineManager:
             返回示例：
                 None  # 无返回数据
         """
-        # 检查启动和关闭事件是否超出时限，登记并隔离超出时限的事件。
-        if event.event_type in {EventType.MACHINE_STARTED, EventType.MACHINE_CLOSED}:
-            age = datetime.now(timezone.utc) - datetime.fromisoformat(event.occurred_at)
-            if abs(age.total_seconds()) * 1000 > self.configuration.event_max_age_ms:
-                await run_blocking_operation(self.recovery.audit, "STALE_CONTROL_EVENT", event)
-                return
-
-        # 检查事件所属机器。
-        if event.machine_id != self.machine.machine_id:
-            await run_blocking_operation(self.recovery.audit, "MACHINE_MISMATCH", event)
-            logger.warning("隔离机器归属不符事件 event_id=%s", event.event_id)
-            return
-
         # 分派不依赖测量档案的机器级事件。
         match event.event_type:
             case EventType.MACHINE_STARTED:
                 await self.handle_machine_start()
                 return
             case EventType.MACHINE_CLOSED:
-                # 核对关闭信号的周期身份，再关闭当前测量。
-                if event.session_id and event.session_id not in {
-                    self.active_session_id, self.interrupted_session_id,
-                }:
+                # 判断此次收到的关闭事件是否对应当前活动session或已中断的session
+                if not self.is_close_event_for_active_session(event):
                     await run_blocking_operation(self.recovery.audit, "CLOSE_SESSION_MISMATCH", event)
                     return
                 await self.handle_machine_close()

@@ -61,7 +61,7 @@ uv run python -X utf8 main.py --config config.example.json
 | `minimum_free_disk_bytes` | 恢复库和证据所在磁盘的最低剩余空间，默认 100 MiB |
 | `ocr_job_timeout_ms` | 证据文件读取期限 |
 | `worker_restart_attempts` | 共享工作单元最多启动次数，默认 3 次 |
-| `event_max_age_ms` | START/CLOSE 允许的最大时间偏差，默认 30000 毫秒 |
+| `event_max_age_ms` | 兼容旧配置保留，当前不再用于过滤 START/CLOSE |
 | `initial_machine_state` | 新机器的模拟初始状态，默认 `CLOSED`；也支持 `OPEN`、`UNKNOWN` |
 
 相机使用 Continuous / Free Run 模式。图像复制到独立内存后立即归还 SDK Buffer，队满时丢弃新帧并统计；消费者同时处理已入队图片。原始帧由 MVS SDK 转换为内存 BMP，不在采集和批次识别阶段落盘，每轮保存采集和处理统计到 `capture_summary`。
@@ -103,7 +103,7 @@ asyncio.run(run_measurement())
 无活动周期时重复关闭、活动周期内重复启动不会产生新测量。
 仅有 `machine_id` 的入口无法辨别来自硬件的跨周期旧信号，真实接入层必须先确定周期身份。
 业务事件使用 `event_type` 区分业务，以 `machine_id` 和 `session_id` 确定归属，保留 `event_id` 和时间；不再包含公共 `source_id`。
-系统不按 event_id 持久化去重；事件处理保留启停信号时效、Session 归属及采集数据中的设备身份检查，结果提交保留幂等写入。
+系统不按 event_id 持久化去重；START/CLOSE 按接收顺序处理，不按事件创建时间过滤；事件处理保留 Session 归属及采集数据中的设备身份检查，结果提交保留幂等写入。
 带旧 Session 的关闭事件会进入审计，不关闭新周期。
 
 ## 业务处理顺序
