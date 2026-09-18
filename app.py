@@ -211,7 +211,7 @@ class App:
         await acknowledgement
 
     async def publish_event(self, event: MeasurementEvent) -> None:
-        """补齐内部事件的来源信息，并将事件送入对应机器的有界队列。
+        """更新事件接收时间，并将事件送入对应机器的有界队列。
 
         Args:
             event: 待分发的测量事件，包含事件类型、机器编号及相关业务数据。
@@ -234,24 +234,8 @@ class App:
             logger.warning("隔离未知机器事件 machine_id=%s", event.machine_id)
             return
 
-        # 为未指定来源的内部事件选择业务模块或设备编号。
-        if not event.source_id:
-            source_id = "business"
-            if event.event_type.startswith(("Frame", "Capture")):
-                source_id = machine_manager.machine.camera_id
-            elif event.event_type.startswith("Frequency"):
-                source_id = machine_manager.machine.frequency_source_id
-            elif event.event_type.startswith("OCR"):
-                source_id = "OCR"
-            elif event.event_type.startswith("Commit"):
-                source_id = "STORAGE"
-
-            # 复制事件并补齐来源和接收时间。
-            event = replace(
-                event,
-                source_id=source_id,
-                received_at=datetime.now(timezone.utc).isoformat(),
-            )
+        # 更新本次路由接收时间。
+        event = replace(event, received_at=datetime.now(timezone.utc).isoformat())
 
         # 将事件放入对应机器队列，队列满时等待空位。
         await machine_manager.queue.put(event)

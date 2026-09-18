@@ -15,7 +15,6 @@ class MeasurementEvent:
     payload: Any = None
     event_id: str = field(default_factory=lambda: uuid4().hex)
     acknowledgement: asyncio.Future[None] | None = None
-    source_id: str = ""
     occurred_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

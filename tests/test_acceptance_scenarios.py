@@ -108,18 +108,16 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len({session.session_id for session in sessions}), 3)
 
-        # 检查配置绑定，并向同一机器注入错误通道和错误来源。
+        # 检查配置绑定，并向同一机器注入错误频率通道。
         for session in sessions:
             machine_number = int(session.machine_id[1:])
             self.assertEqual(session.camera_id, f"CAM{machine_number:02}")
             self.assertEqual(session.frequency_source_id, f"FREQ{machine_number:02}")
             frame, measurement = await self.supply_valid_inputs(session)
-            for source_id in ("", "wrong-frequency"):
-                await self.publish_and_wait(MeasurementEvent(
-                    "FrequencyMeasured", session.machine_id, session.session_id,
-                    replace(measurement, frequency_source_id="wrong-frequency"),
-                    source_id=source_id,
-                ))
+            await self.publish_and_wait(MeasurementEvent(
+                "FrequencyMeasured", session.machine_id, session.session_id,
+                replace(measurement, frequency_source_id="wrong-frequency"),
+            ))
             self.assertEqual(set(session.selected_frames), {frame.frame_id})
             self.assertEqual(
                 set(session.frequency_candidates), {measurement.measurement_id},

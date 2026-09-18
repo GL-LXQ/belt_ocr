@@ -87,7 +87,6 @@ class TextRecognizer:
                         machine_id=batch.machine_id,
                         session_id=batch.session_id,
                         payload=str(error),
-                        source_id="OCR",
                     ))
                     continue
 
@@ -106,7 +105,6 @@ class TextRecognizer:
                     machine_id=batch.machine_id,
                     session_id=batch.session_id,
                     payload=frame_results,
-                    source_id="OCR",
                 ))
             finally:
                 # 结束本次队列消费记账。
