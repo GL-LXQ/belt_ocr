@@ -142,83 +142,6 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_audit_reasons())
 
-    async def test_03_04_05_late_ocr_and_commit_preserve_new_cycle(self):
-        # 建立旧轮输入及识别、提交确认的两个等待点。
-        app = await self.start_controlled_app(max_frames_per_session=1)
-        machine_manager = app.machine_managers["M01"]
-        await app.handle_start("M01")
-        first_session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.supply_valid_inputs(first_session)
-        recognition_entered = asyncio.Event()
-        recognition_release = asyncio.Event()
-        confirmation_entered = asyncio.Event()
-        confirmation_release = asyncio.Event()
-        original_recognize = app.ocr.recognize_frame
-        original_publish = app.database.publish_event
-
-        # 暂停旧轮识别和提交确认，分别检查新轮活动位置。
-        async def hold_old_recognition(job):
-            if job.session_id == first_session.session_id:
-                recognition_entered.set()
-                await recognition_release.wait()
-            return await original_recognize(job)
-
-        async def hold_old_confirmation(event):
-            if event.event_type == "CommitSucceeded":
-                if event.session_id == first_session.session_id:
-                    confirmation_entered.set()
-                    await confirmation_release.wait()
-            await original_publish(event)
-
-        with patch.object(app.ocr, "recognize_frame", hold_old_recognition):
-            with patch.object(app.database, "publish_event", hold_old_confirmation):
-                try:
-                    await self.close_controlled_cycle(first_session)
-                    await asyncio.wait_for(recognition_entered.wait(), 10)
-                    self.assertIsNone(machine_manager.active_session_id)
-                    self.assertFalse(first_session.ocr_done)
-                    self.assertEqual(self.read_records(), [])
-                    machine_manager.machine = replace(
-                        machine_manager.machine, simulated_lines=("SECOND CYCLE",),
-                    )
-                    await app.handle_start("M01")
-                    second_session = machine_manager.sessions[machine_manager.active_session_id]
-                    await self.supply_valid_inputs(second_session)
-                    recognition_release.set()
-                    await asyncio.wait_for(confirmation_entered.wait(), 10)
-
-                    # 数据已写入但确认仍暂停，新轮保持未结算状态。
-                    self.assertEqual(machine_manager.active_session_id, second_session.session_id)
-                    self.assertIsNone(second_session.ocr_result)
-                    self.assertEqual(second_session.commit_state, "NOT_READY")
-                    first_record = self.read_records()[0]
-                    self.assertEqual(
-                        first_record["session_id"], first_session.session_id,
-                    )
-                    self.assertEqual(
-                        first_record["ordered_lines"], ["MODEL 1", "SAME", "SAME"],
-                    )
-                    self.assertTrue(all(
-                        frame["session_id"] == first_session.session_id
-                        for frame in first_record["selected_frames"]
-                    ))
-                    confirmation_release.set()
-                    await self.wait_for_state(
-                        lambda: first_session.commit_state == "COMMITTED",
-                    )
-                    self.assertEqual(machine_manager.active_session_id, second_session.session_id)
-                finally:
-                    recognition_release.set()
-                    confirmation_release.set()
-        await self.close_controlled_cycle(second_session)
-        await app.wait_until_idle(10)
-        self.assertEqual(len(self.read_records()), 2)
-        second_record = next(
-            record for record in self.read_records()
-            if record["session_id"] == second_session.session_id
-        )
-        self.assertEqual(second_record["ordered_lines"], ["SECOND CYCLE"])
-
     async def test_06_repeated_start_input_creates_one_cycle(self):
         # 并发重复启动后，只为唯一活动周期完成一次测量。
         app = await self.start_controlled_app()
@@ -231,54 +154,6 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         await app.wait_until_idle(10)
         self.assertEqual(len(self.read_records()), 1)
         self.assertEqual(self.read_records()[0]["outcome"], "COMPLETE")
-
-    async def test_08_replayed_frame_results_do_not_duplicate_jobs_or_lines(self):
-        # 建立包含两帧输入的周期并记录实际完成的识别事件。
-        app = await self.start_controlled_app()
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        original_publish = app.ocr.publish_event
-        completed_events = []
-
-        # 重放同一事件，并用新事件编号重复投递同一任务结果。
-        async def duplicate_completed_frame(event):
-            await original_publish(event)
-            if event.event_type == "OCRFrameCompleted":
-                completed_events.append(event)
-                await original_publish(event)
-                await original_publish(replace(event, event_id=uuid4().hex))
-
-        with patch.object(app.ocr, "publish_event", duplicate_completed_frame):
-            first_frame, first_measurement = await self.supply_valid_inputs(session)
-            await self.supply_valid_inputs(session)
-            await self.publish_and_wait(MeasurementEvent(
-                "FrameBatchSelected", "M01", session.session_id, (first_frame,),
-            ))
-            await self.publish_and_wait(MeasurementEvent(
-                "FrequencyMeasured", "M01", session.session_id, first_measurement,
-            ))
-            await self.publish_and_wait(MeasurementEvent(
-                "CaptureSealed", "M01", session.session_id, CaptureSummary(session.capture_id),
-            ))
-            await self.wait_for_state(lambda: session.ocr_done)
-            await machine_manager.queue.join()
-
-            # 两帧仅结算两份任务，重复文本行保持模拟模块的原有顺序。
-            self.assertEqual(len(completed_events), 2)
-            self.assertEqual(len(session.ocr_jobs), 2)
-            self.assertEqual(len(session.frequency_candidates), 2)
-            self.assertTrue(all(
-                job["state"] == "SUCCESS" and job["attempt"] == 1
-                for job in session.ocr_jobs.values()
-            ))
-            self.assertEqual(
-                session.ocr_result.ordered_lines, ("MODEL 1", "SAME", "SAME"),
-            )
-            self.assertIn("STALE_OCR_ATTEMPT", self.read_audit_reasons())
-            await self.close_controlled_cycle(session)
-            await app.wait_until_idle(10)
-        self.assertEqual(len(self.read_records()), 1)
 
     async def test_07_replayed_close_does_not_close_the_next_cycle(self):
         # 保存旧轮关闭事件，并完成该轮图像与频率封口。
@@ -492,46 +367,6 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             record["outcome"] == "COMPLETE" for record in self.read_records()
         ), 3)
 
-    async def test_16_busy_machine_yields_ocr_to_other_machines(self):
-        # 记录共享识别器的机器调度顺序。
-        app = await self.start_controlled_app(max_frames_per_session=6)
-        first_entered = asyncio.Event()
-        first_release = asyncio.Event()
-        recognized_machines = []
-        original_recognize = app.ocr.recognize_frame
-
-        # 暂停第一帧，等待三台机器的任务都进入共享队列。
-        async def record_recognition_order(job):
-            recognized_machines.append(job.machine_id)
-            if len(recognized_machines) == 1:
-                first_entered.set()
-                await first_release.wait()
-            return await original_recognize(job)
-
-        with patch.object(app.ocr, "recognize_frame", record_recognition_order):
-            try:
-                for machine_id, machine_manager in app.machine_managers.items():
-                    await app.handle_start(machine_id)
-                    session = machine_manager.sessions[machine_manager.active_session_id]
-                    frame_count = 6 if machine_id == "M01" else 1
-                    for frame_number in range(frame_count):
-                        await self.supply_valid_inputs(session)
-                    await self.close_controlled_cycle(session)
-                    if machine_id == "M01":
-                        await asyncio.wait_for(first_entered.wait(), 10)
-                first_release.set()
-                await app.wait_until_idle(10)
-            finally:
-                first_release.set()
-
-        # M01 的剩余五帧不能排在 M02、M03 的第一帧前面。
-        self.assertEqual(recognized_machines[:3], ["M01", "M02", "M03"])
-        self.assertEqual(recognized_machines.count("M01"), 6)
-        self.assertTrue(all(
-            record["outcome"] == "COMPLETE" for record in self.read_records()
-        ))
-        self.assertEqual(len(self.read_records()), 3)
-
     async def test_17_20_late_batches_stay_with_original_session(self):
         # 保存旧轮关闭边界，并保留新轮活动采集。
         app = await self.start_controlled_app()
@@ -599,7 +434,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             json.dumps(serialize_value(configuration)), encoding="utf-8",
         )
 
-        # 子进程暂停识别，在关闭和封口事件处理完成后直接退出。
+        # 子进程在图片批次入队、关闭和封口事件处理完成后直接退出。
         script = """
 import asyncio
 import os
@@ -615,17 +450,13 @@ application_module.load_mvs_sdk = FakeMvsSdk
 async def crash_after_close():
     app = App(load_configuration(Path(sys.argv[1])))
     await app.start()
-    recognition_entered = asyncio.Event()
-
-    async def hold_recognition(job):
-        recognition_entered.set()
-        await asyncio.Event().wait()
-
-    app.ocr.recognize_frame = hold_recognition
     await app.handle_start("M01")
     machine_manager = app.machine_managers["M01"]
     session = machine_manager.sessions[machine_manager.active_session_id]
-    await recognition_entered.wait()
+    while not session.capture_sealed:
+        app.state_changed.clear()
+        await app.state_changed.wait()
+    assert not app.text_recognizer.batch_queue.empty()
     await app.handle_close("M01")
     while not session.frequency_window_sealed:
         app.state_changed.clear()
@@ -657,7 +488,7 @@ asyncio.run(crash_after_close())
         await restarted.wait_until_idle(10)
         self.assertTrue(session_id)
         self.assertEqual(restarted.machine_managers["M01"].sessions, {})
-        self.assertEqual(restarted.ocr.pending_count, 0)
+        self.assertTrue(restarted.text_recognizer.batch_queue.empty())
         self.assertEqual(self.read_records(), [])
 
     async def test_19_evidence_write_sync_and_replace_failures_require_review(self):
@@ -710,76 +541,6 @@ asyncio.run(crash_after_close())
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["outcome"], "REVIEW_REQUIRED")
         self.assertIn("EVIDENCE_UNAVAILABLE", records[0]["error_codes"])
-
-
-    async def test_ignored_events_do_not_trigger_finalization(self) -> None:
-        """验证被忽略的图片、封口和 OCR 事件不会触发完成检查。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            None: 通过断言验证事件分派结果。
-            返回示例：
-                None  # 无返回数据
-        """
-        # 建立受控周期，登记一张有效图片和一次有效频率。
-        app = await self.start_controlled_app()
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        frame, measurement = await self.supply_valid_inputs(session)
-
-        # 构造空批次、未运行 OCR 结果和未关闭频率封口。
-        events = (
-            MeasurementEvent("FrameBatchSelected", "M01", session.session_id, ()),
-            MeasurementEvent("OCRCompleted", "M01", session.session_id),
-            MeasurementEvent("FrequencyWindowSealed", "M01", session.session_id),
-        )
-        with patch.object(machine_manager, "try_finalize", new_callable=AsyncMock) as finalize:
-            for event in events:
-                await self.publish_and_wait(event)
-
-            # 重复图像封口同样跳过完成检查。
-            session.capture_sealed = True
-            await self.publish_and_wait(MeasurementEvent("CaptureSealed", "M01", session.session_id, CaptureSummary(session.capture_id)))
-            finalize.assert_not_awaited()
-
-        # 保留原图片、频率和识别状态。
-        self.assertEqual(list(session.selected_frames), [frame.frame_id])
-        self.assertEqual(list(session.frequency_candidates), [measurement.measurement_id])
-        self.assertEqual(session.ocr_state, "WAITING")
-        self.assertFalse(session.frequency_window_sealed)
-
-    async def test_batch_registers_valid_frames_and_ignores_duplicates(self) -> None:
-        """验证采集端交付的批次被登记且重复批次不增加图片。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            None  # 批次登记、去重和 OCR 状态断言完成
-        """
-        # 创建受控周期，并登记用于构造批次的原始图片。
-        app = await self.start_controlled_app()
-        await app.handle_start("M01")
-        manager = app.machine_managers["M01"]
-        session = manager.sessions[manager.active_session_id]
-        frame, measurement = await self.supply_valid_inputs(session)
-
-        # 添加一帧新图片，并重复交付整个批次。
-        accepted_frame = replace(frame, frame_id="accepted-batch-frame")
-        event = MeasurementEvent(
-            "FrameBatchSelected", "M01", session.session_id,
-            (accepted_frame, frame),
-        )
-        await self.publish_and_wait(event)
-        await self.publish_and_wait(replace(event, event_id=uuid4().hex))
-
-        # 图片按编号去重登记，批次接收后 OCR 仍等待采集封口。
-        self.assertEqual(set(session.selected_frames), {frame.frame_id, accepted_frame.frame_id})
-        self.assertEqual(session.ocr_state, "WAITING")
-        self.assertEqual(session.ocr_jobs, {})
 
     async def test_frequency_identity_conflict_still_triggers_finalization(self) -> None:
         """验证频率周期身份冲突仍触发一次完成检查并保留无效状态。

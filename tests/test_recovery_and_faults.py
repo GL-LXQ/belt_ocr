@@ -285,7 +285,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(restarted_machine_manager.active_session_id)
         self.assertEqual(restarted_machine_manager.deadline_tasks, {})
         self.assertEqual(restarted_machine_manager.background_tasks, set())
-        self.assertEqual(restarted.ocr.pending_count, 0)
+        self.assertTrue(restarted.text_recognizer.batch_queue.empty())
         self.assertEqual(self.read_records(), [])
 
     async def test_process_crash_discards_previous_open_cycle(self) -> None:
@@ -462,33 +462,6 @@ asyncio.run(crash_after_start())
                 await second_app.start()
         self.assertTrue(app.accepting_signals)
 
-    async def test_frame_retry_keeps_attempt_and_is_not_counted_twice(self) -> None:
-        app = await self.start_app(max_frames_per_session=1)
-        original_recognize = app.ocr.recognize_frame
-        attempt_count = 0
-
-        # 第一帧第一次识别失败，第二次成功。
-        async def fail_once(job):
-            nonlocal attempt_count
-            attempt_count += 1
-            if attempt_count == 1:
-                raise OSError("模拟 OCR 临时失败")
-            return await original_recognize(job)
-
-        with patch.object(app.ocr, "recognize_frame", fail_once):
-            with self.assertLogs("ocr", level="ERROR"):
-                await app.handle_start("M01")
-                machine_manager = app.machine_managers["M01"]
-                session = machine_manager.sessions[machine_manager.active_session_id]
-                await self.wait_for_state(lambda: session.ocr_done)
-            await app.handle_close("M01")
-            await app.wait_until_idle(10)
-        record = self.read_records()[0]
-        self.assertEqual(attempt_count, 2)
-        self.assertEqual(len(record["ocr_jobs"]), 1)
-        self.assertEqual(next(iter(record["ocr_jobs"].values()))["attempt"], 2)
-        self.assertEqual(record["ordered_lines"], ["MODEL 1", "SAME", "SAME"])
-
     async def test_database_unavailable_at_startup_uses_local_spool(self) -> None:
         blocked_directory = self.output_directory / "blocked"
         blocked_directory.write_text("模拟不可用路径", encoding="utf-8")
@@ -530,9 +503,22 @@ asyncio.run(crash_after_start())
             app.handle_start(machine_id) for machine_id in app.machine_managers
         ))
         await self.wait_for_state(lambda: all(
-            next(iter(machine_manager.sessions.values())).ocr_done
+            next(iter(machine_manager.sessions.values())).capture_sealed
             for machine_manager in app.machine_managers.values()
         ))
+
+        # 注入频率失败，使关闭后的待复核记录直接进入存储流程。
+        for machine_manager in app.machine_managers.values():
+            session = machine_manager.sessions[machine_manager.active_session_id]
+            await app.publish_event(MeasurementEvent(
+                "FrequencyFailed",
+                session.machine_id,
+                session.session_id,
+                "FREQUENCY_UNAVAILABLE",
+            ))
+            await machine_manager.queue.join()
+
+        # 暂停写库，检查队列之外的待提交记录仍已持久化。
         with patch.object(app.database, "write_record", hold_write):
             try:
                 await asyncio.gather(*(
@@ -574,32 +560,6 @@ asyncio.run(crash_after_start())
         self.assertEqual(status["pending"]["blocked"], 1)
         self.assertEqual(self.read_records(), [])
         self.assertIn("COMMIT_INTEGRITY_CONFLICT", self.read_audit_reasons())
-
-    async def test_ocr_worker_restart_preserves_closed_frame_job(self) -> None:
-        app = await self.start_app(
-            max_frames_per_session=1, simulated_ocr_delay_ms=600,
-            storage_retry_interval_ms=50,
-        )
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_state == "RUNNING")
-        await app.handle_close("M01")
-        await self.wait_for_state(lambda: session.frequency_window_sealed)
-
-        # 取消受监督的 OCR 工作任务，检查同一帧重试后仍只形成一条结果。
-        worker = next(
-            task for task in app.worker_tasks
-            if task.get_name() == "OCR"
-        )
-        with self.assertLogs(level="ERROR"):
-            worker.cancel()
-            await self.wait_for_state(lambda: "OCR" in machine_manager.device_faults)
-        await app.wait_until_idle(10)
-        record = self.read_records()[0]
-        self.assertEqual(record["outcome"], "COMPLETE")
-        self.assertEqual(record["session_id"], session.session_id)
-        self.assertIn("OCR_WORKER_EXITED", self.read_audit_reasons())
 
     async def test_repeated_cycles_remain_independent(self) -> None:
         app = await self.start_app(

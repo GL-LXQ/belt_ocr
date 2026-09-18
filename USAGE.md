@@ -1,6 +1,6 @@
 # 核心流程运行说明
 
-> 当前开发阶段仅完成图片批次送入 OCR 模块。App 不启动旧逐帧 OCR Worker；批次暂存于有界队列，尚未消费或回传结果。队列满或停止接收时记录 `OCR_BATCH_REJECTED`。当前不能生成正常完整测量，原有 OCR 超时仍可能触发；下文完整测量演示和识别流程属于后续待接通行为。
+> 当前开发阶段仅完成图片批次送入 OCR 模块。TextRecognizer 仅接收 RecognitionBatch，旧逐帧模拟识别代码已删除；批次暂存于有界队列，尚未消费或回传结果。队列满或停止接收时记录 `OCR_BATCH_REJECTED`。当前不能生成正常完整测量，原有 OCR 超时仍可能触发；下文完整测量演示和识别流程属于后续待接通行为。
 
 当前版本包含三机测量、跨轮后台收尾、内存机器状态、本次运行内自动补交、重启清理和异常审计。
 信号统一从 `App.handle_start()` 和 `handle_close()` 进入，尚未接入现场 IO。
@@ -47,7 +47,7 @@ uv run python -X utf8 main.py --config config.example.json
 | `capture_window_ms` | 启动后的最长图像采集时长，默认 1000 毫秒 |
 | `camera_queue_capacity` / `camera_timeout_ms` | 每轮帧队列容量与单次等帧超时，默认 32 帧 / 50 毫秒 |
 | `max_frames_per_session` | 每轮最多选择的帧数，默认 5；采用先到先选策略 |
-| `simulated_ocr_delay_ms` | 每帧每次模拟识别耗时；示例为 800 毫秒 |
+| `simulated_ocr_delay_ms` | 旧模拟识别配置，当前不再使用 |
 | `frequency_interval_ms` | 仪器产生一次新测量的间隔，默认 100 毫秒 |
 | `frequency_delivery_delay_ms` | 测量产生到事件送达的模拟延迟；示例为 50 毫秒 |
 | `frequency_drain_timeout_ms` | 关闭后等待已归属在途测量的上限，默认 2000 毫秒 |
@@ -64,7 +64,7 @@ uv run python -X utf8 main.py --config config.example.json
 | `maintenance_interval_ms` | 补交和容量检查间隔，默认 250 毫秒 |
 | `max_persistent_records` | 待提交记录数量达到该值时停止接收新周期，默认 1000 |
 | `minimum_free_disk_bytes` | 恢复库和证据所在磁盘的最低剩余空间，默认 100 MiB |
-| `ocr_retry_attempts` / `ocr_job_timeout_ms` | 单帧最大尝试次数和每次处理期限，默认 3 次 / 5000 毫秒 |
+| `ocr_retry_attempts` / `ocr_job_timeout_ms` | 旧逐帧重试已删除；前者暂不使用，后者仍用于现有证据读取期限 |
 | `worker_restart_attempts` | 共享工作单元最多启动次数，默认 3 次 |
 | `event_max_age_ms` | START/CLOSE 允许的最大时间偏差，默认 30000 毫秒 |
 | `initial_machine_state` | 新机器的模拟初始状态，默认 `CLOSED`；也支持 `OPEN`、`UNKNOWN` |
@@ -191,8 +191,7 @@ await app.synchronize_machine("M01", observed_state="CLOSED")
 
 `IO`、`OCR`、`STORAGE` 作为共享来源时影响所有机器；也可显式指定 `machine_id`。
 设备报告恢复不代表已确认机器关闭，重新同步须使用真实可确认的现场状态。相机未打开或取流故障时，仅报告健康恢复不能重新打开设备；第一版需要排除故障后重启应用。
-OCR/存储工作任务意外退出时会记录故障并有限重启；OCR 在途帧保留任务身份继续尝试。
-单帧超时和处理失败有有限重试；尝试次数、终态和有序文字行进入最终可追溯记录。
+存储工作任务意外退出时会记录故障并有限重启。文字识别目前只接收批次，没有识别工作任务、逐帧重试或结果回传。
 
 ## 文件职责
 
@@ -206,7 +205,7 @@ OCR/存储工作任务意外退出时会记录故障并有限重启；OCR 在途
 | `camera.py` | MVS 与 Session 适配、证据保存、线程事件桥接和封口 |
 | `mvs_sdk.py` | 官方 MVS 绑定、设备管理和独立帧内存复制 |
 | `mvs_capture.py` | 固定窗口流式采集、独立有界队列、逐帧回调和统计 |
-| `ocr.py` | 共享有界调度和模拟有序文字行输出 |
+| `text_recognition.py` | TextRecognizer 接收 RecognitionBatch，保存到有界批次队列 |
 | `frequency.py` | 持续模拟新测量、窗口归属和在途数据收尾 |
 | `database.py` | SQLite 建表、幂等写入和有限重试 |
 | `recovery.py` | 本地待提交记录、审计和实例锁 |
@@ -238,4 +237,4 @@ README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTAN
 .\.venv\Scripts\python.exe -m pytest tests/test_ocr_batch_delivery.py tests/test_mvs_capture.py tests/test_machine_state.py -q
 ```
 
-该命令验证满批与尾批交付、队列拒收、封口不重复提交、底层采集和配置。旧的完整测量及逐帧 OCR 测试保留供后续改造，当前不适用，未跳过或改写为成功断言。
+该命令验证满批与尾批交付、队列拒收、封口不重复提交、底层采集和配置。直接依赖旧逐帧模拟识别实现的测试已删除；独立的采集、频率、存储和重启测试保留。其余依赖完整识别结果的历史场景仍待后续接通，当前未宣称全套测试通过。

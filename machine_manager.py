@@ -14,9 +14,9 @@ from camera import SessionCamera
 from configuration import MachineConfiguration, MeasurementConfiguration
 from frequency import SimulatedFrequency
 from enums import MachineState
-from models import BeltSession, MeasurementEvent, OCRResult, PublishEvent
+from models import BeltSession, MeasurementEvent, PublishEvent
 from recovery import run_blocking_operation, serialize_value
-from ocr import OCRJob, SimulatedOCR
+from text_recognition import TextRecognizer
 from database import Database, DatabaseRequest
 
 
@@ -30,7 +30,7 @@ class MachineManager:
         configuration: MeasurementConfiguration,
         camera: SessionCamera,
         frequency: SimulatedFrequency,
-        ocr: SimulatedOCR,
+        text_recognizer: TextRecognizer,
         database: Database,
         publish_event: PublishEvent,
         state_changed: asyncio.Event,
@@ -39,7 +39,7 @@ class MachineManager:
         self.configuration = configuration
         self.camera = camera
         self.frequency = frequency
-        self.ocr = ocr
+        self.text_recognizer = text_recognizer
         self.database = database
         self.publish_event = publish_event
         self.state_changed = state_changed
@@ -347,7 +347,7 @@ class MachineManager:
         match event.event_type:
             case "FrameBatchSelected":
                 # 将采集端交付的完整图片批次送入 OCR 队列。
-                accepted = self.ocr.submit_batch(
+                accepted = self.text_recognizer.submit_batch(
                     machine_id=session.machine_id,
                     session_id=session.session_id,
                     frames=event.payload,
@@ -364,10 +364,6 @@ class MachineManager:
 
             case "CaptureSealed":
                 should_finalize = await self.handle_capture_sealed(session, event)
-            case "OCRFrameStarted" | "OCRFrameCompleted" | "OCRFrameFailed":
-                await self.settle_ocr_frame(session, event)
-            case "OCRCompleted":
-                should_finalize = await self.handle_ocr_completed(session, event)
             case "EvidenceValidated" | "EvidenceFailed":
                 # 结算证据校验，登记成功状态或失败原因。
                 session.evidence_validation_pending = False
@@ -471,37 +467,6 @@ class MachineManager:
             session.errors.extend(summary.errors)
 
         # 返回封口处理结果，继续检查本轮能否结算。
-        return True
-
-    async def handle_ocr_completed(self, session: BeltSession, event: MeasurementEvent) -> bool:
-        """校验整轮 OCR 结果并更新识别状态。
-
-        Args:
-            session: 事件所属的测量档案。
-            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
-
-        Returns:
-            bool: 是否继续执行本轮完成检查。
-            返回示例：
-                True  # 继续检查本轮能否结算
-                False  # 忽略当前事件，不执行完成检查
-        """
-        # 仅接收正在处理中的整轮 OCR 结果。
-        if session.ocr_state != "RUNNING":
-            return False
-
-        # 核对文字、帧清单和证据路径，登记识别成功或失败。
-        result = event.payload
-        if (
-            not result.ordered_lines or not result.evidence_refs
-            or set(result.frame_ids) != set(session.selected_frames)
-            or result.evidence_refs != tuple(frame.image_path for frame in session.selected_frames.values())
-        ):
-            session.ocr_state = "FAILED"
-            session.errors.append("OCR_INVALID_RESULT")
-        else:
-            session.ocr_result = result
-            session.ocr_state = "SUCCESS"
         return True
 
     async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> bool:
@@ -655,8 +620,7 @@ class MachineManager:
             ),
             "process_epoch": session.process_epoch,
             "configuration_snapshot": session.configuration_snapshot,
-            "ocr_jobs": session.ocr_jobs,
-            "model_version": "simulated-ocr-v1",
+            "model_version": None,
             "software_version": "0.1.0",
         }
 
@@ -689,132 +653,6 @@ class MachineManager:
         await self.publish_event(MeasurementEvent(
             event_type, self.machine.machine_id, session_id,
         ))
-
-    async def submit_ocr_frames(self, session: BeltSession) -> None:
-        """登记逐帧任务并将未完成任务提交给共享 OCR 调度器。
-
-        Args:
-            session: 本轮测量档案，包含已选图片、OCR 任务进度和配置快照。
-
-        Returns:
-            None: 不返回数据，更新档案中的 OCR 状态并提交任务。
-            返回示例：
-                None  # 无返回数据
-        """
-        # 为每张图片登记 OCR 任务，保留已有任务的处理进度。
-        for frame in session.selected_frames.values():
-            session.ocr_jobs.setdefault(
-                frame.frame_id,
-                {
-                    "job_id": uuid4().hex,
-                    "state": "WAITING",
-                    "attempt": 0,
-                    "ordered_lines": [],
-                },
-            )
-
-        # 在内存中标记本轮进入 OCR 处理阶段。
-        session.ocr_state = "RUNNING"
-
-        # 从本轮配置快照中取出包含模拟文字的机器配置。
-        machine_settings = next(
-            machine for machine in session.configuration_snapshot["machines"]
-            if machine["machine_id"] == session.machine_id
-        )
-        for frame_id, job_state in session.ocr_jobs.items():
-            # 跳过已识别成功的图片任务。
-            if job_state["state"] == "SUCCESS":
-                continue
-
-            # 达到尝试次数上限时，标记本轮失败并停止提交。
-            if job_state["attempt"] >= self.configuration.ocr_retry_attempts:
-                session.ocr_state = "FAILED"
-                session.errors.append("OCR_RETRIES_EXHAUSTED")
-                break
-
-            # 组装携带机器、档案、任务编号和图片信息的 OCR 任务。
-            job = OCRJob(
-                session.machine_id,
-                session.session_id,
-                job_state["job_id"],
-                session.selected_frames[frame_id],
-                tuple(machine_settings["simulated_lines"]),
-                job_state["attempt"],
-            )
-
-            # 提交到共享 OCR 队列，队列满时标记失败并停止提交。
-            if not self.ocr.submit(job):
-                session.ocr_state = "FAILED"
-                session.errors.append("OCR_QUEUE_FULL")
-                break
-
-    async def settle_ocr_frame(self, session: BeltSession, event: MeasurementEvent) -> None:
-        """登记单帧识别进度和结果，并在全部帧结算后更新本轮 OCR 状态。
-
-        Args:
-            session: 当前事件所属的测量档案，保存图片任务和本轮 OCR 状态。
-            event: 包含事件类型、帧编号、任务编号、尝试次数和识别结果的事件。
-
-        Returns:
-            None: 更新测量档案中的任务记录和 OCR 状态，不返回数据。
-            返回示例：
-                None  # 无返回数据
-        """
-        # 读取事件数据，找到对应图片的任务记录。
-        payload = event.payload
-        job_state = session.ocr_jobs.get(payload["frame_id"])
-
-        # 计算当前事件应携带的尝试次数。
-        expected_attempt = (
-            job_state["attempt"] + (event.event_type == "OCRFrameStarted")
-            if job_state is not None
-            else None
-        )
-
-        # 核对本轮状态、任务身份和尝试次数，记录并忽略不匹配的事件。
-        if (
-            session.ocr_state != "RUNNING"
-            or job_state is None
-            or job_state["job_id"] != payload["job_id"]
-            or job_state["state"] in {"SUCCESS", "FAILED"}
-            or payload["attempt"] != expected_attempt
-        ):
-            await run_blocking_operation(self.recovery.audit, "STALE_OCR_ATTEMPT", event)
-            return
-
-        # 更新尝试次数，收到开始事件时登记运行状态并返回。
-        job_state["attempt"] = payload["attempt"]
-        if event.event_type == "OCRFrameStarted":
-            job_state["state"] = "RUNNING"
-            return
-
-        # 登记单帧最终状态和识别文字。
-        job_state["state"] = "SUCCESS" if event.event_type == "OCRFrameCompleted" else "FAILED"
-        job_state["ordered_lines"] = payload.get("ordered_lines", [])
-
-        # 将单帧识别失败的错误码写入本轮档案。
-        if event.event_type == "OCRFrameFailed":
-            session.errors.append(payload["error_code"])
-
-        # 还有图片未结算时，等待后续识别事件。
-        if any(job["state"] not in {"SUCCESS", "FAILED"} for job in session.ocr_jobs.values()):
-            return
-
-        # 全部图片结算后，只要存在失败任务就标记本轮 OCR 失败。
-        if any(job["state"] == "FAILED" for job in session.ocr_jobs.values()):
-            session.ocr_state = "FAILED"
-            return
-
-        # 取第一项任务的模拟文字，收集全部选中图片的路径和帧编号。
-        first_job = next(iter(session.ocr_jobs.values()))
-        session.ocr_result = OCRResult(
-            tuple(first_job["ordered_lines"]),
-            tuple(frame.image_path for frame in session.selected_frames.values()),
-            tuple(session.selected_frames),
-        )
-
-        # 将本轮 OCR 标记为成功。
-        session.ocr_state = "SUCCESS"
 
     async def submit_frozen_record(self, session: BeltSession) -> None:
         """提交同一份冻结记录，并保留未成功入队的记录。"""

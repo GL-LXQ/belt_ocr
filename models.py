@@ -101,7 +101,6 @@ class BeltSession:
     configuration_snapshot: dict = field(default_factory=dict)
     ocr_deadline: str = ""
     cycle_deadline: str = ""
-    ocr_jobs: dict[str, dict] = field(default_factory=dict)
     evidence_verified: bool = False
     evidence_validation_pending: bool = False
 

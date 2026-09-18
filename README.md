@@ -6,7 +6,7 @@
 
 海康 MVS 模块已接入 App，使用方法见 [运行说明](USAGE.md) 和 [MVS 采集说明](MVS_CAPTURE.md)。文件夹模拟采集已移除；测试通过假 SDK 验证真实适配器。没有配置序列号或没有可用相机时，对应机器不接受正常测量。
 
-当前系统的数据流：App 初始化数据库与共享 MVS SDK，按序列号打开相机；START 创建 Session，同时启动采集和频率窗口。Grabber 复制图像并释放 SDK Buffer 后放入独立有界队列，消费者筛选并保存 BMP，每满 8 帧发布 FrameBatchSelected，采集结束时先交付尾批再发布 CaptureSealed。MachineManager 将机器编号、Session 编号和图片元组直接送入 OCR 批次队列，不重复校验或登记图片、逐帧任务；CaptureSealed 只保存封口状态、统计和采集错误，不再提交识别。当前开发阶段到批次入队为止，App 不启动旧 OCR Worker，尚无批次消费、识别或结果回传；ocr_queue_capacity 按批次数限制队列，拒收记为 OCR_BATCH_REJECTED。队列未消费会逐渐填满，Session 不会正常完成，原有 OCR 超时及异常存储流程仍保留；退出停止批次接收，重启不恢复旧 Session。
+当前系统的数据流：App 初始化数据库与共享 MVS SDK，按序列号打开相机；START 创建 Session，同时启动采集和频率窗口。Grabber 复制图像并释放 SDK Buffer 后放入独立有界队列，消费者筛选并保存 BMP，每满 8 帧发布 FrameBatchSelected，采集结束时先交付尾批再发布 CaptureSealed。MachineManager 将机器编号、Session 编号和图片元组直接送入 OCR 批次队列，不重复校验或登记图片、逐帧任务；CaptureSealed 只保存封口状态、统计和采集错误，不再提交识别。当前开发阶段到批次入队为止，text_recognition.py 中的 TextRecognizer 通过 submit_batch 接收 RecognitionBatch 并保存到 batch_queue；旧逐帧模拟识别实现已删除，尚无批次消费、识别或结果回传；ocr_queue_capacity 按批次数限制队列，拒收记为 OCR_BATCH_REJECTED。队列未消费会逐渐填满，Session 不会正常完成，原有 OCR 超时及异常存储流程仍保留；退出停止批次接收，重启不恢复旧 Session。
 
 ## 1. 项目目标与边界
 

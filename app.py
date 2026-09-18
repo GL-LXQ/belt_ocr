@@ -15,7 +15,7 @@ from machine_manager import MachineManager
 from enums import MachineState
 from models import MeasurementEvent
 from recovery import run_blocking_operation, RecoveryStore
-from ocr import SimulatedOCR
+from text_recognition import TextRecognizer
 from database import Database
 
 
@@ -29,7 +29,7 @@ class App:
         self.state_changed = asyncio.Event()
         self.recovery = RecoveryStore(configuration.recovery_path)
         self.database = Database(configuration, self.publish_event, self.recovery)
-        self.ocr = SimulatedOCR(configuration, self.publish_event)
+        self.text_recognizer = TextRecognizer(configuration)
         self.machine_managers: dict[str, MachineManager] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
         self.accepting_signals = False
@@ -44,8 +44,14 @@ class App:
             camera = SessionCamera(machine, configuration, self.publish_event)
             frequency = SimulatedFrequency(machine, configuration, self.publish_event)
             self.machine_managers[machine.machine_id] = MachineManager(
-                machine, configuration, camera, frequency, self.ocr, self.database,
-                self.publish_event, self.state_changed,
+                machine,
+                configuration,
+                camera,
+                frequency,
+                self.text_recognizer,
+                self.database,
+                self.publish_event,
+                self.state_changed,
             )
             self.machine_managers[machine.machine_id].process_epoch = self.process_epoch
 
@@ -396,8 +402,6 @@ class App:
                     await self.publish_event(MeasurementEvent(
                         "DeviceRecovered", machine_manager.machine.machine_id, payload=component,
                     ))
-        if component == "OCR":
-            self.ocr.accepting_jobs = False
 
     async def retry_pending_records(self) -> None:
         """重新提交进程内保留的失败记录。"""
@@ -431,7 +435,7 @@ class App:
         self.stopping = True
 
         # 停止接收新的 OCR 图片批次。
-        self.ocr.accepting_jobs = False
+        self.text_recognizer.accepting_batches = False
 
         async def drain_measurements() -> None:
             # 将尚未关闭的现场周期标记为中断。
@@ -473,7 +477,6 @@ class App:
 
         # 取消剩余后台工作并释放持续任务。
         self.releasing_resources = True
-        self.ocr.stopping = True
         all_tasks = background_tasks + self.worker_tasks
         for task in all_tasks:
             task.cancel()
