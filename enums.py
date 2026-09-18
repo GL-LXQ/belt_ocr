@@ -14,3 +14,11 @@ class MachineState(str, Enum):
 
     # 机器状态尚未确认，暂停接收启动，等待有效关闭或现场状态同步。
     UNKNOWN = "UNKNOWN"
+
+
+class FrequencyState(str, Enum):
+    """频率采集状态。"""
+
+    COLLECTING = "COLLECTING"  # 收集中
+    NORMAL = "NORMAL"  # 正常
+    ABNORMAL = "ABNORMAL"  # 异常

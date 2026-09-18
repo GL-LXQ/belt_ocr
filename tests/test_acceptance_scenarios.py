@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import test_measurement_flow as flow_support
 import test_recovery_and_faults as recovery_support
+from enums import FrequencyState
 from models import CapturedFrame, CaptureSummary, FrequencyMeasurement, MeasurementEvent
 from recovery import serialize_value
 
@@ -315,7 +316,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             "FrequencyMeasured", "M01", first_session.session_id,
             replace(measurement, session_id=second_session.session_id),
         ))
-        self.assertEqual(first_session.frequency_state, "FINAL_INVALID")
+        self.assertEqual(first_session.frequency_state, FrequencyState.ABNORMAL)
         self.assertEqual(second_session.frequency_candidates, {})
         self.assertEqual(machine_manager.active_session_id, second_session.session_id)
         await self.supply_valid_inputs(second_session)
@@ -566,7 +567,7 @@ asyncio.run(crash_after_close())
             finalize.assert_awaited_once_with(session)
 
         # 冲突测量不替换原候选，并记录无效频率和审计原因。
-        self.assertEqual(session.frequency_state, "FINAL_INVALID")
+        self.assertEqual(session.frequency_state, FrequencyState.ABNORMAL)
         self.assertIn("AMBIGUOUS_MEASUREMENT", session.errors)
         self.assertEqual(session.frequency_candidates[measurement.measurement_id], measurement)
         self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_audit_reasons())

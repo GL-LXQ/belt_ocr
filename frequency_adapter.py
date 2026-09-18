@@ -83,7 +83,7 @@ class FrequencyAdapter:
         source_sequence = 0
         frequency_values = cycle(self.machine.simulated_frequencies_hz)
         while True:
-            await asyncio.sleep(self.configuration.frequency_interval_ms / 1000)
+            await asyncio.sleep(self.configuration.frequency_interval_ms / 10000)
             source_sequence += 1
             value_hz = next(frequency_values, None)
 

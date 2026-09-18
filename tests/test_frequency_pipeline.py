@@ -11,6 +11,7 @@ import pytest
 
 from app import App
 from configuration import load_configuration
+from enums import FrequencyState
 from models import BeltSession, FrequencyMeasurement, MeasurementEvent
 
 
@@ -196,7 +197,7 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
     assert payload["final_frequency_hz"] is None
     assert len(payload["measurement_frequencies"]) == (0 if outcome == "empty" else 1)
     assert session.frequency_window_sealed
-    assert session.frequency_state == "FINAL_INVALID"
+    assert session.frequency_state == FrequencyState.ABNORMAL
 
 
 def test_fifo_includes_queued_reading_before_close_and_rejects_late_reading(frequency_context):

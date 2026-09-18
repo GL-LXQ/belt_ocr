@@ -6,6 +6,8 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 from datetime import datetime, timezone
 
+from enums import FrequencyState
+
 
 @dataclass(frozen=True)
 class MeasurementEvent:
@@ -94,7 +96,7 @@ class BeltSession:
     text_postprocessing_started: bool = False
     frequency_window_sealed: bool = False
     measurement_frequencies: list[FrequencyMeasurement] = field(default_factory=list)
-    frequency_state: str = "COLLECTING"
+    frequency_state: FrequencyState = FrequencyState.COLLECTING
     final_frequency: FrequencyMeasurement | None = None
     outcome: str = "UNDECIDED"
     commit_state: str = "NOT_READY"
@@ -114,7 +116,7 @@ class BeltSession:
 
     @property
     def frequency_done(self) -> bool:
-        return self.frequency_state == "FINAL_VALID"
+        return self.frequency_state == FrequencyState.NORMAL
 
     @property
     def cycle_closed(self) -> bool:

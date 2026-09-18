@@ -12,7 +12,7 @@ from uuid import uuid4
 from camera import SessionCamera
 from configuration import MachineConfiguration, MeasurementConfiguration
 from frequency_adapter import FrequencyAdapter
-from enums import MachineState
+from enums import FrequencyState, MachineState
 from models import BeltSession, MeasurementEvent, PublishEvent
 from recovery import run_blocking_operation, serialize_value
 from text_recognition import TextRecognizer
@@ -195,55 +195,66 @@ class MachineManager:
         self.schedule_timeout(session, "OCRTimeout", self.configuration.ocr_result_timeout_ms)
 
     async def close_measurement(self, interrupted: bool = False) -> None:
-        """固定采集与频率窗口边界，释放活动位置并检查本轮结果。
+        """结束本轮采集，结算频率并检查完成条件。
 
         Args:
-            interrupted: 是否以中断方式结束本轮，默认正常关闭。
+            interrupted: False 表示收到正常 CLOSE；True 表示因故障、超时或退出而中断本轮。
 
         Returns:
-            None  # 活动位置已释放，后台收尾继续处理原周期
+            None  # 本轮现场采集和频率接收已结束，OCR 与存储按各自状态继续处理
         """
+        # 没有正在测量的 Session 时，收到正常 CLOSE 就清除等待复位和中断周期标记。
         if self.active_session_id is None:
             if not interrupted:
                 self.waiting_cycle_reset = False
                 self.interrupted_session_id = None
             return
 
-        # 记录正常关闭或明确中断的现场边界。
+        # 找到当前 Session，记录采集截止时刻，并将周期设为正常关闭或中断。
         session = self.sessions[self.active_session_id]
         session.close_boundary = asyncio.get_running_loop().time()
         session.cycle_state = "INTERRUPTED" if interrupted else "CLOSED"
+
         if interrupted:
+            # 中断时登记错误和本轮编号，将机器设为等待关闭复位。
             session.errors.append("CYCLE_INTERRUPTED")
             self.waiting_cycle_reset = True
             self.interrupted_session_id = session.session_id
         else:
+            # 正常 CLOSE 清除中断编号，并保存本轮关闭的 UTC 时间。
             self.interrupted_session_id = None
             session.close_time = datetime.now(timezone.utc).isoformat()
 
-        # 立即关闭频率接收，不等待设备输出，也不补收本轮数据。
+        # 清空适配器的当前周期，停止向本轮交付频率；同时封闭本轮频率列表。
         self.frequency_adapter.active_session_id = None
         session.frequency_window_sealed = True
 
-        # 按接收顺序取最后一条，频率失败或周期中断时不确认最终值。
-        if interrupted or session.frequency_state == "FINAL_INVALID":
+        # 根据周期是否中断、频率是否异常以及已有读数，确定最终频率和状态。
+        if interrupted or session.frequency_state == FrequencyState.ABNORMAL:
+            # 周期中断或频率已异常时，最终频率为空，已收到的明细继续保留。
             session.final_frequency = None
-            session.frequency_state = "FINAL_INVALID"
+            session.frequency_state = FrequencyState.ABNORMAL
         elif session.measurement_frequencies:
+            # 本轮有有效读数时，取按接收顺序保存的最后一条，标记频率正常。
             session.final_frequency = session.measurement_frequencies[-1]
-            session.frequency_state = "FINAL_VALID"
+            session.frequency_state = FrequencyState.NORMAL
         else:
-            session.frequency_state = "FINAL_INVALID"
+            # 本轮没有有效读数时，标记频率异常并记录缺少测量的错误。
+            session.frequency_state = FrequencyState.ABNORMAL
             session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
 
-        # 停止相机生产并释放本机活动位置。
+        # 通知相机按本轮截止时刻停止生产，等待停采完成后清空机器的活动 Session。
         await self.camera.seal_capture(session.capture_id, session.close_boundary)
         self.active_session_id = None
+
+        # 从任务表移除本轮 CycleTimeout；任务仍存在时，取消它后续的超时通知。
         deadline_task = self.deadline_tasks.pop(
             (session.session_id, "CycleTimeout"), None,
         )
         if deadline_task is not None:
             deadline_task.cancel()
+
+        # 根据关闭、OCR 和频率状态检查本轮结果，条件满足时冻结记录并提交存储。
         await self.try_finalize(session)
 
     async def process_event(self, event: MeasurementEvent) -> None:
@@ -436,7 +447,7 @@ class MachineManager:
                 # 登记本轮频率故障，保留明细但不确认最终频率。
                 if session.frequency_window_sealed:
                     return
-                session.frequency_state = "FINAL_INVALID"
+                session.frequency_state = FrequencyState.ABNORMAL
                 session.final_frequency = None
                 session.errors.append(event.payload)
             case "CycleTimeout":
@@ -599,7 +610,7 @@ class MachineManager:
         # 确认本轮是中断、待复核还是完整结果。
         has_terminal_failure = (
             session.ocr_state in {"FAILED", "TIMED_OUT"}
-            or session.frequency_state == "FINAL_INVALID"
+            or session.frequency_state == FrequencyState.ABNORMAL
         )
         if session.cycle_state == "INTERRUPTED":
             session.outcome = "INTERRUPTED"
