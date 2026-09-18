@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import test_measurement_flow as flow_support
 from app import App
-from enums import OCRState
+from enums import OCRState, EventType
 from models import MeasurementEvent
 from recovery import serialize_value
 from database import DatabaseRequest
@@ -190,7 +190,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         """
         # 处理启动事件并取得内存中的活动档案。
         app = await self.start_app()
-        event = MeasurementEvent("MachineStarted", "M01")
+        event = MeasurementEvent(EventType.MACHINE_STARTED, "M01")
         await app.publish_event(event)
         machine_manager = app.machine_managers["M01"]
         await machine_manager.queue.join()
@@ -365,7 +365,7 @@ asyncio.run(crash_after_start())
         """
         # 完成首次运行的测量并保留原启动事件。
         app = await self.start_app()
-        event = MeasurementEvent("MachineStarted", "M01")
+        event = MeasurementEvent(EventType.MACHINE_STARTED, "M01")
         await app.publish_event(event)
         await app.machine_managers["M01"].queue.join()
         await app.handle_close("M01")
@@ -389,7 +389,7 @@ asyncio.run(crash_after_start())
 
         # 把带旧 Session 身份的关闭事件送回业务队列。
         await app.publish_event(MeasurementEvent(
-            "MachineClosed", "M01", old_session_id,
+            EventType.MACHINE_CLOSED, "M01", old_session_id,
         ))
         await app.machine_managers["M01"].queue.join()
         self.assertEqual(app.machine_managers["M01"].active_session_id, new_session_id)
@@ -405,7 +405,7 @@ asyncio.run(crash_after_start())
 
         # 对同一测量身份注入不同数值。
         await app.publish_event(MeasurementEvent(
-            "FrequencyMeasured", "M01", session.session_id,
+            EventType.FREQUENCY_MEASURED, "M01", session.session_id,
             replace(measurement, value_hz=measurement.value_hz + 1),
         ))
         await app.handle_close("M01")
@@ -512,7 +512,7 @@ asyncio.run(crash_after_start())
         for machine_manager in app.machine_managers.values():
             session = machine_manager.sessions[machine_manager.active_session_id]
             await app.publish_event(MeasurementEvent(
-                "FrequencyFailed",
+                EventType.FREQUENCY_FAILED,
                 session.machine_id,
                 session.session_id,
                 "FREQUENCY_UNAVAILABLE",

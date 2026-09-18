@@ -1,5 +1,6 @@
 """接收图片批次，调用整批识别接口并回传图片识别结果。"""
 
+from enums import EventType
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -87,7 +88,7 @@ class TextRecognizer:
                     image_results = await run_blocking_operation(self.recognize_batch, images)
                 except Exception as error:
                     await publish_event(MeasurementEvent(
-                        event_type="RecognitionBatchFailed",
+                        event_type=EventType.RECOGNITION_BATCH_FAILED,
                         machine_id=batch.machine_id,
                         session_id=batch.session_id,
                         payload=str(error),
@@ -104,7 +105,7 @@ class TextRecognizer:
 
                 # 将整批结果交付给原机器和测量周期。
                 await publish_event(MeasurementEvent(
-                    event_type="RecognitionBatchCompleted",
+                    event_type=EventType.RECOGNITION_BATCH_COMPLETED,
                     machine_id=batch.machine_id,
                     session_id=batch.session_id,
                     payload=frame_results,

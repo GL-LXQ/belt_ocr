@@ -1,5 +1,6 @@
 """为业务测试提供按接收顺序交付测量的频率设备替身。"""
 
+from enums import EventType
 import asyncio
 import math
 from datetime import datetime, timezone
@@ -53,5 +54,5 @@ class FakeFrequency(FrequencyAdapter):
 
             # 顺序等待测量事件入队，不安排延迟交付任务。
             await self.publish_event(MeasurementEvent(
-                "FrequencyMeasured", self.machine.machine_id, session_id, measurement,
+                EventType.FREQUENCY_MEASURED, self.machine.machine_id, session_id, measurement,
             ))

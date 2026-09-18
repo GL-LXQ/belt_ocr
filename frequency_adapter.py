@@ -1,5 +1,6 @@
 """定义持续接收频率数据的设备黑盒及当前周期归属。"""
 
+from enums import EventType
 import asyncio
 import logging
 import math
@@ -59,11 +60,11 @@ class FrequencyAdapter:
             session_id = self.active_session_id
             if session_id is not None:
                 await self.publish_event(MeasurementEvent(
-                    "FrequencyFailed", self.machine.machine_id, session_id,
+                    EventType.FREQUENCY_FAILED, self.machine.machine_id, session_id,
                     "FREQUENCY_RECEIVE_FAILED",
                 ))
             await self.publish_event(MeasurementEvent(
-                "DeviceFault", self.machine.machine_id,
+                EventType.DEVICE_FAULT, self.machine.machine_id,
                 payload=self.machine.frequency_source_id,
             ))
 
@@ -111,5 +112,5 @@ class FrequencyAdapter:
 
             # 顺序等待测量事件入队，不安排延迟交付任务。
             await self.publish_event(MeasurementEvent(
-                "FrequencyMeasured", self.machine.machine_id, session_id, measurement,
+                EventType.FREQUENCY_MEASURED, self.machine.machine_id, session_id, measurement,
             ))

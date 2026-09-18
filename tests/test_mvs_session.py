@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import camera
-from enums import OCRState
+from enums import OCRState, EventType
 
 import test_measurement_flow as flow_support
 from app import App
@@ -57,7 +57,10 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         await app.wait_until_idle()
 
         # 验证图片先交付，最后封口，结果保留采集统计和模拟标记。
-        self.assertEqual([event.event_type for event in events], ["FrameBatchSelected", "CaptureSealed"])
+        self.assertEqual(
+            [event.event_type for event in events],
+            [EventType.FRAME_BATCH_SELECTED, EventType.CAPTURE_SEALED],
+        )
         self.assertTrue(all(event.session_id == session.session_id for event in events))
         self.assertEqual(len(events[0].payload), 2)
         self.assertTrue(all(frame.capture_id == session.capture_id for frame in events[0].payload))
@@ -150,7 +153,11 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         events = [call.args[0] for call in publisher.call_args_list]
         self.assertEqual(
             [event.event_type for event in events],
-            ["FrameBatchSelected", "FrameBatchSelected", "CaptureSealed"],
+            [
+                EventType.FRAME_BATCH_SELECTED,
+                EventType.FRAME_BATCH_SELECTED,
+                EventType.CAPTURE_SEALED,
+            ],
         )
         self.assertEqual([len(event.payload) for event in events[:-1]], [8, 2])
         frames = [frame for event in events[:-1] for frame in event.payload]
@@ -180,7 +187,10 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_close("M01")
         await app.wait_until_idle()
         events = [call.args[0] for call in publisher.call_args_list]
-        self.assertEqual([event.event_type for event in events], ["FrameBatchSelected", "CaptureSealed"])
+        self.assertEqual(
+            [event.event_type for event in events],
+            [EventType.FRAME_BATCH_SELECTED, EventType.CAPTURE_SEALED],
+        )
         self.assertEqual(len(events[0].payload), 8)
 
     async def test_rejected_frames_do_not_use_selected_limit(self):
@@ -239,7 +249,10 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
             await self.wait_for_state(lambda: session.is_capture_finished)
 
         # 空采集只封口，不保存图片，关闭后留下待复核结果。
-        self.assertEqual([call.args[0].event_type for call in publisher.call_args_list], ["CaptureSealed"])
+        self.assertEqual(
+            [call.args[0].event_type for call in publisher.call_args_list],
+            [EventType.CAPTURE_SEALED],
+        )
         self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
         await app.handle_close("M01")
         await app.wait_until_idle()

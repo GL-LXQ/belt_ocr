@@ -12,7 +12,7 @@ from uuid import uuid4
 from camera import SessionCamera
 from configuration import MachineConfiguration, MeasurementConfiguration
 from frequency_adapter import FrequencyAdapter
-from enums import OCRState, FrequencyState, MachineState, SessionState
+from enums import OCRState, FrequencyState, MachineState, SessionState, EventType
 from models import BeltSession, MeasurementEvent, PublishEvent
 from recovery import run_blocking_operation
 from text_recognition import TextRecognizer
@@ -49,7 +49,7 @@ class MachineManager:
         self.sessions: dict[str, BeltSession] = {}
         self.waiting_cycle_reset = False
         self.interrupted_session_id: str | None = None
-        self.deadline_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self.deadline_tasks: dict[tuple[str, EventType], asyncio.Task[None]] = {}
         self.recovery = database.recovery
         self.device_faults: set[str] = set()
         self.capacity_available = True
@@ -170,9 +170,9 @@ class MachineManager:
         self.frequency_adapter.active_session_id = session.session_id
 
         # 安排本轮运行超时和 OCR 超时事件。
-        self.schedule_timeout(session, "CycleTimeout", self.configuration.max_cycle_open_ms)
+        self.schedule_timeout(session, EventType.CYCLE_TIMEOUT, self.configuration.max_cycle_open_ms)
         # 登记本轮 OCR 等待期限，此处只安排超时事件。
-        self.schedule_timeout(session, "OCRTimeout", self.configuration.ocr_result_timeout_ms)
+        self.schedule_timeout(session, EventType.OCR_TIMEOUT, self.configuration.ocr_result_timeout_ms)
 
     async def handle_machine_close(self, interrupted: bool = False) -> None:
         """结束本轮采集，结算频率并检查完成条件。
@@ -227,7 +227,7 @@ class MachineManager:
 
         # 从任务表移除本轮 CycleTimeout；任务仍存在时，取消它后续的超时通知。
         deadline_task = self.deadline_tasks.pop(
-            (session.session_id, "CycleTimeout"), None,
+            (session.session_id, EventType.CYCLE_TIMEOUT), None,
         )
         if deadline_task is not None:
             deadline_task.cancel()
@@ -257,7 +257,7 @@ class MachineManager:
                 None  # 无返回数据
         """
         # 检查启动和关闭事件是否超出时限，登记并隔离超出时限的事件。
-        if event.event_type in {"MachineStarted", "MachineClosed"}:
+        if event.event_type in {EventType.MACHINE_STARTED, EventType.MACHINE_CLOSED}:
             age = datetime.now(timezone.utc) - datetime.fromisoformat(event.occurred_at)
             if abs(age.total_seconds()) * 1000 > self.configuration.event_max_age_ms:
                 await run_blocking_operation(self.recovery.audit, "STALE_CONTROL_EVENT", event)
@@ -271,10 +271,10 @@ class MachineManager:
 
         # 分派不依赖测量档案的机器级事件。
         match event.event_type:
-            case "MachineStarted":
+            case EventType.MACHINE_STARTED:
                 await self.handle_machine_start()
                 return
-            case "MachineClosed":
+            case EventType.MACHINE_CLOSED:
                 # 核对关闭信号的周期身份，再关闭当前测量。
                 if event.session_id and event.session_id not in {
                     self.active_session_id, self.interrupted_session_id,
@@ -285,21 +285,21 @@ class MachineManager:
                 # 收到有效关闭信号后清除初始状态未知的故障。
                 self.device_faults.discard("UNKNOWN_INITIAL_STATE")
                 return
-            case "Shutdown":
+            case EventType.SHUTDOWN:
                 await self.handle_machine_close(interrupted=True)
                 return
-            case "DeviceFault":
+            case EventType.DEVICE_FAULT:
                 # 登记设备故障并中断当前周期。
                 self.device_faults.add(event.payload)
                 await run_blocking_operation(self.recovery.audit, "DEVICE_FAULT", event)
                 await self.handle_machine_close(interrupted=True)
                 self.waiting_cycle_reset = True
                 return
-            case "DeviceRecovered":
+            case EventType.DEVICE_RECOVERED:
                 self.device_faults.discard(event.payload)
                 await run_blocking_operation(self.recovery.audit, "DEVICE_RECOVERED", event)
                 return
-            case "MachineSynchronized":
+            case EventType.MACHINE_SYNCHRONIZED:
                 # 中断原活动周期，更新机器复位状态。
                 if self.active_session_id is not None:
                     await self.handle_machine_close(interrupted=True)
@@ -309,13 +309,13 @@ class MachineManager:
                 self.device_faults.discard("UNKNOWN_INITIAL_STATE")
                 await run_blocking_operation(self.recovery.audit, "MACHINE_SYNCHRONIZED", event)
                 return
-            case "CapacityChanged":
+            case EventType.CAPACITY_CHANGED:
                 self.capacity_available = event.payload
                 await run_blocking_operation(self.recovery.audit, "CAPACITY_CHANGED", event)
                 return
 
         # 隔离没有周期身份的频率，不分配给当前或历史 Session。
-        if event.event_type == "FrequencyMeasured" and not event.session_id:
+        if event.event_type == EventType.FREQUENCY_MEASURED and not event.session_id:
             await run_blocking_operation(self.recovery.audit, "AMBIGUOUS_MEASUREMENT", event)
             return
 
@@ -332,12 +332,12 @@ class MachineManager:
 
         # 处理数据库提交回调。
         match event.event_type:
-            case "CommitSucceeded" | "CommitFailed":
+            case EventType.COMMIT_SUCCEEDED | EventType.COMMIT_FAILED:
                 await self.handle_commit_result(session, event)
                 return
 
         # 判断活动周期是否超过关闭期限，超时后进入机器复位流程。
-        if event.event_type == "CycleTimeout":
+        if event.event_type == EventType.CYCLE_TIMEOUT:
             if self.active_session_id == session.session_id:
                 session.errors.append("CYCLE_TIMEOUT")
                 await self.handle_machine_close(interrupted=True)
@@ -356,7 +356,7 @@ class MachineManager:
         # 分派采集结果，保留各事件是否继续结算的处理决定。
         should_finalize = True
         match event.event_type:
-            case "FrameBatchSelected":
+            case EventType.FRAME_BATCH_SELECTED:
                 # 丢弃 OCR 已失败或超时的迟到图片。
                 if session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}:
                     return
@@ -382,17 +382,17 @@ class MachineManager:
                 # 结束批次转发，等待后续业务事件。
                 return
 
-            case "CaptureSealed":
+            case EventType.CAPTURE_SEALED:
                 # 更新本轮采集封口状态，被忽略的封口事件直接结束处理。
                 if not await self.handle_capture_finished(session, event):
                     return
 
-            case "RecognitionBatchCompleted":
+            case EventType.RECOGNITION_BATCH_COMPLETED:
                 # 保存本批识别结果，减少本轮待处理批次数。
                 session.recognition_results.extend(event.payload)
                 session.pending_recognition_batches -= 1
 
-            case "RecognitionBatchFailed":
+            case EventType.RECOGNITION_BATCH_FAILED:
                 # 记录本批识别错误，减少本轮待处理批次数。
                 session.errors.append(event.payload)
                 session.pending_recognition_batches -= 1
@@ -403,15 +403,19 @@ class MachineManager:
                     event.payload,
                 )
 
-            case "EvidenceValidated" | "EvidenceFailed":
+            case EventType.EVIDENCE_VALIDATED | EventType.EVIDENCE_FAILED:
                 # 结算证据校验，登记成功状态或失败原因。
                 session.evidence_validation_pending = False
-                if event.event_type == "EvidenceValidated":
+                if event.event_type == EventType.EVIDENCE_VALIDATED:
                     session.evidence_verified = True
                 else:
                     session.ocr_state = OCRState.FAILED
                     session.errors.append("EVIDENCE_UNAVAILABLE")
-            case "OCRFailed" | "CaptureFailed" | "OCRTimeout":
+            case (
+                EventType.OCR_FAILED
+                | EventType.CAPTURE_FAILED
+                | EventType.OCR_TIMEOUT
+            ):
                 # 忽略已有 OCR 终态，登记本次失败或超时。
                 if session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}:
                     return
@@ -419,13 +423,13 @@ class MachineManager:
                     return
                 session.ocr_state = (
                     OCRState.TIMED_OUT
-                    if event.event_type == "OCRTimeout"
+                    if event.event_type == EventType.OCR_TIMEOUT
                     else OCRState.FAILED
                 )
                 session.errors.append(event.payload or "OCR_TIMEOUT")
-            case "FrequencyMeasured":
+            case EventType.FREQUENCY_MEASURED:
                 should_finalize = await self.handle_frequency_measured(session, event)
-            case "FrequencyFailed":
+            case EventType.FREQUENCY_FAILED:
                 # 登记本轮频率故障，保留明细但不确认最终频率。
                 if session.frequency_window_sealed:
                     return
@@ -475,7 +479,7 @@ class MachineManager:
             return
 
         # 判断提交是否成功，标记已入库并移除本轮档案。
-        if event.event_type == "CommitSucceeded":
+        if event.event_type == EventType.COMMIT_SUCCEEDED:
             session.state = SessionState.COMMITTED
             logger.info(
                 "已保存 machine_id=%s session_id=%s",
@@ -522,7 +526,7 @@ class MachineManager:
                 continue
             if (
                 self.active_session_id == session.session_id
-                and deadline_key[1] == "CycleTimeout"
+                and deadline_key[1] == EventType.CYCLE_TIMEOUT
             ):
                 continue
             self.deadline_tasks.pop(deadline_key).cancel()
@@ -711,10 +715,10 @@ class MachineManager:
                 )
                 if not image_content:
                     raise ValueError("证据文件为空。")
-            event_type = "EvidenceValidated"
+            event_type = EventType.EVIDENCE_VALIDATED
         except Exception:
             logger.exception("最终证据检查失败 session_id=%s", session_id)
-            event_type = "EvidenceFailed"
+            event_type = EventType.EVIDENCE_FAILED
         await self.publish_event(MeasurementEvent(
             event_type, self.machine.machine_id, session_id,
         ))
@@ -750,7 +754,7 @@ class MachineManager:
         await self.handle_measurement_failure(session)
 
     def schedule_timeout(
-        self, session: BeltSession, event_type: str, timeout_ms: int
+        self, session: BeltSession, event_type: EventType, timeout_ms: int
     ) -> None:
         """安排本轮期限事件。"""
         async def publish_timeout() -> None:

@@ -11,7 +11,7 @@ from mvs_sdk import load_mvs_sdk
 from configuration import MeasurementConfiguration
 from frequency_adapter import FrequencyAdapter
 from machine_manager import MachineManager
-from enums import MachineState, SessionState
+from enums import MachineState, SessionState, EventType
 from models import MeasurementEvent
 from recovery import run_blocking_operation, RecoveryStore
 from text_recognition import TextRecognizer
@@ -162,13 +162,13 @@ class App:
 
     async def handle_start(self, machine_id: str) -> None:
         """处理某台皮带机启动，不依赖信号来源。"""
-        await self.send_signal("MachineStarted", machine_id)
+        await self.send_signal(EventType.MACHINE_STARTED, machine_id)
 
     async def handle_close(self, machine_id: str) -> None:
         """处理某台皮带机正常关闭，不等待后台识别和保存。"""
-        await self.send_signal("MachineClosed", machine_id)
+        await self.send_signal(EventType.MACHINE_CLOSED, machine_id)
 
-    async def send_signal(self, event_type: str, machine_id: str, payload=None) -> None:
+    async def send_signal(self, event_type: EventType, machine_id: str, payload=None) -> None:
         """把入口信号送入对应机器队列，并等待本次事件处理回执。
 
         Args:
@@ -197,7 +197,7 @@ class App:
                 machine_id,
                 session_id=(
                     self.machine_managers[machine_id].active_session_id
-                    if event_type == "MachineClosed" else None
+                    if event_type == EventType.MACHINE_CLOSED else None
                 ),
                 payload=payload,
                 acknowledgement=acknowledgement,
@@ -257,7 +257,9 @@ class App:
             raise ValueError(f"未配置设备来源：{source_id}")
         for target in targets:
             await self.send_signal(
-                "DeviceRecovered" if healthy else "DeviceFault", target, source_id,
+                EventType.DEVICE_RECOVERED if healthy else EventType.DEVICE_FAULT,
+                target,
+                source_id,
             )
 
     async def synchronize_machine(self, machine_id: str, observed_state: MachineState | str) -> None:
@@ -278,7 +280,7 @@ class App:
         machine_state = MachineState(observed_state)
 
         # 发送状态同步事件并等待处理完成。
-        await self.send_signal("MachineSynchronized", machine_id, machine_state)
+        await self.send_signal(EventType.MACHINE_SYNCHRONIZED, machine_id, machine_state)
 
     async def maintain_system(self) -> None:
         """定期检查存储容量并通知机器管理员更新容量状态。
@@ -308,7 +310,7 @@ class App:
                     if machine_manager.capacity_available != capacity_available:
                         await self.publish_event(
                             MeasurementEvent(
-                                "CapacityChanged",
+                                EventType.CAPACITY_CHANGED,
                                 machine_manager.machine.machine_id,
                                 payload=capacity_available,
                             )
@@ -369,7 +371,7 @@ class App:
             # 记录退出事件并按影响范围限制接收。
             for machine_manager in self.machine_managers.values():
                 await self.publish_event(MeasurementEvent(
-                    "DeviceFault", machine_manager.machine.machine_id, payload=component,
+                    EventType.DEVICE_FAULT, machine_manager.machine.machine_id, payload=component,
                 ))
             await run_blocking_operation(
                 self.recovery.audit, f"{component}_WORKER_EXITED",
@@ -378,7 +380,7 @@ class App:
                 await asyncio.sleep(self.configuration.storage_retry_interval_ms / 1000)
                 for machine_manager in self.machine_managers.values():
                     await self.publish_event(MeasurementEvent(
-                        "DeviceRecovered", machine_manager.machine.machine_id, payload=component,
+                        EventType.DEVICE_RECOVERED, machine_manager.machine.machine_id, payload=component,
                     ))
 
     async def wait_until_idle(self, timeout_seconds: float = 30) -> None:
@@ -409,7 +411,7 @@ class App:
             for machine_manager in self.machine_managers.values():
                 acknowledgement = asyncio.get_running_loop().create_future()
                 await self.publish_event(MeasurementEvent(
-                    "Shutdown", machine_manager.machine.machine_id,
+                    EventType.SHUTDOWN, machine_manager.machine.machine_id,
                     acknowledgement=acknowledgement,
                 ))
                 await acknowledgement

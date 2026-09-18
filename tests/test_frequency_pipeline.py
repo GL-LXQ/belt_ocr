@@ -11,7 +11,7 @@ import pytest
 
 from app import App
 from configuration import load_configuration
-from enums import OCRState, FrequencyState, SessionState
+from enums import OCRState, FrequencyState, SessionState, EventType
 from models import BeltSession, FrequencyMeasurement, MeasurementEvent, OCRResult
 
 
@@ -126,7 +126,7 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
             create_measurement(session, 2, 11, 43.0),
         ):
             await manager.handle_event(MeasurementEvent(
-                "FrequencyMeasured", "M01", session.session_id, measurement,
+                EventType.FREQUENCY_MEASURED, "M01", session.session_id, measurement,
             ))
         assert len(session.measurement_frequencies) == 3
         assert session.frozen_payload is None
@@ -181,12 +181,12 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
         # 接收部分有效数据，读取失败事件不覆盖已有明细。
         if outcome != "empty":
             await manager.handle_event(MeasurementEvent(
-                "FrequencyMeasured", "M01", session.session_id,
+                EventType.FREQUENCY_MEASURED, "M01", session.session_id,
                 create_measurement(session, 1, 12, 42.0),
             ))
         if outcome == "failure":
             await manager.handle_event(MeasurementEvent(
-                "FrequencyFailed", "M01", session.session_id, "FREQUENCY_RECEIVE_FAILED",
+                EventType.FREQUENCY_FAILED, "M01", session.session_id, "FREQUENCY_RECEIVE_FAILED",
             ))
 
         # 正常关闭或明确中断均立即完成频率结算。
@@ -227,12 +227,12 @@ def test_fifo_includes_queued_reading_before_close_and_rejects_late_reading(freq
         """
         # 关闭前的测量先入队；即使尚未处理，也必须计入本轮。
         await app.publish_event(MeasurementEvent(
-            "FrequencyMeasured", "M01", session.session_id,
+            EventType.FREQUENCY_MEASURED, "M01", session.session_id,
             create_measurement(session, 1, 12, 42.0),
         ))
-        await app.publish_event(MeasurementEvent("MachineClosed", "M01"))
+        await app.publish_event(MeasurementEvent(EventType.MACHINE_CLOSED, "M01"))
         await app.publish_event(MeasurementEvent(
-            "FrequencyMeasured", "M01", session.session_id,
+            EventType.FREQUENCY_MEASURED, "M01", session.session_id,
             create_measurement(session, 2, 13, 99.0),
         ))
 
@@ -273,7 +273,7 @@ def test_next_session_is_not_changed_by_old_frequency_event(frequency_context):
         manager.active_session_id = "next-session"
         manager.frequency_adapter.active_session_id = "next-session"
         await manager.handle_event(MeasurementEvent(
-            "FrequencyMeasured", "M01", session.session_id,
+            EventType.FREQUENCY_MEASURED, "M01", session.session_id,
             create_measurement(session, 1, 12, 42.0),
         ))
         assert session.measurement_frequencies == []
@@ -298,7 +298,10 @@ def test_listener_failure_reports_device_fault(frequency_context):
     adapter.listen_measurements = AsyncMock(side_effect=OSError("读取失败"))
     asyncio.run(adapter.run())
     events = [call.args[0] for call in adapter.publish_event.call_args_list]
-    assert [event.event_type for event in events] == ["FrequencyFailed", "DeviceFault"]
+    assert [event.event_type for event in events] == [
+        EventType.FREQUENCY_FAILED,
+        EventType.DEVICE_FAULT,
+    ]
     assert events[0].session_id == session.session_id
 
 
@@ -381,7 +384,7 @@ def test_placeholder_listener_delivers_only_active_session(frequency_context):
         try:
             first = await asyncio.wait_for(events.get(), 1)
             second = await asyncio.wait_for(events.get(), 1)
-            assert first.event_type == second.event_type == "FrequencyMeasured"
+            assert first.event_type == second.event_type == EventType.FREQUENCY_MEASURED
             assert first.payload.value_hz == second.payload.value_hz == 42
             assert first.payload.measurement_id != second.payload.measurement_id
             assert first.session_id == second.session_id == session.session_id

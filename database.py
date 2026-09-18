@@ -1,5 +1,6 @@
 """使用独立写入任务保存正常测量结果，失败时返回错误并打印日志。"""
 
+from enums import EventType
 import asyncio
 import json
 import logging
@@ -187,7 +188,7 @@ class Database:
         while True:
             # 读取本轮冻结请求，准备成功回调。
             request = await self.queue.get()
-            event_type = "CommitSucceeded"
+            event_type = EventType.COMMIT_SUCCEEDED
             payload = None
             try:
                 try:
@@ -199,7 +200,7 @@ class Database:
                 except Exception as error:
                     # 判断是否为内容冲突，打印错误并准备失败回调。
                     self.available = False
-                    event_type = "CommitFailed"
+                    event_type = EventType.COMMIT_FAILED
                     payload = {
                         "error_code": (
                             "COMMIT_INTEGRITY_CONFLICT"

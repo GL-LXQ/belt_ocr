@@ -6,12 +6,12 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 from datetime import datetime, timezone
 
-from enums import OCRState, FrequencyState, SessionState
+from enums import OCRState, FrequencyState, SessionState, EventType
 
 
 @dataclass(frozen=True)
 class MeasurementEvent:
-    event_type: str
+    event_type: EventType
     machine_id: str
     session_id: str | None = None
     payload: Any = None

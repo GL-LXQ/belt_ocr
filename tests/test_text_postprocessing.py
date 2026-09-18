@@ -1,5 +1,6 @@
 """验证按 Session 结算批次并触发一次文字后处理。"""
 
+from enums import EventType
 import asyncio
 from pathlib import Path
 from unittest.mock import Mock
@@ -96,17 +97,27 @@ def test_postprocessing_waits_for_seal_and_results(recognition_context, seal_fir
         """
         # 提交本轮批次并检查独立待处理数量。
         await manager.handle_event(
-            MeasurementEvent("FrameBatchSelected", session.machine_id, session.session_id, (frames[0],))
+            MeasurementEvent(
+                EventType.FRAME_BATCH_SELECTED,
+                session.machine_id,
+                session.session_id,
+                (frames[0],),
+            )
         )
         assert session.pending_recognition_batches == 1
         events = [
             MeasurementEvent(
-                "CaptureSealed",
+                EventType.CAPTURE_SEALED,
                 session.machine_id,
                 session.session_id,
                 CaptureSummary(session.capture_id),
             ),
-            MeasurementEvent("RecognitionBatchCompleted", session.machine_id, session.session_id, results),
+            MeasurementEvent(
+                EventType.RECOGNITION_BATCH_COMPLETED,
+                session.machine_id,
+                session.session_id,
+                results,
+            ),
         ]
         if not seal_first:
             events.reverse()
@@ -119,7 +130,10 @@ def test_postprocessing_waits_for_seal_and_results(recognition_context, seal_fir
 
         # 再次检查同一周期不会重复触发。
         await manager.handle_event(MeasurementEvent(
-            "CaptureSealed", session.machine_id, session.session_id, CaptureSummary(session.capture_id),
+            EventType.CAPTURE_SEALED,
+            session.machine_id,
+            session.session_id,
+            CaptureSummary(session.capture_id),
         ))
         assert session.pending_recognition_batches == 0
         assert session.text_postprocessing_started
@@ -154,26 +168,47 @@ def test_failed_and_rejected_batches_preserve_successful_results(recognition_con
         for current_session, frame in zip(sessions, frames):
             current_manager = app.machine_managers[current_session.machine_id]
             await current_manager.handle_event(MeasurementEvent(
-                "FrameBatchSelected", current_session.machine_id, current_session.session_id, (frame,),
+                EventType.FRAME_BATCH_SELECTED,
+                current_session.machine_id,
+                current_session.session_id,
+                (frame,),
             ))
         await manager.handle_event(
-            MeasurementEvent("FrameBatchSelected", session.machine_id, session.session_id, (frames[0],))
+            MeasurementEvent(
+                EventType.FRAME_BATCH_SELECTED,
+                session.machine_id,
+                session.session_id,
+                (frames[0],),
+            )
         )
 
         # 拒收目标周期的额外批次，计数保持两批且不会冻结结果。
         app.text_recognizer.accepting_batches = False
         await manager.handle_event(
-            MeasurementEvent("FrameBatchSelected", session.machine_id, session.session_id, (frames[0],))
+            MeasurementEvent(
+                EventType.FRAME_BATCH_SELECTED,
+                session.machine_id,
+                session.session_id,
+                (frames[0],),
+            )
         )
         assert session.pending_recognition_batches == 2
         assert session.frozen_payload is None
 
         # 目标周期封口，一批失败后仍等待另一批结果。
         await manager.handle_event(MeasurementEvent(
-            "CaptureSealed", session.machine_id, session.session_id, CaptureSummary(session.capture_id),
+            EventType.CAPTURE_SEALED,
+            session.machine_id,
+            session.session_id,
+            CaptureSummary(session.capture_id),
         ))
         await manager.handle_event(
-            MeasurementEvent("RecognitionBatchFailed", session.machine_id, session.session_id, "模型失败")
+            MeasurementEvent(
+                EventType.RECOGNITION_BATCH_FAILED,
+                session.machine_id,
+                session.session_id,
+                "模型失败",
+            )
         )
         app.text_recognizer.select_final_text_and_img.assert_not_called()
 
@@ -183,7 +218,12 @@ def test_failed_and_rejected_batches_preserve_successful_results(recognition_con
             "blocks": [{"lines": [{"text": "003"}]}],
         }]
         await manager.handle_event(
-            MeasurementEvent("RecognitionBatchCompleted", session.machine_id, session.session_id, results)
+            MeasurementEvent(
+                EventType.RECOGNITION_BATCH_COMPLETED,
+                session.machine_id,
+                session.session_id,
+                results,
+            )
         )
         app.text_recognizer.select_final_text_and_img.assert_called_once_with(results, session.images_for_final_selection)
         assert [current.pending_recognition_batches for current in sessions] == [0, 1, 1]
@@ -219,20 +259,26 @@ def test_no_usable_text_skips_postprocessing(recognition_context, completion):
         # 有图片时先提交并结算识别任务。
         if completion != "no_frames":
             await manager.handle_event(MeasurementEvent(
-                "FrameBatchSelected", session.machine_id, session.session_id, (frames[0],),
+                EventType.FRAME_BATCH_SELECTED, session.machine_id, session.session_id, (frames[0],),
             ))
             if completion == "failed":
-                event_type, payload = "RecognitionBatchFailed", "模型失败"
+                event_type, payload = EventType.RECOGNITION_BATCH_FAILED, "模型失败"
             else:
-                event_type, payload = "RecognitionBatchCompleted", [{"blocks": []}]
+                event_type, payload = EventType.RECOGNITION_BATCH_COMPLETED, [{"blocks": []}]
             await manager.handle_event(MeasurementEvent(event_type, session.machine_id, session.session_id, payload))
 
         # 封口并重复交付封口事件，确认筛选入口只调用一次。
         await manager.handle_event(MeasurementEvent(
-            "CaptureSealed", session.machine_id, session.session_id, CaptureSummary(session.capture_id),
+            EventType.CAPTURE_SEALED,
+            session.machine_id,
+            session.session_id,
+            CaptureSummary(session.capture_id),
         ))
         await manager.handle_event(MeasurementEvent(
-            "CaptureSealed", session.machine_id, session.session_id, CaptureSummary(session.capture_id),
+            EventType.CAPTURE_SEALED,
+            session.machine_id,
+            session.session_id,
+            CaptureSummary(session.capture_id),
         ))
         assert session.text_postprocessing_started
         assert session.pending_recognition_batches == 0
@@ -272,7 +318,7 @@ def test_ocr_finished_check_only_returns_state(recognition_context, sealed, pend
     app.text_recognizer.select_final_text_and_img.assert_not_called()
 
 
-@pytest.mark.parametrize("failure_event", ["OCRTimeout", "OCRFailed"])
+@pytest.mark.parametrize("failure_event", [EventType.OCR_TIMEOUT, EventType.OCR_FAILED])
 def test_terminal_failure_releases_only_target_images(recognition_context, failure_event):
     """验证整轮失败和超时释放本轮图片，保留其他周期排队图片。
 
@@ -299,7 +345,7 @@ def test_terminal_failure_releases_only_target_images(recognition_context, failu
         # 提交两个周期图片，保留相互独立的内存引用。
         for current_session, frame in zip(sessions[:2], frames[:2]):
             await manager.handle_event(MeasurementEvent(
-                "FrameBatchSelected", current_session.machine_id,
+                EventType.FRAME_BATCH_SELECTED, current_session.machine_id,
                 current_session.session_id, (frame,),
             ))
         assert session.images_for_final_selection[frames[0].frame_id] is frames[0]
@@ -315,7 +361,7 @@ def test_terminal_failure_releases_only_target_images(recognition_context, failu
 
         # 迟到批次不再占用内存，其他周期批次仍可消费并完成队列记账。
         await manager.handle_event(MeasurementEvent(
-            "FrameBatchSelected", session.machine_id, session.session_id,
+            EventType.FRAME_BATCH_SELECTED, session.machine_id, session.session_id,
             (frames[0],),
         ))
         remaining_batch = app.text_recognizer.batch_queue.get_nowait()

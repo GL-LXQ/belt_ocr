@@ -1,5 +1,6 @@
 """将 MVS 流式采集接入 Session、内存图片和业务事件。"""
 
+from enums import EventType
 import asyncio
 import logging
 import os
@@ -209,7 +210,7 @@ class SessionCamera:
         # 满八帧后从消费线程交付独立批次，交付完成后清空待组批列表。
         if len(window.pending_frames) == FRAME_BATCH_SIZE:
             event = MeasurementEvent(
-                "FrameBatchSelected",
+                EventType.FRAME_BATCH_SELECTED,
                 self.machine.machine_id,
                 window.session_id,
                 tuple(window.pending_frames),
@@ -253,7 +254,7 @@ class SessionCamera:
         # 消费结束后交付不足八帧的尾批，空批次不发送事件。
         if window.pending_frames:
             event = MeasurementEvent(
-                "FrameBatchSelected",
+                EventType.FRAME_BATCH_SELECTED,
                 self.machine.machine_id,
                 window.session_id,
                 tuple(window.pending_frames),
@@ -288,7 +289,7 @@ class SessionCamera:
 
         # 所有帧事件已入队后发布封口，并移除本轮窗口。
         await self.publish_event(MeasurementEvent(
-            "CaptureSealed", self.machine.machine_id, window.session_id, summary,
+            EventType.CAPTURE_SEALED, self.machine.machine_id, window.session_id, summary,
         ))
         # 封口事件交付后，移除本轮窗口。
         self.windows.pop(window.capture_id, None)

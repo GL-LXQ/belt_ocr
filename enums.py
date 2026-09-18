@@ -41,3 +41,29 @@ class FrequencyState(str, Enum):
     RUNNING = "RUNNING"  # 本 Session 正在采集频率，尚未确定最终结果
     SUCCESS = "SUCCESS"  # 本 Session 已封闭频率列表并确定有效的最终频率
     FAILED = "FAILED"  # 本 Session 缺少有效频率、频率采集故障或周期中断
+
+
+class EventType(str, Enum):
+    """定义机器与测量周期的业务事件类型。"""
+
+    MACHINE_STARTED = "MachineStarted"  # 机器启动
+    MACHINE_CLOSED = "MachineClosed"  # 机器正常关闭
+    SHUTDOWN = "Shutdown"  # 应用退出
+    DEVICE_FAULT = "DeviceFault"  # 设备故障
+    DEVICE_RECOVERED = "DeviceRecovered"  # 设备恢复
+    MACHINE_SYNCHRONIZED = "MachineSynchronized"  # 机器现场状态同步
+    CAPACITY_CHANGED = "CapacityChanged"  # 可用容量变化
+    FRAME_BATCH_SELECTED = "FrameBatchSelected"  # 图片批次交付
+    CAPTURE_SEALED = "CaptureSealed"  # 采集和图片交付结束
+    CAPTURE_FAILED = "CaptureFailed"  # 采集失败
+    RECOGNITION_BATCH_COMPLETED = "RecognitionBatchCompleted"  # 识别批次完成
+    RECOGNITION_BATCH_FAILED = "RecognitionBatchFailed"  # 识别批次失败
+    OCR_FAILED = "OCRFailed"  # 整轮文字识别失败
+    OCR_TIMEOUT = "OCRTimeout"  # 文字识别超时
+    EVIDENCE_VALIDATED = "EvidenceValidated"  # 证据验证成功
+    EVIDENCE_FAILED = "EvidenceFailed"  # 证据验证失败
+    FREQUENCY_MEASURED = "FrequencyMeasured"  # 收到有效频率测量
+    FREQUENCY_FAILED = "FrequencyFailed"  # 频率采集失败
+    CYCLE_TIMEOUT = "CycleTimeout"  # 测量周期超时
+    COMMIT_SUCCEEDED = "CommitSucceeded"  # 数据库提交成功
+    COMMIT_FAILED = "CommitFailed"  # 数据库提交失败

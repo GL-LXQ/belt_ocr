@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import test_measurement_flow as flow_support
 
-from enums import FrequencyState, OCRState, SessionState
+from enums import FrequencyState, OCRState, SessionState, EventType
 from models import CapturedFrame, MeasurementEvent, OCRResult
 from test_frequency_pipeline import create_measurement, frequency_context
 
@@ -62,7 +62,7 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
             await asyncio.wait_for(app.database.queue.join(), 1)
             assert session.state == SessionState.WAITING_COMMIT_DB
             event = manager.queue.get_nowait()
-            assert event.event_type == "CommitSucceeded"
+            assert event.event_type == EventType.COMMIT_SUCCEEDED
             await manager.handle_event(event)
             manager.queue.task_done()
         finally:
@@ -149,7 +149,7 @@ def test_evidence_validation_controls_commit(frequency_context, tmp_path, readab
     asyncio.run(validate_and_finalize())
 
 
-@pytest.mark.parametrize("end_event", ["MachineClosed", "CycleTimeout"])
+@pytest.mark.parametrize("end_event", [EventType.MACHINE_CLOSED, EventType.CYCLE_TIMEOUT])
 def test_failure_before_close_keeps_machine_identity(frequency_context, end_event):
     """验证关闭前失败清理资源，但保留机器身份直到关闭或超时。
 
@@ -183,28 +183,28 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
             image_data=b"BM-test",
         )
         await manager.handle_event(MeasurementEvent(
-            "FrameBatchSelected", "M01", session.session_id, (frame,),
+            EventType.FRAME_BATCH_SELECTED, "M01", session.session_id, (frame,),
         ))
-        manager.schedule_timeout(session, "CycleTimeout", 60000)
-        manager.schedule_timeout(session, "OCRTimeout", 60000)
+        manager.schedule_timeout(session, EventType.CYCLE_TIMEOUT, 60000)
+        manager.schedule_timeout(session, EventType.OCR_TIMEOUT, 60000)
         deadlines = tuple(manager.deadline_tasks.values())
 
         # 整轮 OCR 失败后清理图片，保留活动编号和等待关闭的期限。
         await manager.handle_event(MeasurementEvent(
-            "OCRFailed", "M01", session.session_id, "MODEL_FAILED",
+            EventType.OCR_FAILED, "M01", session.session_id, "MODEL_FAILED",
         ))
         assert session.state == SessionState.FAILED
         assert not session.images_for_final_selection
         assert app.text_recognizer.batch_queue.empty()
         assert manager.active_session_id == session.session_id
         assert session.session_id in manager.sessions
-        assert (session.session_id, "CycleTimeout") in manager.deadline_tasks
-        assert (session.session_id, "OCRTimeout") not in manager.deadline_tasks
+        assert (session.session_id, EventType.CYCLE_TIMEOUT) in manager.deadline_tasks
+        assert (session.session_id, EventType.OCR_TIMEOUT) not in manager.deadline_tasks
 
         # 重复启动和迟到图片不得恢复失败周期或创建新周期。
         await manager.handle_machine_start()
         await manager.handle_event(MeasurementEvent(
-            "FrameBatchSelected", "M01", session.session_id, (frame,),
+            EventType.FRAME_BATCH_SELECTED, "M01", session.session_id, (frame,),
         ))
         assert len(manager.sessions) == 1
         assert app.text_recognizer.batch_queue.empty()
@@ -216,11 +216,11 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
         assert manager.active_session_id is None
         assert session.session_id not in manager.sessions
         assert not manager.deadline_tasks
-        assert manager.waiting_cycle_reset == (end_event == "CycleTimeout")
+        assert manager.waiting_cycle_reset == (end_event == EventType.CYCLE_TIMEOUT)
         await asyncio.gather(*deadlines, return_exceptions=True)
-        if end_event == "CycleTimeout":
+        if end_event == EventType.CYCLE_TIMEOUT:
             await manager.handle_event(MeasurementEvent(
-                "MachineClosed", "M01", session.session_id,
+                EventType.MACHINE_CLOSED, "M01", session.session_id,
             ))
             assert not manager.waiting_cycle_reset
         assert app.database.queue.empty()
@@ -337,13 +337,13 @@ def test_old_commit_does_not_change_new_active_session(
 
         # 交付旧轮提交回调，再交付带旧编号的关闭信号。
         await manager.handle_event(MeasurementEvent(
-            "CommitSucceeded" if commit_success else "CommitFailed",
+            EventType.COMMIT_SUCCEEDED if commit_success else EventType.COMMIT_FAILED,
             "M01",
             session.session_id,
             None if commit_success else {"error_code": "DATABASE_WRITE_FAILED"},
         ))
         await manager.handle_event(MeasurementEvent(
-            "MachineClosed", "M01", session.session_id,
+            EventType.MACHINE_CLOSED, "M01", session.session_id,
         ))
         assert manager.active_session_id == next_session.session_id
         assert manager.frequency_adapter.active_session_id == next_session.session_id
@@ -393,7 +393,7 @@ def test_closed_session_remains_running_while_next_cycle_starts(frequency_contex
         next_session = manager.sessions[manager.active_session_id]
         deadlines = tuple(manager.deadline_tasks.values())
         await manager.handle_event(MeasurementEvent(
-            "OCRFailed", "M01", session.session_id, "MODEL_FAILED",
+            EventType.OCR_FAILED, "M01", session.session_id, "MODEL_FAILED",
         ))
         assert session.state == SessionState.FAILED
         assert next_session.state == SessionState.RUNNING
