@@ -88,6 +88,8 @@ class BeltSession:
     ocr_state: str = "WAITING"
     ocr_result: OCRResult | None = None
     recognition_results: list[dict] = field(default_factory=list)
+    pending_recognition_batches: int = 0
+    text_postprocessing_started: bool = False
     frequency_window_sealed: bool = False
     frequency_candidates: dict[str, FrequencyMeasurement] = field(default_factory=dict)
     frequency_state: str = "COLLECTING"

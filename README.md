@@ -6,7 +6,7 @@
 
 海康 MVS 模块已接入 App，使用方法见 [运行说明](USAGE.md) 和 [MVS 采集说明](MVS_CAPTURE.md)。文件夹模拟采集已移除；测试通过假 SDK 验证真实适配器。没有配置序列号或没有可用相机时，对应机器不接受正常测量。
 
-当前系统的数据流：事件通过 event_type 区分业务，按 machine_id 和 session_id 路由，不再携带公共 source_id；具体故障设备和频率来源保留在业务数据中。App 初始化数据库与共享 MVS SDK，START 创建 Session 并启动采集和频率窗口；相机消费者筛选并保存 BMP，按 8 帧及尾批发布 FrameBatchSelected，MachineManager 将机器编号、Session 编号和图片元组直接提交到 TextRecognizer.batch_queue。手动启动 listen_and_recognize_batches 后，单消费者按批次顺序提取图片路径，在线程中一次调用 recognize_batch，再按同序结果关联 frame_id、image_path 和原始 blocks，通过 RecognitionBatchCompleted 返回所属 Session 的 recognition_results；推理异常通过 RecognitionBatchFailed 记录到所属 Session，继续下一批，不重试。recognize_batch 暂按输入数量返回独立的空 blocks，仅用于联调，不代表真实识别结果，App 不自动启动消费者。CaptureSealed 保留封口和采集统计；不增加批次 ID 或 Session 待处理计数，不进行跨帧融合、整轮成功判断或正常结果入库。队列仍按批次数限制容量，拒收记为 OCR_BATCH_REJECTED；原有超时和异常存储流程保留，重启不恢复旧 Session。
+当前系统的数据流：START 创建独立 Session，采集图片经过筛选、保存后组批，MachineManager 将批次交给共享 TextRecognizer 队列，成功入队即增加所属 Session 的 pending_recognition_batches，拒收仅记录日志和错误。消费者整批识别后按 machine_id、session_id 回传结果，成功保存原始文字块，失败记录日志并跳过，两者均扣减本轮待处理批次数。采集停止、筛选和尾批交付完成后发布 CaptureSealed；封口、识别成功和识别失败各自使用独立事件分支，仅更新状态或保存结果；分支处理结束后，在公共位置统一判断本 Session 的 OCR 是否结束，并执行一次最终文字筛选，不再按事件类型二次分流。条件满足先设置 text_postprocessing_started，通过纯判断函数 is_session_ocr_finished 确认结束后，将全部成功图片原始结果交给 select_final_text；筛选函数内部选出含文字块的图片，没有可用文字时记录日志并跳过，原始结果保留。后处理内部算法暂未实现，不标记整轮 OCR 成功；正常关闭后的在途结果收齐前暂缓异常冻结，超时与中断沿用原流程。recognize_batch 仍返回联调空 blocks，App 不自动启动消费者；队列无消费者时仍可能满，重启不恢复旧 Session。
 
 ## 1. 项目目标与边界
 

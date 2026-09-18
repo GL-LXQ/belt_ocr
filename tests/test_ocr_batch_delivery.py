@@ -74,7 +74,7 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for_state(lambda: session.capture_sealed)
         self.assertEqual(app.text_recognizer.batch_queue.qsize(), 1)
         self.assertEqual(len(app.text_recognizer.batch_queue.get_nowait().frames), 8)
-        self.assertEqual(session.ocr_state, "FAILED")
+        self.assertEqual(session.ocr_state, "WAITING")
         self.assertIn("OCR_BATCH_REJECTED", session.errors)
 
     async def test_stopped_receiver_rejects_batch_without_enqueueing(self) -> None:
@@ -98,5 +98,5 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         # 检查批次未入队，并记录本轮拒收错误。
         self.assertTrue(app.text_recognizer.batch_queue.empty())
-        self.assertEqual(session.ocr_state, "FAILED")
+        self.assertEqual(session.ocr_state, "WAITING")
         self.assertIn("OCR_BATCH_REJECTED", session.errors)

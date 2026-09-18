@@ -353,27 +353,36 @@ class MachineManager:
                     frames=event.payload,
                 )
 
-                # 记录批次拒收状态并检查异常结算。
-                if not accepted:
-                    session.ocr_state = "FAILED"
+                # 成功入队后登记本轮待处理数量，拒收批次只记录错误。
+                if accepted:
+                    session.pending_recognition_batches += 1
+                else:
                     session.errors.append("OCR_BATCH_REJECTED")
-                    await self.try_finalize(session)
+                    logger.error("识别批次被拒收 machine_id=%s session_id=%s", session.machine_id, session.session_id)
 
                 # 结束批次转发，等待后续业务事件。
                 return
 
             case "CaptureSealed":
-                should_finalize = await self.handle_capture_sealed(session, event)
+                # 更新本轮采集封口状态，被忽略的封口事件直接结束处理。
+                if not await self.handle_capture_sealed(session, event):
+                    return
 
             case "RecognitionBatchCompleted":
-                # 保存本轮每张图片的原始识别结果。
+                # 保存本批识别结果，减少本轮待处理批次数。
                 session.recognition_results.extend(event.payload)
-                return
+                session.pending_recognition_batches -= 1
 
             case "RecognitionBatchFailed":
-                # 记录本批识别错误，保留整轮状态等待后续处理。
+                # 记录本批识别错误，减少本轮待处理批次数。
                 session.errors.append(event.payload)
-                return
+                session.pending_recognition_batches -= 1
+                logger.error(
+                    "识别批次失败 machine_id=%s session_id=%s error=%s",
+                    session.machine_id,
+                    session.session_id,
+                    event.payload,
+                )
 
             case "EvidenceValidated" | "EvidenceFailed":
                 # 结算证据校验，登记成功状态或失败原因。
@@ -408,9 +417,17 @@ class MachineManager:
             case _:
                 await run_blocking_operation(self.recovery.audit, "UNKNOWN_EVENT_TYPE", event)
 
-        # 对需要继续结算的事件统一检查本轮结果。
-        if should_finalize:
-            await self.try_finalize(session)
+        # 已忽略的事件不继续处理本轮结果。
+        if not should_finalize:
+            return
+
+        # 状态更新后，统一判断本session OCR 是否结束并执行一次文字终选。
+        if self.is_session_ocr_finished(session) and not session.text_postprocessing_started:
+            session.text_postprocessing_started = True
+            self.text_recognizer.select_final_text(session.recognition_results)
+
+        # 文字终选检查后，继续执行原有的测量结算检查。
+        await self.try_finalize(session)
 
     async def handle_commit_result(self, session: BeltSession, event: MeasurementEvent) -> None:
         """处理提交成功或失败回调，更新原测量档案的提交状态。
@@ -477,8 +494,21 @@ class MachineManager:
             session.ocr_state = "FAILED"
             session.errors.extend(summary.errors)
 
-        # 返回封口处理结果，继续检查本轮能否结算。
+        # 返回封口处理结果，由事件主流程判断是否开始文字筛选。
         return True
+
+    def is_session_ocr_finished(self, session: BeltSession) -> bool:
+        """判断本轮采集是否已封口且已提交的 OCR 批次是否全部结算。
+
+        Args:
+            session: 保存采集封口状态和待处理批次数的测量周期。
+
+        Returns:
+            True  # 采集已封口且待处理批次数为零，包含已结算的失败批次
+            False  # 采集尚未封口或仍有批次等待结算
+        """
+        # 只判断本轮识别是否结束，不修改周期状态。
+        return session.capture_sealed and session.pending_recognition_batches == 0
 
     async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> bool:
         """校验频率归属和测量身份并收集有效候选值。
@@ -570,6 +600,11 @@ class MachineManager:
         """检查结果完整性并冻结本轮最终记录。"""
         if session.frozen_payload is not None or session.cycle_state == "OPEN":
             return
+
+        # 正常关闭后等待采集和识别收尾，超时或中断仍按原有异常流程退出。
+        if session.cycle_state == "CLOSED" and session.ocr_state != "TIMED_OUT":
+            if not session.capture_sealed or session.pending_recognition_batches != 0:
+                return
 
         # 确认本轮是中断、待复核还是完整结果。
         has_terminal_failure = (

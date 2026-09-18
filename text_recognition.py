@@ -1,11 +1,15 @@
 """接收图片批次，调用整批识别接口并回传图片识别结果。"""
 
 import asyncio
+import logging
 from dataclasses import dataclass
 
 from configuration import MeasurementConfiguration
 from models import CapturedFrame, MeasurementEvent, PublishEvent
 from recovery import run_blocking_operation
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -131,3 +135,22 @@ class TextRecognizer:
             }
             for image_path in image_paths
         ]
+
+    def select_final_text(self, frame_results: list[dict]) -> None:
+        """预留本轮图片识别结果的跨帧去重、聚合和业务筛选入口。
+
+        Args:
+            frame_results: 本轮全部成功图片的原始结果列表，每项包含 frame_id、
+                image_path 和原始 blocks；blocks 保留 bbox、lines 及其文字、坐标和置信度。
+
+        Returns:
+            None  # 暂不生成后处理结果，也不改变测量完成状态
+        """
+        # 选出含文字块的图片结果，没有可用文字时记录日志并结束。
+        text_results = [result for result in frame_results if result["blocks"]]
+        if not text_results:
+            logger.warning("本轮无可用识别文字，跳过最终文字筛选。")
+            return
+
+        # 预留跨帧去重、聚合和业务规则筛选逻辑。
+        pass

@@ -1,6 +1,6 @@
 # 核心流程运行说明
 
-> 当前已实现 TextRecognizer 的批次接收、手动消费和原始结果回传。recognize_batch 当前为每张图片返回空 blocks 作为联调占位结果，App 不自动启动消费者。模型未接入时不可进行真实识别；当前不做跨帧融合、整轮完成判断或正常结果入库，原有超时仍可能触发。
+> 当前已实现 TextRecognizer 的批次接收、手动消费和原始结果回传。recognize_batch 当前为每张图片返回空 blocks 作为联调占位结果，App 不自动启动消费者。模型未接入时不可进行真实识别；当前已实现按 Session 触发一次后处理，但不执行跨帧融合算法或正常结果入库，原有超时仍可能触发。
 
 当前版本包含三机测量、跨轮后台收尾、内存机器状态、本次运行内自动补交、重启清理和异常审计。
 信号统一从 `App.handle_start()` 和 `handle_close()` 进入，尚未接入现场 IO。
@@ -234,7 +234,7 @@ README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTAN
 ## 当前阶段验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_text_recognition.py tests/test_ocr_batch_delivery.py tests/test_mvs_capture.py tests/test_machine_state.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_text_postprocessing.py tests/test_text_recognition.py tests/test_ocr_batch_delivery.py tests/test_mvs_capture.py tests/test_machine_state.py -q
 ```
 
 该命令验证满批与尾批交付、队列拒收、封口不重复提交、底层采集和配置。直接依赖旧逐帧模拟识别实现的测试已删除；独立的采集、频率、存储和重启测试保留。其余依赖完整识别结果的历史场景仍待后续接通，当前未宣称全套测试通过。
@@ -243,6 +243,12 @@ README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTAN
 
 `recognize_batch(image_paths)` 是同步黑盒接口，接收有序图片路径列表，返回等长、同序的 `list[dict]`，每项为 `{"blocks": [...]}`。图片读取、预处理和真实模型调用在该方法中补齐。当前按输入数量返回独立的 `{"blocks": []}`，仅用于联调，不表示模型判断图片无文字；后续以真实模型实现替换。
 
-`listen_and_recognize_batches(app.publish_event)` 持续等待 `batch_queue` 并逐批处理，内部在线程中调用一次整批识别。成功事件为 `RecognitionBatchCompleted`，公共字段保留 `machine_id`、`session_id`，payload 为含 `frame_id`、`image_path` 和原始 `blocks` 的逐图结果列表。MachineManager 只追加到 `Session.recognition_results`，不更新整轮 OCR 成功状态，不触发完成检查。推理异常发送 `RecognitionBatchFailed`，只记录错误并继续下一批，无自动重试。
+`listen_and_recognize_batches(app.publish_event)` 持续等待 `batch_queue` 并逐批处理，内部在线程中调用一次整批识别。成功事件为 `RecognitionBatchCompleted`，公共字段保留 `machine_id`、`session_id`，payload 为含 `frame_id`、`image_path` 和原始 `blocks` 的逐图结果列表。MachineManager 将结果追加到 `Session.recognition_results` 并扣减本轮待处理批次数；推理异常发送 `RecognitionBatchFailed`，记录日志和错误，同样扣减计数，跳过失败批次，无自动重试。采集封口且本轮待处理数归零时，只调用一次后处理占位函数，不更新整轮 OCR 成功状态。
 
 模型或测试替身接入后，由调用方使用 `asyncio.create_task(app.text_recognizer.listen_and_recognize_batches(app.publish_event))` 手动启动，并在应用退出前取消和等待该任务；取消时会等待正在执行的同步模型调用结束。App 当前不管理或自动启动这个任务。队列的 `task_done()` 仅结算队列消费，不是 Session 待处理批次计数，也不表示识别成功。
+
+## Session 文字后处理触发
+
+`pending_recognition_batches` 按 Session 独立记录成功入队但尚未结算的批次数，不使用共享队列长度。拒收批次不增加计数，也不立即将本轮置为失败或冻结。`CaptureSealed`、`RecognitionBatchCompleted` 和 `RecognitionBatchFailed` 各自只更新状态，之后在事件主流程公共位置调用一次只返回布尔值的 `is_session_ocr_finished(session)`；仅在本轮已封口、计数为零且尚未触发时，将 `text_postprocessing_started` 置为 True，再调用 `select_final_text(frame_results)`。传入全部成功图片原始结果；`select_final_text()` 内部选取含非空 blocks 的图片，全部为空或没有成功结果则记日志并跳过；不增加批次身份、重复结果校验或计数修正。
+
+`select_final_text()` 暂为返回 None 的占位函数，不执行去重、聚合、筛选算法，不产生最终 OCR 结果。部分批次失败不阻止其余成功结果进入该函数。正常关闭后，采集或识别仍未收尾时，原有异常记录冻结暂缓；OCR 超时和周期中断仍可按现有流程结束等待。
