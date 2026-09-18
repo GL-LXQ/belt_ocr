@@ -40,7 +40,7 @@ class Database:
         self.initialized = False
 
     def initialize(self) -> None:
-        """创建记录表并升级历史库中的频率明细字段。
+        """创建记录表、移除废弃列并升级历史频率明细字段。
 
         Args:
             无外部参数。
@@ -62,9 +62,7 @@ class Database:
                     measurement_frequencies TEXT NOT NULL DEFAULT '[]',
                     final_measurement_id TEXT,
                     evidence_refs TEXT NOT NULL,
-                    outcome TEXT NOT NULL,
                     error_codes TEXT NOT NULL,
-                    is_simulated INTEGER NOT NULL,
                     payload_json TEXT NOT NULL,
                     payload_hash TEXT NOT NULL
                 );
@@ -76,8 +74,14 @@ class Database:
             """)
             # 检查旧库字段，首次升级时增加频率明细列并回填已有记录。
             column_names = {column[1] for column in connection.execute("PRAGMA table_info(measurements)")}
+            # 删除旧库的固定状态与模拟标记列，保留历史 JSON 和哈希。
+            connection.execute("BEGIN IMMEDIATE")
+            for column_name in ("outcome", "is_simulated"):
+                if column_name in column_names:
+                    connection.execute(f"ALTER TABLE measurements DROP COLUMN {column_name}")
+
+            # 为尚无频率明细列的旧库补齐查询数据。
             if "measurement_frequencies" not in column_names:
-                connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
                     "ALTER TABLE measurements ADD COLUMN measurement_frequencies TEXT NOT NULL DEFAULT '[]'"
                 )
@@ -156,17 +160,16 @@ class Database:
             connection.execute(
                 "INSERT INTO measurements ("
                 "session_id, machine_id, start_time, finish_time, ordered_lines, "
-                "final_frequency_hz, final_measurement_id, evidence_refs, outcome, error_codes, "
-                "is_simulated, payload_json, payload_hash, measurement_frequencies) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "final_frequency_hz, final_measurement_id, evidence_refs, error_codes, "
+                "payload_json, payload_hash, measurement_frequencies) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     request.session_id, request.machine_id, payload["start_time"],
                     payload["finish_time"],
                     json.dumps(payload["ordered_lines"], ensure_ascii=False),
                     payload["final_frequency_hz"], payload["final_measurement_id"],
                     json.dumps(payload["evidence_refs"], ensure_ascii=False),
-                    payload["outcome"], json.dumps(payload["error_codes"]),
-                    int(payload["is_simulated"]), request.payload_json,
+                    json.dumps(payload["error_codes"]), request.payload_json,
                     request.payload_hash,
                     json.dumps(payload["measurement_frequencies"], ensure_ascii=False),
                 ),

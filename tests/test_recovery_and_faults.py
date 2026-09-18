@@ -43,7 +43,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_database_failure_is_automatically_retried(self) -> None:
         app = await self.start_app(
-            storage_retry_attempts=1, storage_retry_interval_ms=100,
+            storage_retry_interval_ms=100,
         )
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
@@ -80,7 +80,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         """
         # 创建待写入的完整测量结果。
         app = await self.start_app(
-            storage_retry_attempts=1, shutdown_timeout_ms=100,
+            shutdown_timeout_ms=100,
         )
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
@@ -99,7 +99,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
                 await app.stop()
         # 确认退出时旧结果仍在待提交区，并保留证据路径。
         self.assertEqual(app.recovery.pending_count(), 1)
-        evidence_paths = [frame.image_path for frame in session.images_for_final_selection.values()]
+        evidence_paths = session.ocr_result.evidence_refs
         restarted = await self.restart_app(shutdown_timeout_ms=2000)
 
         # 确认旧记录已清理，多次补交检查也不会生成旧结果。
@@ -263,7 +263,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         """
         # 创建已关闭但 OCR 尚未完成的测量档案。
         app = await self.start_app(
-            simulated_ocr_delay_ms=1200, shutdown_timeout_ms=100,
+            shutdown_timeout_ms=100,
         )
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
@@ -276,7 +276,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         # 在 OCR 完成前退出，再启动新的应用实例。
         with self.assertLogs(level="WARNING"):
             restarted = await self.restart_app(
-                simulated_ocr_delay_ms=10, shutdown_timeout_ms=2000,
+                shutdown_timeout_ms=2000,
             )
         await restarted.wait_until_idle(10)
 
@@ -470,7 +470,7 @@ asyncio.run(crash_after_start())
             app = await self.start_app(
                 database_path=blocked_directory / "measurements.sqlite3",
                 recovery_database_path=self.output_directory / "recovery.sqlite3",
-                storage_retry_attempts=1, storage_retry_interval_ms=100,
+                storage_retry_interval_ms=100,
             )
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
@@ -563,9 +563,7 @@ asyncio.run(crash_after_start())
         self.assertIn("COMMIT_INTEGRITY_CONFLICT", self.read_audit_reasons())
 
     async def test_repeated_cycles_remain_independent(self) -> None:
-        app = await self.start_app(
-            max_frames_per_session=1, simulated_ocr_delay_ms=5,
-        )
+        app = await self.start_app(max_frames_per_session=1)
 
         # 连续执行多轮三机采集，并让每轮后台结果自行提交。
         for cycle_number in range(8):

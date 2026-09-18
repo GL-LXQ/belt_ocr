@@ -12,7 +12,7 @@
 
 本轮采集汇总保存在 `capture_summary`；供文字和图片终选使用的原图统一保存在 `images_for_final_selection`，批次结果保存在 `recognition_results`；已移除未填充的 `selected_frames` 容器及其提交字段。OCR 与周期超时继续由 `schedule_timeout` 创建的期限任务触发，不再在 Session 中保存未读取的 `ocr_deadline`、`cycle_deadline` 时间字符串。
 
-测量数据由 START 创建 Session，经相机组批、OCR 终选和 CLOSE 频率结算，在证据验证通过后冻结并写入 SQLite。Session 和新写入的 `payload_json` 不再保存 `process_epoch`、`configuration_snapshot`，配置版本直接从应用配置读取；这两个键没有对应的独立数据库列，历史记录的 JSON 和哈希保持不变。
+测量数据由 START 创建 Session，经相机内存组批、OCR 终选和 CLOSE 频率结算，在证据验证通过后冻结并写入 SQLite。Session 不再保存 `process_epoch`、`configuration_snapshot`，新写入的 `payload_json` 不再保存这两个键及 `software_version`、`model_version`、`outcome`、`is_simulated`，配置版本直接从应用配置读取；初始化旧库时删除 `outcome`、`is_simulated` 独立列，历史记录的 JSON 和哈希保持不变。图片以 `frame_id` 关联内存内容，已删除未使用的图片路径、来源批次、接收时间和 OCR 结果帧编号列表。本次仅清理字段与废弃配置，频率监听和自动启停入口另行处理。
 
 ## 1. 项目目标与边界
 
@@ -233,12 +233,12 @@ Machine START
 
 ```text
 machine_id, session_id, capture_id
-camera_id, source_epoch, frame_id
-captured_at / received_at
-image_ref, image_metadata
+camera_id, frame_id
+captured_at, captured_monotonic
+image_data
 ```
 
-`source_epoch` 用于区分相机重连或计数器重置后的帧序号。归属必须在采集窗口内确定，后续 OCR 结果只沿用这个归属。
+`capture_id` 区分不同采集任务，`frame_id` 关联本轮原图与识别结果。归属必须在采集窗口内确定，后续 OCR 结果只沿用这个归属。
 
 开始新窗口时建立帧序号/时间戳基线，按 SDK 能力清理或识别旧缓冲。不能把上一次留在缓冲区的图像当作本次第一帧。设备时间戳与主机时间不在同一时间基准时，必须先建立可验证映射，不能直接比较。
 
@@ -407,7 +407,7 @@ Session 只维护 `state`，不再维护 `cycle_state`、`outcome` 和 `commit_s
 | COMMITTED | 正常结果已确认入库 |
 | FAILED | 整轮处理、中断或数据库提交失败，打印日志并清理 |
 
-`finished` 为 `state == SessionState.COMMITTED` 的只读属性。数据库历史字段 `outcome` 保留，新写入的正常记录固定为 `COMPLETE`；新建测量表和 payload 均不包含 `close_time`，不再记录关闭时间；已有数据库不做删除该列的迁移。
+`finished` 为 `state == SessionState.COMMITTED` 的只读属性。数据库初始化时移除旧表的 `outcome`、`is_simulated` 列，新记录也不包含这两个键及 `model_version`；历史 payload 和哈希保持不变。新建测量表和 payload 均不包含 `close_time`；已有数据库不做删除该列的迁移。
 
 业务时间用可追溯时间保存；进程内超时和排序使用单调时钟。进程重启后放弃旧任务和旧期限，不使用上一进程的单调时钟值继续计时。
 
@@ -502,8 +502,8 @@ ocr_result / ordered_lines / fusion_score
 final_frequency_hz
 final_measurement_id
 evidence_refs
-outcome, error_codes
-configuration_version, model_version, software_version
+error_codes
+configuration_version
 payload_hash
 ```
 

@@ -53,7 +53,7 @@ def frequency_context(tmp_path):
         capture_start_time=10,
         is_capture_finished=True,
         ocr_state=OCRState.SUCCESS,
-        ocr_result=OCRResult(("MODEL",), (), ()),
+        ocr_result=OCRResult(("MODEL",), ()),
         evidence_verified=True,
     )
     manager.sessions[session.session_id] = session
@@ -313,6 +313,8 @@ def test_old_database_migration_preserves_frozen_record(frequency_context):
     """
     app, manager, session = frequency_context
     historical_payload = json.dumps({
+        "outcome": "REVIEW_REQUIRED",
+        "is_simulated": True,
         "frequency_candidates": [
             {"measured_monotonic": 15, "source_sequence": 1, "value_hz": 42},
             {"measured_monotonic": 11, "source_sequence": 2, "value_hz": 41},
@@ -321,6 +323,8 @@ def test_old_database_migration_preserves_frozen_record(frequency_context):
     # 构造上一版本表结构和已有历史记录。
     with sqlite3.connect(app.configuration.database_path) as connection:
         connection.execute("ALTER TABLE measurements DROP COLUMN measurement_frequencies")
+        connection.execute("ALTER TABLE measurements ADD COLUMN outcome TEXT NOT NULL DEFAULT 'COMPLETE'")
+        connection.execute("ALTER TABLE measurements ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 1")
         connection.execute(
             "INSERT INTO measurements ("
             "session_id, machine_id, start_time, finish_time, "
@@ -337,6 +341,8 @@ def test_old_database_migration_preserves_frozen_record(frequency_context):
     with sqlite3.connect(app.configuration.database_path) as connection:
         columns = connection.execute("PRAGMA table_info(measurements)").fetchall()
         assert "close_time" not in {column[1] for column in columns}
+        assert "outcome" not in {column[1] for column in columns}
+        assert "is_simulated" not in {column[1] for column in columns}
         row = connection.execute(
             "SELECT measurement_frequencies, final_frequency_hz, payload_json, payload_hash "
             "FROM measurements WHERE session_id = 'old-session'"

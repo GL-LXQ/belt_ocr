@@ -47,7 +47,6 @@ class RecognitionBatchDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(frame.image_data.startswith(b"BM"))
                 self.assertEqual(struct.unpack_from("<ii", frame.image_data, 18), (2, 2))
                 self.assertEqual(frame.image_data[54:60], b"000@@@")
-                self.assertEqual(frame.image_path, "")
 
         # 检查业务层持有图片但没有落盘，也没有启动或重复提交旧识别流程。
         self.assertEqual(len(session.images_for_final_selection), 10)

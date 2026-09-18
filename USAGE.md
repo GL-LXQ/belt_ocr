@@ -42,36 +42,31 @@ uv run python -X utf8 main.py --config config.example.json
 | `machines[].camera_serial` | 真实相机序列号；示例留空，设备到货后填写 |
 | `machines[].camera_pixel_format` | 可选像素格式，省略时保留设备设置 |
 | `machines[].camera_exposure_time_us` / `camera_gain` | 可选手动曝光和增益 |
-| `machines[].simulated_lines` | 模拟筛选后的文字行，保留行顺序和重复文字 |
 | `machines[].simulated_frequencies_hz` | 联调频率列表，循环产生新测量；空列表不产生有效读数 |
 | `capture_window_ms` | 启动后的最长图像采集时长，默认 1000 毫秒 |
 | `camera_queue_capacity` / `camera_timeout_ms` | 每轮帧队列容量与单次等帧超时，默认 32 帧 / 50 毫秒 |
 | `max_frames_per_session` | 每轮最多选择的帧数，默认 5；采用先到先选策略 |
-| `simulated_ocr_delay_ms` | 旧模拟识别配置，当前不再使用 |
 | `frequency_interval_ms` | 联调测量间隔，默认 100 毫秒 |
-| `frequency_delivery_delay_ms` | 旧频率配置，生产适配器不再读取 |
-| `frequency_drain_timeout_ms` | 仅兼容旧配置，已不再使用，CLOSE 后不等待 |
 | `ocr_result_timeout_ms` | 从启动到本轮 OCR 完成的期限，默认 30000 毫秒 |
 | `max_cycle_open_ms` | 等待正常关闭的最大时长，默认 60000 毫秒 |
 | `minimum_frequency_hz` / `maximum_frequency_hz` | 有效频率范围，默认 0.01～10000 Hz |
 | `max_pending_sessions_per_machine` | 每台机器未完成记录上限，默认 20 |
 | `ocr_queue_capacity` | 当前 OCR 待处理批次队列上限，默认 32 批；本阶段没有消费者 |
 | `event_queue_capacity` / `storage_queue_capacity` | 单机事件队列和存储队列上限，默认 128 / 32 |
-| `storage_retry_attempts` / `storage_retry_delay_ms` | 兼容旧配置；当前提交失败不重试，这两个参数不再使用 |
 | `shutdown_timeout_ms` | 正常退出等待后台收尾的上限，默认 10000 毫秒 |
 | `recovery_database_path` | 独立恢复库路径；省略时使用最终库同目录的 `.recovery.sqlite3` 文件 |
 | `storage_retry_interval_ms` | 共享工作任务异常重启的间隔，默认 1000 毫秒；不再用于提交补交 |
 | `maintenance_interval_ms` | 容量检查间隔，默认 250 毫秒 |
 | `max_persistent_records` | 正在排队或写入的记录数量达到该值时停止接收新周期，默认 1000 |
 | `minimum_free_disk_bytes` | 恢复库和证据所在磁盘的最低剩余空间，默认 100 MiB |
-| `ocr_retry_attempts` / `ocr_job_timeout_ms` | 旧逐帧重试已删除；前者暂不使用，后者仍用于现有证据读取期限 |
+| `ocr_job_timeout_ms` | 证据文件读取期限 |
 | `worker_restart_attempts` | 共享工作单元最多启动次数，默认 3 次 |
 | `event_max_age_ms` | START/CLOSE 允许的最大时间偏差，默认 30000 毫秒 |
 | `initial_machine_state` | 新机器的模拟初始状态，默认 `CLOSED`；也支持 `OPEN`、`UNKNOWN` |
 
 相机使用 Continuous / Free Run 模式。图像复制到独立内存后立即归还 SDK Buffer，队满时丢弃新帧并统计；消费者同时处理已入队图片。原始帧由 MVS SDK 转换为内存 BMP，不在采集和批次识别阶段落盘，每轮保存采集和处理统计到 `capture_summary`。
 当前按主机收到图像的单调时间校验 START/CLOSE 及窗口边界，不把设备时间戳直接作为主机时间；SDK 停止可能略晚于请求边界，越过业务边界的帧不进入选帧清单。
-频率设备采用黑盒接口，当前监听按配置循环产生联调读数，真实协议读取待替换。数据库历史标记 `is_simulated` 本次不调整，真实设备验收后另行确定。
+频率设备采用黑盒接口，当前监听按配置循环产生联调读数，真实协议读取待替换。本次仅清理废弃字段，频率监听和自动启停入口另行处理；删除 `is_simulated` 不代表真实频率协议已经接入。
 
 ## 调用业务入口
 
@@ -132,12 +127,12 @@ asyncio.run(run_measurement())
 `payload_json` 保存完整内容，包括文字行、频率候选、测量身份、帧清单、证据引用、错误码和版本。
 
 ```sql
-SELECT machine_id, session_id, measurement_frequencies, final_frequency_hz, outcome
+SELECT machine_id, session_id, measurement_frequencies, final_frequency_hz
 FROM measurements
 ORDER BY start_time;
 ```
 
-Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正常 CLOSE 后仍为 RUNNING，结果与证据齐全后进入 WAITING_COMMIT_DB，数据库确认后进入 COMMITTED。数据库 outcome 列兼容历史格式，新记录只写 `COMPLETE`。
+Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正常 CLOSE 后仍为 RUNNING，结果与证据齐全后进入 WAITING_COMMIT_DB，数据库确认后进入 COMMITTED。数据库初始化移除旧表的 `outcome`、`is_simulated` 列，新记录不包含这两个键及 `model_version`；历史 JSON 和哈希保持不变。
 
 整轮 OCR、频率或证据失败、中断、存储队列满、写入异常和内容冲突均进入 FAILED，只打印日志并清理资源。关闭前失败保留活动 Session 身份和关闭期限，真实 CLOSE 后再移除；失败不代表实体机器已经停止。局部 OCR 批次失败仍允许其他成功批次进入终选，由整轮状态决定是否失败。
 
@@ -255,6 +250,6 @@ README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTAN
 
 measurement_frequencies 只按接收顺序追加。处理 CLOSE 前已入队的数据先处理，CLOSE 后的旧轮数据不再追加。最终频率取列表最后一条；列表为空、频率读取失败或周期中断时最终频率为空，已有明细保留。设备测量时间仅用于追溯，不重新排序。
 
-measurements 表的 measurement_frequencies 为 JSON 文本列，final_frequency_hz 为最终频率数值；两个字段与 payload_json 一起事务写入。历史库升级和历史记录冻结内容保持原规则。frequency_drain_timeout_ms 只为兼容旧配置保留，不再参与业务处理。
+measurements 表的 measurement_frequencies 为 JSON 文本列，final_frequency_hz 为最终频率数值；两个字段与 payload_json 一起事务写入。历史库升级保留冻结内容和哈希。废弃的关闭等待、延迟交付和重试配置已删除，旧配置文件需移除对应键后加载。
 
 listen_measurements 当前按 frequency_interval_ms 循环读取 simulated_frequencies_hz，并过滤无读数、非有限值及范围外数值；相同有效值每次生成新的测量身份。真实协议尚未接入。监听异常时报告 DeviceFault，有活动周期时先报告 FrequencyFailed。程序退出只取消并等待持续监听任务，无频率收尾任务。测试使用独立设备替身，不代表设备协议已实现。

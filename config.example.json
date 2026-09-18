@@ -7,18 +7,12 @@
   "minimum_free_disk_bytes": 104857600,
   "capture_window_ms": 1000,
   "max_frames_per_session": 5,
-  "simulated_ocr_delay_ms": 800,
   "frequency_interval_ms": 100,
-  "frequency_delivery_delay_ms": 50,
   "machines": [
     {
       "machine_id": "M01",
       "camera_id": "CAM01",
       "frequency_source_id": "FREQ01",
-      "simulated_lines": [
-        "BELT MODEL A",
-        "SERIAL 001"
-      ],
       "simulated_frequencies_hz": [
         42.0,
         42.0,
@@ -30,10 +24,6 @@
       "machine_id": "M02",
       "camera_id": "CAM02",
       "frequency_source_id": "FREQ02",
-      "simulated_lines": [
-        "BELT MODEL B",
-        "SERIAL 002"
-      ],
       "simulated_frequencies_hz": [
         51.0,
         52.0
@@ -44,10 +34,6 @@
       "machine_id": "M03",
       "camera_id": "CAM03",
       "frequency_source_id": "FREQ03",
-      "simulated_lines": [
-        "BELT MODEL C",
-        "SERIAL 003"
-      ],
       "simulated_frequencies_hz": [
         63.0,
         63.0

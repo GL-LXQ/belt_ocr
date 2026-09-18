@@ -36,10 +36,7 @@ class CapturedFrame:
     frame_id: str
     captured_at: str
     captured_monotonic: float
-    image_path: str = ""
     image_data: bytes = field(default=b"", repr=False)
-    source_epoch: str = ""
-    received_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -58,7 +55,6 @@ class FrequencyMeasurement:
 class OCRResult:
     ordered_lines: tuple[str, ...]
     evidence_refs: tuple[str, ...]
-    frame_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)

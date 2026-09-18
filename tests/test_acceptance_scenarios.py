@@ -416,7 +416,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
                 None  # 无返回数据
         """
         # 为崩溃子进程准备独立的持久化配置。
-        app = await self.start_app(simulated_ocr_delay_ms=10)
+        app = await self.start_app()
         configuration = replace(
             app.configuration, capture_window_ms=120, frequency_interval_ms=20,
         )
@@ -477,7 +477,7 @@ asyncio.run(crash_after_close())
         session_id = standard_output.decode("utf-8").strip()
 
         # 重启后不恢复旧 Session，也不生成旧周期的测量结果。
-        restarted = await self.start_app(simulated_ocr_delay_ms=10)
+        restarted = await self.start_app()
         await restarted.wait_until_idle(10)
         self.assertTrue(session_id)
         self.assertEqual(restarted.machine_managers["M01"].sessions, {})
@@ -526,7 +526,7 @@ asyncio.run(crash_after_close())
         await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
 
         # OCR 已成功后删除证据，提交前重新读取时应转为待复核。
-        Path(frame.image_path).unlink()
+        Path(session.ocr_result.evidence_refs[0]).unlink()
         with self.assertLogs("machine_manager", level="ERROR"):
             await self.close_controlled_cycle(session)
             await app.wait_until_idle(10)

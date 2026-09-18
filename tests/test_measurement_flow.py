@@ -53,7 +53,6 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                 camera_id=f"CAM{machine_number:02}",
                 frequency_source_id=f"FREQ{machine_number:02}",
                 camera_serial=f"SERIAL{machine_number:02}",
-                simulated_lines=(f"MODEL {machine_number}", "SAME", "SAME"),
                 simulated_frequencies_hz=(40.0, 40.0, 43.0),
             )
             for machine_number in range(1, 4)
@@ -64,12 +63,10 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             evidence_directory=self.output_directory / "evidence",
             mvs_development_directory=Path("test-sdk"),
             capture_window_ms=1000,
-            simulated_ocr_delay_ms=20,
             frequency_interval_ms=150,
             max_frames_per_session=2,
             max_cycle_open_ms=30000,
             ocr_result_timeout_ms=20000,
-            storage_retry_delay_ms=5,
             shutdown_timeout_ms=2000,
         )
         self.app = App(replace(configuration, **overrides))
@@ -165,7 +162,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             ))
 
     async def test_old_ocr_and_commit_do_not_clear_new_active_session(self) -> None:
-        app = await self.start_app(simulated_ocr_delay_ms=250)
+        app = await self.start_app()
         machine_manager = app.machine_managers["M01"]
 
         # 在第一轮 OCR 结束前关闭并立即启动第二轮。
@@ -207,7 +204,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.read_records()), 2)
 
     async def test_delayed_frequency_stays_with_original_session(self) -> None:
-        app = await self.start_app(frequency_delivery_delay_ms=1000)
+        app = await self.start_app()
         machine_manager = app.machine_managers["M01"]
 
         # 在读数尚未送达时关闭第一轮并打开第二轮。
@@ -296,9 +293,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.read_records()[0]["outcome"], "REVIEW_REQUIRED")
 
     async def test_frequency_drain_has_a_deadline(self) -> None:
-        app = await self.start_app(
-            frequency_delivery_delay_ms=3000, frequency_drain_timeout_ms=50,
-        )
+        app = await self.start_app()
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
@@ -362,7 +357,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.read_records()[0], json.loads(session.frozen_payload))
 
     async def test_failed_commit_retains_frozen_payload_for_retry(self) -> None:
-        app = await self.start_app(storage_retry_attempts=1)
+        app = await self.start_app()
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
@@ -386,7 +381,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ocr_capacity_failure_creates_review_record(self) -> None:
         app = await self.start_app(
-            ocr_queue_capacity=1, simulated_ocr_delay_ms=250, max_frames_per_session=1,
+            ocr_queue_capacity=1, max_frames_per_session=1,
         )
         await asyncio.gather(*(
             app.handle_start(machine_id) for machine_id in app.machine_managers

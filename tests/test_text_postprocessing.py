@@ -82,7 +82,6 @@ def test_postprocessing_waits_for_seal_and_results(recognition_context, seal_fir
     manager = app.machine_managers[session.machine_id]
     results = [{
         "frame_id": frames[0].frame_id,
-        "image_path": frames[0].image_path,
         "blocks": [{"lines": [{"text": "003"}]}],
     }]
 
@@ -181,7 +180,6 @@ def test_failed_and_rejected_batches_preserve_successful_results(recognition_con
         # 最后一批成功结果返回后，只处理目标周期的有效文字。
         results = [{
             "frame_id": frames[0].frame_id,
-            "image_path": frames[0].image_path,
             "blocks": [{"lines": [{"text": "003"}]}],
         }]
         await manager.apply_event(

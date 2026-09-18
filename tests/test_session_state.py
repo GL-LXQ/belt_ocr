@@ -75,19 +75,24 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
     asyncio.run(process_measurement())
     with sqlite3.connect(app.configuration.database_path) as connection:
         records = connection.execute(
-            "SELECT outcome, payload_json FROM measurements"
+            "SELECT payload_json FROM measurements"
         ).fetchall()
         assert len(records) == 1
-        assert records[0][0] == "COMPLETE"
-        payload = json.loads(records[0][1])
+        payload = json.loads(records[0][0])
         assert "close_time" not in payload
         assert "selected_frames" not in payload
         # 检查入库内容已移除运行批次和配置快照，保留配置版本。
         assert "process_epoch" not in payload
         assert "configuration_snapshot" not in payload
+        assert "software_version" not in payload
+        assert "outcome" not in payload
+        assert "is_simulated" not in payload
+        assert "model_version" not in payload
         assert payload["configuration_version"] == app.configuration.configuration_version
         columns = connection.execute("PRAGMA table_info(measurements)").fetchall()
         assert "close_time" not in {column[1] for column in columns}
+        assert "outcome" not in {column[1] for column in columns}
+        assert "is_simulated" not in {column[1] for column in columns}
     assert app.recovery.pending_count() == 0
 
 
@@ -107,7 +112,7 @@ def test_evidence_validation_controls_commit(frequency_context, tmp_path, readab
     evidence_path = tmp_path / "evidence.bmp"
     if readable:
         evidence_path.write_bytes(b"BM-evidence")
-    session.ocr_result = OCRResult(("MODEL",), (str(evidence_path),), ())
+    session.ocr_result = OCRResult(("MODEL",), (str(evidence_path),))
     session.evidence_verified = False
     session.measurement_frequencies.append(create_measurement(session, 1, 12, 42))
 

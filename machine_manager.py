@@ -691,12 +691,8 @@ class MachineManager:
             ],
             "skipped_frame_count": session.skipped_frame_count,
             "capture_summary": session.capture_summary,
-            "outcome": "COMPLETE",
             "error_codes": session.errors.copy(),
-            "is_simulated": True,
             "configuration_version": self.configuration.configuration_version,
-            "model_version": None,
-            "software_version": "0.1.0",
         }
 
         # 冻结提交内容并计算内容哈希。

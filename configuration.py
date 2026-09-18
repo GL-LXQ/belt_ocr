@@ -12,7 +12,6 @@ class MachineConfiguration:
     machine_id: str
     camera_id: str
     frequency_source_id: str
-    simulated_lines: tuple[str, ...] = ()
     simulated_frequencies_hz: tuple[float, ...] = ()
     camera_serial: str = ""
     camera_pixel_format: str | None = None
@@ -30,11 +29,7 @@ class MeasurementConfiguration:
     camera_queue_capacity: int = 32
     camera_timeout_ms: int = 50
     max_frames_per_session: int = 5
-    simulated_ocr_delay_ms: int = 500
     frequency_interval_ms: int = 100
-    frequency_delivery_delay_ms: int = 0
-    # 兼容旧配置文件，关闭后的频率等待已取消，此字段不再使用。
-    frequency_drain_timeout_ms: int = 2000
     minimum_frequency_hz: float = 0.01
     maximum_frequency_hz: float = 10000.0
     ocr_result_timeout_ms: int = 30000
@@ -43,9 +38,6 @@ class MeasurementConfiguration:
     ocr_queue_capacity: int = 32
     storage_queue_capacity: int = 32
     max_pending_sessions_per_machine: int = 20
-    # 兼容旧配置，数据库提交失败后不再重试。
-    storage_retry_attempts: int = 3
-    storage_retry_delay_ms: int = 100
     shutdown_timeout_ms: int = 10000
     configuration_version: str = "simulation-v1"
     recovery_database_path: Path | None = None
@@ -53,7 +45,6 @@ class MeasurementConfiguration:
     storage_retry_interval_ms: int = 1000
     max_persistent_records: int = 1000
     minimum_free_disk_bytes: int = 104857600
-    ocr_retry_attempts: int = 3
     ocr_job_timeout_ms: int = 5000
     worker_restart_attempts: int = 3
     event_max_age_ms: int = 30000
@@ -87,21 +78,15 @@ class MeasurementConfiguration:
             "frequency_interval_ms",
             "ocr_result_timeout_ms", "max_cycle_open_ms", "event_queue_capacity",
             "ocr_queue_capacity", "storage_queue_capacity",
-            "max_pending_sessions_per_machine", "storage_retry_attempts",
+            "max_pending_sessions_per_machine",
             "shutdown_timeout_ms",
             "maintenance_interval_ms", "storage_retry_interval_ms",
-            "max_persistent_records", "ocr_retry_attempts", "ocr_job_timeout_ms",
+            "max_persistent_records", "ocr_job_timeout_ms",
             "worker_restart_attempts", "event_max_age_ms",
         )
         for parameter in positive_parameters:
             if getattr(self, parameter) <= 0:
                 raise ValueError(f"{parameter} 必须大于零。")
-        for parameter in (
-            "simulated_ocr_delay_ms", "frequency_delivery_delay_ms",
-            "storage_retry_delay_ms",
-        ):
-            if getattr(self, parameter) < 0:
-                raise ValueError(f"{parameter} 不能为负数。")
         if not 0 < self.minimum_frequency_hz < self.maximum_frequency_hz:
             raise ValueError("频率范围必须是递增的正数范围。")
         if self.minimum_free_disk_bytes < 0:
@@ -123,7 +108,6 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
     # 创建各机器的相机绑定及 OCR、频率配置。
     machines = []
     for machine_settings in settings.pop("machines"):
-        machine_settings["simulated_lines"] = tuple(machine_settings.get("simulated_lines", ()))
         machine_settings["simulated_frequencies_hz"] = tuple(
             machine_settings.get("simulated_frequencies_hz", ())
         )

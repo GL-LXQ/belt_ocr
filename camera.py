@@ -200,8 +200,6 @@ class SessionCamera:
             captured_at=captured_at.isoformat(),
             captured_monotonic=received_time,
             image_data=image_data,
-            source_epoch=window.capture_id,
-            received_at=datetime.now(timezone.utc).isoformat(),
         )
 
         # 将编码成功的合格帧加入本轮批次，并累计选中数量。
