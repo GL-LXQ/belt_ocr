@@ -33,6 +33,7 @@ class MeasurementConfiguration:
     simulated_ocr_delay_ms: int = 500
     frequency_interval_ms: int = 100
     frequency_delivery_delay_ms: int = 0
+    # 兼容旧配置文件，关闭后的频率等待已取消，此字段不再使用。
     frequency_drain_timeout_ms: int = 2000
     minimum_frequency_hz: float = 0.01
     maximum_frequency_hz: float = 10000.0
@@ -82,7 +83,7 @@ class MeasurementConfiguration:
         # 检查等待期限、采集间隔和队列容量。
         positive_parameters = (
             "capture_window_ms", "camera_queue_capacity", "camera_timeout_ms", "max_frames_per_session",
-            "frequency_interval_ms", "frequency_drain_timeout_ms",
+            "frequency_interval_ms",
             "ocr_result_timeout_ms", "max_cycle_open_ms", "event_queue_capacity",
             "ocr_queue_capacity", "storage_queue_capacity",
             "max_pending_sessions_per_machine", "storage_retry_attempts",

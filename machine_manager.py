@@ -186,8 +186,8 @@ class MachineManager:
 
         # 启动本轮图像采集，打开对应档案的频率窗口。
         self.camera.start_capture(session.session_id, session.capture_id, session.start_boundary)
-        # 后台采集启动后，打开当前 Session 的频率接收窗口。
-        self.frequency_adapter.open_window(session.session_id, session.start_boundary)
+        # 登记频率接收的当前周期，新测量按接收顺序交给本轮。
+        self.frequency_adapter.active_session_id = session.session_id
 
         # 安排本轮运行超时和 OCR 超时事件。
         self.schedule_timeout(session, "CycleTimeout", self.configuration.max_cycle_open_ms)
@@ -221,8 +221,22 @@ class MachineManager:
             self.interrupted_session_id = None
             session.close_time = datetime.now(timezone.utc).isoformat()
 
-        # 封闭本轮窗口并释放本机活动位置。
-        self.frequency_adapter.seal_window(session.session_id, session.close_boundary)
+        # 立即关闭频率接收，不等待设备输出，也不补收本轮数据。
+        self.frequency_adapter.active_session_id = None
+        session.frequency_window_sealed = True
+
+        # 按接收顺序取最后一条，频率失败或周期中断时不确认最终值。
+        if interrupted or session.frequency_state == "FINAL_INVALID":
+            session.final_frequency = None
+            session.frequency_state = "FINAL_INVALID"
+        elif session.measurement_frequencies:
+            session.final_frequency = session.measurement_frequencies[-1]
+            session.frequency_state = "FINAL_VALID"
+        else:
+            session.frequency_state = "FINAL_INVALID"
+            session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
+
+        # 停止相机生产并释放本机活动位置。
         await self.camera.seal_capture(session.capture_id, session.close_boundary)
         self.active_session_id = None
         deadline_task = self.deadline_tasks.pop(
@@ -418,13 +432,10 @@ class MachineManager:
                 session.errors.append(event.payload or "OCR_TIMEOUT")
             case "FrequencyMeasured":
                 should_finalize = await self.handle_frequency_measured(session, event)
-            case "FrequencyWindowSealed":
-                should_finalize = await self.handle_frequency_window_sealed(session, event)
             case "FrequencyFailed":
-                # 失败作为本轮频率终态，保留明细但不确认最终频率。
+                # 登记本轮频率故障，保留明细但不确认最终频率。
                 if session.frequency_window_sealed:
                     return
-                session.frequency_window_sealed = True
                 session.frequency_state = "FINAL_INVALID"
                 session.final_frequency = None
                 session.errors.append(event.payload)
@@ -541,7 +552,7 @@ class MachineManager:
         return session.capture_sealed and session.pending_recognition_batches <= 0
 
     async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> bool:
-        """收集黑盒交付的新有效测量并按测量时间排列。
+        """按接收顺序保存黑盒交付的新有效测量。
 
         Args:
             session: 事件所属的测量档案。
@@ -558,38 +569,8 @@ class MachineManager:
             await run_blocking_operation(self.recovery.audit, "LATE_FREQUENCY", event)
             return False
 
-        # 接收黑盒已完成有效性、去重和归属处理的测量，按测量时间排列。
+        # 按机器事件队列的接收顺序追加明细，不重复检查黑盒保证的数据约束。
         session.measurement_frequencies.append(event.payload)
-        session.measurement_frequencies.sort(
-            key=lambda measurement: (measurement.measured_monotonic, measurement.source_sequence)
-        )
-        return True
-
-    async def handle_frequency_window_sealed(self, session: BeltSession, event: MeasurementEvent) -> bool:
-        """封口频率窗口并确定本轮最后一次有效测量。
-
-        Args:
-            session: 事件所属的测量档案。
-            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
-
-        Returns:
-            bool: 是否继续执行本轮完成检查。
-            返回示例：
-                True  # 继续检查本轮能否结算
-                False  # 忽略当前事件，不执行完成检查
-        """
-        # 忽略重复封口和周期尚未结束的封口事件。
-        if session.frequency_window_sealed or session.cycle_state == "OPEN":
-            return False
-
-        # 封闭本轮列表，取已按测量时间排序的最后一次有效测量。
-        session.frequency_window_sealed = True
-        if session.measurement_frequencies:
-            session.final_frequency = session.measurement_frequencies[-1]
-            session.frequency_state = "FINAL_VALID"
-        else:
-            session.frequency_state = "FINAL_INVALID"
-            session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
         return True
 
     async def try_finalize(self, session: BeltSession) -> None:
@@ -608,10 +589,6 @@ class MachineManager:
                 self.text_recognizer.discard_session_batches(session.session_id)
             )
         if session.frozen_payload is not None or session.cycle_state == "OPEN":
-            return
-
-        # 正常关闭必须等待频率终态，保留关闭前产生的晚到测量。
-        if session.cycle_state == "CLOSED" and not session.frequency_window_sealed:
             return
 
         # 正常关闭后等待采集和识别收尾，超时或中断仍按原有异常流程退出。

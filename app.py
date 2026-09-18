@@ -453,7 +453,6 @@ class App:
         # 收集在途测量和期限任务。
         background_tasks = []
         for machine_manager in self.machine_managers.values():
-            background_tasks.extend(machine_manager.frequency_adapter.tasks)
             background_tasks.extend(machine_manager.deadline_tasks.values())
             background_tasks.extend(machine_manager.background_tasks)
 

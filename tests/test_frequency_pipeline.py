@@ -1,4 +1,4 @@
-"""验证频率黑盒收尾、按时间结算和 SQLite 明细存储。"""
+"""验证频率立即关闭、按接收顺序结算和 SQLite 明细存储。"""
 
 import asyncio
 import json
@@ -16,7 +16,7 @@ from models import BeltSession, FrequencyMeasurement, MeasurementEvent
 
 @pytest.fixture
 def frequency_context(tmp_path):
-    """准备独立数据库、业务处理器和等待频率收尾的周期。
+    """准备独立数据库、业务处理器和准备关闭的周期。
 
     Args:
         tmp_path: pytest 提供的临时目录。
@@ -35,7 +35,6 @@ def frequency_context(tmp_path):
         database_path=tmp_path / "measurements.sqlite3",
         recovery_database_path=tmp_path / "recovery.sqlite3",
         evidence_directory=tmp_path / "evidence",
-        frequency_drain_timeout_ms=30,
     )
     app = App(configuration)
     app.recovery.initialize()
@@ -56,6 +55,9 @@ def frequency_context(tmp_path):
         configuration_snapshot={"configuration_version": "test-frequency"},
     )
     manager.sessions[session.session_id] = session
+    manager.active_session_id = session.session_id
+    manager.frequency_adapter.active_session_id = session.session_id
+    manager.camera.seal_capture = AsyncMock()
     try:
         yield app, manager, session
     finally:
@@ -95,59 +97,48 @@ def create_measurement(session, sequence, measured_time, value):
     )
 
 
-def test_delayed_measurements_are_sorted_and_saved_together(frequency_context):
-    """验证 OCR 失败不会提前冻结频率，并将时间顺序明细与最终值一起入库。
+def test_close_freezes_received_frequencies_and_saves_together(frequency_context):
+    """验证 CLOSE 立即选取最后收到的频率并将明细与最终值一起入库。
 
     Args:
         frequency_context: 应用、处理器和测量周期。
 
     Returns:
-        None  # 已验证晚到数据、跨轮隔离、时间排序和幂等写入
+        None  # 已验证接收顺序、立即封口及数据库幂等写入
     """
     app, manager, session = frequency_context
 
-    async def complete_frequency():
-        """交付乱序测量、关闭后测量和成功封口事件。
+    async def receive_and_close():
+        """交付设备时间乱序的测量，再执行正常关闭。
 
         Args:
             无外部参数。
 
         Returns:
-            None  # 已生成冻结提交请求
+            None  # 关闭已经生成冻结提交请求
         """
-        # 接收两个数值相同、身份不同的测量。
+        # 测量时间和序号与接收顺序不同，列表仍按接收顺序保存。
         for measurement in (
             create_measurement(session, 10, 15, 42.0),
-            create_measurement(session, 11, 11, 42.0),
+            create_measurement(session, 11, 19, 42.0),
+            create_measurement(session, 2, 11, 43.0),
         ):
             await manager.apply_event(MeasurementEvent(
                 "FrequencyMeasured", "M01", session.session_id, measurement,
             ))
-        assert len(session.measurement_frequencies) == 2
-
-        # 关闭后仍等待频率，OCR 超时也不能提前冻结本轮记录。
-        session.cycle_state = "CLOSED"
-        session.close_boundary = 20
-        session.close_time = "2026-09-18T00:00:20+00:00"
-        session.ocr_state = "TIMED_OUT"
-        await manager.try_finalize(session)
+        assert len(session.measurement_frequencies) == 3
         assert session.frozen_payload is None
 
-        # 新周期打开时，旧轮晚到数据仍按原 Session 结算。
-        manager.active_session_id = "next-session"
-        await manager.apply_event(MeasurementEvent(
-            "FrequencyMeasured", "M01", session.session_id,
-            create_measurement(session, 2, 19, 43.0),
-        ))
-        await manager.apply_event(MeasurementEvent(
-            "FrequencyWindowSealed", "M01", session.session_id,
-        ))
-        assert manager.active_session_id == "next-session"
+        # CLOSE 返回时频率已结算，没有等待设备或另发封口事件。
+        await manager.close_measurement()
+        assert manager.frequency_adapter.active_session_id is None
+        assert session.frequency_window_sealed
         assert session.final_frequency.measurement_id == "reading-2"
+        assert session.frozen_payload is not None
 
-    asyncio.run(complete_frequency())
+    asyncio.run(receive_and_close())
 
-    # 写入同一冻结请求两次，检查两个数据库字段与冻结内容一致。
+    # 重复写入同一请求，检查两个查询字段与完整冻结内容一致。
     request = app.database.queue.get_nowait()
     app.database.write_record(request)
     app.database.write_record(request)
@@ -158,102 +149,151 @@ def test_delayed_measurements_are_sorted_and_saved_together(frequency_context):
         ).fetchall()
     assert len(rows) == 1
     frequencies = json.loads(rows[0][0])
-    assert [measurement["measured_monotonic"] for measurement in frequencies] == [11, 15, 19]
+    assert [measurement["measured_monotonic"] for measurement in frequencies] == [15, 19, 11]
     assert rows[0][1] == frequencies[-1]["value_hz"] == 43.0
     assert json.loads(rows[0][2])["measurement_frequencies"] == frequencies
 
 
-@pytest.mark.parametrize("outcome", ["empty", "timeout", "failure"])
-def test_frequency_terminal_outcomes_preserve_partial_data(frequency_context, outcome):
-    """验证空测量、收尾超时和设备失败不产生最终频率。
+@pytest.mark.parametrize("outcome", ["empty", "failure", "interrupted"])
+def test_close_preserves_partial_data_without_final_value(frequency_context, outcome):
+    """验证无读数、频率失败及中断时保留明细但不确认最终频率。
 
     Args:
         frequency_context: 应用、处理器和周期。
-        outcome: 黑盒收尾的终态场景。
+        outcome: 无测量、读取失败或周期中断场景。
 
     Returns:
-        None  # 明细保留，最终频率为空，异常记录已冻结
+        None  # 异常记录已冻结，最终频率为空
     """
     app, manager, session = frequency_context
-    session.cycle_state = "CLOSED"
-    session.close_boundary = 20
-    adapter = manager.frequency_adapter
-    adapter.publish_event = manager.apply_event
 
-    async def drain_measurements(window):
-        """交付一条已确认测量，再触发指定的设备收尾结果。
-
-        Args:
-            window: 本轮已关闭窗口。
-
-        Returns:
-            None  # 空场景正常完成，其他场景超时或抛出异常
-        """
-        if outcome == "empty":
-            return
-        # 失败前交付已经确定属于本轮的测量。
-        await adapter.publish_event(MeasurementEvent(
-            "FrequencyMeasured", "M01", window.session_id,
-            create_measurement(session, 1, 12, 42.0),
-        ))
-        if outcome == "failure":
-            raise RuntimeError("设备输出中断")
-        await asyncio.Future()
-
-    async def close_window():
-        """关闭设备窗口并等待有限收尾主流程。
+    async def receive_and_close():
+        """接收部分数据并以指定结果关闭本轮。
 
         Args:
             无外部参数。
 
         Returns:
-            None  # 收尾任务已结束，本轮窗口已移除
+            None  # 本轮频率已封闭并生成异常记录
         """
-        adapter.drain_measurements = drain_measurements
-        adapter.open_window(session.session_id, 10)
-        adapter.seal_window(session.session_id, 20)
-        await asyncio.gather(*tuple(adapter.tasks))
-        assert session.session_id not in adapter.windows
+        # 接收部分有效数据，读取失败事件不覆盖已有明细。
+        if outcome != "empty":
+            await manager.apply_event(MeasurementEvent(
+                "FrequencyMeasured", "M01", session.session_id,
+                create_measurement(session, 1, 12, 42.0),
+            ))
+        if outcome == "failure":
+            await manager.apply_event(MeasurementEvent(
+                "FrequencyFailed", "M01", session.session_id, "FREQUENCY_RECEIVE_FAILED",
+            ))
 
-    asyncio.run(close_window())
+        # 正常关闭或明确中断均立即完成频率结算。
+        await manager.close_measurement(interrupted=outcome == "interrupted")
+        assert manager.frequency_adapter.active_session_id is None
+
+    asyncio.run(receive_and_close())
     payload = json.loads(session.frozen_payload)
     assert payload["final_frequency_hz"] is None
     assert len(payload["measurement_frequencies"]) == (0 if outcome == "empty" else 1)
-    assert payload["outcome"] == "REVIEW_REQUIRED"
     assert session.frequency_window_sealed
     assert session.frequency_state == "FINAL_INVALID"
 
 
-def test_unimplemented_blackbox_does_not_report_success(frequency_context):
-    """验证黑盒留空时只报告故障，不生成测量或成功封口。
+def test_fifo_includes_queued_reading_before_close_and_rejects_late_reading(frequency_context):
+    """验证队列中关闭前的数据先处理，关闭后的旧轮数据不再加入列表。
 
     Args:
         frequency_context: 应用、处理器和周期。
 
     Returns:
-        None  # 已验证黑盒未实现时的明确故障事件
+        None  # 已验证真实事件循环中的接收、关闭及迟到事件顺序
     """
     app, manager, session = frequency_context
-    adapter = manager.frequency_adapter
-    adapter.publish_event = AsyncMock()
 
-    async def run_interfaces():
-        """依次调用留空监听和收尾接口。
+    async def process_queued_events():
+        """按接收顺序入队测量、关闭和迟到测量。
 
         Args:
             无外部参数。
 
         Returns:
-            None  # 接口故障已交付
+            None  # 队列已排空，业务监听任务已停止
         """
-        await adapter.run()
-        adapter.open_window(session.session_id, 10)
-        adapter.seal_window(session.session_id, 20)
-        await asyncio.gather(*tuple(adapter.tasks))
+        # 关闭前的测量先入队；即使尚未处理，也必须计入本轮。
+        await app.publish_event(MeasurementEvent(
+            "FrequencyMeasured", "M01", session.session_id,
+            create_measurement(session, 1, 12, 42.0),
+        ))
+        await app.publish_event(MeasurementEvent("MachineClosed", "M01"))
+        await app.publish_event(MeasurementEvent(
+            "FrequencyMeasured", "M01", session.session_id,
+            create_measurement(session, 2, 13, 99.0),
+        ))
 
-    asyncio.run(run_interfaces())
+        # 启动正式串行处理器并等待三条事件全部处理。
+        listener = asyncio.create_task(manager.listen_and_process_events())
+        try:
+            await asyncio.wait_for(manager.queue.join(), 1)
+        finally:
+            listener.cancel()
+            await asyncio.gather(listener, return_exceptions=True)
+        assert [measurement.value_hz for measurement in session.measurement_frequencies] == [42.0]
+        assert session.final_frequency.value_hz == 42.0
+
+    asyncio.run(process_queued_events())
+
+
+def test_next_session_is_not_changed_by_old_frequency_event(frequency_context):
+    """验证旧轮封闭后的测量不会改写新周期或追加旧列表。
+
+    Args:
+        frequency_context: 应用、处理器和周期。
+
+    Returns:
+        None  # 已验证旧轮迟到数据与新轮活动身份隔离
+    """
+    app, manager, session = frequency_context
+
+    async def close_then_receive_old_data():
+        """关闭旧轮，登记新轮身份并交付旧轮事件。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 新轮身份保持不变
+        """
+        await manager.close_measurement()
+        manager.active_session_id = "next-session"
+        manager.frequency_adapter.active_session_id = "next-session"
+        await manager.apply_event(MeasurementEvent(
+            "FrequencyMeasured", "M01", session.session_id,
+            create_measurement(session, 1, 12, 42.0),
+        ))
+        assert session.measurement_frequencies == []
+        assert manager.active_session_id == "next-session"
+        assert manager.frequency_adapter.active_session_id == "next-session"
+
+    asyncio.run(close_then_receive_old_data())
+
+
+def test_listener_failure_reports_device_fault(frequency_context):
+    """验证监听异常时报告本轮读取失败和设备故障，不生成测量。
+
+    Args:
+        frequency_context: 应用、处理器和周期。
+
+    Returns:
+        None  # 已验证明确故障事件和原周期身份
+    """
+    app, manager, session = frequency_context
+    adapter = manager.frequency_adapter
+    adapter.publish_event = AsyncMock()
+    adapter.listen_measurements = AsyncMock(side_effect=OSError("读取失败"))
+    asyncio.run(adapter.run())
     events = [call.args[0] for call in adapter.publish_event.call_args_list]
-    assert [event.event_type for event in events] == ["DeviceFault", "FrequencyFailed"]
+    assert [event.event_type for event in events] == ["FrequencyFailed", "DeviceFault"]
+    assert events[0].session_id == session.session_id
 
 
 def test_old_database_migration_preserves_frozen_record(frequency_context):
@@ -293,57 +333,55 @@ def test_old_database_migration_preserves_frozen_record(frequency_context):
     assert row[1:] == (42, historical_payload, "original-hash")
 
 
-def test_old_window_finishes_without_releasing_new_window(frequency_context):
-    """验证旧窗口等待期间可开启新窗口，收尾只释放旧窗口。
+def test_placeholder_listener_delivers_only_active_session(frequency_context):
+    """验证联调监听过滤无效值、保留相同新读数，并在关闭后停止交付。
 
     Args:
         frequency_context: 应用、处理器和周期。
 
     Returns:
-        None  # 已验证两个窗口边界、封口归属及新窗口继续活动
+        None  # 已验证事件身份、有效值、跨轮归属和取消退出
     """
     app, manager, session = frequency_context
     adapter = manager.frequency_adapter
-    adapter.publish_event = AsyncMock()
+    adapter.configuration = replace(app.configuration, frequency_interval_ms=5)
+    adapter.machine = replace(adapter.machine, simulated_frequencies_hz=(-1, float("nan"), 42, 42))
 
-    async def complete_old_window():
-        """暂停旧轮收尾，在新轮打开后完成旧轮。
+    async def receive_events():
+        """运行正式监听并核对两个周期的测量事件。
 
         Args:
             无外部参数。
 
         Returns:
-            None  # 旧轮已封口，新轮仍处于活动状态
+            None  # 监听已取消，事件已核对
         """
-        release_delivery = asyncio.Event()
+        # 直接接收正式适配器发布的事件，不替换监听函数。
+        events = asyncio.Queue()
+        adapter.publish_event = events.put
+        listener = asyncio.create_task(adapter.run())
+        try:
+            first = await asyncio.wait_for(events.get(), 1)
+            second = await asyncio.wait_for(events.get(), 1)
+            assert first.event_type == second.event_type == "FrequencyMeasured"
+            assert first.payload.value_hz == second.payload.value_hz == 42
+            assert first.payload.measurement_id != second.payload.measurement_id
+            assert first.session_id == second.session_id == session.session_id
 
-        async def wait_for_delivery(window):
-            """等待测试放行在途数据交付。
+            # 清空活动周期后，监听继续运行但不交付频率。
+            adapter.active_session_id = None
+            await asyncio.sleep(0.03)
+            assert events.empty()
 
-            Args:
-                window: 被关闭的旧周期窗口。
+            # 新周期接收新的测量身份，序号不因 START 重置。
+            adapter.active_session_id = "next-session"
+            following = await asyncio.wait_for(events.get(), 1)
+            assert following.session_id == "next-session"
+            assert following.payload.source_sequence > second.payload.source_sequence
+            assert following.payload.frequency_source_id == session.frequency_source_id
+        finally:
+            listener.cancel()
+            await asyncio.gather(listener, return_exceptions=True)
+        assert listener.cancelled()
 
-            Returns:
-                None  # 旧轮数据交付已完成
-            """
-            assert window.start_boundary == 10
-            assert window.close_boundary == 20
-            await release_delivery.wait()
-
-        # 关闭旧轮后立即打开新轮，两个窗口同时存在。
-        adapter.drain_measurements = wait_for_delivery
-        adapter.open_window(session.session_id, 10)
-        adapter.seal_window(session.session_id, 20)
-        adapter.open_window("next-session", 21)
-        assert len(adapter.windows) == 2
-
-        # 旧轮完成时只删除旧窗口，封口事件保留原周期身份。
-        release_delivery.set()
-        await asyncio.gather(*tuple(adapter.tasks))
-        assert adapter.active_window.session_id == "next-session"
-        assert set(adapter.windows) == {"next-session"}
-        event = adapter.publish_event.call_args.args[0]
-        assert event.event_type == "FrequencyWindowSealed"
-        assert event.session_id == session.session_id
-
-    asyncio.run(complete_old_window())
+    asyncio.run(receive_events())

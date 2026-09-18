@@ -1,12 +1,12 @@
 # 多皮带机并行采集与 OCR 系统：Codex 开发规格
 
-> 当前已接入 MVS 相机与 Session 流程；OCR 支持内存图片批次及终选占位入口；频率采用设备黑盒接口，窗口收尾与数据库结算已接通，设备协议内部待实现。支持 SQLite 保存、本次运行内自动补交和故障审计；重启不恢复旧 Session。
+> 当前已接入 MVS 相机与 Session 流程；OCR 支持内存图片批次及终选占位入口；频率采用设备黑盒接口，接收及关闭结算与数据库存储已接通，设备协议内部待实现。支持 SQLite 保存、本次运行内自动补交和故障审计；重启不恢复旧 Session。
 > 启动方法、配置说明、信号入口及当前边界见 [运行说明](USAGE.md)。
 > 下文保留完整开发规格，不表示所有生产能力均已交付。
 
 海康 MVS 模块已接入 App，使用方法见 [运行说明](USAGE.md) 和 [MVS 采集说明](MVS_CAPTURE.md)。文件夹模拟采集已移除；测试通过假 SDK 验证真实适配器。没有配置序列号或没有可用相机时，对应机器不接受正常测量。
 
-当前系统的数据流：START 创建独立 Session，登记频率起始边界并启动相机内存图片组批；OCR 按批次回传原始文字块，采集封口且批次结算后只触发一次文字和图片终选占位入口，当前不保存图片。frequency_adapter.py 中的 FrequencyAdapter 由 frequency_adapter 对象调用，负责读取、有效性判断、测量去重和窗口归属，业务层将 FrequencyMeasured 追加到 measurement_frequencies 并按统一时钟下的测量时间排序，时间相同按来源序号排序。CLOSE 固定频率截止时间并请求黑盒收齐本轮在途数据，FrequencyWindowSealed 后取列表最后一条为 final_frequency_hz；空列表、失败或收尾超时保留明细但最终值为空。正常关闭后的记录冻结必须等待频率终态，即使 OCR 已失败也不提前截断频率明细；最终明细 JSON、最终频率和完整 payload 在同一 SQLite 事务中写入。监听和收尾黑盒未实现时报告明确故障，不生成测量或成功封口；数据库启动时升级旧库明细列，保留历史冻结内容及哈希，重启仍不恢复旧 Session。
+当前系统的数据流：START 创建独立 Session，登记 frequency_adapter.active_session_id 并启动相机内存图片组批；OCR 按批次回传原始文字块，采集封口且批次结算后只触发一次文字和图片终选占位入口，当前不保存图片。频率监听黑盒负责设备连接、新有效测量识别和固定接收时的周期归属，按接收顺序将 FrequencyMeasured 与 START/CLOSE 送入同一机器 FIFO 队列；业务层仅追加 measurement_frequencies，不按设备测量时间重排，也不重复校验黑盒已保证的数据。处理 CLOSE 时立即清空适配器的活动周期、封闭列表并取最后一条作为最终频率；没有有效测量、频率故障或周期中断时保留明细且最终值为空。CLOSE 前入队的测量先处理，CLOSE 后不等待设备、不补收旧轮数据。频率明细 JSON、final_frequency_hz 和完整 payload 在同一 SQLite 事务中写入，整轮记录仍等待 OCR 等原有完成条件。当前 listen_measurements 按 frequency_interval_ms 循环读取 simulated_frequencies_hz 产生联调测量，每次分配独立身份，无活动 Session 时不交付；真实设备协议仍待替换，读取异常报告故障；旧库升级保留历史冻结内容和哈希，重启不恢复旧 Session。
 
 ## 1. 项目目标与边界
 
@@ -41,9 +41,9 @@ START 后，为本次 Session 连续采集配置时长的图像。首版默认 `
 
 ### 2.2 频率选择
 
-频率接收器持续运行。Session 打开期间，保存属于该 Session 的所有有效新测量。首版最终采用“本次现场窗口内最后一次有效测量”，不做未经定义的平均，不凭数值变化判断是否出现新测量。
+频率接收器持续运行。START 到 CLOSE 之间按程序接收顺序保存本轮所有新有效测量，最终采用最后收到的一条有效测量，不平均，也不按设备测量时间重排。相同频率值的新测量分别保留，同一测量的重发由设备黑盒过滤。
 
-关闭前的频率是候选值，可用于界面显示；频率窗口封口并处理完已明确归属的在途事件后，冻结最终值，置 `frequency_done = True`。
+关闭前的频率是候选值，可用于界面显示；处理 CLOSE 时立即封闭列表并冻结最终值，频率有效且本轮无频率故障时置 `frequency_done = True`，不设置关闭后的等待期。
 
 ### 2.3 正常完成
 
@@ -70,7 +70,7 @@ cycle_closed = True
 │
 ├─ 数字 IO 模块 ── IOAdapter ── 启动/关闭/输入异常事件
 ├─ 三台工业相机 ── CameraWorker ── 图像/采集封口事件
-└─ 频率采集通道 ── FrequencyAdapter ── 频率测量/窗口封口事件
+└─ 频率采集通道 ── FrequencyAdapter ── 频率测量/失败事件
                                       │
                                       ▼
                                 EventRouter
@@ -123,7 +123,6 @@ max_frames_per_session / frame_selection_policy
 ocr_quality_thresholds / matching_thresholds
 frequency_validity_rules
 io_poll_interval_ms / io_debounce_ms
-frequency_drain_timeout_ms
 ocr_result_timeout_ms / max_cycle_open_ms
 max_pending_sessions_per_machine / queue_capacities
 storage_paths / database_connection
@@ -201,7 +200,7 @@ IOAdapter 负责读取输入、通信健康判断、有效电平解释、去抖�
 5. 注册到该机器的 Session 集合，将 `active_session_id` 指向新 Session。
 6. 请求写入最小运行记录，建立本 Session 的证据目录/索引。
 7. 向相机发出 `StartCapture(session_id, capture_id)`。
-8. 向频率适配器发出 `OpenFrequencyWindow(session_id)`。
+8. 将频率适配器的 `active_session_id` 设置为本轮编号。
 9. 返回事件循环，继续处理事件，不等待 OCR 或频率结果。
 
 ```text
@@ -305,42 +304,15 @@ CaptureSealed 已收到
 
 ## 11. 频率采集与归属
 
-当前设备黑盒入口为 `FrequencyAdapter.listen_measurements()` 和 `drain_measurements(window)`，内部协议逻辑待实现。前者负责连接、持续读取、有效性检查、去重、时间映射、归属及资源释放；后者确认关闭前测量已全部交付后才返回。业务层信任这些前置约束，仅隔离终态后的迟到事件，不重复判断数值范围或测量身份。`finish_frequency_window()` 负责有限等待、成功封口或失败交付及窗口释放。
+现场操作规则为操作员完成频率调整后再发送 CLOSE。软件按程序接收顺序划定测量窗口，CLOSE 后不等待设备，也不补收旧周期数据。
 
-数据库 `measurements.measurement_frequencies` 为按时间排序的完整测量对象 JSON 列表，`final_frequency_hz` 为最终数值。新记录的 payload_json 同步保存相同明细。旧库升级从历史 frequency_candidates 回填新列，不改写已有 payload、最终值和哈希。
+`FrequencyAdapter.listen_measurements()` 是设备黑盒，负责连接、持续读取、有效性检查、新测量去重、来源确认、旧缓冲处理和资源释放，当前内部按配置生成联调读数，真实协议仍待替换。黑盒在接收时固定 active_session_id，无活动周期则不交付；有效测量按接收顺序立即通过 publish_event 入队，不创建延迟交付任务。频率值有效性和测量身份仅在黑盒边界处理，业务层不重复检查。
 
-频率适配器始终接收设备数据，先完成协议解析、来源识别、新测量识别和有效性校验，再向业务层发布事件。
+频率事件与 START/CLOSE 在同一事件循环中按接收顺序进入同一机器 FIFO 队列。排在 CLOSE 前的 FrequencyMeasured 先追加到 measurement_frequencies；处理 CLOSE 时清空适配器活动周期、封闭列表，并取最后一条为最终频率。排在 CLOSE 后的旧轮测量进入迟到审计，不修改旧轮，也不改绑新轮。
 
-```text
-仪器新测量记录
-   ↓
-识别 frequency_source_id → machine_id
-   ↓
-确认是新测量，而不是上一次显示值或重发包
-   ↓
-确认测量属于哪个已登记的 Session 窗口
-   ↓
-单位/状态/范围/错误码校验
-   ↓
-FrequencyMeasured(session_id, measurement_id, value_hz, ...)
-   ↓
-机器管理员 保存候选并刷新显示值
-```
+每条 FrequencyMeasurement 保留测量身份、设备测量时间、接收时间和频率值。设备测量时间仅供追溯，不用于重新排序或关闭后补收。没有有效测量、读取故障或周期中断时保留已收到的明细，final_frequency_hz 为空并记录错误。
 
-有效性至少包含：可解析、有限数值、单位已明确换算为 Hz、设备报告有效，以及符合本项目配置的测量范围。除协议明确定义外，0、空值、异常码不能当有效频率。
-
-归属规则：
-
-- 使用设备周期标识、测量序号、可信测量时间，或适配器在接收边界建立的明确窗口归属。
-- 将主机接收时间和设备测量时间分开记录；主机接收时间本身不一定能证明测量发生于哪个周期。
-- 晚到且已证明属于 Session_A 的结果只能更新 A，不查“当前活动 Session”重新分配。
-- 无活动窗口的新测量不自动补给某个缺值旧 Session。
-- 无法区分跨周期旧读数与新读数时，记录 `AMBIGUOUS_MEASUREMENT`，不能靠时间猜测或当前机器状态强行匹配。
-- 数值相同不意味着同一次测量；数值变化也不是可靠的测量身份。
-
-CLOSE 后要求适配器封口。适配器将已经明确归属的在途数据按序发完，再发送 `FrequencyWindowSealed`。设置有限封口等待上限，但等待只针对已发生且归属可确认的测量，不延长现场测量窗口。
-
-成功封口后按统一时钟下的测量时间排序，选择本周期最后一次有效测量，生成最终频率并置 `frequency_done = True`。若没有有效值或存在未解决的归属冲突，标记失败/待复核，不无限等待。
+数据库 measurements.measurement_frequencies 为按接收顺序保存的完整测量对象 JSON 列表，与 final_frequency_hz 及 payload_json 一起事务写入。旧库升级继续沿用历史明细回填规则，不改变已有 payload、最终值和哈希。
 
 ## 12. CLOSE：关闭现场窗口，释放活动位置
 
@@ -350,7 +322,7 @@ CLOSE 后要求适配器封口。适配器将已经明确归属的在途数据�
 2. 检查事件属于当前周期；重复事件不重复执行。
 3. 为本 Session 记录 close_time，置 `cycle_closed = True`。
 4. 关闭本 Session 图像窗口；已自然结束则幂等处理。
-5. 关闭本 Session 频率窗口，结算已经明确归属的在途测量。
+5. 立即封闭本 Session 频率列表，按接收顺序确定最终频率。
 6. 仅当 active_session_id 仍等于该 Session ID 时清空活动位置。
 7. Session 保留在未完成集合中，进入后台收尾。
 8. 执行一次完成检查；后续结果到达时再次检查。
@@ -457,7 +429,7 @@ MachineStarted / MachineClosed
 FrameBatchSelected / CaptureSealed / CaptureFailed
 OCRFrameCompleted / OCRFrameFailed
 OCRCompleted / OCRFailed
-FrequencyMeasured / FrequencyWindowSealed / FrequencyFailed
+FrequencyMeasured / FrequencyFailed
 DeviceFault / DeviceRecovered
 SessionTimeout
 CommitSucceeded / CommitFailed
@@ -468,8 +440,6 @@ CommitSucceeded / CommitFailed
 ```text
 StartCapture(machine_id, session_id, capture_id, parameters)
 SealCapture(machine_id, session_id, capture_id, close_boundary)
-OpenFrequencyWindow(machine_id, session_id, start_boundary)
-SealFrequencyWindow(machine_id, session_id, close_boundary)
 SubmitOCRJob(job_id, machine_id, session_id, frame_id, image_ref)
 SubmitPostprocess(session_id, candidate_refs)
 CommitSession(session_id, frozen_payload, payload_hash)
@@ -617,7 +587,7 @@ payload_hash
 | 重复 START，已有活动 Session | 忽略重复或记录协议异常，不覆盖原对象 |
 | 重复 CLOSE，无活动 Session | 幂等处理，不关闭其他未完成 Session |
 | 无有效图像/全部识别失败 | OCR 失败；正常 CLOSE 后形成待复核记录 |
-| 关闭后没有有效频率 | 封口期限到达后记录缺频率，不补 0、不无限等待 |
+| 关闭后没有有效频率 | 处理 CLOSE 时立即记录缺频率，不补 0、不额外等待 |
 | 数据跨周期归属不明确 | 隔离并记录冲突，不写给“当前 Session” |
 | 相机采集失败 | 标记本次采集异常；是否影响其他机器取决于共享资源范围 |
 | IO 通信中断/无效输入 | 标记受影响机器不同步；不能生成正常 CLOSE |
