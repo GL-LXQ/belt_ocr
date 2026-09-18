@@ -43,6 +43,7 @@ class MeasurementConfiguration:
     ocr_queue_capacity: int = 32
     storage_queue_capacity: int = 32
     max_pending_sessions_per_machine: int = 20
+    # 兼容旧配置，数据库提交失败后不再重试。
     storage_retry_attempts: int = 3
     storage_retry_delay_ms: int = 100
     shutdown_timeout_ms: int = 10000

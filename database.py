@@ -1,4 +1,4 @@
-"""使用独立写入任务保存 SQLite 测量记录和未受理事件。"""
+"""使用独立写入任务保存正常测量结果，失败时返回错误并打印日志。"""
 
 import asyncio
 import json
@@ -98,47 +98,27 @@ class Database:
         self.initialized = True
 
     async def submit(self, request: DatabaseRequest) -> bool:
-        """暂存提交记录并尝试加入后台写入队列。
+        """将正常结果加入存储队列，不保存待补交记录。
 
         Args:
-            request: 保存请求，包含机器编号、记录编号、JSON 内容、内容摘要和记录类型。
+            request: 本轮机器身份、冻结 JSON 和内容哈希。
 
         Returns:
-            bool: 请求已入队、已在排队或已提交成功时返回 True，队列满时返回 False。
-            返回示例：
-                True  # 请求已受理，不表示本次调用已完成最终入库
-                False  # 队列已满，记录保留在待提交区供本次运行补交
+            True  # 请求已在队列中或本次入队成功，等待数据库回调
+            False  # 队列已满，本轮提交失败
         """
-        # 已在排队的记录直接返回，其他记录登记排队标记。
+        # 判断同一记录是否已经排队。
         if request.session_id in self.queued_records:
             return True
-        self.queued_records.add(request.session_id)
 
+        # 将本轮请求加入队列，队列满时返回失败。
         try:
-            # 检查已提交身份，并将尚未提交的记录保存到待提交区。
-            staged = await run_blocking_operation(self.recovery.stage_record, request)
-
-            # 已提交成功的记录移除排队标记，测量记录发送成功回执事件。
-            if not staged:
-                self.queued_records.discard(request.session_id)
-                if request.record_type == "measurement":
-                    await self.publish_event(
-                        MeasurementEvent("CommitSucceeded", request.machine_id, request.session_id)
-                    )
-                return True
-
-            # 将待提交记录放入后台写入队列。
             self.queue.put_nowait(request)
         except asyncio.QueueFull:
-            # 队列已满时移除排队标记，返回未入队结果。
-            self.queued_records.discard(request.session_id)
             return False
-        except (asyncio.CancelledError, Exception):
-            # 取消或异常时移除排队标记，并继续抛出异常。
-            self.queued_records.discard(request.session_id)
-            raise
 
-        # 入队成功后返回受理结果。
+        # 登记本轮排队身份。
+        self.queued_records.add(request.session_id)
         return True
 
     def write_record(self, request: DatabaseRequest) -> None:
@@ -194,111 +174,48 @@ class Database:
             )
 
     async def run(self) -> None:
-        """持续消费存储队列，执行写入和有限重试，并通过事件报告提交结果。
+        """逐条写入正常结果，交付成功或失败回调，不自动重试。
 
         Args:
             无外部参数。
 
         Returns:
-            None: 持续运行直到任务被取消，提交结果通过事件发送，无返回数据。
-            返回值形式示例：
-                None  # 无返回数据
+            None  # 持续消费队列，直到应用取消存储任务
         """
         while True:
-            # 等待并取出一份待写入记录。
+            # 读取本轮冻结请求，准备成功回调。
             request = await self.queue.get()
+            event_type = "CommitSucceeded"
+            payload = None
             try:
-                # 初始化本次提交的成功状态和内容冲突标记。
-                succeeded = False
-                integrity_conflict = False
-
-                # 对同一份冻结记录执行有限次数的提交。
-                for attempt_number in range(self.configuration.storage_retry_attempts):
-                    try:
-                        # 首次写入前创建数据库目录和数据表。
-                        if not self.initialized:
-                            await run_blocking_operation(self.initialize)
-
-                        # 写入最终记录，并登记待提交记录已完成。
-                        await run_blocking_operation(self.write_record, request)
-                        await run_blocking_operation(self.recovery.complete_record, request)
-
-                        # 标记提交成功和存储可用，结束本次重试循环。
-                        succeeded = True
-                        self.available = True
-                        break
-                    except ValueError:
-                        # 登记提交内容冲突，记录审计和日志，结束本次重试循环。
-                        integrity_conflict = True
-                        await run_blocking_operation(self.recovery.audit, "COMMIT_INTEGRITY_CONFLICT", request)
-                        logger.exception("提交内容冲突 session_id=%s", request.session_id)
-                        break
-                    except Exception:
-                        # 标记存储不可用并记录本次写入异常。
-                        self.available = False
-                        logger.exception(
-                            "保存失败 machine_id=%s session_id=%s attempt=%s",
-                            request.machine_id,
-                            request.session_id,
-                            attempt_number + 1,
-                        )
-
-                        # 等待配置的重试间隔。
-                        await asyncio.sleep(self.configuration.storage_retry_delay_ms / 1000)
-
-                # 保存下一次自动补交时间，冲突记录停止自动重试。
-                if not succeeded:
-                    await run_blocking_operation(
-                        self.recovery.delay_record,
+                try:
+                    # 初始化最终数据库并写入本轮正常结果。
+                    if not self.initialized:
+                        await run_blocking_operation(self.initialize)
+                    await run_blocking_operation(self.write_record, request)
+                    self.available = True
+                except Exception as error:
+                    # 判断是否为内容冲突，打印错误并准备失败回调。
+                    self.available = False
+                    event_type = "CommitFailed"
+                    payload = {
+                        "error_code": (
+                            "COMMIT_INTEGRITY_CONFLICT"
+                            if isinstance(error, ValueError)
+                            else "DATABASE_WRITE_FAILED"
+                        ),
+                    }
+                    logger.exception(
+                        "保存失败，不自动重试 machine_id=%s session_id=%s",
+                        request.machine_id,
                         request.session_id,
-                        self.configuration.storage_retry_interval_ms / 1000,
-                        blocked=integrity_conflict,
                     )
 
-                # 把提交状态返回原 Session。
-                if request.record_type == "measurement":
-                    await self.publish_event(
-                        MeasurementEvent(
-                            "CommitSucceeded" if succeeded else "CommitFailed",
-                            request.machine_id,
-                            request.session_id,
-                            {
-                                "integrity_conflict": integrity_conflict,
-                            },
-                        )
-                    )
+                # 将本次提交结果返回原 Session。
+                await self.publish_event(MeasurementEvent(
+                    event_type, request.machine_id, request.session_id, payload,
+                ))
             finally:
-                # 移除本次排队标记，并通知队列任务已处理完毕。
+                # 移除排队身份并结算本次队列任务。
                 self.queued_records.discard(request.session_id)
                 self.queue.task_done()
-
-    async def enqueue_pending_records(self) -> None:
-        """按存储队列剩余容量读取到期的待提交记录并重新入队。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            None: 完成本轮补交入队，无返回数据。
-            返回示例：
-                None  # 无返回数据
-        """
-        # 计算存储队列的剩余容量。
-        remaining_capacity = self.queue.maxsize - self.queue.qsize()
-
-        # 按剩余容量读取已到期且未被阻止补交的持久化记录。
-        records = await run_blocking_operation(self.recovery.pending_records, remaining_capacity)
-
-        for record in records:
-            # 使用原有冻结内容和摘要组装存储请求。
-            request = DatabaseRequest(
-                record["machine_id"],
-                record["record_id"],
-                record["payload_json"],
-                record["payload_hash"],
-                record["record_type"],
-            )
-
-            # 提交记录，队列满时结束本轮入队。
-            if not await self.submit(request):
-                break

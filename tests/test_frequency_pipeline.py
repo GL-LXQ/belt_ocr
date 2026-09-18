@@ -11,8 +11,8 @@ import pytest
 
 from app import App
 from configuration import load_configuration
-from enums import OCRState, FrequencyState
-from models import BeltSession, FrequencyMeasurement, MeasurementEvent
+from enums import OCRState, FrequencyState, SessionState
+from models import BeltSession, FrequencyMeasurement, MeasurementEvent, OCRResult
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def frequency_context(tmp_path):
         (
             app,  # 未启动设备的应用及独立数据库
             manager,  # M01 的串行业务处理器
-            session,  # 图像已收尾、OCR 已失败的测试周期
+            session,  # 图像已收尾、OCR 已成功的测试周期
         )
     """
     # 创建独立存储配置，启用较短的频率收尾期限。
@@ -52,7 +52,9 @@ def frequency_context(tmp_path):
         start_time="2026-09-18T00:00:10+00:00",
         start_boundary=10,
         capture_sealed=True,
-        ocr_state=OCRState.FAILED,
+        ocr_state=OCRState.SUCCESS,
+        ocr_result=OCRResult(("MODEL",), (), ()),
+        evidence_verified=True,
         configuration_snapshot={"configuration_version": "test-frequency"},
     )
     manager.sessions[session.session_id] = session
@@ -164,7 +166,7 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
         outcome: 无测量、读取失败或周期中断场景。
 
     Returns:
-        None  # 异常记录已冻结，最终频率为空
+        None  # 异常周期已清理且未入库，最终频率为空
     """
     app, manager, session = frequency_context
 
@@ -175,7 +177,7 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
             无外部参数。
 
         Returns:
-            None  # 本轮频率已封闭并生成异常记录
+            None  # 本轮频率已封闭，失败周期未提交数据库
         """
         # 接收部分有效数据，读取失败事件不覆盖已有明细。
         if outcome != "empty":
@@ -193,9 +195,13 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
         assert manager.frequency_adapter.active_session_id is None
 
     asyncio.run(receive_and_close())
-    payload = json.loads(session.frozen_payload)
-    assert payload["final_frequency_hz"] is None
-    assert len(payload["measurement_frequencies"]) == (0 if outcome == "empty" else 1)
+    assert session.state == SessionState.FAILED
+    assert session.frozen_payload is None
+    assert session.final_frequency is None
+    assert len(session.measurement_frequencies) == (0 if outcome == "empty" else 1)
+    assert app.database.queue.empty()
+    assert app.recovery.pending_count() == 0
+    assert session.session_id not in manager.sessions
     assert session.frequency_window_sealed
     assert session.frequency_state == FrequencyState.FAILED
 

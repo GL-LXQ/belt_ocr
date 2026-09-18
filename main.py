@@ -39,9 +39,9 @@ async def run_measurement_demo(configuration_path: Path) -> None:
         await asyncio.sleep(configuration.capture_window_ms / 1000 + 0.1)
         await app.handle_close(machine_ids[0])
 
-        # 等待全部结果落库并输出数据库位置。
+        # 等待全部任务完成入库或失败清理，输出正常结果的数据库位置。
         await app.wait_until_idle()
-        logging.info("演示完成，记录已保存到 %s", configuration.database_path)
+        logging.info("演示结束，正常结果数据库：%s；失败原因见日志。", configuration.database_path)
     finally:
         await app.stop()
 

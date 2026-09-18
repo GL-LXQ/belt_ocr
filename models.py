@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 from datetime import datetime, timezone
 
-from enums import OCRState, FrequencyState
+from enums import OCRState, FrequencyState, SessionState
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,7 @@ class BeltSession:
     close_time: str | None = None
     close_boundary: float | None = None
     finish_time: str | None = None
-    cycle_state: str = "OPEN"
+    state: SessionState = SessionState.RUNNING  # 本轮任务的整体处理状态
     capture_sealed: bool = False
     selected_frames: dict[str, CapturedFrame] = field(default_factory=dict)
     skipped_frame_count: int = 0
@@ -98,8 +98,6 @@ class BeltSession:
     measurement_frequencies: list[FrequencyMeasurement] = field(default_factory=list)
     frequency_state: FrequencyState = FrequencyState.RUNNING
     final_frequency: FrequencyMeasurement | None = None
-    outcome: str = "UNDECIDED"
-    commit_state: str = "NOT_READY"
     frozen_payload: str | None = None
     payload_hash: str | None = None
     errors: list[str] = field(default_factory=list)
@@ -111,9 +109,14 @@ class BeltSession:
     evidence_validation_pending: bool = False
 
     @property
-    def cycle_closed(self) -> bool:
-        return self.cycle_state == "CLOSED"
-
-    @property
     def finished(self) -> bool:
-        return self.outcome == "COMPLETE" and self.commit_state == "COMMITTED"
+        """判断本轮结果是否已确认入库。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            True  # 本轮结果已确认入库
+            False  # 本轮尚未入库或已失败
+        """
+        return self.state == SessionState.COMMITTED

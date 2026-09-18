@@ -12,7 +12,7 @@ from mvs_sdk import load_mvs_sdk
 from configuration import MeasurementConfiguration
 from frequency_adapter import FrequencyAdapter
 from machine_manager import MachineManager
-from enums import MachineState
+from enums import MachineState, SessionState
 from models import MeasurementEvent
 from recovery import run_blocking_operation, RecoveryStore
 from text_recognition import TextRecognizer
@@ -92,7 +92,7 @@ class App:
             await run_blocking_operation(
                 self.recovery.audit, "DATABASE_UNAVAILABLE_AT_STARTUP",
             )
-            logger.exception("最终结果库暂不可用，将使用本地待提交区。")
+            logger.exception("最终结果库暂不可用，正常结果提交时重新尝试初始化。")
 
         # 加载共享 MVS SDK，失败时保留应用并禁止相机测量。
         try:
@@ -156,7 +156,7 @@ class App:
             self.supervise_worker("STORAGE", self.database.run), name="STORAGE",
         ))
 
-        # 启动定期补交待提交记录和检查存储容量的任务。
+        # 启动定期检查存储容量的任务。
         self.worker_tasks.append(asyncio.create_task(self.maintain_system()))
         
         # 标记启动完成，开放启动和关闭信号入口。
@@ -284,7 +284,7 @@ class App:
         await self.send_signal("MachineSynchronized", machine_id, machine_state)
 
     async def maintain_system(self) -> None:
-        """定期补交待提交记录，检查存储容量并通知机器管理员更新容量状态。
+        """定期检查存储容量并通知机器管理员更新容量状态。
 
         Args:
             无外部参数。
@@ -296,14 +296,11 @@ class App:
         """
         while True:
             try:
-                # 将已到期的待提交记录重新加入存储队列。
-                await self.database.enqueue_pending_records()
-
                 # 检查磁盘剩余空间。
                 disk_capacity_available = await self.check_disk_capacity()
 
-                # 读取本次运行的待提交数量，合并磁盘和积压检查结果。
-                pending_count = await run_blocking_operation(self.recovery.pending_count)
+                # 读取正在排队或写入的数量，合并磁盘和积压检查结果。
+                pending_count = len(self.database.queued_records)
                 capacity_available = (
                     disk_capacity_available
                     and pending_count < self.configuration.max_persistent_records
@@ -387,19 +384,8 @@ class App:
                         "DeviceRecovered", machine_manager.machine.machine_id, payload=component,
                     ))
 
-    async def retry_pending_records(self) -> None:
-        """重新提交进程内保留的失败记录。"""
-        if not self.worker_tasks:
-            raise RuntimeError("测量系统尚未启动。")
-        for machine_manager in self.machine_managers.values():
-            for session in tuple(machine_manager.sessions.values()):
-                if session.commit_state == "RETRY_PENDING":
-                    await self.publish_event(MeasurementEvent(
-                        "RetryCommit", machine_manager.machine.machine_id, session.session_id,
-                    ))
-
     async def wait_until_idle(self, timeout_seconds: float = 30) -> None:
-        """等待全部已受理的测量记录获得保存确认。"""
+        """等待全部已受理的测量完成入库或失败清理，并结束现场周期。"""
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         while True:
             # 检查当前状态，再等待下一次状态更新。
@@ -408,7 +394,7 @@ class App:
                 return
             remaining_seconds = deadline - asyncio.get_running_loop().time()
             if remaining_seconds <= 0:
-                raise asyncio.TimeoutError("测量结果尚未全部保存。")
+                raise asyncio.TimeoutError("测量任务或现场周期尚未全部结束。")
             await asyncio.wait_for(self.state_changed.wait(), remaining_seconds)
 
     async def stop(self) -> None:
@@ -443,7 +429,7 @@ class App:
                 drain_measurements(), self.configuration.shutdown_timeout_ms / 1000,
             )
         except asyncio.TimeoutError:
-            logger.warning("退出等待到期，放弃未完成测量；本地待提交记录将在下次启动时清理。")
+            logger.warning("退出等待到期，未完成测量将标记失败并释放资源。")
 
         # 保持事件处理器运行，先停止并排空所有相机任务。
         await asyncio.gather(*(
@@ -465,15 +451,24 @@ class App:
         self.worker_tasks.clear()
         # 业务任务停止后释放各周期原图和剩余批次事件。
         for machine_manager in self.machine_managers.values():
-            for session in machine_manager.sessions.values():
-                session.memory_frames.clear()
-                session.pending_recognition_batches -= (
-                    self.text_recognizer.discard_session_batches(session.session_id)
-                )
+            for session in tuple(machine_manager.sessions.values()):
+                # 标记退出时未完成的周期，只打印日志并执行失败清理。
+                if session.state != SessionState.FAILED:
+                    session.errors.append("SHUTDOWN_TIMEOUT")
+                    await machine_manager.fail_measurement(session)
+            # 清空退出后的周期身份与未完成档案。
+            machine_manager.sessions.clear()
+            machine_manager.active_session_id = None
+            machine_manager.frequency_adapter.active_session_id = None
             # 清空不再处理的事件，释放事件携带的图片引用。
             while not machine_manager.queue.empty():
                 machine_manager.queue.get_nowait()
                 machine_manager.queue.task_done()
+        # 清空退出后未执行的存储请求和排队身份。
+        while not self.database.queue.empty():
+            self.database.queue.get_nowait()
+            self.database.queue.task_done()
+        self.database.queued_records.clear()
         # 最后关闭相机设备与共享 SDK，再释放恢复库。
         try:
             if self.camera_sdk is not None:

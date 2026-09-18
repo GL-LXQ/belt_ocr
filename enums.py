@@ -16,6 +16,15 @@ class MachineState(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class SessionState(str, Enum):
+    """定义本次测量任务的处理状态，与机器启停状态分开。"""
+
+    RUNNING = "RUNNING"  # 正在采集或等待 OCR、频率及证据处理完成
+    WAITING_COMMIT_DB = "WAITING_COMMIT_DB"  # 结果完整，等待或正在提交数据库
+    COMMITTED = "COMMITTED"  # 本轮结果已确认提交数据库
+    FAILED = "FAILED"  # 本轮处理、中断或数据库提交失败
+
+
 class OCRState(str, Enum):
     """定义整个 Session 的 OCR 处理状态，不表示单个图片或批次的识别结果。"""
 
