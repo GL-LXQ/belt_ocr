@@ -593,36 +593,35 @@ class MachineManager:
         Returns:
             None  # 条件不足时继续等待，否则冻结并提交本轮记录
         """
-        # 周期中断时释放内存图片和未消费批次。
-        if session.cycle_state == "INTERRUPTED":
-            session.memory_frames.clear()
-            session.pending_recognition_batches -= (
-                self.text_recognizer.discard_session_batches(session.session_id)
-            )
-        if session.frozen_payload is not None or session.cycle_state == "OPEN":
+
+        # 判断本轮周期是否尚未结束。
+        if session.cycle_state == "OPEN":
             return
 
-        # 正常关闭后等待采集和识别收尾，超时或中断仍按原有异常流程退出。
-        if session.cycle_state == "CLOSED" and session.ocr_state != "TIMED_OUT":
-            if not session.capture_sealed or session.pending_recognition_batches != 0:
-                return
-
-        # 确认本轮是中断、待复核还是完整结果。
-        has_terminal_failure = (
-            session.ocr_state in {"FAILED", "TIMED_OUT"}
-            or session.frequency_state == FrequencyState.ABNORMAL
-        )
+        # 判断本轮周期是否中断，确定中断结果。
         if session.cycle_state == "INTERRUPTED":
             session.outcome = "INTERRUPTED"
-        elif has_terminal_failure:
-            session.outcome = "REVIEW_REQUIRED"
-        elif session.ocr_done and session.frequency_done and session.cycle_closed:
-            session.outcome = "COMPLETE"
         else:
-            return
+            # 判断 OCR 是否超时，未超时时检查采集封口和批次结算状态。
+            if session.ocr_state != "TIMED_OUT":
+                if not session.capture_sealed or session.pending_recognition_batches != 0:
+                    return
 
-        # 在冻结正常记录前确认本地证据仍可读取。
+            # 判断 OCR 或频率是否异常，确定待复核结果。
+            if (
+                session.ocr_state in {"FAILED", "TIMED_OUT"}
+                or session.frequency_state == FrequencyState.ABNORMAL
+            ):
+                session.outcome = "REVIEW_REQUIRED"
+            # 判断 OCR 和频率是否均成功，确定完整结果。
+            elif session.ocr_done and session.frequency_done:
+                session.outcome = "COMPLETE"
+            else:
+                return
+
+        # 判断完整结果的证据是否已验证。
         if session.outcome == "COMPLETE" and not session.evidence_verified:
+            # 判断证据验证是否已启动，创建尚未启动的验证任务。
             if not session.evidence_validation_pending:
                 session.evidence_validation_pending = True
                 task = asyncio.create_task(self.validate_evidence(
@@ -632,10 +631,11 @@ class MachineManager:
                 task.add_done_callback(self.background_tasks.discard)
             return
 
-        # 组装查询字段、原始候选、证据和模拟标记。
+        # 记录结算时间，获取最终频率和 OCR 结果。
         session.finish_time = datetime.now(timezone.utc).isoformat()
         final_frequency = session.final_frequency
         ocr_result = session.ocr_result
+        # 组装本轮身份、测量结果、采集统计和配置数据。
         payload = {
             "session_id": session.session_id,
             "machine_id": session.machine_id,
@@ -675,12 +675,12 @@ class MachineManager:
             "software_version": "0.1.0",
         }
 
-        # 固定提交内容并撤销本轮剩余期限任务。
+        # 冻结提交内容并计算内容哈希。
         session.frozen_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         session.payload_hash = hashlib.sha256(
             session.frozen_payload.encode()
         ).hexdigest()
-        # 记录冻结后释放本轮内存图片及剩余排队批次。
+        # 释放本轮内存图片并移除剩余排队批次。
         session.memory_frames.clear()
         session.pending_recognition_batches -= (
             self.text_recognizer.discard_session_batches(session.session_id)
@@ -690,6 +690,7 @@ class MachineManager:
         for deadline_key in tuple(self.deadline_tasks):
             if deadline_key[0] == session.session_id:
                 self.deadline_tasks.pop(deadline_key).cancel()
+        # 提交本轮冻结记录。
         await self.submit_frozen_record(session)
 
     async def validate_evidence(

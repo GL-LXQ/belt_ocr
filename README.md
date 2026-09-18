@@ -8,6 +8,8 @@
 
 当前系统的数据流：START 创建独立 Session，登记 frequency_adapter.active_session_id 并启动相机内存图片组批；OCR 按批次回传原始文字块，采集封口且批次结算后只触发一次文字和图片终选占位入口，当前不保存图片。频率监听黑盒负责设备连接、新有效测量识别和固定接收时的周期归属，按接收顺序将 FrequencyMeasured 与 START/CLOSE 送入同一机器 FIFO 队列；业务层仅追加 measurement_frequencies，不按设备测量时间重排，也不重复校验黑盒已保证的数据。处理 CLOSE 时立即清空适配器的活动周期、封闭列表并取最后一条作为最终频率；频率状态统一使用 FrequencyState 枚举，区分 COLLECTING（收集中）、NORMAL（正常）和 ABNORMAL（异常）；没有有效测量、频率故障或周期中断时保留明细且最终值为空。CLOSE 前入队的测量先处理，CLOSE 后不等待设备、不补收旧轮数据。频率明细 JSON、final_frequency_hz 和完整 payload 在同一 SQLite 事务中写入，整轮记录仍等待 OCR 等原有完成条件。当前 listen_measurements 按 frequency_interval_ms 循环读取 simulated_frequencies_hz 产生联调测量，每次分配独立身份，无活动 Session 时不交付；真实设备协议仍待替换，读取异常报告故障；旧库升级保留历史冻结内容和哈希，重启不恢复旧 Session。
 
+结算数据流：`try_finalize` 先判断周期是否结束；中断周期确定为中断结果，正常关闭周期在 OCR 未超时时等待采集封口和批次结算，再根据 OCR 与频率状态确定完整或待复核结果。完整结果通过证据验证后，与异常结果统一组装并冻结提交内容，释放内存图片和排队批次、取消剩余期限任务，最后提交存储并等待入库回调。
+
 ## 1. 项目目标与边界
 
 在 Python 工程中实现一套正式生产系统：一台工控机同时管理三台皮带机，每台机器绑定自己的工业相机、启动/关闭输入通道和可唯一识别的频率采集通道。
