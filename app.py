@@ -145,11 +145,6 @@ class App:
             self.worker_tasks.append(asyncio.create_task(machine_manager.listen_and_process_events()))
             self.worker_tasks.append(asyncio.create_task(machine_manager.frequency.run()))
 
-        # 启动共享 OCR 任务并监控运行状态。
-        self.worker_tasks.append(asyncio.create_task(
-            self.supervise_worker("OCR", self.ocr.run), name="OCR",
-        ))
-
         # 启动共享存储任务并监控运行状态。
         self.worker_tasks.append(asyncio.create_task(
             self.supervise_worker("STORAGE", self.database.run), name="STORAGE",
@@ -434,6 +429,9 @@ class App:
             return
         self.accepting_signals = False
         self.stopping = True
+
+        # 停止接收新的 OCR 图片批次。
+        self.ocr.accepting_jobs = False
 
         async def drain_measurements() -> None:
             # 将尚未关闭的现场周期标记为中断。

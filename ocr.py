@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class OCRBatch:
+    """保存送入 OCR 模块的机器、周期和图片批次。"""
+
+    machine_id: str
+    session_id: str
+    frames: tuple[CapturedFrame, ...]
+
+
+@dataclass(frozen=True)
 class OCRJob:
     machine_id: str
     session_id: str
@@ -39,6 +48,37 @@ class SimulatedOCR:
         self.registered_jobs: set[str] = set()
         self.accepting_jobs = True
         self.stopping = False
+
+        # 创建待处理批次队列，容量按批次数计算。
+        self.batch_queue: asyncio.Queue[OCRBatch] = asyncio.Queue(maxsize=configuration.ocr_queue_capacity)
+
+    def submit_batch(self, machine_id: str, session_id: str, frames: tuple[CapturedFrame, ...]) -> bool:
+        """将图片批次放入 OCR 队列，暂不执行识别。
+
+        Args:
+            machine_id: 本批图片所属机器编号。
+            session_id: 本批图片所属测量周期编号。
+            frames: 上游筛选并保存后交付的图片元组。
+
+        Returns:
+            bool: 批次是否成功入队。
+            返回示例：
+                True  # 本批图片已入队
+                False  # 已停止接收或批次队列已满
+        """
+        # 停止接收时返回提交失败。
+        if not self.accepting_jobs:
+            return False
+
+        # 将完整批次非阻塞入队，队列满时返回提交失败。
+        batch = OCRBatch(machine_id, session_id, frames)
+        try:
+            self.batch_queue.put_nowait(batch)
+        except asyncio.QueueFull:
+            return False
+
+        # 返回批次受理结果。
+        return True
 
     def submit(self, job: OCRJob) -> bool:
         """将单张图片的识别任务加入对应机器的 OCR 队列。

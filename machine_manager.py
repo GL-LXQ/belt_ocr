@@ -346,7 +346,22 @@ class MachineManager:
         should_finalize = True
         match event.event_type:
             case "FrameBatchSelected":
-                should_finalize = await self.handle_frame_batch_selected(session, event)
+                # 将采集端交付的完整图片批次送入 OCR 队列。
+                accepted = self.ocr.submit_batch(
+                    machine_id=session.machine_id,
+                    session_id=session.session_id,
+                    frames=event.payload,
+                )
+
+                # 记录批次拒收状态并检查异常结算。
+                if not accepted:
+                    session.ocr_state = "FAILED"
+                    session.errors.append("OCR_BATCH_REJECTED")
+                    await self.try_finalize(session)
+
+                # 结束批次转发，等待后续业务事件。
+                return
+
             case "CaptureSealed":
                 should_finalize = await self.handle_capture_sealed(session, event)
             case "OCRFrameStarted" | "OCRFrameCompleted" | "OCRFrameFailed":
@@ -422,24 +437,8 @@ class MachineManager:
                 self.device_faults.add("COMMIT_INTEGRITY_CONFLICT")
             logger.error("记录待重试 machine_id=%s session_id=%s", session.machine_id, session.session_id)
 
-    async def handle_frame_batch_selected(self, session: BeltSession, event: MeasurementEvent) -> bool:
-        """将采集端交付的图片批次按帧编号去重登记到 Session。
-
-        Args:
-            session: 接收批次的测量档案。
-            event: FrameBatchSelected 事件，payload 为已筛选图片的元组。
-
-        Returns:
-            True  # 批次非空，继续检查本轮能否结算
-            False  # 批次为空，不执行完成检查
-        """
-        # 登记批内图片，重复帧保留首次交付的记录。
-        for frame in event.payload:
-            session.selected_frames.setdefault(frame.frame_id, frame)
-        return bool(event.payload)
-
     async def handle_capture_sealed(self, session: BeltSession, event: MeasurementEvent) -> bool:
-        """封口图像窗口并提交本轮已收集的图片任务。
+        """封口图像窗口并保存本轮采集统计和错误。
 
         Args:
             session: 事件所属的测量档案。
@@ -454,27 +453,24 @@ class MachineManager:
         # 忽略本轮重复到达的采集封口事件。
         if session.capture_sealed:
             return False
+
         # 校验封口摘要的采集编号，冲突事件只记录审计。
         summary = event.payload
         if summary.capture_id != session.capture_id:
             await run_blocking_operation(self.recovery.audit, "CAPTURE_IDENTITY_CONFLICT", event)
             return False
+
         # 标记图像清单已封闭，保存跳帧数量和完整采集统计。
         session.capture_sealed = True
         session.skipped_frame_count = summary.skipped_frame_count
         session.capture_statistics = summary.statistics
+
         # 采集或证据交付失败时，登记本轮识别失败和错误信息。
         if summary.errors:
             session.ocr_state = "FAILED"
             session.errors.extend(summary.errors)
 
-        # 等待识别时提交已选图片，没有图片则标记失败。
-        if session.ocr_state == "WAITING":
-            if not session.selected_frames:
-                session.ocr_state = "FAILED"
-                session.errors.append("CAPTURE_NO_FRAMES")
-            else:
-                await self.submit_ocr_frames(session)
+        # 返回封口处理结果，继续检查本轮能否结算。
         return True
 
     async def handle_ocr_completed(self, session: BeltSession, event: MeasurementEvent) -> bool:

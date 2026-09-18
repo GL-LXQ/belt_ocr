@@ -1,5 +1,7 @@
 # 核心流程运行说明
 
+> 当前开发阶段仅完成图片批次送入 OCR 模块。App 不启动旧逐帧 OCR Worker；批次暂存于有界队列，尚未消费或回传结果。队列满或停止接收时记录 `OCR_BATCH_REJECTED`。当前不能生成正常完整测量，原有 OCR 超时仍可能触发；下文完整测量演示和识别流程属于后续待接通行为。
+
 当前版本包含三机测量、跨轮后台收尾、内存机器状态、本次运行内自动补交、重启清理和异常审计。
 信号统一从 `App.handle_start()` 和 `handle_close()` 进入，尚未接入现场 IO。
 
@@ -53,7 +55,7 @@ uv run python -X utf8 main.py --config config.example.json
 | `max_cycle_open_ms` | 等待正常关闭的最大时长，默认 60000 毫秒 |
 | `minimum_frequency_hz` / `maximum_frequency_hz` | 有效频率范围，默认 0.01～10000 Hz |
 | `max_pending_sessions_per_machine` | 每台机器未完成记录上限，默认 20 |
-| `ocr_queue_capacity` | 全局 OCR 待处理及处理中帧任务总上限，默认 32 |
+| `ocr_queue_capacity` | 当前 OCR 待处理批次队列上限，默认 32 批；本阶段没有消费者 |
 | `event_queue_capacity` / `storage_queue_capacity` | 单机事件队列和存储队列上限，默认 128 / 32 |
 | `storage_retry_attempts` / `storage_retry_delay_ms` | 一次提交的最大尝试次数和间隔，默认 3 次 / 100 毫秒 |
 | `shutdown_timeout_ms` | 正常退出等待后台收尾的上限，默认 10000 毫秒 |
@@ -113,8 +115,8 @@ asyncio.run(run_measurement())
 
 1. START 创建全局唯一 Session，绑定机器、相机和频率来源。
 2. MVS 相机开始连续取流，频率适配器登记本轮接收窗口。
-3. 消费者逐帧保存并发布图片；窗口到时或提前 CLOSE 后停止取流，全部帧交付后封口，再交给共享 OCR。
-4. 一个 OCR Worker 按机器轮转，同一机器内按提交顺序处理；每帧有独立任务和尝试编号。
+3. 消费者保存图片，满 8 帧交付一批；窗口到时或提前 CLOSE 后交付尾批并封口。MachineManager 收到批次即直接提交 OCR 队列。
+4. 当前到批次入队为止，不启动 OCR Worker，不登记逐帧任务；封口不再提交 OCR，后续识别和结果处理待改造。
 5. CLOSE 等待本轮 Grabber 停止后释放活动位置；新一轮可以开始，旧一轮继续后台保存和识别。
 6. 频率适配器等待已绑定旧轮的在途读数，再封口并按测量序号取最后一次有效值。
 7. 正常关闭、OCR 成功、有效频率三项齐全，且证据可读取，才冻结完整结果。
@@ -229,3 +231,11 @@ App 已接入官方 MVS 相机；IO、频率、图像质量评估和 OCR 融合�
 README 第 22 节的逐项测试和模拟边界见 [验收测试对照](ACCEPTANCE.md)。
 
 退出时业务等待受 shutdown_timeout_ms 限制，但已持有原始图像的消费线程仍须排空后才能释放 SDK，不能强行销毁它正在使用的设备句柄。证据写盘或 SDK 操作长期不返回时，资源退出也可能延后。
+
+## 当前阶段验证
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_ocr_batch_delivery.py tests/test_mvs_capture.py tests/test_machine_state.py -q
+```
+
+该命令验证满批与尾批交付、队列拒收、封口不重复提交、底层采集和配置。旧的完整测量及逐帧 OCR 测试保留供后续改造，当前不适用，未跳过或改写为成功断言。
