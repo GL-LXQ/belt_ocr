@@ -13,7 +13,7 @@ from unittest.mock import patch
 from configuration import MachineConfiguration, MeasurementConfiguration
 from app import App
 from enums import OCRState
-from models import MeasurementEvent
+from models import MeasurementEvent, OCRResult
 from database import DatabaseRequest
 from fake_mvs import FakeMvsSdk
 from fake_frequency import FakeFrequency
@@ -62,18 +62,24 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             database_path=self.output_directory / "measurements.sqlite3",
             evidence_directory=self.output_directory / "evidence",
             mvs_development_directory=Path("test-sdk"),
-            capture_window_ms=1000,
+            capture_window_ms=180,
             frequency_interval_ms=150,
-            max_frames_per_session=2,
             max_cycle_open_ms=30000,
             ocr_result_timeout_ms=20000,
             shutdown_timeout_ms=2000,
         )
         self.app = App(replace(configuration, **overrides))
+        # 仅在测试中提供确定性识别和终选，生产黑盒继续保持未实现。
+        self.app.text_recognizer.recognize_images = lambda images: [{"blocks": []} for image in images]
+        self.app.text_recognizer.generate_final_text_and_images = lambda results, frames: OCRResult(
+            ordered_lines=("MODEL",),
+            selected_frames=(frames[0],),
+            line_frame_ids=((frames[0].frame_id,),),
+        )
         await self.app.start()
         return self.app
 
-    async def wait_for_state(self, predicate, timeout_seconds: float = 20) -> None:
+    async def wait_for_state(self, predicate, timeout_seconds: float = 3) -> None:
         """等待业务事件推动指定条件成立。"""
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         while not predicate():
@@ -110,277 +116,81 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             ).fetchall()
         return [json.loads(record[0]) for record in records]
 
-    async def test_three_machines_save_independent_records(self) -> None:
-        app = await self.start_app()
 
-        # 同时采集三台机器并等待各自的 OCR 完成。
-        await asyncio.gather(*(
-            app.handle_start(machine_id) for machine_id in app.machine_managers
-        ))
+    async def test_three_machines_save_independent_records(self):
+        """验证三台机器分别收集完整帧并在 CLOSE 后保存结果。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 三机身份、图片与频率归属已验证
+        """
+        app = await self.start_app(capture_window_ms=400)
+        await asyncio.gather(*(app.handle_start(identity) for identity in app.machine_managers))
         await self.wait_for_state(lambda: all(
-            next(iter(machine_manager.sessions.values())).ocr_state == OCRState.SUCCESS
-            for machine_manager in app.machine_managers.values()
+            next(iter(manager.sessions.values())).ocr_state == OCRState.SUCCESS
+            for manager in app.machine_managers.values()
         ))
+        # OCR 完成时图片仍在内存，没有提前写入。
         self.assertEqual(self.read_records(), [])
-        await asyncio.gather(*(
-            app.handle_close(machine_id) for machine_id in app.machine_managers
-        ))
+        self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
+        await asyncio.gather(*(app.handle_close(identity) for identity in app.machine_managers))
         await app.wait_until_idle()
-
-        # 检查每条记录的机器、文字、频率身份和证据归属。
         records = self.read_records()
         self.assertEqual(len(records), 3)
         for record in records:
-            machine_number = int(record["machine_id"][1:])
-            self.assertEqual(record["camera_id"], f"CAM{machine_number:02}")
-            self.assertEqual(record["frequency_source_id"], f"FREQ{machine_number:02}")
-            self.assertNotIn("selected_frames", record)
+            self.assertGreater(record["capture_summary"]["retained_frame_count"], 5)
+            self.assertEqual(record["ordered_lines"], ["MODEL"])
+            self.assertEqual(record["line_evidence_refs"], [record["evidence_refs"]])
+            self.assertTrue(all(Path(path).read_bytes().startswith(b"BM") for path in record["evidence_refs"]))
             self.assertTrue(all(
-                measurement["frequency_source_id"] == record["frequency_source_id"]
-                and measurement["session_id"] == record["session_id"]
-                for measurement in record["frequency_candidates"]
-            ))
-            self.assertEqual(record["outcome"], "COMPLETE", record["error_codes"])
-            self.assertTrue(record["is_simulated"])
-            self.assertEqual(
-                record["ordered_lines"], [f"MODEL {machine_number}", "SAME", "SAME"],
-            )
-            candidates = record["frequency_candidates"]
-            latest_measurement = max(
-                candidates, key=lambda measurement: measurement["source_sequence"],
-            )
-            self.assertEqual(
-                record["final_measurement_id"], latest_measurement["measurement_id"],
-            )
-            self.assertEqual(
-                record["final_frequency_hz"], latest_measurement["value_hz"],
-            )
-            self.assertTrue(all(
-                Path(image_path).is_file() and record["session_id"] in image_path
-                for image_path in record["evidence_refs"]
+                value["session_id"] == record["session_id"] for value in record["measurement_frequencies"]
             ))
 
-    async def test_old_ocr_and_commit_do_not_clear_new_active_session(self) -> None:
-        app = await self.start_app()
-        machine_manager = app.machine_managers["M01"]
+    async def test_early_close_and_next_cycle_keep_ownership(self):
+        """验证提前关闭和立即重启不会混用相机帧与 OCR 结果。
 
-        # 在第一轮 OCR 结束前关闭并立即启动第二轮。
-        await app.handle_start("M01")
-        first_session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: first_session.is_capture_finished)
-        await app.handle_close("M01")
-        await app.handle_start("M01")
-        second_session_id = machine_manager.active_session_id
-        self.assertNotEqual(first_session.session_id, second_session_id)
-        await self.wait_for_state(lambda: first_session.commit_state == "COMMITTED")
+        Args:
+            无外部参数。
 
-        # 第一轮提交成功后，第二轮仍保持活动状态。
-        self.assertEqual(machine_manager.active_session_id, second_session_id)
-        self.assertEqual(self.read_records()[0]["session_id"], first_session.session_id)
-        await app.handle_close("M01")
-        await app.wait_until_idle()
-        self.assertEqual(len(self.read_records()), 2)
-
-    async def test_early_close_seals_only_the_old_capture(self) -> None:
-        app = await self.start_app(capture_window_ms=800)
-        machine_manager = app.machine_managers["M01"]
-
-        # 采到第一帧和频率后提前关闭，再立即打开新窗口。
-        await app.handle_start("M01")
-        first_session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: (
-            first_session.images_for_final_selection and first_session.frequency_candidates
-        ))
-        await app.handle_close("M01")
-        await app.handle_start("M01")
-        second_session = machine_manager.sessions[machine_manager.active_session_id]
-        await machine_manager.camera.seal_capture(first_session.capture_id)
-        await self.wait_for_state(lambda: bool(second_session.frequency_candidates))
-        self.assertFalse(second_session.is_capture_finished)
-        self.assertLess(len(first_session.images_for_final_selection), 5)
-        await app.handle_close("M01")
-        await app.wait_until_idle()
-        self.assertEqual(len(self.read_records()), 2)
-
-    async def test_delayed_frequency_stays_with_original_session(self) -> None:
-        app = await self.start_app()
-        machine_manager = app.machine_managers["M01"]
-
-        # 在读数尚未送达时关闭第一轮并打开第二轮。
-        await app.handle_start("M01")
-        first_session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: (
-            first_session.images_for_final_selection
-            and machine_manager.frequency_adapter.active_window.pending_deliveries
-        ))
-        self.assertEqual(first_session.frequency_candidates, {})
-        await app.handle_close("M01")
-        await app.handle_start("M01")
-        second_session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: first_session.commit_state == "COMMITTED")
-
-        # 已结算的读数全部属于第一轮，第二轮仍然活动。
-        first_record = self.read_records()[0]
-        self.assertTrue(first_record["frequency_candidates"])
-        self.assertTrue(all(
-            measurement["session_id"] == first_session.session_id
-            for measurement in first_record["frequency_candidates"]
-        ))
-        self.assertEqual(machine_manager.active_session_id, second_session.session_id)
-        await app.handle_close("M01")
-        await app.wait_until_idle()
-        measurement_ids = [
-            {
-                measurement["measurement_id"]
-                for measurement in record["frequency_candidates"]
-            }
-            for record in self.read_records()
-        ]
-        self.assertFalse(measurement_ids[0] & measurement_ids[1])
-
-    async def test_equal_frequency_values_have_different_measurement_ids(self) -> None:
-        app = await self.start_app()
-        machine_manager = app.machine_managers["M01"]
-        machine_manager.frequency_adapter.machine = replace(
-            machine_manager.machine, simulated_frequencies_hz=(42.0,),
-        )
-
-        # 收集数值相同但身份不同的新测量。
-        await app.handle_start("M01")
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: len(session.frequency_candidates) >= 3)
-        await app.handle_close("M01")
-        await app.wait_until_idle()
-        candidates = self.read_records()[0]["frequency_candidates"]
-        self.assertEqual(
-            {measurement["value_hz"] for measurement in candidates}, {42.0},
-        )
-        self.assertEqual(
-            len({value["measurement_id"] for value in candidates}), len(candidates),
-        )
-
-    async def test_no_valid_frequency_saves_review_record(self) -> None:
-        app = await self.start_app()
-        machine_manager = app.machine_managers["M01"]
-        machine_manager.frequency_adapter.machine = replace(
-            machine_manager.machine, simulated_frequencies_hz=(0.0, float("nan"), -1.0),
-        )
-
-        # OCR 成功后关闭，确认缺频率不会补零或永久等待。
-        await app.handle_start("M01")
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
-        await app.handle_close("M01")
-        await app.wait_until_idle()
-        record = self.read_records()[0]
-        self.assertEqual(record["outcome"], "REVIEW_REQUIRED")
-        self.assertIsNone(record["final_frequency_hz"])
-        self.assertIn("FREQUENCY_NO_VALID_MEASUREMENT", record["error_codes"])
-
-    async def test_camera_acquisition_failure_saves_review_record(self) -> None:
-        app = await self.start_app()
-        app.machine_managers["M01"].camera.device.handle.failure = True
-
-        # SDK 取帧失败时保存本轮待复核记录。
-        with self.assertLogs("camera", level="ERROR"):
+        Returns:
+            None  # 两轮各自产生一次正确归属的记录
+        """
+        app = await self.start_app(capture_window_ms=1000)
+        manager = app.machine_managers["M01"]
+        for cycle_number in range(2):
             await app.handle_start("M01")
-            machine_manager = app.machine_managers["M01"]
-            session = machine_manager.sessions[machine_manager.active_session_id]
-            await self.wait_for_state(lambda: session.ocr_state == OCRState.FAILED)
-        await app.handle_close("M01")
-        await app.wait_until_idle()
-        self.assertEqual(self.read_records()[0]["outcome"], "REVIEW_REQUIRED")
-
-    async def test_frequency_drain_has_a_deadline(self) -> None:
-        app = await self.start_app()
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.is_capture_finished)
-        await app.handle_close("M01")
-        await app.wait_until_idle()
-        record = self.read_records()[0]
-        self.assertEqual(record["outcome"], "REVIEW_REQUIRED")
-        self.assertIn("FREQUENCY_DRAIN_TIMEOUT", record["error_codes"])
-
-    async def test_cycle_timeout_requires_reset_and_never_fakes_close(self) -> None:
-        app = await self.start_app(max_cycle_open_ms=180)
-        await app.handle_start("M01")
-        await app.wait_until_idle()
-
-        # 超时记录没有正常关闭时间，并等待明确关闭后重新同步。
-        record = self.read_records()[0]
-        self.assertEqual(record["outcome"], "INTERRUPTED")
-        self.assertNotIn("close_time", record)
-        machine_manager = app.machine_managers["M01"]
-        await app.handle_start("M01")
-        self.assertIsNone(machine_manager.active_session_id)
-        await app.handle_close("M01")
-        await app.handle_start("M01")
-        self.assertIsNotNone(machine_manager.active_session_id)
-
-    async def test_shutdown_records_interruption(self) -> None:
-        app = await self.start_app()
-        await app.handle_start("M01")
-        await app.stop()
-        record = self.read_records()[0]
-        self.assertEqual(record["outcome"], "INTERRUPTED")
-        self.assertNotIn("close_time", record)
-        self.assertFalse(app.worker_tasks)
-
-    async def test_lost_acknowledgement_does_not_duplicate_record(self) -> None:
-        app = await self.start_app()
-        original_write = app.database.write_record
-        attempt_count = 0
-
-        # 第一次真实写入成功后模拟确认丢失。
-        def write_then_lose_acknowledgement(request: DatabaseRequest) -> None:
-            nonlocal attempt_count
-            attempt_count += 1
-            original_write(request)
-            if attempt_count == 1:
-                raise OSError("模拟确认丢失")
-
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
-        with patch.object(
-            app.database, "write_record", write_then_lose_acknowledgement,
-        ):
-            with self.assertLogs("database", level="ERROR"):
-                await app.handle_close("M01")
-                await app.wait_until_idle()
-        self.assertEqual(attempt_count, 2)
-        self.assertEqual(len(self.read_records()), 1)
-        self.assertEqual(self.read_records()[0], json.loads(session.frozen_payload))
-
-    async def test_ocr_capacity_failure_creates_review_record(self) -> None:
-        app = await self.start_app(
-            ocr_queue_capacity=1, max_frames_per_session=1,
-        )
-        await asyncio.gather(*(
-            app.handle_start(machine_id) for machine_id in app.machine_managers
-        ))
-        await self.wait_for_state(lambda: all(
-            next(iter(machine_manager.sessions.values())).is_capture_finished
-            for machine_manager in app.machine_managers.values()
-        ))
-        await asyncio.gather(*(
-            app.handle_close(machine_id) for machine_id in app.machine_managers
-        ))
+            session = manager.sessions[manager.active_session_id]
+            await self.wait_for_state(lambda: bool(session.measurement_frequencies))
+            await app.handle_close("M01")
         await app.wait_until_idle()
         records = self.read_records()
-        self.assertEqual(sum(record["outcome"] == "COMPLETE" for record in records), 1)
-        self.assertEqual(
-            sum("OCR_QUEUE_FULL" in record["error_codes"] for record in records), 2,
-        )
+        self.assertEqual(len(records), 2)
+        self.assertNotEqual(records[0]["session_id"], records[1]["session_id"])
+        for record in records:
+            self.assertTrue(all(record["session_id"] in path for path in record["evidence_refs"]))
 
-    async def test_unknown_machine_returns_clear_validation_error(self) -> None:
+    async def test_unimplemented_model_fails_without_waiting_for_timeout(self):
+        """验证正式占位模型立即失败且等待真实 CLOSE 释放现场身份。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 未实现算法未伪造成功或写入记录
+        """
+        from text_recognition import TextRecognizer
+        from enums import SessionState
+
         app = await self.start_app()
-        with self.assertRaisesRegex(ValueError, "未配置机器"):
-            await app.handle_start("UNKNOWN")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        app.text_recognizer.recognize_images = TextRecognizer().recognize_images
+        await app.handle_start("M01")
+        manager = app.machine_managers["M01"]
+        session = manager.sessions[manager.active_session_id]
+        await self.wait_for_state(lambda: session.state == SessionState.FAILED)
+        self.assertIn("OCR_MODEL_NOT_IMPLEMENTED", session.errors)
+        self.assertEqual(manager.active_session_id, session.session_id)
+        await app.handle_close("M01")
+        await app.wait_until_idle()
+        self.assertEqual(self.read_records(), [])

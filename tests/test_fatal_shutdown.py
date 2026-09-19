@@ -158,7 +158,7 @@ def test_camera_fault_interrupts_main_workflow(device_environment, monkeypatch, 
     """
     # 打开相机时替换指定设备操作，停止故障在短采集窗口触发。
     configuration, sdk = device_environment
-    if operation == "stop":
+    if operation in {"stop", "encode"}:
         configuration = replace(configuration, capture_window_ms=50)
     original_open = sdk.open_camera
     method_names = {

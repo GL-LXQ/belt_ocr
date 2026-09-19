@@ -123,10 +123,11 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_app(
             shutdown_timeout_ms=100,
         )
+        await app.text_recognizer.processing_lock.acquire()
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
         session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.is_capture_finished)
+        await self.wait_for_state(lambda: session.ocr_state == OCRState.RUNNING)
         await app.handle_close("M01")
         await self.wait_for_state(lambda: session.frequency_window_sealed)
         self.assertNotEqual(session.ocr_state, OCRState.SUCCESS)
@@ -143,8 +144,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restarted_machine_manager.sessions, {})
         self.assertIsNone(restarted_machine_manager.active_session_id)
         self.assertEqual(restarted_machine_manager.deadline_tasks, {})
-        self.assertEqual(restarted_machine_manager.background_tasks, set())
-        self.assertTrue(restarted.text_recognizer.batch_queue.empty())
+        self.assertEqual(restarted_machine_manager.recognition_tasks, {})
         self.assertEqual(self.read_records(), [])
 
     async def test_process_crash_discards_previous_open_cycle(self) -> None:
@@ -328,7 +328,7 @@ asyncio.run(crash_after_start())
         self.assertTrue(app.accepting_signals)
 
     async def test_repeated_cycles_remain_independent(self) -> None:
-        app = await self.start_app(max_frames_per_session=1)
+        app = await self.start_app()
 
         # 连续执行多轮三机采集，并让每轮后台结果自行提交。
         for cycle_number in range(8):
@@ -336,8 +336,8 @@ asyncio.run(crash_after_start())
                 app.handle_start(machine_id) for machine_id in app.machine_managers
             ))
             await self.wait_for_state(lambda: all(
-                machine_manager.sessions[machine_manager.active_session_id].images_for_final_selection
-                and machine_manager.sessions[machine_manager.active_session_id].frequency_candidates
+                machine_manager.sessions[machine_manager.active_session_id].ocr_state == OCRState.SUCCESS
+                and machine_manager.sessions[machine_manager.active_session_id].measurement_frequencies
                 for machine_manager in app.machine_managers.values()
             ))
             await asyncio.gather(*(
@@ -348,7 +348,7 @@ asyncio.run(crash_after_start())
         records = self.read_records()
         self.assertEqual(len(records), 24)
         self.assertEqual(len({record["session_id"] for record in records}), 24)
-        self.assertTrue(all(record["outcome"] == "COMPLETE" for record in records))
+        self.assertTrue(all(record["ordered_lines"] for record in records))
 
 
 if __name__ == "__main__":

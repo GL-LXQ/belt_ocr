@@ -24,12 +24,21 @@ async def run_blocking_operation(operation, *arguments, **keyword_arguments):
     task = asyncio.create_task(asyncio.to_thread(
         operation, *arguments, **keyword_arguments,
     ))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        # 等待已经开始的文件或事务操作结束。
+    cancelled = False
+    while True:
         try:
-            await task
+            # 重复取消只登记状态，线程实际结束后才允许调用方释放资源。
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
         except Exception:
-            logger.exception("释放阻塞操作时发生异常")
-        raise
+            if cancelled:
+                logger.exception("释放阻塞操作时发生异常")
+                raise asyncio.CancelledError
+            raise
+    if cancelled:
+        raise asyncio.CancelledError
+    return result

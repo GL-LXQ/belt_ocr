@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import shutil
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -27,7 +28,7 @@ class App:
         self.configuration = configuration
         self.state_changed = asyncio.Event()
         self.database = Database(configuration, self.publish_event)
-        self.text_recognizer = TextRecognizer(configuration)
+        self.text_recognizer = TextRecognizer()
         self.machine_managers: dict[str, MachineManager] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
         self.accepting_signals = False
@@ -198,7 +199,11 @@ class App:
             return
 
         # 更新本次路由接收时间。
-        event = replace(event, received_at=datetime.now(timezone.utc).isoformat())
+        event = replace(
+            event,
+            received_at=datetime.now(timezone.utc).isoformat(),
+            received_monotonic=time.monotonic(),
+        )
 
         # 将事件放入对应机器队列，队列满时等待空位。
         await machine_manager.queue.put(event)
@@ -409,9 +414,6 @@ class App:
         self.accepting_signals = False
         self.stopping = True
 
-        # 停止接收新的 OCR 图片批次。
-        self.text_recognizer.accepting_batches = False
-
         async def drain_measurements() -> None:
             """中断活动周期并等待现有业务队列排空。
 
@@ -449,17 +451,7 @@ class App:
 
         # 停止事件交付并取消业务任务，禁止退出期间启动新的采集。
         self.releasing_resources = True
-        background_tasks = []
-        for manager in self.machine_managers.values():
-            background_tasks.extend(manager.deadline_tasks.values())
-            background_tasks.extend(manager.background_tasks)
-        all_tasks = background_tasks + self.worker_tasks
-        for task in all_tasks:
-            task.cancel()
-        await asyncio.gather(*all_tasks, return_exceptions=True)
-        self.worker_tasks.clear()
-
-        # 排空已停止处理的事件队列，唤醒仍在等待入队的相机消费线程。
+        # 排空退出时的事件队列，释放阻塞入队的相机交付任务。
         for manager in self.machine_managers.values():
             while not manager.queue.empty():
                 event = manager.queue.get_nowait()
@@ -475,7 +467,18 @@ class App:
             if isinstance(result, Exception):
                 self.report_failure(result, f"停止相机 machine_id={manager.machine.machine_id}")
 
-        # 业务任务停止后释放各周期原图和剩余批次事件。
+        # 取消后台工作并等待在途阻塞操作完成。
+        background_tasks = []
+        for manager in self.machine_managers.values():
+            background_tasks.extend(manager.deadline_tasks.values())
+            background_tasks.extend(manager.recognition_tasks.values())
+        all_tasks = background_tasks + self.worker_tasks
+        for task in all_tasks:
+            task.cancel()
+        await asyncio.gather(*all_tasks, return_exceptions=True)
+        self.worker_tasks.clear()
+
+        # 业务任务停止后释放各周期最终图片和剩余事件。
         for machine_manager in self.machine_managers.values():
             for session in tuple(machine_manager.sessions.values()):
                 # 标记退出时未完成的周期，只打印日志并执行失败清理。

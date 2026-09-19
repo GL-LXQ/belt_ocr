@@ -5,7 +5,6 @@
   "initial_machine_state": "CLOSED",
   "minimum_free_disk_bytes": 104857600,
   "capture_window_ms": 1000,
-  "max_frames_per_session": 5,
   "frequency_interval_ms": 100,
   "machines": [
     {
@@ -41,6 +40,5 @@
     }
   ],
   "mvs_development_directory": "D:\\app\\HIK\\MVS\\Development",
-  "camera_queue_capacity": 32,
   "camera_timeout_ms": 50
 }

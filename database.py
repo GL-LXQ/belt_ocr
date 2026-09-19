@@ -14,10 +14,38 @@ from pathlib import Path
 
 from async_utils import run_blocking_operation
 from configuration import MeasurementConfiguration
-from models import MeasurementEvent, PublishEvent
+from models import CapturedFrame, MeasurementEvent, PublishEvent
 
 
 logger = logging.getLogger(__name__)
+
+
+def save_evidence_image(image_data: bytes, image_path: Path) -> None:
+    """将编码后的图片同步写盘并原子发布。
+
+    Args:
+        image_data: 完整图片文件字节。
+        image_path: 本轮证据文件路径。
+
+    Returns:
+        None  # 图片已保存，失败时抛出文件操作异常
+    """
+    # 为本帧生成临时文件路径。
+    temporary_path = image_path.with_suffix(image_path.suffix + ".partial")
+    try:
+        # 将本帧内容写入临时文件并同步到磁盘。
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        with temporary_path.open("wb") as evidence_file:
+            evidence_file.write(image_data)
+            evidence_file.flush()
+            os.fsync(evidence_file.fileno())
+        # 将写入完成的临时文件发布为正式证据文件。
+        os.replace(temporary_path, image_path)
+    finally:
+        # 删除写入失败后可能留下的临时文件。
+        if temporary_path.exists():
+            temporary_path.unlink()
+
 
 
 def serialize_value(value):
@@ -55,6 +83,7 @@ class DatabaseRequest:
     session_id: str
     payload_json: str
     payload_hash: str
+    selected_frames: tuple[CapturedFrame, ...] = ()
 
 
 class Database:
@@ -295,6 +324,50 @@ class Database:
                 ),
             )
 
+    def persist_measurement(self, request: DatabaseRequest) -> None:
+        """保存最终图片后写入测量记录，明确未提交时清理本次新建图片。
+
+        Args:
+            request: 冻结内容、图片和周期身份。
+
+        Returns:
+            None  # 图片和测量记录保存成功，失败时抛出原始异常
+        """
+        # 读取冻结路径，记录本次创建的文件。
+        payload = json.loads(request.payload_json)
+        created_paths = []
+        database_attempted = False
+        try:
+            for frame, evidence_ref in zip(request.selected_frames, payload["evidence_refs"]):
+                image_path = Path(evidence_ref)
+                if not image_path.exists():
+                    created_paths.append(image_path)
+                    save_evidence_image(frame.image_data, image_path)
+            # 全部图片写入成功后才执行数据库事务。
+            database_attempted = True
+            self.write_record(request)
+        except Exception:
+            # 查询提交结果，无法确认时保留图片并记录异常。
+            definitely_uncommitted = not database_attempted
+            if database_attempted:
+                try:
+                    with closing(sqlite3.connect(self.configuration.database_path, timeout=1)) as connection:
+                        record = connection.execute(
+                            "SELECT 1 FROM measurements WHERE session_id = ?",
+                            (request.session_id,),
+                        ).fetchone()
+                    definitely_uncommitted = record is None
+                except Exception:
+                    logger.exception("无法确认提交结果，保留图片 session_id=%s", request.session_id)
+            # 仅清理本次创建且确认没有入库的图片。
+            if definitely_uncommitted:
+                for image_path in created_paths:
+                    try:
+                        image_path.unlink(missing_ok=True)
+                    except OSError:
+                        logger.exception("清理未提交图片失败 path=%s", image_path)
+            raise
+
     async def run(self) -> None:
         """逐条写入正常结果，交付成功或失败回调，不自动重试。
 
@@ -314,7 +387,7 @@ class Database:
                     # 初始化最终数据库并写入本轮正常结果。
                     if not self.initialized:
                         await run_blocking_operation(self.initialize)
-                    await run_blocking_operation(self.write_record, request)
+                    await run_blocking_operation(self.persist_measurement, request)
                     self.available = True
                 except Exception as error:
                     # 判断是否为内容冲突，打印错误并准备失败回调。
@@ -341,3 +414,4 @@ class Database:
                 # 移除排队身份并结算本次队列任务。
                 self.queued_records.discard(request.session_id)
                 self.queue.task_done()
+                request = None

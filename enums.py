@@ -19,14 +19,14 @@ class MachineState(str, Enum):
 class SessionState(str, Enum):
     """定义本次测量任务的处理状态，与机器启停状态分开。"""
 
-    RUNNING = "RUNNING"  # 正在采集或等待 OCR、频率及证据处理完成
+    RUNNING = "RUNNING"  # 正在采集或等待 OCR 和频率处理完成
     WAITING_COMMIT_DB = "WAITING_COMMIT_DB"  # 结果完整，等待或正在提交数据库
     COMMITTED = "COMMITTED"  # 本轮结果已确认提交数据库
     FAILED = "FAILED"  # 本轮处理、中断或数据库提交失败
 
 
 class OCRState(str, Enum):
-    """定义整个 Session 的 OCR 处理状态，不表示单个图片或批次的识别结果。"""
+    """定义整个 Session 的 OCR 处理状态，不表示单张图片的识别结果。"""
 
     WAITING = "WAITING"  # 本 Session 等待最终 OCR 结果
     RUNNING = "RUNNING"  # 本 Session 正在处理 OCR，尚未确定最终结果
@@ -51,17 +51,13 @@ class EventType(str, Enum):
     SHUTDOWN = "Shutdown"  # 应用退出
     MACHINE_SYNCHRONIZED = "MachineSynchronized"  # 机器现场状态同步
     CAPACITY_CHANGED = "CapacityChanged"  # 可用容量变化
-    FRAME_BATCH_SELECTED = "FrameBatchSelected"  # 图片批次交付
-    CAPTURE_SEALED = "CaptureSealed"  # 采集和图片交付结束
+    CAPTURE_COMPLETED = "CaptureCompleted"  # 整轮采集结果
+    OCR_COMPLETED = "OCRCompleted"  # 整轮识别结果
     CAPTURE_FAILED = "CaptureFailed"  # 采集失败
-    RECOGNITION_BATCH_COMPLETED = "RecognitionBatchCompleted"  # 识别批次完成
-    RECOGNITION_BATCH_FAILED = "RecognitionBatchFailed"  # 识别批次失败
     OCR_FAILED = "OCRFailed"  # 整轮文字识别失败
     OCR_TIMEOUT = "OCRTimeout"  # 文字识别超时
-    EVIDENCE_VALIDATED = "EvidenceValidated"  # 证据验证成功
-    EVIDENCE_FAILED = "EvidenceFailed"  # 证据验证失败
     FREQUENCY_MEASURED = "FrequencyMeasured"  # 收到有效频率测量
     FREQUENCY_FAILED = "FrequencyFailed"  # 频率采集失败
     CYCLE_TIMEOUT = "CycleTimeout"  # 测量周期超时
     COMMIT_SUCCEEDED = "CommitSucceeded"  # 数据库提交成功
-    COMMIT_FAILED = "CommitFailed"  # 数据库提交失败
+    COMMIT_FAILED = "CommitFailed"  # 数据库提交失败xian

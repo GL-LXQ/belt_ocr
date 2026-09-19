@@ -12,7 +12,7 @@ import pytest
 from app import App
 from configuration import load_configuration
 from enums import OCRState, FrequencyState, SessionState, EventType
-from models import BeltSession, FrequencyMeasurement, MeasurementEvent, OCRResult
+from models import CapturedFrame, BeltSession, FrequencyMeasurement, MeasurementEvent, OCRResult
 
 
 @pytest.fixture
@@ -50,10 +50,20 @@ def frequency_context(tmp_path):
         capture_id="capture-frequency",
         start_time="2026-09-18T00:00:10+00:00",
         capture_start_time=10,
-        is_capture_finished=True,
         ocr_state=OCRState.SUCCESS,
-        ocr_result=OCRResult(("MODEL",), ()),
-        evidence_verified=True,
+        ocr_result=OCRResult(
+            ordered_lines=("MODEL",),
+            selected_frames=(CapturedFrame(
+                session_id="frequency-session",
+                capture_id="capture-frequency",
+                camera_id="CAM01",
+                frame_id="frame-1",
+                captured_at="2026-09-18T00:00:10+00:00",
+                captured_monotonic=10,
+                image_data=b"BM-test",
+            ),),
+            line_frame_ids=(("frame-1",),),
+        ),
     )
     manager.sessions[session.session_id] = session
     manager.active_session_id = session.session_id

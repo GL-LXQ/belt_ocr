@@ -26,16 +26,13 @@ class MeasurementConfiguration:
     evidence_directory: Path
     mvs_development_directory: Path
     capture_window_ms: int = 1000
-    camera_queue_capacity: int = 32
     camera_timeout_ms: int = 50
-    max_frames_per_session: int = 5
     frequency_interval_ms: int = 100
     minimum_frequency_hz: float = 0.01
     maximum_frequency_hz: float = 10000.0
     ocr_result_timeout_ms: int = 30000
     max_cycle_open_ms: int = 60000
     event_queue_capacity: int = 128
-    ocr_queue_capacity: int = 32
     storage_queue_capacity: int = 32
     max_pending_sessions_per_machine: int = 20
     shutdown_timeout_ms: int = 10000
@@ -44,7 +41,6 @@ class MeasurementConfiguration:
     maintenance_interval_ms: int = 250
     max_persistent_records: int = 1000
     minimum_free_disk_bytes: int = 104857600
-    ocr_job_timeout_ms: int = 5000
     event_max_age_ms: int = 30000
     initial_machine_state: MachineState = MachineState.CLOSED
     mvs_dll_directory: Path | None = None
@@ -72,14 +68,14 @@ class MeasurementConfiguration:
 
         # 检查等待期限、采集间隔和队列容量。
         positive_parameters = (
-            "capture_window_ms", "camera_queue_capacity", "camera_timeout_ms", "max_frames_per_session",
+            "capture_window_ms", "camera_timeout_ms",
             "frequency_interval_ms",
             "ocr_result_timeout_ms", "max_cycle_open_ms", "event_queue_capacity",
-            "ocr_queue_capacity", "storage_queue_capacity",
+            "storage_queue_capacity",
             "max_pending_sessions_per_machine",
             "shutdown_timeout_ms",
             "maintenance_interval_ms",
-            "max_persistent_records", "ocr_job_timeout_ms",
+            "max_persistent_records",
             "event_max_age_ms",
         )
         for parameter in positive_parameters:

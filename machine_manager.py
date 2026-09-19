@@ -5,17 +5,18 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict
+from functools import partial
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import uuid4
 
 from camera import SessionCamera
 from configuration import MachineConfiguration, MeasurementConfiguration
 from frequency_adapter import FrequencyAdapter
 from enums import OCRState, FrequencyState, MachineState, SessionState, EventType
+from mvs_sdk import CameraFrame
 from models import BeltSession, MeasurementEvent, PublishEvent
 from async_utils import run_blocking_operation
-from text_recognition import TextRecognizer
+from text_recognition import ImageEncodingError, TextRecognizer
 from database import Database, DatabaseRequest
 
 
@@ -52,7 +53,7 @@ class MachineManager:
         self.deadline_tasks: dict[tuple[str, EventType], asyncio.Task[None]] = {}
         self.capacity_available = True
         self.initialized = False
-        self.background_tasks: set[asyncio.Task[None]] = set()
+        self.recognition_tasks: dict[str, asyncio.Task] = {}
 
     @property
     def acceptance_state(self) -> str:
@@ -101,6 +102,7 @@ class MachineManager:
                 # 通知状态已变化，并标记当前队列任务处理结束。
                 self.state_changed.set()
                 self.queue.task_done()
+                event = None
 
     async def handle_machine_start(self) -> None:
         """检查接收条件，创建本轮测量档案并启动采集窗口和超时任务。
@@ -158,11 +160,12 @@ class MachineManager:
         # 登记本轮 OCR 等待期限，此处只安排超时事件。
         self.schedule_timeout(session, EventType.OCR_TIMEOUT, self.configuration.ocr_result_timeout_ms)
 
-    async def handle_machine_close(self, interrupted: bool = False) -> None:
+    async def handle_machine_close(self, interrupted: bool = False, capture_stop_time: float | None = None) -> None:
         """结束本轮采集，结算频率并检查完成条件。
 
         Args:
-            interrupted: False 表示收到正常 CLOSE；True 表示因故障、超时或退出而中断本轮。
+            interrupted: False 表示正常 CLOSE；True 表示故障、超时或退出中断。
+            capture_stop_time: 关闭信号接收时的单调时间，省略时取当前时间。
 
         Returns:
             None  # 本轮现场采集和频率接收已结束，OCR 与存储按各自状态继续处理
@@ -176,7 +179,9 @@ class MachineManager:
 
         # 找到当前 Session，记录本轮相机采集图片的停止截止时间。
         session = self.sessions[self.active_session_id]
-        session.capture_stop_time = asyncio.get_running_loop().time()
+        session.capture_stop_time = (
+            capture_stop_time if capture_stop_time is not None else asyncio.get_running_loop().time()
+        )
 
         if interrupted:
             # 中断时登记错误和本轮编号，将机器设为等待关闭复位。
@@ -268,7 +273,7 @@ class MachineManager:
                         self.database.save_abnormal_event, "CLOSE_SESSION_MISMATCH", event,
                     )
                     return
-                await self.handle_machine_close()
+                await self.handle_machine_close(capture_stop_time=event.received_monotonic)
                 return
             case EventType.SHUTDOWN:
                 await self.handle_machine_close(interrupted=True)
@@ -329,75 +334,49 @@ class MachineManager:
         # 分派采集结果，保留各事件是否继续结算的处理决定。
         should_finalize = True
         match event.event_type:
-            case EventType.FRAME_BATCH_SELECTED:
-                # 丢弃 OCR 已失败或超时的迟到图片。
-                if session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}:
+            case EventType.CAPTURE_COMPLETED | EventType.CAPTURE_FAILED:
+                # 仅接收等待阶段的采集结果，保留整轮统计。
+                if session.ocr_state != OCRState.WAITING:
                     return
-
-                # 将采集端交付的完整图片批次送入 OCR 队列。
-                accepted = self.text_recognizer.submit_batch(
-                    machine_id=session.machine_id,
-                    session_id=session.session_id,
-                    frames=event.payload,
-                )
-
-                # 成功入队后登记本轮待处理数量，拒收批次按原因分别处理。
-                if accepted:
-                    session.pending_recognition_batches += 1
-                    # 保留已受理原图，直到终选完成或周期异常结束。
-                    session.images_for_final_selection.update(
-                        (frame.frame_id, frame) for frame in event.payload
-                    )
-                else:
-                    session.errors.append("OCR_BATCH_REJECTED")
-                    # 仍在接收说明拒收原因是队列满，本轮识别文字残缺，按整轮失败处理。
-                    # 已停止接收只出现在退出阶段，本轮交给退出流程中断，不在这里定因。
-                    if self.text_recognizer.accepting_batches:
-                        session.ocr_state = OCRState.FAILED
-                        await self.handle_measurement_failure(session)
-
-                # 结束批次转发，等待后续业务事件。
-                return
-
-            case EventType.CAPTURE_SEALED:
-                # 更新本轮采集封口状态，被忽略的封口事件直接结束处理。
-                if not await self.handle_capture_finished(session, event):
-                    return
-
-            case EventType.RECOGNITION_BATCH_COMPLETED:
-                # 保存本批识别结果，减少本轮待处理批次数。
-                session.recognition_results.extend(event.payload)
-                session.pending_recognition_batches -= 1
-
-            case EventType.RECOGNITION_BATCH_FAILED:
-                # 整批识别失败会让本轮文字残缺，登记错误并结束本轮。
-                session.errors.append(event.payload)
-                session.ocr_state = OCRState.FAILED
-                session.pending_recognition_batches -= 1
-
-            case EventType.EVIDENCE_VALIDATED | EventType.EVIDENCE_FAILED:
-                # 结算证据校验，登记成功状态或失败原因。
-                session.evidence_validation_pending = False
-                if event.event_type == EventType.EVIDENCE_VALIDATED:
-                    session.evidence_verified = True
-                else:
+                summary = event.payload
+                session.skipped_frame_count = summary.skipped_frame_count
+                session.capture_summary = summary.statistics
+                if summary.errors:
                     session.ocr_state = OCRState.FAILED
-                    session.errors.append("EVIDENCE_UNAVAILABLE")
-            case (
-                EventType.OCR_FAILED
-                | EventType.CAPTURE_FAILED
-                | EventType.OCR_TIMEOUT
-            ):
-                # 忽略已有 OCR 终态，登记本次失败或超时。
-                if session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}:
+                    session.errors.extend(summary.errors)
+                else:
+                    # 按信号接收时间排除关闭后取得的帧，更新交付统计。
+                    frames = summary.frames
+                    if session.capture_stop_time is not None:
+                        frames = tuple(
+                            frame for frame in frames if frame.received_monotonic <= session.capture_stop_time
+                        )
+                        session.skipped_frame_count += len(summary.frames) - len(frames)
+                        session.capture_summary["retained_frame_count"] = len(frames)
+                        session.capture_summary["skipped_frame_count"] = session.skipped_frame_count
+                    # 启动一个整轮后台任务并登记完成回调。
+                    session.ocr_state = OCRState.RUNNING
+                    task = asyncio.create_task(self.recognize_session(session, frames))
+                    self.recognition_tasks[session.session_id] = task
+                    task.add_done_callback(
+                        partial(self.handle_recognition_task_finished, session.session_id)
+                    )
                     return
-                if session.ocr_state == OCRState.SUCCESS:
+            case EventType.OCR_COMPLETED:
+                # 只接收正在处理周期的一次最终结果。
+                if session.ocr_state != OCRState.RUNNING:
                     return
-                session.ocr_state = (
-                    OCRState.TIMED_OUT
-                    if event.event_type == EventType.OCR_TIMEOUT
-                    else OCRState.FAILED
-                )
+                session.ocr_result = event.payload
+                session.ocr_state = OCRState.SUCCESS
+                # 撤销已经成功周期的 OCR 超时通知。
+                deadline = self.deadline_tasks.pop((session.session_id, EventType.OCR_TIMEOUT), None)
+                if deadline is not None:
+                    deadline.cancel()
+            case EventType.OCR_FAILED | EventType.OCR_TIMEOUT:
+                # 忽略已有终态，登记处理失败或超时。
+                if session.ocr_state not in {OCRState.WAITING, OCRState.RUNNING}:
+                    return
+                session.ocr_state = OCRState.TIMED_OUT if event.event_type == EventType.OCR_TIMEOUT else OCRState.FAILED
                 session.errors.append(event.payload or "OCR_TIMEOUT")
             case EventType.FREQUENCY_MEASURED:
                 should_finalize = await self.handle_frequency_measured(session, event)
@@ -417,23 +396,7 @@ class MachineManager:
         if not should_finalize:
             return
 
-        # 判断 OCR 或频率是否整轮失败，停止本轮处理并清理资源。
-        if (
-            session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}
-            or session.frequency_state == FrequencyState.FAILED
-        ):
-            await self.handle_measurement_failure(session)
-            return
-
-        # 状态更新后，统一判断本 Session OCR 是否结束并触发一次文字和图片终选。
-        if self.is_session_ocr_finished(session) and not session.text_postprocessing_started:
-            session.text_postprocessing_started = True
-            if session.ocr_state not in {OCRState.FAILED, OCRState.TIMED_OUT}:
-                self.text_recognizer.select_final_text_and_img(
-                    session.recognition_results, session.images_for_final_selection
-                )
-
-        # 文字终选检查后，继续执行原有的测量结算检查。
+        # 统一处理本轮失败或满足条件后的提交。
         await self.try_finalize(session)
 
     async def handle_commit_result(self, session: BeltSession, event: MeasurementEvent) -> None:
@@ -485,12 +448,11 @@ class MachineManager:
             session.errors,
         )
 
-        # 释放本轮图片、识别结果和未消费批次。
-        session.images_for_final_selection.clear()
-        session.recognition_results.clear()
-        self.text_recognizer.discard_session_batches(session.session_id)
-        session.pending_recognition_batches = 0
-        session.evidence_validation_pending = False
+        # 取消等待或正在执行的识别任务，后台线程结束后自行释放锁。
+        recognition_task = self.recognition_tasks.get(session.session_id)
+        if recognition_task is not None:
+            recognition_task.cancel()
+        session.ocr_result = None
         session.frozen_payload = None
         session.payload_hash = None
 
@@ -516,56 +478,62 @@ class MachineManager:
             # 移除已经结束现场阶段的失败档案。
             self.sessions.pop(session.session_id)
 
-    async def handle_capture_finished(self, session: BeltSession, event: MeasurementEvent) -> bool:
-        """封口图像窗口并保存本轮采集统计和错误。
+    def handle_recognition_task_finished(self, session_id: str, task: asyncio.Task) -> None:
+        """移除识别任务并报告未处理的结果交付异常。
 
         Args:
-            session: 事件所属的测量档案。
-            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
+            session_id: 任务所属周期编号。
+            task: 已结束或取消的整轮识别任务。
 
         Returns:
-            bool: 是否继续执行本轮完成检查。
-            返回示例：
-                True  # 继续检查本轮能否结算
-                False  # 忽略当前事件，不执行完成检查
+            None  # 任务引用已释放，未处理异常已报告
         """
-        # 忽略本轮重复到达的采集封口事件。
-        if session.is_capture_finished:
-            return False
+        # 取消的任务只清理登记，不再报告处理故障。
+        self.recognition_tasks.pop(session_id, None)
+        if task.cancelled():
+            return
+        # 将事件交付等意外异常交给应用退出流程。
+        error = task.exception()
+        if error is not None:
+            self.camera.report_failure(error, f"OCR 结果交付 session_id={session_id}")
 
-        # 校验封口摘要的采集编号，冲突事件只记录异常信息。
-        summary = event.payload
-        if summary.capture_id != session.capture_id:
-            await run_blocking_operation(
-                self.database.save_abnormal_event, "CAPTURE_IDENTITY_CONFLICT", event,
-            )
-            return False
-
-        # 标记图像清单已封闭，保存跳帧数量和完整采集统计。
-        session.is_capture_finished = True
-        session.skipped_frame_count = summary.skipped_frame_count
-        session.capture_summary = summary.statistics
-
-        # 采集或证据交付失败时，登记本轮识别失败和错误信息。
-        if summary.errors:
-            session.ocr_state = OCRState.FAILED
-            session.errors.extend(summary.errors)
-
-        # 返回封口处理结果，由事件主流程判断是否开始文字筛选。
-        return True
-
-    def is_session_ocr_finished(self, session: BeltSession) -> bool:
-        """判断本轮采集是否已封口且已提交的 OCR 批次是否全部结算。
+    async def recognize_session(self, session: BeltSession, frames: tuple[CameraFrame, ...]) -> None:
+        """等待共享锁并执行整轮 OCR，向所属周期交付一次结果。
 
         Args:
-            session: 保存采集封口状态和待处理批次数的测量周期。
+            session: 原测量周期，任务执行前检查其状态。
+            frames: 本轮全部原始帧。
 
         Returns:
-            True  # 采集已封口且待处理批次数为零，包含已结算的失败批次
-            False  # 采集尚未封口或仍有批次等待结算
+            None  # 最终结果或失败原因通过事件交付
         """
-        # 只判断本轮识别是否结束，不修改周期状态。
-        return session.is_capture_finished and session.pending_recognition_batches <= 0
+        # 等待共享锁，失效周期不再调用编码和模型。
+        async with self.text_recognizer.processing_lock:
+            if session.state != SessionState.RUNNING:
+                return
+            try:
+                result = await run_blocking_operation(
+                    self.text_recognizer.process_session_frames,
+                    session.session_id,
+                    session.capture_id,
+                    session.camera_id,
+                    frames,
+                    self.camera.device.encode_image,
+                )
+            except Exception as error:
+                logger.exception("OCR 处理失败 session_id=%s", session.session_id)
+                if isinstance(error, ImageEncodingError):
+                    self.camera.report_failure(
+                        error.__cause__,
+                        f"相机编码 machine_id={session.machine_id} camera_id={session.camera_id}",
+                    )
+                event_type, payload = EventType.OCR_FAILED, str(error)
+            else:
+                event_type, payload = EventType.OCR_COMPLETED, result
+        # 释放原始帧后只交付仍然有效周期的结果。
+        frames = ()
+        if session.state == SessionState.RUNNING:
+            await self.publish_event(MeasurementEvent(event_type, session.machine_id, session.session_id, payload))
 
     async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> bool:
         """按接收顺序保存黑盒交付的新有效测量。
@@ -613,32 +581,25 @@ class MachineManager:
             await self.handle_measurement_failure(session)
             return
 
-        # 判断采集是否封口、批次是否全部结算。
-        if not session.is_capture_finished or session.pending_recognition_batches != 0:
-            return
-
-        # 判断 OCR 和频率是否均已成功。
+        # 正常关闭并且 OCR、频率均成功后，才准备提交。
         if (
-            session.ocr_state != OCRState.SUCCESS
+            not session.frequency_window_sealed
+            or self.active_session_id == session.session_id
+            or session.ocr_state != OCRState.SUCCESS
             or session.frequency_state != FrequencyState.SUCCESS
         ):
-            return
-
-        # 判断证据是否已验证，启动尚未执行的验证任务。
-        if not session.evidence_verified:
-            if not session.evidence_validation_pending:
-                session.evidence_validation_pending = True
-                task = asyncio.create_task(self.validate_evidence(
-                    session.session_id, session.ocr_result.evidence_refs,
-                ))
-                self.background_tasks.add(task)
-                task.add_done_callback(self.background_tasks.discard)
             return
 
         # 记录结算时间，获取最终频率和 OCR 结果。
         session.finish_time = datetime.now(timezone.utc).isoformat()
         final_frequency = session.final_frequency
         ocr_result = session.ocr_result
+        # 按机器、周期和帧编号生成最终图片路径。
+        evidence_directory = self.configuration.evidence_directory / session.machine_id / session.session_id
+        image_paths = {
+            frame.frame_id: str(evidence_directory / f"{frame.frame_id}.bmp")
+            for frame in ocr_result.selected_frames
+        }
         # 组装本轮身份、测量结果、采集统计和配置数据。
         payload = {
             "session_id": session.session_id,
@@ -647,9 +608,13 @@ class MachineManager:
             "frequency_source_id": session.frequency_source_id,
             "start_time": session.start_time,
             "finish_time": session.finish_time,
-            "ordered_lines": list(ocr_result.ordered_lines) if ocr_result else [],
-            "evidence_refs": list(ocr_result.evidence_refs) if ocr_result else [],
-            "final_frequency_hz": final_frequency.value_hz if final_frequency else None,
+            "ordered_lines": list(ocr_result.ordered_lines),
+            "evidence_refs": list(image_paths.values()),
+            "line_evidence_refs": [
+                [image_paths[frame_id] for frame_id in frame_ids]
+                for frame_ids in ocr_result.line_frame_ids
+            ],
+            "final_frequency_hz": final_frequency.value_hz,
             "measurement_frequencies": [
                 asdict(measurement)
                 for measurement in session.measurement_frequencies
@@ -664,38 +629,12 @@ class MachineManager:
         session.payload_hash = hashlib.sha256(
             session.frozen_payload.encode()
         ).hexdigest()
-        # 释放本轮内存图片并移除剩余排队批次。
-        session.images_for_final_selection.clear()
-        session.pending_recognition_batches -= (
-            self.text_recognizer.discard_session_batches(session.session_id)
-        )
-
         # 撤销已冻结周期的剩余期限任务。
         for deadline_key in tuple(self.deadline_tasks):
             if deadline_key[0] == session.session_id:
                 self.deadline_tasks.pop(deadline_key).cancel()
         # 提交本轮冻结记录。
         await self.submit_frozen_record(session)
-
-    async def validate_evidence(
-        self, session_id: str, evidence_refs: tuple[str, ...]
-    ) -> None:
-        """在后台读取证据并把检查结果返回本机队列。"""
-        try:
-            for evidence_ref in evidence_refs:
-                image_content = await asyncio.wait_for(
-                    run_blocking_operation(Path(evidence_ref).read_bytes),
-                    self.configuration.ocr_job_timeout_ms / 1000,
-                )
-                if not image_content:
-                    raise ValueError("证据文件为空。")
-            event_type = EventType.EVIDENCE_VALIDATED
-        except Exception:
-            logger.exception("最终证据检查失败 session_id=%s", session_id)
-            event_type = EventType.EVIDENCE_FAILED
-        await self.publish_event(MeasurementEvent(
-            event_type, self.machine.machine_id, session_id,
-        ))
 
     async def submit_frozen_record(self, session: BeltSession) -> None:
         """提交本轮正常结果，提交异常或队列满时结束本轮任务。
@@ -710,8 +649,11 @@ class MachineManager:
         session.state = SessionState.WAITING_COMMIT_DB
         request = DatabaseRequest(
             session.machine_id, session.session_id,
-            session.frozen_payload, session.payload_hash,
+            session.frozen_payload, session.payload_hash, session.ocr_result.selected_frames,
         )
+
+        # 将最终图片所有权交给提交请求，Session 不再保留图片。
+        session.ocr_result = None
 
         # 提交存储队列，登记入队异常或容量不足。
         try:

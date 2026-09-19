@@ -1,155 +1,131 @@
-"""验证整批推理、结果归属和批次异常处理。"""
+"""验证整轮 OCR 的阶段顺序、数据契约和黑盒失败边界。"""
 
-import asyncio
-import threading
-import unittest
+import time
 from unittest.mock import Mock
 
-from enums import OCRState
+import pytest
 
-import test_measurement_flow as flow_support
+from models import OCRResult
+from mvs_sdk import CameraFrame
+from text_recognition import TextRecognizer
 
 
-class TextRecognitionTests(unittest.IsolatedAsyncioTestCase):
-    """使用模型替身验证批次消费到 Session 结果保存。"""
+@pytest.fixture
+def recognition_inputs():
+    """创建原始帧和无设备依赖的编码接口。
 
-    asyncSetUp = flow_support.MeasurementFlowTests.asyncSetUp
-    asyncTearDown = flow_support.MeasurementFlowTests.asyncTearDown
-    start_app = flow_support.MeasurementFlowTests.start_app
-    wait_for_state = flow_support.MeasurementFlowTests.wait_for_state
+    Args:
+        无外部参数。
 
-    async def test_batch_inference_preserves_machine_frame_and_raw_results(self) -> None:
-        """验证整批调用在线程中执行，原始结果返回所属机器和周期。
+    Returns:
+        (frames, encoder)  # 独立帧集合与图片编码替身
+    """
+    frames = tuple(
+        CameraFrame("serial", number, 0, 0, time.monotonic(), 2, 2, 0, 0, b"pixels")
+        for number in range(1, 4)
+    )
+    return (
+        frames,
+        Mock(return_value=(".bmp", b"BM-image")),
+    )
 
-        Args:
-            无外部参数。
 
-        Returns:
-            None  # 完成批量调用、结果结构和归属断言
-        """
-        # 为两台机器各准备一批两张图片，等待图片全部入队。
-        app = await self.start_app(capture_window_ms=180)
-        for machine_id in ("M01", "M02"):
-            await app.handle_start(machine_id)
-        sessions = [
-            next(iter(app.machine_managers[machine_id].sessions.values()))
-            for machine_id in ("M01", "M02")
-        ]
-        await self.wait_for_state(lambda: all(session.is_capture_finished for session in sessions))
+def test_processing_order_and_image_identity(recognition_inputs):
+    """验证编码、筛选、识别和终选顺序以及跨帧对应关系。
 
-        # 准备包含重复行和空图片结果的模型替身。
-        blocks = [{
-            "bbox": [1, 2, 30, 40],
-            "lines": [
-                {
-                    "text": "003",
-                    "bbox": [1, 2, 10, 12],
-                    "confidence": 0.4,
-                },
-                {
-                    "text": "003",
-                    "bbox": [1, 13, 10, 23],
-                    "confidence": 0.99,
-                },
-            ],
-        }]
-        event_loop_thread = threading.get_ident()
-        inference_threads = []
+    Args:
+        recognition_inputs: 原始帧和编码替身。
 
-        def recognize_images(images: list[bytes]) -> list[dict]:
-            """记录推理线程并返回本批两张图片的测试结果。
+    Returns:
+        None  # 顺序、筛选和最终来源对应关系已验证
+    """
+    frames, encoder = recognition_inputs
+    recognizer = TextRecognizer()
+    calls = []
 
-            Args:
-                images: 当前批次的有序内存 BMP 字节。
-
-            Returns:
-                [
-                    {"blocks": blocks},  # 第一张图片的文字块，含坐标和原始文字行
-                    {"blocks": []},  # 第二张图片没有文字
-                ]
-            """
-            # 记录执行线程，确认模型每次接收两张图片。
-            inference_threads.append(threading.get_ident())
-            self.assertEqual(len(images), 2)
-
-            # 返回保留原始行信息的结果和无文字结果。
-            return [
-                {"blocks": blocks},
-                {"blocks": []},
-            ]
-
-        # 手动启动消费者，等待两批结果进入各自机器的事件队列。
-        recognizer = app.text_recognizer
-        recognizer.recognize_batch = Mock(side_effect=recognize_images)
-        listener = asyncio.create_task(recognizer.listen_and_recognize_batches(app.publish_event))
-        try:
-            await asyncio.wait_for(recognizer.batch_queue.join(), 3)
-            for machine_id in ("M01", "M02"):
-                await app.machine_managers[machine_id].queue.join()
-
-            # 检查每批只调用一次模型，所有推理均在业务线程之外执行。
-            self.assertEqual(recognizer.recognize_batch.call_count, 2)
-            self.assertTrue(all(thread_id != event_loop_thread for thread_id in inference_threads))
-
-            # 检查结果归属、图片顺序、重复文字及空文字结果均被保留。
-            for session in sessions:
-                results = session.recognition_results
-                self.assertEqual(len(results), 2)
-                self.assertIs(results[0]["blocks"], blocks)
-                self.assertEqual(results[1]["blocks"], [])
-                self.assertNotEqual(results[0]["frame_id"], results[1]["frame_id"])
-                self.assertTrue(all(
-                    result["frame_id"] in session.images_for_final_selection for result in results
-                ))
-                self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
-                self.assertIn(
-                    [session.images_for_final_selection[result["frame_id"]].image_data for result in results],
-                    [call.args[0] for call in recognizer.recognize_batch.call_args_list],
-                )
-                self.assertEqual(session.ocr_state, OCRState.WAITING)
-        finally:
-            # 取消等待下一批的监听任务。
-            listener.cancel()
-            await asyncio.gather(listener, return_exceptions=True)
-
-    async def test_failed_batch_does_not_stop_next_batch(self) -> None:
-        """验证模型失败只回传本批错误，消费者继续处理下一批。
+    def filter_frames(images):
+        """检查编码已全部完成并排除首帧。
 
         Args:
-            无外部参数。
+            images: 已编码图片。
 
         Returns:
-            None  # 完成失败归属、后续消费和预留接口断言
+            images[1:]  # 保留后两帧
         """
-        # 检查联调接口返回独立的空结果，再准备满批和尾批的采集。
-        app = await self.start_app(capture_window_ms=350, max_frames_per_session=10)
-        recognizer = app.text_recognizer
-        placeholder_results = recognizer.recognize_batch([b"first", b"second"])
-        self.assertEqual(placeholder_results, [{"blocks": []}, {"blocks": []}])
-        self.assertIsNot(placeholder_results[0]["blocks"], placeholder_results[1]["blocks"])
+        assert encoder.call_count == 3
+        calls.append("filter")
+        return images[1:]
 
-        # 启动采集并等待所有图片批次入队。
-        await app.handle_start("M01")
-        manager = app.machine_managers["M01"]
-        session = manager.sessions[manager.active_session_id]
-        await self.wait_for_state(lambda: session.is_capture_finished)
+    def recognize_images(images):
+        """核对仅识别合格图片。
 
-        # 第一批模拟模型异常，第二批返回两张图片的空文字结果。
-        recognizer.recognize_batch = Mock(side_effect=[
-            RuntimeError("测试整批推理失败"),
-            [{"blocks": []}, {"blocks": []}],
-        ])
-        listener = asyncio.create_task(recognizer.listen_and_recognize_batches(app.publish_event))
-        try:
-            await asyncio.wait_for(recognizer.batch_queue.join(), 3)
-            await manager.queue.join()
+        Args:
+            images: 合格图片字节。
 
-            # 检查失败批次未重试，尾批结果已保存，整轮未被标为完成。
-            self.assertEqual(recognizer.recognize_batch.call_count, 2)
-            self.assertEqual(session.errors, ["测试整批推理失败"])
-            self.assertEqual(len(session.recognition_results), 2)
-            self.assertEqual(session.ocr_state, OCRState.WAITING)
-        finally:
-            # 取消监听任务，结束本次测试的消费流程。
-            listener.cancel()
-            await asyncio.gather(listener, return_exceptions=True)
+        Returns:
+            [{"blocks": []}, {"blocks": []}]  # 两张图片的测试模型结果
+        """
+        assert len(images) == 2
+        calls.append("recognize")
+        return [{"blocks": []}, {"blocks": []}]
+
+    def select_result(results, images):
+        """检查帧身份并生成一条文字对应两张图片。
+
+        Args:
+            results: 逐图识别结果。
+            images: 合格内存图片。
+
+        Returns:
+            OCRResult  # 一条文字、两张图片及其来源编号
+        """
+        calls.append("select")
+        assert [result["frame_id"] for result in results] == ["capture-2", "capture-3"]
+        assert all(image.session_id == "session" for image in images)
+        return OCRResult(("ABC",), images, (("capture-2", "capture-3"),))
+
+    # 替换三个算法边界，执行真实顺序主流程。
+    recognizer.filter_qualified_frames = filter_frames
+    recognizer.recognize_images = recognize_images
+    recognizer.generate_final_text_and_images = select_result
+    result = recognizer.process_session_frames("session", "capture", "camera", frames, encoder)
+    assert calls == ["filter", "recognize", "select"]
+    assert result.ordered_lines == ("ABC",)
+    assert len(result.selected_frames) == 2
+    assert result.line_frame_ids == (("capture-2", "capture-3"),)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["no_frames", "no_qualified", "model", "selection", "no_text", "no_images", "count"],
+)
+def test_processing_failure_boundaries(recognition_inputs, failure):
+    """验证空数据、未实现算法和模型输出异常均不会产生成功结果。
+
+    Args:
+        recognition_inputs: 原始帧与编码接口。
+        failure: 要注入的失败阶段。
+
+    Returns:
+        None  # 每种失败均抛出明确异常
+    """
+    frames, encoder = recognition_inputs
+    recognizer = TextRecognizer()
+    if failure == "no_frames":
+        frames = ()
+    if failure == "no_qualified":
+        recognizer.filter_qualified_frames = lambda images: ()
+    if failure not in {"no_frames", "no_qualified", "model"}:
+        recognizer.recognize_images = lambda images: [{"blocks": []} for image in images]
+    if failure == "count":
+        recognizer.recognize_images = lambda images: []
+    if failure in {"no_text", "no_images"}:
+        recognizer.generate_final_text_and_images = lambda results, images: OCRResult(
+            ordered_lines=() if failure == "no_text" else ("ABC",),
+            selected_frames=() if failure == "no_images" else images,
+            line_frame_ids=(),
+        )
+    with pytest.raises((ValueError, NotImplementedError)):
+        recognizer.process_session_frames("session", "capture", "camera", frames, encoder)
+    if failure == "no_frames":
+        encoder.assert_not_called()
