@@ -344,15 +344,15 @@ class MachineManager:
                 # 仅接收等待阶段的采集结果，保留整轮统计。
                 if session.ocr_state != OCRState.WAITING:
                     return
-                summary = event.payload
-                session.capture_summary = summary.statistics
-                if summary.errors:
+                capture_result = event.payload
+                session.capture_summary = capture_result.statistics
+                if capture_result.errors:
                     session.ocr_state = OCRState.FAILED
-                    session.errors.extend(summary.errors)
+                    session.errors.extend(capture_result.errors)
                 else:
                     # 启动一个整轮后台任务并登记完成回调。
                     session.ocr_state = OCRState.RUNNING
-                    task = asyncio.create_task(self.recognize_session(session, summary.frames))
+                    task = asyncio.create_task(self.recognize_session(session, capture_result.frames))
                     self.recognition_task = task
                     task.add_done_callback(self.handle_recognition_task_finished)
                     return

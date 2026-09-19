@@ -290,9 +290,9 @@ def test_empty_capture_waits_until_deadline(camera, start_capture, wait_capture)
     with pytest.raises(asyncio.TimeoutError):
         wait_capture(task, 0.05)
     result = wait_capture(task, 2)
-    assert result.received_frame_count == 0
-    assert 0.18 <= result.capture_duration_seconds < 1
-    assert result.camera_stopped
+    assert result.statistics["received_frame_count"] == 0
+    assert 0.18 <= result.statistics["capture_duration_seconds"] < 1
+    assert result.statistics["camera_stopped"]
 
 
 
@@ -365,12 +365,12 @@ def test_sdk_errors_are_recorded_and_resources_released(camera, operation, start
     camera.handle.frames.put(b"frame")
     task = start_capture(camera, duration_seconds=0.05)
     result = wait_capture(task, 2)
-    assert bool(result.capture_errors)
-    assert result.capture_errors
-    assert result.camera_stopped == (operation != "stop")
+    assert bool(result.errors)
+    assert result.errors
+    assert result.statistics["camera_stopped"] == (operation != "stop")
     assert not camera.handle.buffer_outstanding
     assert task.completion_future.done()
-    assert result.received_frame_count == (0 if operation in {"start", "get"} else 1)
+    assert result.statistics["received_frame_count"] == (0 if operation in {"start", "get"} else 1)
     with pytest.raises(MvsError, match="不可用"):
         start_capture(camera)
 
@@ -408,9 +408,9 @@ def test_copy_exception_still_frees_sdk_buffer(camera, monkeypatch, start_captur
     monkeypatch.setattr(mvs_sdk.ctypes, "string_at", fail_copy)
     camera.handle.frames.put(b"frame")
     result = wait_capture(start_capture(camera))
-    assert result.received_frame_count == 1
+    assert result.statistics["received_frame_count"] == 1
     assert len(result.frames) == 0
-    assert bool(result.capture_errors)
+    assert bool(result.errors)
     assert camera.handle.released_frames.get_nowait() == 1
     assert not camera.handle.buffer_outstanding
 
@@ -534,8 +534,8 @@ def test_stop_exception_blocks_next_capture(camera, monkeypatch, start_capture, 
 
     monkeypatch.setattr(camera.handle, "MV_CC_StopGrabbing", fail_stop)
     result = wait_capture(start_capture(camera, duration_seconds=0.05))
-    assert not result.camera_stopped
-    assert bool(result.capture_errors)
+    assert not result.statistics["camera_stopped"]
+    assert bool(result.errors)
     with pytest.raises(MvsError, match="不可用"):
         start_capture(camera)
 
@@ -621,7 +621,7 @@ def test_collects_all_owned_frames_without_encoding(camera, start_capture, wait_
     result = wait_capture(start_capture(camera, duration_seconds=0.1, timeout_ms=5))
     assert len(result.frames) == 12
     assert [frame.data for frame in result.frames] == [f"frame-{number}".encode() for number in range(12)]
-    assert result.received_frame_count == 12
+    assert result.statistics["received_frame_count"] == 12
     assert not camera.capture_lock.locked()
 
 
@@ -667,7 +667,7 @@ def test_close_keeps_inflight_tail_frame(camera, monkeypatch, start_capture, wai
         release.set()
     result = wait_capture(task, 2)
     assert [frame.data for frame in result.frames] == [b"late"]
-    assert result.camera_stopped
+    assert result.statistics["camera_stopped"]
 
 
 
@@ -703,5 +703,5 @@ def test_thread_start_failure_releases_camera(camera, start_capture, monkeypatch
 
     # 恢复线程入口，确认同一相机可以正常采集。
     result = wait_capture(start_capture(camera, duration_seconds=0.05))
-    assert result.camera_stopped
-    assert not result.capture_errors
+    assert result.statistics["camera_stopped"]
+    assert not result.errors

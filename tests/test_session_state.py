@@ -336,7 +336,7 @@ def test_delayed_close_keeps_all_delivered_frames(frequency_context):
         None  # OCR 收到本轮交付的全部帧
     """
     from mvs_sdk import CameraFrame
-    from models import CaptureSummary
+    from models import CaptureResult
 
     app, manager, session = frequency_context
     expected_result = session.ocr_result
@@ -364,7 +364,7 @@ def test_delayed_close_keeps_all_delivered_frames(frequency_context):
         ))
         await manager.handle_event(MeasurementEvent(
             EventType.CAPTURE_COMPLETED, "M01", session.session_id,
-            CaptureSummary(session.capture_id, frames=frames),
+            CaptureResult(session.capture_id, frames=frames),
         ))
         await asyncio.gather(*tuple((manager.recognition_task,)))
         assert app.text_recognizer.process_session_frames.call_args.args[3] == frames

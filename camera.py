@@ -9,19 +9,8 @@ from dataclasses import dataclass, field
 
 from configuration import MachineConfiguration, MeasurementConfiguration
 from enums import EventType
-from models import CaptureSummary, MeasurementEvent, PublishEvent
-from mvs_sdk import CameraFrame, MvsCamera, MvsError
-
-
-@dataclass(frozen=True)
-class CaptureResult:
-    """保存一轮独立内存帧与采集统计。"""
-
-    frames: tuple[CameraFrame, ...] = field(repr=False)
-    capture_duration_seconds: float
-    received_frame_count: int
-    camera_stopped: bool
-    capture_errors: tuple[str, ...]
+from models import CaptureResult, MeasurementEvent, PublishEvent
+from mvs_sdk import MvsCamera, MvsError
 
 
 @dataclass(eq=False)
@@ -83,13 +72,18 @@ class CaptureTask:
             finally:
                 self.camera.capture_lock.release()
 
-            # 收集最终统计，将帧集合交给异步调用方。
+            # 一次性整理本轮帧、采集统计和错误。
             result = CaptureResult(
+                capture_id=self.capture_id,
                 frames=tuple(frames),
-                capture_duration_seconds=time.monotonic() - self.capture_start_time,
-                received_frame_count=self.camera.received_frame_count - initial_frame_count,
-                camera_stopped=camera_stopped,
-                capture_errors=tuple(errors),
+                statistics={
+                    "capture_duration_seconds": time.monotonic() - self.capture_start_time,
+                    "received_frame_count": self.camera.received_frame_count - initial_frame_count,
+                    "retained_frame_count": len(frames),
+                    "camera_stopped": camera_stopped,
+                    "capture_errors": list(errors),
+                },
+                errors=tuple(errors),
             )
 
             # 保存整轮结果，通知等待结果的异步任务继续执行。
@@ -251,24 +245,11 @@ class SessionCamera:
             None  # 整轮结果已交付，采集引用已移除
         """
         try:
-            # 等待相机停止并准备不包含图像字节的统计信息。
+            # 等待采集线程交付完整结果。
             result = await asyncio.shield(asyncio.wrap_future(capture_task.completion_future))
-            statistics = {
-                "capture_duration_seconds": result.capture_duration_seconds,
-                "received_frame_count": result.received_frame_count,
-                "retained_frame_count": len(result.frames),
-                "camera_stopped": result.camera_stopped,
-                "capture_errors": list(result.capture_errors),
-            }
-            summary = CaptureSummary(
-                capture_id=capture_task.capture_id,
-                frames=result.frames,
-                statistics=statistics,
-                errors=result.capture_errors,
-            )
-            # 正常和失败采集均只交付一个整轮事件。
-            event_type = EventType.CAPTURE_FAILED if result.capture_errors else EventType.CAPTURE_COMPLETED
-            await self.publish_event(MeasurementEvent(event_type, self.machine.machine_id, session_id, summary))
+            # 根据采集错误发布一次整轮结果事件。
+            event_type = EventType.CAPTURE_FAILED if result.errors else EventType.CAPTURE_COMPLETED
+            await self.publish_event(MeasurementEvent(event_type, self.machine.machine_id, session_id, result))
         finally:
             self.current_capture = None
 

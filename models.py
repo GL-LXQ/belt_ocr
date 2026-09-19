@@ -63,8 +63,8 @@ class OCRResult:
 
 
 @dataclass(frozen=True)
-class CaptureSummary:
-    """携带本轮原始帧、采集统计、跳帧数和失败原因。"""
+class CaptureResult:
+    """保存本次采集编号、全部原始帧、统计和错误。"""
 
     capture_id: str
     frames: tuple[CameraFrame, ...] = field(default=(), repr=False)
