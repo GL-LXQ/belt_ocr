@@ -99,7 +99,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                         "queued_events": machine_manager.queue.qsize(),
                     }
                     for machine_manager in self.app.machine_managers.values()
-                    for session in machine_manager.sessions.values()
+                    for session in (machine_manager.current_session,) if session is not None
                 ]
                 workers = [
                     (task.get_name(), task.done(), str(task.get_coro()))
@@ -129,7 +129,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_app(capture_window_ms=400)
         await asyncio.gather(*(app.handle_start(identity) for identity in app.machine_managers))
         await self.wait_for_state(lambda: all(
-            next(iter(manager.sessions.values())).ocr_state == OCRState.SUCCESS
+            manager.current_session.ocr_state == OCRState.SUCCESS
             for manager in app.machine_managers.values()
         ))
         # OCR 完成时图片仍在内存，没有提前写入。
@@ -148,7 +148,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                 value["session_id"] == record["session_id"] for value in record["measurement_frequencies"]
             ))
 
-    async def test_early_close_and_next_cycle_keep_ownership(self):
+    async def test_early_close_and_sequential_cycles_keep_ownership(self):
         """验证提前关闭和立即重启不会混用相机帧与 OCR 结果。
 
         Args:
@@ -161,9 +161,10 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         manager = app.machine_managers["M01"]
         for cycle_number in range(2):
             await app.handle_start("M01")
-            session = manager.sessions[manager.active_session_id]
+            session = manager.current_session
             await self.wait_for_state(lambda: bool(session.measurement_frequencies))
             await app.handle_close("M01")
+            await app.wait_until_idle()
         await app.wait_until_idle()
         records = self.read_records()
         self.assertEqual(len(records), 2)
@@ -187,10 +188,10 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         app.text_recognizer.recognize_images = TextRecognizer().recognize_images
         await app.handle_start("M01")
         manager = app.machine_managers["M01"]
-        session = manager.sessions[manager.active_session_id]
+        session = manager.current_session
         await self.wait_for_state(lambda: session.state == SessionState.FAILED)
         self.assertIn("OCR_MODEL_NOT_IMPLEMENTED", session.errors)
-        self.assertEqual(manager.active_session_id, session.session_id)
+        self.assertEqual(manager.current_session.session_id, session.session_id)
         await app.handle_close("M01")
         await app.wait_until_idle()
         self.assertEqual(self.read_records(), [])

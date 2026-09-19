@@ -47,17 +47,21 @@ class CaptureTask:
             None  # 结果通过 completion_future 交付
         """
         # 准备本轮帧集合、截止时间和统计基线。
-        frames = []
-        errors = []
+        frames = []   # 存放这一轮采集到的原始帧
+        errors = []  # 记录采集或停止相机时的错误
         skipped_count = 0
         camera_stopped = True
         initial_frame_count = self.camera.received_frame_count
-        deadline = self.capture_start_time + self.duration_seconds
+        deadline = self.capture_start_time + self.duration_seconds  # 本轮采集的截止时间
         try:
             # 未提前关闭时启动取流，循环保存边界内的独立内存帧。
             if not self.stop_requested.is_set() and time.monotonic() < deadline:
+                # 没有收到停止信号；采集窗口还没过期，执行 start_grabbing
                 self.camera.start_grabbing()
+            
+            # 本次采集未提前停止并且没过期，进入循环，每次读取一帧
             while not self.stop_requested.is_set() and time.monotonic() < deadline:
+                # 读取本轮采集的剩余时间
                 remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
                 frame = self.camera.read_frame(self.stop_requested, min(self.timeout_ms, remaining_ms))
                 if frame is None:
@@ -95,6 +99,8 @@ class CaptureTask:
                 camera_stopped=camera_stopped,
                 capture_errors=tuple(errors),
             )
+
+            # 填入future的值，SessionCamera对象中finish_capture的await会执行
             self.completion_future.set_result(result)
 
     def wait(self, timeout_seconds: float | None = None) -> CaptureResult:

@@ -163,8 +163,9 @@ class App:
                 event_type,
                 machine_id,
                 session_id=(
-                    self.machine_managers[machine_id].active_session_id
-                    if event_type == EventType.MACHINE_CLOSED else None
+                    self.machine_managers[machine_id].current_session.session_id
+                    if event_type == EventType.MACHINE_CLOSED
+                    and self.machine_managers[machine_id].current_session is not None else None
                 ),
                 payload=payload,
                 acknowledgement=acknowledgement,
@@ -381,7 +382,7 @@ class App:
             self.state_changed.clear()
             if self.failure is not None:
                 raise self.failure
-            if not any(machine_manager.sessions for machine_manager in self.machine_managers.values()):
+            if not any(manager.current_session is not None for manager in self.machine_managers.values()):
                 return
             remaining_seconds = deadline - asyncio.get_running_loop().time()
             if remaining_seconds <= 0:
@@ -471,7 +472,8 @@ class App:
         background_tasks = []
         for manager in self.machine_managers.values():
             background_tasks.extend(manager.deadline_tasks.values())
-            background_tasks.extend(manager.recognition_tasks.values())
+            if manager.recognition_task is not None:
+                background_tasks.append(manager.recognition_task)
         all_tasks = background_tasks + self.worker_tasks
         for task in all_tasks:
             task.cancel()
@@ -480,7 +482,8 @@ class App:
 
         # 业务任务停止后释放各周期最终图片和剩余事件。
         for machine_manager in self.machine_managers.values():
-            for session in tuple(machine_manager.sessions.values()):
+            session = machine_manager.current_session
+            if session is not None:
                 # 标记退出时未完成的周期，只打印日志并执行失败清理。
                 if session.state != SessionState.FAILED:
                     session.errors.append("PROGRAM_FAILED" if self.failure is not None else "SHUTDOWN_TIMEOUT")
@@ -489,8 +492,7 @@ class App:
                     except Exception as error:
                         self.report_failure(error, f"清理测量 machine_id={session.machine_id}")
             # 清空退出后的周期身份与未完成档案。
-            machine_manager.sessions.clear()
-            machine_manager.active_session_id = None
+            machine_manager.current_session = None
             machine_manager.frequency_adapter.active_session_id = None
             # 清空不再处理的事件，释放事件携带的图片引用。
             while not machine_manager.queue.empty():

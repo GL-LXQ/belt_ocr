@@ -34,7 +34,6 @@ class MeasurementConfiguration:
     max_cycle_open_ms: int = 60000
     event_queue_capacity: int = 128
     storage_queue_capacity: int = 32
-    max_pending_sessions_per_machine: int = 20
     shutdown_timeout_ms: int = 10000
     configuration_version: str = "simulation-v1"
     recovery_database_path: Path | None = None
@@ -72,7 +71,6 @@ class MeasurementConfiguration:
             "frequency_interval_ms",
             "ocr_result_timeout_ms", "max_cycle_open_ms", "event_queue_capacity",
             "storage_queue_capacity",
-            "max_pending_sessions_per_machine",
             "shutdown_timeout_ms",
             "maintenance_interval_ms",
             "max_persistent_records",

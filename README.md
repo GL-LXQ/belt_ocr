@@ -8,7 +8,7 @@
 
 一台工控机管理三台皮带机，每台机器绑定海康 MVS 相机、启停输入和频率来源。一次 START → CLOSE 对应一个 BeltSession。仅将 OCR、频率和图片保存均成功的正常测量写入结果库；失败和中断打印日志，不写异常测量记录。运行库保存异常事件审计并提供进程级实例锁。
 
-Python 3.10 及以上，运行时使用标准库和 MVS 官方绑定，pytest 用于测试。保持扁平模块结构，采用单进程、每机串行事件处理、每轮一个相机采集线程、共享串行 OCR 和共享存储队列。
+Python 3.10 及以上，运行时使用标准库和 MVS 官方绑定，pytest 用于测试。保持扁平模块结构，采用单进程、每机一个当前周期和串行事件处理、每轮一个相机采集线程、共享串行 OCR 和共享存储队列。
 
 ```powershell
 uv run python -X utf8 main.py --config config.example.json
@@ -19,15 +19,15 @@ uv run python -X utf8 -m pytest -q
 
 ### 1.2 数据流动逻辑
 
-START 创建周期并同时开启相机采集和频率接收；相机线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后停止取流，只交付一次整轮结果。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器管理器在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用。任一业务失败清理本轮，活动周期保留身份直到真实 CLOSE；设备故障停止整个应用。
+每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；相机线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后停止取流，只交付一次整轮结果。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器管理器在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，设备故障停止整个应用。
 
 ### 1.3 处理阶段与职责
 
 1. **启动**：校验配置，初始化双库并获取实例锁，加载 SDK、打开全部相机，检查磁盘容量，根据初始机器状态决定是否等待关闭复位，启动机器事件、频率和存储任务。任一设备打开失败则整体启动失败并释放已打开设备。
-2. **采集**：START 的单调时间是窗口起点，默认 1000 ms；唯一采集线程执行启动、取帧、复制独立内存、停止和释放相机占用。取消前 5 帧限制，不设置应用层帧队列，不执行质量筛选和图片编码。单次等帧默认 50 ms。CLOSE 事件携带接收时的单调时间，排队不延长业务采集边界。
+2. **采集**：START 的单调时间是窗口起点，默认 1000 ms；唯一采集线程执行启动、取帧、复制独立内存、停止和释放相机占用。相机只保留 current_capture 和一个结果交付任务，不维护 windows 字典；取消前 5 帧限制，不设置应用层帧队列，不执行质量筛选和图片编码。单次等帧默认 50 ms。CLOSE 事件携带接收时的单调时间，排队不延长业务采集边界。
 3. **一次性交付**：CAPTURE_COMPLETED 携带原始帧和统计；设备采集失败交付 CAPTURE_FAILED 并触发全局故障退出。统计只包含采集耗时、接收帧数、保留帧数、边界排除数量、停止状态和错误。
-4. **OCR**：每周期一个后台任务，三台机器共用处理锁。`process_session_frames` 顺序完成编码 → `filter_qualified_frames` → `recognize_images` → `generate_final_text_and_images`。锁覆盖整轮处理，无批次队列和消费者。成功只发送一次 OCR_COMPLETED，普通识别失败发送 OCR_FAILED；SDK 编码异常仍属于设备故障。
-5. **关闭与结算**：CLOSE 停止本轮采集，封闭频率接收并选取最后一条有效读数；没有读数或周期中断则失败。现场相机释放后可采集下一轮，旧轮继续后台处理。机器管理器不参与 OCR 中间结果整理。
+4. **OCR**：每台机器最多一个识别任务，三台机器共用处理锁。`process_session_frames` 顺序完成编码 → `filter_qualified_frames` → `recognize_images` → `generate_final_text_and_images`。锁覆盖整轮处理，无批次队列和消费者。成功只发送一次 OCR_COMPLETED，普通识别失败发送 OCR_FAILED；SDK 编码异常仍属于设备故障。
+5. **关闭与结算**：CLOSE 停止本轮采集，封闭频率接收并选取最后一条有效读数；没有读数或周期中断则失败。关闭后当前周期继续占用本机，直到图片、数据库保存或失败清理全部完成，才接收下一轮。机器管理器不参与 OCR 中间结果整理。
 6. **提交**：正常关闭、OCR 成功和频率成功后，生成 `evidence_directory / machine_id / session_id / frame_id.bmp` 路径，冻结 JSON 和 SHA256，进入 WAITING_COMMIT_DB。存储线程先原子保存图片，再写数据库，完成后返回 COMMIT_SUCCEEDED 或 COMMIT_FAILED，不自动重试。
 7. **失败与退出**：整轮 OCR 超时从 START 计时，包含采集、排队和处理。等待锁的任务取消后不执行模型；已开始的阻塞操作等线程实际结束后再释放锁，迟到结果丢弃。退出时关闭入口、排空事件、停止采集、收尾后台处理，最后关闭相机、SDK 和数据库。退出等待期限不能强制终止已经运行的线程。
 
@@ -69,7 +69,6 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 | `camera_pixel_format` / `camera_exposure_time_us` / `camera_gain` | 机器级可选相机参数，省略时保留设备设置 |
 | `capture_window_ms` / `camera_timeout_ms` | 采集窗口 1000 ms / 单次读取超时 50 ms |
 | `ocr_result_timeout_ms` / `max_cycle_open_ms` | 从 START 起的 OCR 期限 30 s / 等待 CLOSE 期限 60 s |
-| `max_pending_sessions_per_machine` | 每机未完成周期上限，默认 20，限制等待 OCR 和提交的积压 |
 | `event_queue_capacity` / `storage_queue_capacity` | 单机事件容量 128 / 共享存储容量 32 |
 | `simulated_frequencies_hz` / `frequency_interval_ms` | 机器级联调频率列表 / 全局读数间隔配置 |
 | `minimum_frequency_hz` / `maximum_frequency_hz` | 有效频率范围，默认 0.01～10000 Hz |
@@ -78,7 +77,7 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 | `maintenance_interval_ms` / `max_persistent_records` | 容量检查间隔 250 ms / 存储积压限制 1000 |
 | `initial_machine_state` | 默认 CLOSED；OPEN、UNKNOWN 需要关闭或状态同步 |
 
-已删除 `camera_queue_capacity`、`max_frames_per_session`、`ocr_queue_capacity` 和 `ocr_job_timeout_ms`。使用旧配置文件时需移除这些键。窗口内帧全部保存在内存，内存占用取决于分辨率、帧率和未完成周期数。
+已删除 `camera_queue_capacity`、`max_frames_per_session`、`ocr_queue_capacity` 、`ocr_job_timeout_ms` 和 `max_pending_sessions_per_machine`。使用旧配置文件时需移除这些键。窗口内帧全部保存在内存，内存占用取决于分辨率和帧率，每台机器最多保留一个未完成周期。
 
 ## 二、项目进度（按天汇总）
 
@@ -121,12 +120,20 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 - 图片保存并入已有存储工作流程，新增文字与图片路径对应关系；数据库表结构不变。
 - 增加取消后等待工作线程、共享锁隔离、关闭信号接收时间边界及退出资源顺序测试。
 
+**单机单周期精简**
+
+- 将 sessions 字典与 active_session_id 合并成 current_session，删除同机多个周期并行收尾能力和周期积压配置。
+- 相机只保留一个采集任务和一个交付任务，OCR 只保留一个任务；期限任务仅按事件类型登记。
+- CLOSE 后继续保留当前周期直至保存或失败清理完成；忙时 START 只记录日志并跳过，不覆盖数据、不停止系统。
+- 失败发生在 CLOSE 前时等待真实关闭；失败发生在 CLOSE 后时，等在途线程和图片引用释放后再允许下一轮。
+- 演示先等待三台机器第一轮保存完成，再启动第一台机器的第二轮。不新增 4 秒期限，保留已有故障与超时处理。
+
 **测试**
 
-- 修改前基线：`uv run python -X utf8 -m pytest -q`，86 通过、45 失败。
-- 本次核心回归：采集、OCR、Session、频率、存储、退出和机器状态等 80 项全部通过；成功链路使用明确的 OCR 测试替身。
-- 最终全量：91 通过、11 失败。删除的批次/预保存证据测试已由整轮顺序、共享锁、存储失败及内存结果测试替代，测试总数发生变化。
-- 剩余 11 项均在修改前基线中失败：`test_acceptance_scenarios.py` 7 项仍引用 `frequency_candidates`、`outcome`、`final_measurement_id` 或要求已取消的频率冲突校验；`test_recovery_and_faults.py` 4 项涉及旧频率字段、未等待读数即期望入库、UNKNOWN 状态期望 FAULT 以及实例锁异常文案。未修改对应生产业务来迎合这些历史期望。
+- 本次修改前基线：91 通过、11 失败。
+- 最终全量：`uv run python -X utf8 -m pytest -q`，92 通过、11 失败。新增 4 项单周期集成验收，移除 3 个同机跨轮重叠用例，其他受影响测试改为读取唯一当前周期。
+- 新增验收全部通过：采集/等待 OCR/保存阶段跳过 START、线程实际退出后才能重启、其他机器独立处理、演示顺序保存四条记录。已有 OCR/CLOSE 两种先后顺序、失败不入库和设备退出测试继续通过。
+- 剩余 11 项失败名单与本次修改前完全一致：`test_acceptance_scenarios.py` 7 项涉及旧频率字段、旧结果字段和历史频率冲突规则；`test_recovery_and_faults.py` 4 项涉及旧频率字段、未等待读数即期望入库、UNKNOWN 状态期望和实例锁异常文案。未修改对应生产业务来迎合历史期望。
 
 ## 三、当前状态与后续工作
 

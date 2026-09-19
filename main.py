@@ -69,7 +69,8 @@ async def run_measurement_cycles(app: App) -> None:
     await asyncio.sleep(app.configuration.capture_window_ms / 1000 + 0.1)
     await asyncio.gather(*(app.handle_close(machine_id) for machine_id in machine_ids))
 
-    # 在旧轮后台处理中启动第一台机器的下一轮。
+    # 等待第一轮全部保存或清理完成，再启动下一轮。
+    await app.wait_until_idle()
     await app.handle_start(machine_ids[0])
     await asyncio.sleep(app.configuration.capture_window_ms / 1000 + 0.1)
     await app.handle_close(machine_ids[0])

@@ -65,8 +65,7 @@ def frequency_context(tmp_path):
             line_frame_ids=(("frame-1",),),
         ),
     )
-    manager.sessions[session.session_id] = session
-    manager.active_session_id = session.session_id
+    manager.current_session = session
     manager.frequency_adapter.active_session_id = session.session_id
     manager.camera.seal_capture = AsyncMock()
     try:
@@ -208,7 +207,7 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
     assert session.final_frequency is None
     assert len(session.measurement_frequencies) == (0 if outcome == "empty" else 1)
     assert app.database.queue.empty()
-    assert session.session_id not in manager.sessions
+    assert manager.current_session is None
     assert session.frequency_window_sealed
     assert session.frequency_state == FrequencyState.FAILED
 
@@ -278,14 +277,19 @@ def test_next_session_is_not_changed_by_old_frequency_event(frequency_context):
             None  # 新轮身份保持不变
         """
         await manager.handle_machine_close()
-        manager.active_session_id = "next-session"
+        manager.current_session = replace(
+            session,
+            session_id="next-session",
+            capture_stop_time=None,
+            state=SessionState.RUNNING,
+        )
         manager.frequency_adapter.active_session_id = "next-session"
         await manager.handle_event(MeasurementEvent(
             EventType.FREQUENCY_MEASURED, "M01", session.session_id,
             create_measurement(session, 1, 12, 42.0),
         ))
         assert session.measurement_frequencies == []
-        assert manager.active_session_id == "next-session"
+        assert manager.current_session.session_id == "next-session"
         assert manager.frequency_adapter.active_session_id == "next-session"
 
     asyncio.run(close_then_receive_old_data())

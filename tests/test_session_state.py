@@ -49,7 +49,7 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
         await manager.handle_machine_close()
         if close_first:
             assert session.state == SessionState.RUNNING
-            assert manager.active_session_id is None
+            assert manager.current_session is session
             session.ocr_state = OCRState.SUCCESS
             await manager.try_finalize(session)
         assert session.state == SessionState.WAITING_COMMIT_DB
@@ -70,7 +70,7 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
             await asyncio.gather(worker, return_exceptions=True)
         assert session.state == SessionState.COMMITTED
         assert session.finished
-        assert session.session_id not in manager.sessions
+        assert manager.current_session is None
 
     asyncio.run(process_measurement())
     with sqlite3.connect(app.configuration.database_path) as connection:
@@ -132,26 +132,26 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
         ))
         assert session.state == SessionState.FAILED
         assert session.ocr_result is None
-        assert not manager.recognition_tasks
-        assert manager.active_session_id == session.session_id
-        assert session.session_id in manager.sessions
-        assert (session.session_id, EventType.CYCLE_TIMEOUT) in manager.deadline_tasks
-        assert (session.session_id, EventType.OCR_TIMEOUT) not in manager.deadline_tasks
+        assert not manager.recognition_task
+        assert manager.current_session.session_id == session.session_id
+        assert manager.current_session is session
+        assert EventType.CYCLE_TIMEOUT in manager.deadline_tasks
+        assert EventType.OCR_TIMEOUT not in manager.deadline_tasks
 
         # 重复启动和迟到图片不得恢复失败周期或创建新周期。
         await manager.handle_machine_start()
         await manager.handle_event(MeasurementEvent(
             EventType.OCR_COMPLETED, "M01", session.session_id, frame,
         ))
-        assert len(manager.sessions) == 1
-        assert not manager.recognition_tasks
+        assert manager.current_session is session
+        assert not manager.recognition_task
 
         # 真实关闭或关闭超时释放活动身份，超时仍要求机器复位。
         await manager.handle_event(MeasurementEvent(
             end_event, "M01", session.session_id,
         ))
-        assert manager.active_session_id is None
-        assert session.session_id not in manager.sessions
+        assert manager.current_session is None
+        assert manager.current_session is None
         assert not manager.deadline_tasks
         assert manager.waiting_cycle_reset == (end_event == EventType.CYCLE_TIMEOUT)
         await asyncio.gather(*deadlines, return_exceptions=True)
@@ -222,7 +222,7 @@ def test_database_failure_is_terminal_without_retry(frequency_context, failure_m
 
         # 失败后再次检查不重新入队，也不保留冻结数据供补交。
         assert session.state == SessionState.FAILED
-        assert session.session_id not in manager.sessions
+        assert manager.current_session is None
         assert session.frozen_payload is None
         await manager.try_finalize(session)
         assert app.database.queue.empty()
@@ -233,114 +233,8 @@ def test_database_failure_is_terminal_without_retry(frequency_context, failure_m
         assert records == (0,)
 
 
-@pytest.mark.parametrize("commit_success", [True, False])
-def test_old_commit_does_not_change_new_active_session(
-    frequency_context, commit_success,
-):
-    """验证旧轮提交成功或失败均不改变新轮的现场身份。
-
-    Args:
-        frequency_context: 独立应用、机器处理器和活动周期。
-        commit_success: 旧轮提交是否成功。
-
-    Returns:
-        None  # 新轮活动身份、状态和频率接收均保持不变
-    """
-    app, manager, session = frequency_context
-
-    async def overlap_sessions():
-        """关闭旧轮，启动新轮，再交付旧轮数据库回调。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            None  # 旧轮回调和迟到关闭均未影响新轮
-        """
-        # 关闭结果完整的旧轮，进入等待入库状态。
-        session.measurement_frequencies.append(create_measurement(session, 1, 12, 42))
-        await manager.handle_machine_close()
-        assert session.state == SessionState.WAITING_COMMIT_DB
-
-        # 使用设备替身启动新轮，保留真实业务创建与期限逻辑。
-        manager.camera.device = SimpleNamespace(
-            closed=False, faulted=False, capture_lock=threading.Lock(),
-        )
-        manager.camera.start_capture = Mock()
-        await manager.handle_machine_start()
-        next_session = manager.sessions[manager.active_session_id]
-        deadlines = tuple(manager.deadline_tasks.values())
-
-        # 交付旧轮提交回调，再交付带旧编号的关闭信号。
-        await manager.handle_event(MeasurementEvent(
-            EventType.COMMIT_SUCCEEDED if commit_success else EventType.COMMIT_FAILED,
-            "M01",
-            session.session_id,
-            None if commit_success else {"error_code": "DATABASE_WRITE_FAILED"},
-        ))
-        await manager.handle_event(MeasurementEvent(
-            EventType.MACHINE_CLOSED, "M01", session.session_id,
-        ))
-        assert manager.active_session_id == next_session.session_id
-        assert manager.frequency_adapter.active_session_id == next_session.session_id
-        assert next_session.state == SessionState.RUNNING
-        assert session.session_id not in manager.sessions
-
-        # 结束测试中新建的周期，撤销其期限任务。
-        await manager.handle_machine_close(interrupted=True)
-        await asyncio.gather(*deadlines, return_exceptions=True)
-
-    asyncio.run(overlap_sessions())
 
 
-def test_closed_session_remains_running_while_next_cycle_starts(frequency_context):
-    """验证关闭后等待 OCR 的旧轮与新轮同时保持 RUNNING。
-
-    Args:
-        frequency_context: 独立应用、机器处理器和活动周期。
-
-    Returns:
-        None  # 旧轮失败清理不影响新轮运行
-    """
-    app, manager, session = frequency_context
-
-    async def close_and_start():
-        """关闭未完成 OCR 的旧轮并启动下一轮。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            None  # 新旧 Session 身份和状态已经核对
-        """
-        # 保留旧轮等待 OCR，关闭时只结算有效频率。
-        session.ocr_state = OCRState.WAITING
-        session.measurement_frequencies.append(create_measurement(session, 1, 12, 42))
-        await manager.handle_machine_close()
-        assert session.state == SessionState.RUNNING
-        assert session.frequency_state == FrequencyState.SUCCESS
-
-        # 启动新轮，旧轮的迟到失败只清理旧轮。
-        manager.camera.device = SimpleNamespace(
-            closed=False, faulted=False, capture_lock=threading.Lock(),
-        )
-        manager.camera.start_capture = Mock()
-        await manager.handle_machine_start()
-        next_session = manager.sessions[manager.active_session_id]
-        deadlines = tuple(manager.deadline_tasks.values())
-        await manager.handle_event(MeasurementEvent(
-            EventType.OCR_FAILED, "M01", session.session_id, "MODEL_FAILED",
-        ))
-        assert session.state == SessionState.FAILED
-        assert next_session.state == SessionState.RUNNING
-        assert manager.active_session_id == next_session.session_id
-        assert app.database.queue.empty()
-
-        # 中断测试的新轮并等待期限任务取消完成。
-        await manager.handle_machine_close(interrupted=True)
-        await asyncio.gather(*deadlines, return_exceptions=True)
-
-    asyncio.run(close_and_start())
 
 
 class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
@@ -365,14 +259,14 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_app(capture_window_ms=10000)
         await app.handle_start("M01")
         manager = app.machine_managers["M01"]
-        session = manager.sessions[manager.active_session_id]
+        session = manager.current_session
 
         # 退出应用，确认未伪造关闭或保存异常记录。
         await app.stop()
         self.assertEqual(session.state, SessionState.FAILED)
         self.assertIn("CYCLE_INTERRUPTED", session.errors)
         self.assertEqual(self.read_records(), [])
-        self.assertFalse(manager.sessions)
+        self.assertIsNone(manager.current_session)
         self.assertFalse(app.database.queued_records)
         self.assertTrue(app.database.queue.empty())
         self.assertTrue(app.camera_sdk.closed)
@@ -391,7 +285,7 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         await app.text_recognizer.processing_lock.acquire()
         await app.handle_start("M01")
         manager = app.machine_managers["M01"]
-        session = manager.sessions[manager.active_session_id]
+        session = manager.current_session
         await self.wait_for_state(lambda: bool(session.measurement_frequencies))
         await app.handle_close("M01")
         self.assertEqual(session.state, SessionState.RUNNING)
@@ -401,7 +295,7 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.state, SessionState.FAILED)
         self.assertIn("SHUTDOWN_TIMEOUT", session.errors)
         self.assertIsNone(session.ocr_result)
-        self.assertFalse(manager.sessions)
+        self.assertIsNone(manager.current_session)
         self.assertEqual(self.read_records(), [])
 
     async def test_capture_failure_stops_entire_application(self):
@@ -418,7 +312,7 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         manager = app.machine_managers["M01"]
         manager.camera.device.handle.encoding_error = 123
         await app.handle_start("M01")
-        session = manager.sessions[manager.active_session_id]
+        session = manager.current_session
 
         # 等待应用报告故障并完成自动退出。
         with self.assertRaisesRegex(RuntimeError, "BMP"):
@@ -429,7 +323,7 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(app.camera_sdk.closed)
         self.assertFalse(app.worker_tasks)
         self.assertEqual(self.read_records(), [])
-        self.assertTrue(all(not manager.sessions for manager in app.machine_managers.values()))
+        self.assertTrue(all(manager.current_session is None for manager in app.machine_managers.values()))
 
 
 def test_delayed_close_uses_signal_time_for_pending_capture(frequency_context):
@@ -472,7 +366,7 @@ def test_delayed_close_uses_signal_time_for_pending_capture(frequency_context):
             EventType.CAPTURE_COMPLETED, "M01", session.session_id,
             CaptureSummary(session.capture_id, frames=frames),
         ))
-        await asyncio.gather(*tuple(manager.recognition_tasks.values()))
+        await asyncio.gather(*tuple((manager.recognition_task,)))
         assert app.text_recognizer.process_session_frames.call_args.args[3] == (frames[0],)
         assert session.skipped_frame_count == 1
         assert session.capture_summary["retained_frame_count"] == 1

@@ -51,7 +51,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
 
         manager.camera.device.encode_image = encode_after_capture
         await app.handle_start("M01")
-        session = manager.sessions[manager.active_session_id]
+        session = manager.current_session
         await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
         events = [call.args[0] for call in publisher.call_args_list]
         self.assertEqual([event.event_type for event in events], [EventType.CAPTURE_COMPLETED])
@@ -93,11 +93,11 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         try:
             await app.handle_start("M01")
             first_manager = app.machine_managers["M01"]
-            first = first_manager.sessions[first_manager.active_session_id]
+            first = first_manager.current_session
             self.assertTrue(await asyncio.to_thread(started.wait, 2))
             await app.handle_start("M02")
             second_manager = app.machine_managers["M02"]
-            second = second_manager.sessions[second_manager.active_session_id]
+            second = second_manager.current_session
             await self.wait_for_state(lambda: second.ocr_state == OCRState.RUNNING)
             # 首轮超时后保留锁，第二轮可以正常关闭并等待处理。
             await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "M01", first.session_id))
@@ -110,7 +110,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
             # 第三轮在锁上等待时失败，永远不调用模型。
             await app.handle_start("M03")
             third_manager = app.machine_managers["M03"]
-            third = third_manager.sessions[third_manager.active_session_id]
+            third = third_manager.current_session
             await self.wait_for_state(lambda: third.ocr_state == OCRState.RUNNING)
             await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "M03", third.session_id))
             await self.wait_for_state(lambda: third.state == SessionState.FAILED)
@@ -120,8 +120,8 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         await app.wait_until_idle()
         self.assertEqual(processed_sessions, [first.session_id, second.session_id])
         self.assertEqual([record["session_id"] for record in self.read_records()], [second.session_id])
-        self.assertFalse(first_manager.recognition_tasks)
-        self.assertFalse(third_manager.recognition_tasks)
+        self.assertFalse(first_manager.recognition_task)
+        self.assertFalse(third_manager.recognition_task)
 
     async def test_shutdown_waits_for_encoder_before_closing_sdk(self):
         """验证重复取消时仍等待在途编码结束后才关闭 SDK。
@@ -181,7 +181,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         app.machine_managers["M01"].camera.device.handle.return_no_data = True
         app.text_recognizer.filter_qualified_frames = lambda frames: ()
         await asyncio.gather(app.handle_start("M01"), app.handle_start("M02"))
-        sessions = [manager.sessions[manager.active_session_id] for manager in list(app.machine_managers.values())[:2]]
+        sessions = [manager.current_session for manager in list(app.machine_managers.values())[:2]]
         await self.wait_for_state(lambda: all(session.state == SessionState.FAILED for session in sessions))
         self.assertIn("CAPTURE_NO_FRAMES", sessions[0].errors)
         self.assertIn("OCR_NO_QUALIFIED_FRAMES", sessions[1].errors)

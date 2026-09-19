@@ -106,7 +106,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             app.handle_start(machine_id) for machine_id in app.machine_managers
         ))
         sessions = [
-            machine_manager.sessions[machine_manager.active_session_id]
+            machine_manager.current_session
             for machine_manager in app.machine_managers.values()
         ]
         self.assertEqual(len({session.session_id for session in sessions}), 3)
@@ -147,8 +147,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_controlled_app()
         await asyncio.gather(*(app.handle_start("M01") for repeat in range(40)))
         machine_manager = app.machine_managers["M01"]
-        self.assertEqual(len(machine_manager.sessions), 1)
-        session = machine_manager.sessions[machine_manager.active_session_id]
+        self.assertIsNotNone(machine_manager.current_session)
+        session = machine_manager.current_session
         await self.supply_valid_inputs(session)
         await self.close_controlled_cycle(session)
         await app.wait_until_idle(10)
@@ -160,18 +160,19 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_controlled_app()
         machine_manager = app.machine_managers["M01"]
         await app.handle_start("M01")
-        first_session = machine_manager.sessions[machine_manager.active_session_id]
+        first_session = machine_manager.current_session
         await self.supply_valid_inputs(first_session)
         close_event = MeasurementEvent(EventType.MACHINE_CLOSED, "M01", first_session.session_id)
         await self.publish_and_wait(close_event)
+        await app.wait_until_idle(3)
 
         # 新轮启动后重放原关闭事件，再用新事件身份重发旧轮关闭。
         await app.handle_start("M01")
-        second_session = machine_manager.sessions[machine_manager.active_session_id]
+        second_session = machine_manager.current_session
         await self.supply_valid_inputs(second_session)
         await self.publish_and_wait(close_event)
         await self.publish_and_wait(replace(close_event, event_id=uuid4().hex))
-        self.assertEqual(machine_manager.active_session_id, second_session.session_id)
+        self.assertEqual(machine_manager.current_session.session_id, second_session.session_id)
         self.assertIsNone(second_session.capture_stop_time)
         self.assertFalse(second_session.frequency_window_sealed)
         self.assertIn("CLOSE_SESSION_MISMATCH", self.read_abnormal_event_reasons())
@@ -190,10 +191,11 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         for cycle_number in range(2):
             await app.handle_start("M01")
             machine_manager = app.machine_managers["M01"]
-            session = machine_manager.sessions[machine_manager.active_session_id]
+            session = machine_manager.current_session
             frame, measurement = await self.supply_valid_inputs(session, 42.0)
             expected_measurements[session.session_id] = measurement.measurement_id
             await self.close_controlled_cycle(session)
+            await app.wait_until_idle(10)
         await app.wait_until_idle(10)
 
         # 相同数值在相邻两轮中使用不同身份，各自成为本轮最终测量。
@@ -223,11 +225,12 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_controlled_app()
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
-        first_session = machine_manager.sessions[machine_manager.active_session_id]
+        first_session = machine_manager.current_session
         frame, old_measurement = await self.supply_valid_inputs(first_session)
         await self.close_controlled_cycle(first_session)
+        await app.wait_until_idle(3)
         await app.handle_start("M01")
-        second_session = machine_manager.sessions[machine_manager.active_session_id]
+        second_session = machine_manager.current_session
 
         # 将旧读数时间设为新周期开始前一秒。
         old_measurement = replace(old_measurement, measured_monotonic=second_session.capture_start_time - 1)
@@ -263,11 +266,12 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_controlled_app()
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
-        first_session = machine_manager.sessions[machine_manager.active_session_id]
+        first_session = machine_manager.current_session
         frame, measurement = await self.supply_valid_inputs(first_session)
         await app.handle_close("M01")
+        await app.wait_until_idle(3)
         await app.handle_start("M01")
-        second_session = machine_manager.sessions[machine_manager.active_session_id]
+        second_session = machine_manager.current_session
 
         # 同时存在旧轮和新轮时，注入没有周期归属的延迟读数。
         await self.publish_and_wait(MeasurementEvent(
@@ -276,7 +280,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(len(first_session.frequency_candidates), 1)
         self.assertEqual(second_session.frequency_candidates, {})
-        self.assertEqual(machine_manager.active_session_id, second_session.session_id)
+        self.assertEqual(machine_manager.current_session.session_id, second_session.session_id)
         self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_abnormal_event_reasons())
 
         # 为两轮分别完成已有的有效输入，不把无归属读数写入任何记录。
@@ -293,11 +297,12 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_controlled_app()
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
-        first_session = machine_manager.sessions[machine_manager.active_session_id]
+        first_session = machine_manager.current_session
         frame, measurement = await self.supply_valid_inputs(first_session)
         await app.handle_close("M01")
+        await app.wait_until_idle(3)
         await app.handle_start("M01")
-        second_session = machine_manager.sessions[machine_manager.active_session_id]
+        second_session = machine_manager.current_session
 
         # 外层事件声明旧轮、测量声明新轮，保持旧轮冲突待复核。
         await self.publish_and_wait(MeasurementEvent(
@@ -306,7 +311,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(first_session.frequency_state, FrequencyState.FAILED)
         self.assertEqual(second_session.frequency_candidates, {})
-        self.assertEqual(machine_manager.active_session_id, second_session.session_id)
+        self.assertEqual(machine_manager.current_session.session_id, second_session.session_id)
         await self.supply_valid_inputs(second_session)
         await self.close_controlled_cycle(second_session)
         await app.wait_until_idle(10)
@@ -383,11 +388,11 @@ async def crash_after_close():
     await app.text_recognizer.processing_lock.acquire()
     await app.handle_start("M01")
     machine_manager = app.machine_managers["M01"]
-    session = machine_manager.sessions[machine_manager.active_session_id]
+    session = machine_manager.current_session
     while session.ocr_state != OCRState.RUNNING:
         app.state_changed.clear()
         await app.state_changed.wait()
-    assert machine_manager.recognition_tasks
+    assert machine_manager.recognition_task
     await app.handle_close("M01")
     while not session.frequency_window_sealed:
         app.state_changed.clear()
@@ -418,8 +423,8 @@ asyncio.run(crash_after_close())
         restarted = await self.start_app()
         await restarted.wait_until_idle(10)
         self.assertTrue(session_id)
-        self.assertEqual(restarted.machine_managers["M01"].sessions, {})
-        self.assertFalse(restarted.machine_managers["M01"].recognition_tasks)
+        self.assertEqual(restarted.machine_managers["M01"].current_session, None)
+        self.assertFalse(restarted.machine_managers["M01"].recognition_task)
         self.assertEqual(self.read_records(), [])
 
 
@@ -439,7 +444,7 @@ asyncio.run(crash_after_close())
         app = await self.start_controlled_app()
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
+        session = machine_manager.current_session
         frame, measurement = await self.supply_valid_inputs(session)
 
         # 将不同周期的测量送入原档案，验证冲突路径继续结算。

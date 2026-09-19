@@ -56,8 +56,8 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await app.publish_event(event)
         machine_manager = app.machine_managers["M01"]
         await machine_manager.queue.join()
-        session_id = machine_manager.active_session_id
-        self.assertIn(session_id, machine_manager.sessions)
+        session_id = machine_manager.current_session.session_id
+        self.assertEqual(session_id, machine_manager.current_session.session_id)
 
         # 确认运行期间不创建事件去重表。
         with closing(sqlite3.connect(app.configuration.recovery_path)) as connection:
@@ -69,7 +69,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         # 活动周期内重放启动事件，确认机器状态阻止创建新周期。
         await app.publish_event(event)
         await machine_manager.queue.join()
-        self.assertEqual(machine_manager.active_session_id, session_id)
+        self.assertEqual(machine_manager.current_session.session_id, session_id)
         self.assertNotIn("DUPLICATE", self.read_abnormal_event_reasons())
 
     async def test_initial_unknown_state_requires_close_or_synchronization(self) -> None:
@@ -87,18 +87,18 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_app(initial_machine_state="UNKNOWN")
         machine_manager = app.machine_managers["M01"]
         await app.handle_start("M01")
-        self.assertEqual(machine_manager.sessions, {})
+        self.assertEqual(machine_manager.current_session, None)
         self.assertEqual(machine_manager.acceptance_state, "FAULT")
         await app.handle_close("M01")
         self.assertEqual(machine_manager.acceptance_state, "READY")
         await app.handle_start("M01")
-        self.assertIsNotNone(machine_manager.active_session_id)
+        self.assertIsNotNone(machine_manager.current_session)
 
         # 其他机器同步为运行中时仍等待关闭，不创建半轮测量。
         await app.synchronize_machine("M02", "OPEN")
         await app.handle_start("M02")
         self.assertEqual(app.machine_managers["M02"].acceptance_state, "WAIT_CYCLE_RESET")
-        self.assertEqual(app.machine_managers["M02"].sessions, {})
+        self.assertEqual(app.machine_managers["M02"].current_session, None)
         await app.handle_close("M02")
         self.assertEqual(app.machine_managers["M02"].acceptance_state, "READY")
 
@@ -106,7 +106,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await app.synchronize_machine("M03", "CLOSED")
         self.assertEqual(app.machine_managers["M03"].acceptance_state, "READY")
         await app.handle_start("M03")
-        self.assertIsNotNone(app.machine_managers["M03"].active_session_id)
+        self.assertIsNotNone(app.machine_managers["M03"].current_session)
 
     async def test_closed_session_does_not_resume_unfinished_ocr(self) -> None:
         """验证重启后不恢复已关闭周期的 OCR 和超时任务。
@@ -126,7 +126,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await app.text_recognizer.processing_lock.acquire()
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
+        session = machine_manager.current_session
         await self.wait_for_state(lambda: session.ocr_state == OCRState.RUNNING)
         await app.handle_close("M01")
         await self.wait_for_state(lambda: session.frequency_window_sealed)
@@ -141,10 +141,10 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
 
         # 确认旧档案和任务没有恢复，也没有生成旧周期的结果。
         restarted_machine_manager = restarted.machine_managers["M01"]
-        self.assertEqual(restarted_machine_manager.sessions, {})
-        self.assertIsNone(restarted_machine_manager.active_session_id)
+        self.assertEqual(restarted_machine_manager.current_session, None)
+        self.assertIsNone(restarted_machine_manager.current_session)
         self.assertEqual(restarted_machine_manager.deadline_tasks, {})
-        self.assertEqual(restarted_machine_manager.recognition_tasks, {})
+        self.assertEqual(restarted_machine_manager.recognition_task, None)
         self.assertEqual(self.read_records(), [])
 
     async def test_process_crash_discards_previous_open_cycle(self) -> None:
@@ -199,16 +199,16 @@ asyncio.run(crash_after_start())
         restarted = await self.restart_app(initial_machine_state="OPEN")
         await restarted.wait_until_idle(10)
         self.assertEqual(self.read_records(), [])
-        self.assertEqual(restarted.machine_managers["M01"].sessions, {})
+        self.assertEqual(restarted.machine_managers["M01"].current_session, None)
         self.assertEqual(restarted.machine_managers["M01"].acceptance_state, "WAIT_CYCLE_RESET")
 
         # 运行中忽略启动，关闭后允许接收下一轮启动。
         await restarted.handle_start("M01")
-        self.assertIsNone(restarted.machine_managers["M01"].active_session_id)
+        self.assertIsNone(restarted.machine_managers["M01"].current_session)
         await restarted.handle_close("M01")
         self.assertEqual(restarted.machine_managers["M01"].acceptance_state, "READY")
         await restarted.handle_start("M01")
-        self.assertIsNotNone(restarted.machine_managers["M01"].active_session_id)
+        self.assertIsNotNone(restarted.machine_managers["M01"].current_session)
 
     async def test_event_identity_does_not_block_start_after_restart(self) -> None:
         """验证重启后不会按旧事件编号拦截有效启动。
@@ -233,31 +233,33 @@ asyncio.run(crash_after_start())
         restarted = await self.restart_app()
         await restarted.publish_event(event)
         await restarted.machine_managers["M01"].queue.join()
-        self.assertIsNotNone(restarted.machine_managers["M01"].active_session_id)
+        self.assertIsNotNone(restarted.machine_managers["M01"].current_session)
         self.assertNotIn("DUPLICATE", self.read_abnormal_event_reasons())
         self.assertEqual(len(self.read_records()), 1)
 
     async def test_stale_close_cannot_close_a_new_cycle(self) -> None:
         app = await self.start_app()
         await app.handle_start("M01")
-        old_session_id = app.machine_managers["M01"].active_session_id
+        old_session_id = app.machine_managers["M01"].current_session.session_id
         await app.handle_close("M01")
+        await app.wait_until_idle(3)
         await app.handle_start("M01")
-        new_session_id = app.machine_managers["M01"].active_session_id
+        new_session_id = app.machine_managers["M01"].current_session.session_id
 
+        self.assertNotEqual(old_session_id, new_session_id)
         # 把带旧 Session 身份的关闭事件送回业务队列。
         await app.publish_event(MeasurementEvent(
             EventType.MACHINE_CLOSED, "M01", old_session_id,
         ))
         await app.machine_managers["M01"].queue.join()
-        self.assertEqual(app.machine_managers["M01"].active_session_id, new_session_id)
+        self.assertEqual(app.machine_managers["M01"].current_session.session_id, new_session_id)
         self.assertIn("CLOSE_SESSION_MISMATCH", self.read_abnormal_event_reasons())
 
     async def test_frequency_identity_conflict_requires_review(self) -> None:
         app = await self.start_app()
         await app.handle_start("M01")
         machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
+        session = machine_manager.current_session
         await self.wait_for_state(lambda: bool(session.frequency_candidates))
         measurement = next(iter(session.frequency_candidates.values()))
 
@@ -292,22 +294,22 @@ asyncio.run(crash_after_start())
         await app.stop()
         self.assertFalse(app.accepting_signals)
         self.assertTrue(app.camera_sdk.closed)
-        self.assertTrue(all(not manager.sessions for manager in app.machine_managers.values()))
+        self.assertTrue(all(manager.current_session is None for manager in app.machine_managers.values()))
 
     async def test_initial_open_state_does_not_create_midcycle_session(self) -> None:
         app = await self.start_app(initial_machine_state="OPEN")
         await app.handle_start("M01")
-        self.assertIsNone(app.machine_managers["M01"].active_session_id)
+        self.assertIsNone(app.machine_managers["M01"].current_session)
         await app.handle_close("M01")
         await app.handle_start("M01")
-        self.assertIsNotNone(app.machine_managers["M01"].active_session_id)
+        self.assertIsNotNone(app.machine_managers["M01"].current_session)
 
     async def test_disk_capacity_blocks_new_cycles_and_recovers(self) -> None:
         app = await self.start_app(minimum_free_disk_bytes=10**30)
         machine_manager = app.machine_managers["M01"]
         await self.wait_for_state(lambda: machine_manager.acceptance_state == "DEGRADED")
         await app.handle_start("M01")
-        self.assertIsNone(machine_manager.active_session_id)
+        self.assertIsNone(machine_manager.current_session)
 
         # 容量恢复后仍须确认被拒收周期已经关闭。
         app.configuration = replace(
@@ -317,7 +319,7 @@ asyncio.run(crash_after_start())
         self.assertTrue(machine_manager.waiting_cycle_reset)
         await app.handle_close("M01")
         await app.handle_start("M01")
-        self.assertIsNotNone(machine_manager.active_session_id)
+        self.assertIsNotNone(machine_manager.current_session)
 
     async def test_second_process_instance_cannot_share_runtime_database(self) -> None:
         app = await self.start_app()
@@ -336,8 +338,8 @@ asyncio.run(crash_after_start())
                 app.handle_start(machine_id) for machine_id in app.machine_managers
             ))
             await self.wait_for_state(lambda: all(
-                machine_manager.sessions[machine_manager.active_session_id].ocr_state == OCRState.SUCCESS
-                and machine_manager.sessions[machine_manager.active_session_id].measurement_frequencies
+                machine_manager.current_session.ocr_state == OCRState.SUCCESS
+                and machine_manager.current_session.measurement_frequencies
                 for machine_manager in app.machine_managers.values()
             ))
             await asyncio.gather(*(

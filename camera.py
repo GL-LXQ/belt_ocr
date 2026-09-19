@@ -39,8 +39,8 @@ class SessionCamera:
         self.report_failure = report_failure
         self.device: MvsCamera | None = None
         # 分别登记现场采集与结果交付任务。
-        self.windows: dict[str, CaptureTask] = {}
-        self.tasks: set[asyncio.Task] = set()
+        self.current_capture: CaptureTask | None = None
+        self.delivery_task: asyncio.Task | None = None
 
     @property
     def available(self) -> bool:
@@ -85,17 +85,23 @@ class SessionCamera:
         )
         capture_task = start_capture(
             self.device,
+            # 整轮采集窗口持续时间
             duration_seconds=self.configuration.capture_window_ms / 1000,
+            # 一次取帧最多等多久
             timeout_ms=self.configuration.camera_timeout_ms,
             capture_id=capture_id,
             capture_start_time=capture_start_time,
             report_failure=lambda error: event_loop.call_soon_threadsafe(self.report_failure, error, component),
         )
-        # 保存采集任务，并安排结束后的单次交付。
-        self.windows[capture_id] = capture_task
-        delivery_task = asyncio.create_task(self.finish_capture(session_id, capture_task))
-        self.tasks.add(delivery_task)
-        delivery_task.add_done_callback(self.handle_capture_task_finished)
+        
+        # 保存本轮采集任务，供停止采集时使用。
+        self.current_capture = capture_task
+
+        # 创建异步任务，等待采集结束并发布整轮采集结果。
+        self.delivery_task = asyncio.create_task(self.finish_capture(session_id, capture_task))
+
+        # 结果交付任务结束后，清理任务引用并处理未捕获的异常。
+        self.delivery_task.add_done_callback(self.handle_capture_task_finished)
 
     def handle_capture_task_finished(self, task: asyncio.Task) -> None:
         """移除交付任务并报告未处理异常。
@@ -106,7 +112,7 @@ class SessionCamera:
         Returns:
             None  # 任务引用已移除，异常已报告
         """
-        self.tasks.discard(task)
+        self.delivery_task = None
         if task.cancelled():
             return
         # 将业务事件交付异常交给应用停止流程。
@@ -114,18 +120,17 @@ class SessionCamera:
         if error is not None:
             self.report_failure(error, f"采集交付 machine_id={self.machine.machine_id}")
 
-    async def seal_capture(self, capture_id: str, capture_stop_time: float | None = None) -> None:
+    async def seal_capture(self, capture_stop_time: float | None = None) -> None:
         """记录关闭边界并等待对应相机停止。
 
         Args:
-            capture_id: 要停止的采集编号。
             capture_stop_time: CLOSE 的单调时间，省略时取当前时间。
 
         Returns:
             None  # 相机已停止，结果交付可能仍在排队
         """
         # 已结束的采集无需再次停止。
-        capture_task = self.windows.get(capture_id)
+        capture_task = self.current_capture
         if capture_task is None:
             return
         # 先保存截止时间，再发出停止通知并等待硬件释放。
@@ -166,10 +171,10 @@ class SessionCamera:
             event_type = EventType.CAPTURE_FAILED if result.capture_errors else EventType.CAPTURE_COMPLETED
             await self.publish_event(MeasurementEvent(event_type, self.machine.machine_id, session_id, summary))
         finally:
-            self.windows.pop(capture_task.capture_id, None)
+            self.current_capture = None
 
     async def stop(self) -> None:
-        """停止全部采集并等待结果交付结束。
+        """停止当前采集并等待结果交付结束。
 
         Args:
             无外部参数。
@@ -177,8 +182,8 @@ class SessionCamera:
         Returns:
             None  # 本机采集和交付全部结束
         """
-        # 通知全部采集线程停止，再等待所有结果交付。
-        for capture_task in tuple(self.windows.values()):
-            capture_task.stop_requested.set()
-        if self.tasks:
-            await asyncio.gather(*tuple(self.tasks))
+        # 停止唯一采集任务，再等待本轮结果交付。
+        if self.current_capture is not None:
+            self.current_capture.stop_requested.set()
+        if self.delivery_task is not None:
+            await self.delivery_task
