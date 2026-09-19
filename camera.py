@@ -98,27 +98,6 @@ class CaptureTask:
             # 保存整轮结果，通知等待结果的异步任务继续执行。
             self.completion_future.set_result(result)
 
-    def wait(self, timeout_seconds: float | None = None) -> CaptureResult:
-        """等待采集线程退出并取得整轮结果。
-
-        Args:
-            timeout_seconds: 最长等待秒数，None 表示不限时。
-
-        Returns:
-            CaptureResult(
-                frames=(),  # 独立内存帧，非空时元素为 CameraFrame
-                capture_duration_seconds=1.0,  # 采集耗时
-                received_frame_count=0,  # 实际接收数量
-                camera_stopped=True,  # 相机是否停止
-                capture_errors=(),  # 设备错误信息
-            )
-        """
-        # 等待结果和线程退出，再返回封闭数据。
-        result = self.completion_future.result(timeout_seconds)
-        self.thread.join()
-        return result
-
-
 class SessionCamera:
     """管理相机采集生命周期和周期身份。"""
 

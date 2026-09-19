@@ -6,7 +6,6 @@ import time
 import queue
 import threading
 from types import SimpleNamespace
-from concurrent.futures import TimeoutError
 from dataclasses import replace
 
 import pytest
@@ -28,6 +27,7 @@ def start_capture():
     """
     event_loop = asyncio.new_event_loop()
     adapters = []
+    delivery_tasks = {}
 
     async def publish_event(event):
         """接收测试采集完成事件。
@@ -70,9 +70,36 @@ def start_capture():
                 CaptureTask  # 当前采集任务
             """
             adapter.start_capture("session-1", f"capture-{len(adapters)}", time.monotonic())
+            delivery_tasks[adapter.current_capture] = adapter.delivery_task
             return adapter.current_capture
 
         return event_loop.run_until_complete(begin())
+
+    def wait_for_delivery(task, timeout_seconds=2):
+        """运行事件循环直到正式结果交付任务结束。
+
+        Args:
+            task: 本轮采集任务。
+            timeout_seconds: 测试等待上限秒数。
+
+        Returns:
+            CaptureResult  # 正式交付完成后的本轮采集结果
+        """
+        async def receive_result():
+            """等待结果交付并取得采集结果。
+
+            Args:
+                无外部参数。
+
+            Returns:
+                CaptureResult  # 包含帧集合和采集统计的结果
+            """
+            await asyncio.wait_for(asyncio.shield(delivery_tasks[task]), timeout_seconds)
+            return task.completion_future.result()
+
+        return event_loop.run_until_complete(receive_result())
+
+    begin_capture.wait_for_delivery = wait_for_delivery
 
     # 向测试提供启动入口，结束时停止采集并完成事件交付。
     yield begin_capture
@@ -81,6 +108,19 @@ def start_capture():
             event_loop.run_until_complete(adapter.stop())
     finally:
         event_loop.close()
+
+
+@pytest.fixture
+def wait_capture(start_capture):
+    """提供等待正式采集结果交付的测试入口。
+
+    Args:
+        start_capture: 本测试的采集启动入口。
+
+    Returns:
+        wait_for_delivery  # 等待异步交付并返回 CaptureResult 的函数
+    """
+    return start_capture.wait_for_delivery
 
 
 class FakeHandle:
@@ -235,10 +275,11 @@ def camera():
 
 
 
-def test_empty_capture_waits_until_deadline(camera, start_capture):
+def test_empty_capture_waits_until_deadline(camera, start_capture, wait_capture):
     """验证空队列不提前完成且无图像时仍按期限停止。
 
     Args:
+        wait_capture: 等待正式异步结果交付的测试入口。
         start_capture: 使用正式相机入口的测试启动函数。
         camera: 假 SDK 相机。
 
@@ -246,9 +287,9 @@ def test_empty_capture_waits_until_deadline(camera, start_capture):
         None  # 断言完成
     """
     task = start_capture(camera, duration_seconds=0.2, timeout_ms=10)
-    with pytest.raises(TimeoutError):
-        task.wait(0.05)
-    result = task.wait(2)
+    with pytest.raises(asyncio.TimeoutError):
+        wait_capture(task, 0.05)
+    result = wait_capture(task, 2)
     assert result.received_frame_count == 0
     assert 0.18 <= result.capture_duration_seconds < 1
     assert result.camera_stopped
@@ -256,10 +297,11 @@ def test_empty_capture_waits_until_deadline(camera, start_capture):
 
 
 
-def test_inflight_copy_finishes_before_stop_and_sealing(camera, monkeypatch, start_capture):
+def test_inflight_copy_finishes_before_stop_and_sealing(camera, monkeypatch, start_capture, wait_capture):
     """验证截止时在途复制被完整释放和入队后才封口。
 
     Args:
+        wait_capture: 等待正式异步结果交付的测试入口。
         start_capture: 使用正式相机入口的测试启动函数。
         camera: 假 SDK 相机。
         monkeypatch: pytest 替换工具。
@@ -296,7 +338,7 @@ def test_inflight_copy_finishes_before_stop_and_sealing(camera, monkeypatch, sta
     finally:
         release_copy.set()
         task.stop_requested.set()
-        result = task.wait(2)
+        result = wait_capture(task, 2)
     assert result.frames[0].data == b"last"
     operations = [operation for operation, arguments in camera.handle.calls]
     assert operations.index("free") < operations.index("stop")
@@ -307,10 +349,11 @@ def test_inflight_copy_finishes_before_stop_and_sealing(camera, monkeypatch, sta
 
 
 @pytest.mark.parametrize("operation", ["start", "get", "free", "stop"])
-def test_sdk_errors_are_recorded_and_resources_released(camera, operation, start_capture):
+def test_sdk_errors_are_recorded_and_resources_released(camera, operation, start_capture, wait_capture):
     """验证 SDK 失败可追溯且任务能退出。
 
     Args:
+        wait_capture: 等待正式异步结果交付的测试入口。
         start_capture: 使用正式相机入口的测试启动函数。
         camera: 假 SDK 相机。
         operation: 注入失败的 SDK 操作。
@@ -321,7 +364,7 @@ def test_sdk_errors_are_recorded_and_resources_released(camera, operation, start
     camera.handle.failure_operation = operation
     camera.handle.frames.put(b"frame")
     task = start_capture(camera, duration_seconds=0.05)
-    result = task.wait(2)
+    result = wait_capture(task, 2)
     assert bool(result.capture_errors)
     assert result.capture_errors
     assert result.camera_stopped == (operation != "stop")
@@ -338,10 +381,11 @@ def test_sdk_errors_are_recorded_and_resources_released(camera, operation, start
     assert operations[-2:] == ["MV_CC_CloseDevice", "MV_CC_DestroyHandle"]
 
 
-def test_copy_exception_still_frees_sdk_buffer(camera, monkeypatch, start_capture):
+def test_copy_exception_still_frees_sdk_buffer(camera, monkeypatch, start_capture, wait_capture):
     """验证复制抛出异常时 SDK Buffer 仍被释放。
 
     Args:
+        wait_capture: 等待正式异步结果交付的测试入口。
         start_capture: 使用正式相机入口的测试启动函数。
         camera: 假 SDK 相机。
         monkeypatch: pytest 替换工具。
@@ -363,7 +407,7 @@ def test_copy_exception_still_frees_sdk_buffer(camera, monkeypatch, start_captur
 
     monkeypatch.setattr(mvs_sdk.ctypes, "string_at", fail_copy)
     camera.handle.frames.put(b"frame")
-    result = start_capture(camera).wait(2)
+    result = wait_capture(start_capture(camera))
     assert result.received_frame_count == 1
     assert len(result.frames) == 0
     assert bool(result.capture_errors)
@@ -465,10 +509,11 @@ def test_close_failure_still_destroys_handle(camera):
 
 
 
-def test_stop_exception_blocks_next_capture(camera, monkeypatch, start_capture):
+def test_stop_exception_blocks_next_capture(camera, monkeypatch, start_capture, wait_capture):
     """验证停流接口抛出异常后禁止新一轮采集。
 
     Args:
+        wait_capture: 等待正式异步结果交付的测试入口。
         start_capture: 使用正式相机入口的测试启动函数。
         camera: 假 SDK 相机。
         monkeypatch: pytest 替换工具。
@@ -488,17 +533,18 @@ def test_stop_exception_blocks_next_capture(camera, monkeypatch, start_capture):
         raise RuntimeError("停流接口异常")
 
     monkeypatch.setattr(camera.handle, "MV_CC_StopGrabbing", fail_stop)
-    result = start_capture(camera, duration_seconds=0.05).wait(2)
+    result = wait_capture(start_capture(camera, duration_seconds=0.05))
     assert not result.camera_stopped
     assert bool(result.capture_errors)
     with pytest.raises(MvsError, match="不可用"):
         start_capture(camera)
 
 
-def test_old_sdk_buffer_is_cleared_before_new_capture(camera, monkeypatch, start_capture):
+def test_old_sdk_buffer_is_cleared_before_new_capture(camera, monkeypatch, start_capture, wait_capture):
     """验证开始新一轮前清除 SDK 残留缓存。
 
     Args:
+        wait_capture: 等待正式异步结果交付的测试入口。
         start_capture: 使用正式相机入口的测试启动函数。
         camera: 假 SDK 相机。
         monkeypatch: pytest 替换工具。
@@ -527,14 +573,15 @@ def test_old_sdk_buffer_is_cleared_before_new_capture(camera, monkeypatch, start
     task = start_capture(camera, duration_seconds=0.1)
     assert camera.handle.started.wait(1)
     camera.handle.frames.put(b"current")
-    result = task.wait(2)
+    result = wait_capture(task, 2)
     assert [frame.data for frame in result.frames] == [b"current"]
 
 
-def test_two_cameras_capture_independently(camera, start_capture):
+def test_two_cameras_capture_independently(camera, start_capture, wait_capture):
     """验证一台相机正在采集时另一台可以独立完成。
 
     Args:
+        wait_capture: 等待正式异步结果交付的测试入口。
         start_capture: 使用正式相机入口的测试启动函数。
         camera: 第一台假 SDK 相机。
 
@@ -550,18 +597,19 @@ def test_two_cameras_capture_independently(camera, start_capture):
             duration_seconds=0.1,
         )
         other_camera.handle.frames.put(b"second")
-        second_result = second_task.wait(2)
+        second_result = wait_capture(second_task, 2)
         assert second_result.frames[0].camera_serial == "CAM002"
         assert not first_task.completion_future.done()
     finally:
         first_task.stop_requested.set()
-        first_task.wait(2)
+        wait_capture(first_task, 2)
 
 
-def test_collects_all_owned_frames_without_encoding(camera, start_capture):
+def test_collects_all_owned_frames_without_encoding(camera, start_capture, wait_capture):
     """验证全部帧独立于 SDK 缓存且不限制前五帧。
 
     Args:
+        wait_capture: 等待正式异步结果交付的测试入口。
         start_capture: 使用正式相机入口的测试启动函数。
         camera: 可控 SDK 相机。
 
@@ -570,17 +618,18 @@ def test_collects_all_owned_frames_without_encoding(camera, start_capture):
     """
     for number in range(12):
         camera.handle.frames.put(f"frame-{number}".encode())
-    result = start_capture(camera, duration_seconds=0.1, timeout_ms=5).wait(2)
+    result = wait_capture(start_capture(camera, duration_seconds=0.1, timeout_ms=5))
     assert len(result.frames) == 12
     assert [frame.data for frame in result.frames] == [f"frame-{number}".encode() for number in range(12)]
     assert result.received_frame_count == 12
     assert not camera.capture_lock.locked()
 
 
-def test_close_keeps_inflight_tail_frame(camera, monkeypatch, start_capture):
+def test_close_keeps_inflight_tail_frame(camera, monkeypatch, start_capture, wait_capture):
     """验证关闭时的在途尾帧保留在本轮集合。
 
     Args:
+        wait_capture: 等待正式异步结果交付的测试入口。
         start_capture: 使用正式相机入口的测试启动函数。
         camera: 可控相机。
         monkeypatch: 接口替换工具。
@@ -616,16 +665,17 @@ def test_close_keeps_inflight_tail_frame(camera, monkeypatch, start_capture):
         task.stop_requested.set()
     finally:
         release.set()
-    result = task.wait(2)
+    result = wait_capture(task, 2)
     assert [frame.data for frame in result.frames] == [b"late"]
     assert result.camera_stopped
 
 
 
-def test_thread_start_failure_releases_camera(camera, start_capture, monkeypatch):
+def test_thread_start_failure_releases_camera(camera, start_capture, monkeypatch, wait_capture):
     """验证线程启动失败后释放相机锁，允许重新启动采集。
 
     Args:
+        wait_capture: 等待正式异步结果交付的测试入口。
         camera: 假 SDK 相机。
         start_capture: 使用正式相机入口的测试启动函数。
         monkeypatch: pytest 替换工具。
@@ -652,6 +702,6 @@ def test_thread_start_failure_releases_camera(camera, start_capture, monkeypatch
     assert not camera.capture_lock.locked()
 
     # 恢复线程入口，确认同一相机可以正常采集。
-    result = start_capture(camera, duration_seconds=0.05).wait(2)
+    result = wait_capture(start_capture(camera, duration_seconds=0.05))
     assert result.camera_stopped
     assert not result.capture_errors
