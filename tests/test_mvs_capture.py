@@ -28,6 +28,7 @@ def start_capture():
     event_loop = asyncio.new_event_loop()
     adapters = []
     delivery_tasks = {}
+    session_ids = {}
     results = {}
 
     async def publish_event(event):
@@ -39,7 +40,7 @@ def start_capture():
         Returns:
             None  # 事件已接收
         """
-        results[event.payload.capture_id] = event.payload
+        results[event.session_id] = event.payload
 
     def begin_capture(camera, duration_seconds=1.0, timeout_ms=50):
         """在测试事件循环中调用正式采集入口。
@@ -70,9 +71,12 @@ def start_capture():
             Returns:
                 CaptureTask  # 当前采集任务
             """
-            adapter.start_capture("session-1", f"capture-{len(adapters)}", time.monotonic())
+            # 为本轮分配周期身份并登记任务与周期的对应关系。
+            session_id = f"session-{len(adapters)}"
+            adapter.start_capture(session_id, time.monotonic())
             delivery_tasks[adapter.current_capture] = adapter.delivery_task
             capture_task = adapter.current_capture
+            session_ids[capture_task] = session_id
             # 让异步主流程提交后台采集，再将控制权交给同步测试。
             for step in range(3):
                 await asyncio.sleep(0)
@@ -100,7 +104,7 @@ def start_capture():
                 CaptureResult  # 包含帧集合和采集统计的结果
             """
             await asyncio.wait_for(asyncio.shield(delivery_tasks[task]), timeout_seconds)
-            return results[task.capture_id]
+            return results[session_ids[task]]
 
         return event_loop.run_until_complete(receive_result())
 
@@ -775,7 +779,7 @@ def test_capture_shutdown_waits_for_worker_only(camera, monkeypatch, cancel_deli
             lambda error, component: None,
         )
         adapter.device = camera
-        adapter.start_capture("session", "capture", time.monotonic())
+        adapter.start_capture("session", time.monotonic())
         delivery_task = adapter.delivery_task
         try:
             assert await asyncio.to_thread(entered.wait, 1)

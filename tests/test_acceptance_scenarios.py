@@ -88,7 +88,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         # 依次确认图像与频率已被业务层接收。
         await self.publish_and_wait(MeasurementEvent(
             EventType.CAPTURE_COMPLETED, session.machine_id, session.session_id,
-            CaptureResult(session.capture_id, frames=(frame,)),
+            CaptureResult(frames=(frame,)),
         ))
         await self.publish_and_wait(MeasurementEvent(
             EventType.FREQUENCY_MEASURED, session.machine_id, session.session_id, measurement,
@@ -247,7 +247,6 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         await self.publish_and_wait(MeasurementEvent(
             EventType.CAPTURE_COMPLETED, "M01", second_session.session_id,
             CaptureResult(
-                second_session.capture_id,
                 frames=(replace(frame, received_monotonic=asyncio.get_running_loop().time()),),
             ),
         ))

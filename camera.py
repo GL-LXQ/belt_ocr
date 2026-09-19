@@ -18,7 +18,6 @@ class CaptureTask:
     """保存采集参数、故障回调、停止信号和完成通知。"""
 
     camera: MvsCamera
-    capture_id: str
     capture_start_time: float
     duration_seconds: float
     timeout_ms: int
@@ -34,7 +33,6 @@ class CaptureTask:
 
         Returns:
             CaptureResult(
-                capture_id="capture-1",  # 采集编号
                 frames=(),  # 本轮原始帧集合
                 statistics={
                     "capture_duration_seconds": 1.0,  # 采集耗时秒数
@@ -83,7 +81,6 @@ class CaptureTask:
 
             # 一次性整理本轮帧、采集统计和错误。
             result = CaptureResult(
-                capture_id=self.capture_id,
                 frames=tuple(frames),
                 statistics={
                     "capture_duration_seconds": time.monotonic() - self.capture_start_time,
@@ -153,12 +150,11 @@ class SessionCamera:
         """
         return self.device is not None and self.device.capture_lock.locked()
 
-    def start_capture(self, session_id: str, capture_id: str, capture_start_time: float) -> None:
+    def start_capture(self, session_id: str, capture_start_time: float) -> None:
         """启动整轮采集并安排一次性结果交付。
 
         Args:
             session_id: 测量周期编号。
-            capture_id: 采集编号。
             capture_start_time: START 受理时的单调时间。
 
         Returns:
@@ -182,7 +178,6 @@ class SessionCamera:
             # 创建本轮任务，登记采集窗口、单次取帧超时和故障入口。
             capture_task = CaptureTask(
                 camera=camera,
-                capture_id=capture_id,
                 capture_start_time=capture_start_time,
                 duration_seconds=self.configuration.capture_window_ms / 1000,
                 timeout_ms=self.configuration.camera_timeout_ms,

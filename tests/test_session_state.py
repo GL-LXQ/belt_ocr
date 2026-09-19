@@ -364,7 +364,7 @@ def test_delayed_close_keeps_all_delivered_frames(frequency_context):
         ))
         await manager.handle_event(MeasurementEvent(
             EventType.CAPTURE_COMPLETED, "M01", session.session_id,
-            CaptureResult(session.capture_id, frames=frames),
+            CaptureResult(frames=frames),
         ))
         await asyncio.gather(*tuple((manager.recognition_task,)))
         assert app.text_recognizer.process_session_frames.call_args.args[3] == frames

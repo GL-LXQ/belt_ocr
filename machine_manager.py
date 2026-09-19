@@ -174,9 +174,8 @@ class MachineManager:
         logger.info("开始测量 machine_id=%s session_id=%s", session.machine_id, session.session_id)
 
         # 启动本轮图像采集，打开对应档案的频率窗口。
-        self.camera.start_capture(session.session_id, session.capture_id, session.capture_start_time)
-        if self.camera.delivery_task is not None:
-            self.camera.delivery_task.add_done_callback(lambda task: self.release_finished_session())
+        self.camera.start_capture(session.session_id, session.capture_start_time)
+        self.camera.delivery_task.add_done_callback(lambda task: self.release_finished_session())
         # 登记频率接收的当前周期，新测量按接收顺序交给本轮。
         self.frequency_adapter.active_session_id = session.session_id
 
