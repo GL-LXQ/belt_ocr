@@ -40,7 +40,7 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
         """
         # 准备有效频率，按场景控制 OCR 完成时机。
         session.ocr_state = OCRState.WAITING if close_first else OCRState.SUCCESS
-        session.measurement_frequencies.append(create_measurement(session, 1, 12, 42))
+        session.measurement_frequencies.append(create_measurement(session, 12, 42))
         await manager.try_finalize(session)
         assert session.state == SessionState.RUNNING
         assert app.database.queue.empty()
@@ -177,7 +177,7 @@ def test_database_failure_is_terminal_without_retry(frequency_context, failure_m
         None  # 本轮已失败且本地运行库无待提交记录
     """
     app, manager, session = frequency_context
-    session.measurement_frequencies.append(create_measurement(session, 1, 12, 42))
+    session.measurement_frequencies.append(create_measurement(session, 12, 42))
 
     async def submit_and_fail():
         """注入存储失败并处理对应回调。
@@ -344,7 +344,7 @@ def test_delayed_close_keeps_all_delivered_frames(frequency_context):
     session.ocr_result = None
     manager.camera.device = SimpleNamespace(encode_image=Mock())
     app.text_recognizer.process_session_frames = Mock(return_value=expected_result)
-    session.measurement_frequencies.append(create_measurement(session, 1, 11, 42))
+    session.measurement_frequencies.append(create_measurement(session, 11, 42))
     frames = tuple(
         CameraFrame("serial", number, 0, 0, timestamp, 2, 2, 0, 0, b"1234")
         for number, timestamp in ((1, 11), (2, 13))

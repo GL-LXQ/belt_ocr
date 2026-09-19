@@ -74,12 +74,11 @@ def frequency_context(tmp_path):
         app.database.close()
 
 
-def create_measurement(session, sequence, measured_time, value):
+def create_measurement(session, measured_time, value):
     """创建具有明确周期身份和统一时钟的设备测试测量。
 
     Args:
         session: 测量所属周期。
-        sequence: 唯一测量序号。
         measured_time: 统一时钟下的测量秒数。
         value: 频率值，单位 Hz。
 
@@ -87,8 +86,6 @@ def create_measurement(session, sequence, measured_time, value):
         FrequencyMeasurement(
             session_id="frequency-session",  # 所属周期
             frequency_source_id="FREQ01",  # 仪器来源
-            measurement_id="reading-1",  # 测量身份
-            source_sequence=1,  # 来源序号
             value_hz=42.0,  # 频率值
             measured_at="2026-09-18T00:00:11+00:00",  # 测量时间
             measured_monotonic=11,  # 统一时钟下的测量时间
@@ -98,8 +95,6 @@ def create_measurement(session, sequence, measured_time, value):
     return FrequencyMeasurement(
         session_id=session.session_id,
         frequency_source_id=session.frequency_source_id,
-        measurement_id=f"reading-{sequence}",
-        source_sequence=sequence,
         value_hz=value,
         measured_at=f"2026-09-18T00:00:{int(measured_time):02}+00:00",
         measured_monotonic=measured_time,
@@ -127,11 +122,11 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
         Returns:
             None  # 关闭已经生成冻结提交请求
         """
-        # 测量时间和序号与接收顺序不同，列表仍按接收顺序保存。
+        # 测量时间与接收顺序不同，列表仍按接收顺序保存。
         for measurement in (
-            create_measurement(session, 10, 15, 42.0),
-            create_measurement(session, 11, 19, 42.0),
-            create_measurement(session, 2, 11, 43.0),
+            create_measurement(session, 15, 42.0),
+            create_measurement(session, 19, 42.0),
+            create_measurement(session, 11, 43.0),
         ):
             await manager.handle_event(MeasurementEvent(
                 EventType.FREQUENCY_MEASURED, "M01", session.session_id, measurement,
@@ -143,7 +138,7 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
         await manager.handle_machine_close()
         assert manager.frequency_adapter.active_session_id is None
         assert session.frequency_window_sealed
-        assert session.final_frequency.measurement_id == "reading-2"
+        assert session.final_frequency is session.measurement_frequencies[-1]
         assert session.frozen_payload is not None
 
     asyncio.run(receive_and_close())
@@ -161,6 +156,8 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
     frequencies = json.loads(rows[0][0])
     assert [measurement["measured_monotonic"] for measurement in frequencies] == [15, 19, 11]
     assert rows[0][1] == frequencies[-1]["value_hz"] == 43.0
+    assert all("measurement_id" not in measurement for measurement in frequencies)
+    assert all("source_sequence" not in measurement for measurement in frequencies)
     assert json.loads(rows[0][2])["measurement_frequencies"] == frequencies
 
 
@@ -190,7 +187,7 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
         if outcome != "empty":
             await manager.handle_event(MeasurementEvent(
                 EventType.FREQUENCY_MEASURED, "M01", session.session_id,
-                create_measurement(session, 1, 12, 42.0),
+                create_measurement(session, 12, 42.0),
             ))
         if outcome == "failure":
             await manager.handle_event(MeasurementEvent(
@@ -235,12 +232,12 @@ def test_fifo_includes_queued_reading_before_close_and_rejects_late_reading(freq
         # 关闭前的测量先入队；即使尚未处理，也必须计入本轮。
         await app.publish_event(MeasurementEvent(
             EventType.FREQUENCY_MEASURED, "M01", session.session_id,
-            create_measurement(session, 1, 12, 42.0),
+            create_measurement(session, 12, 42.0),
         ))
         await app.publish_event(MeasurementEvent(EventType.MACHINE_CLOSED, "M01"))
         await app.publish_event(MeasurementEvent(
             EventType.FREQUENCY_MEASURED, "M01", session.session_id,
-            create_measurement(session, 2, 13, 99.0),
+            create_measurement(session, 13, 99.0),
         ))
 
         # 启动正式串行处理器并等待三条事件全部处理。
@@ -286,7 +283,7 @@ def test_next_session_is_not_changed_by_old_frequency_event(frequency_context):
         manager.frequency_adapter.active_session_id = "next-session"
         await manager.handle_event(MeasurementEvent(
             EventType.FREQUENCY_MEASURED, "M01", session.session_id,
-            create_measurement(session, 1, 12, 42.0),
+            create_measurement(session, 12, 42.0),
         ))
         assert session.measurement_frequencies == []
         assert manager.current_session.session_id == "next-session"
@@ -348,7 +345,6 @@ def test_placeholder_listener_delivers_only_active_session(frequency_context):
             second = await asyncio.wait_for(events.get(), 1)
             assert first.event_type == second.event_type == EventType.FREQUENCY_MEASURED
             assert first.payload.value_hz == second.payload.value_hz == 42
-            assert first.payload.measurement_id != second.payload.measurement_id
             assert first.session_id == second.session_id == session.session_id
 
             # 清空活动周期后，监听继续运行但不交付频率。
@@ -356,11 +352,11 @@ def test_placeholder_listener_delivers_only_active_session(frequency_context):
             await asyncio.sleep(0.03)
             assert events.empty()
 
-            # 新周期接收新的测量身份，序号不因 START 重置。
+            # 新周期接收的读数携带新的周期编号。
             adapter.active_session_id = "next-session"
             following = await asyncio.wait_for(events.get(), 1)
             assert following.session_id == "next-session"
-            assert following.payload.source_sequence > second.payload.source_sequence
+            assert following.payload.session_id == "next-session"
             assert following.payload.frequency_source_id == session.frequency_source_id
         finally:
             listener.cancel()

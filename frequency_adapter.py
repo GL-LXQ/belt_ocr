@@ -5,7 +5,6 @@ import asyncio
 import math
 from datetime import datetime, timezone
 from itertools import cycle
-from uuid import uuid4
 
 from configuration import MachineConfiguration, MeasurementConfiguration
 from models import FrequencyMeasurement, MeasurementEvent, PublishEvent
@@ -61,13 +60,10 @@ class FrequencyAdapter:
 
         当前为设备读取占位实现，后续替换为真实协议读取。
         """
-        # 按配置准备联调读数，并为本次监听分配测量身份前缀。
-        source_epoch = uuid4().hex
-        source_sequence = 0
+        # 按配置准备联调读数。
         frequency_values = cycle(self.machine.simulated_frequencies_hz)
         while True:
             await asyncio.sleep(self.configuration.frequency_interval_ms / 10000)
-            source_sequence += 1
             value_hz = next(frequency_values, None)
 
             # 在设备边界过滤无读数、非有限值和超出范围的读数。
@@ -84,8 +80,6 @@ class FrequencyAdapter:
             measurement = FrequencyMeasurement(
                 session_id=session_id,
                 frequency_source_id=self.machine.frequency_source_id,
-                measurement_id=f"{source_epoch}-{source_sequence}",
-                source_sequence=source_sequence,
                 value_hz=value_hz,
                 measured_at=received_at,
                 measured_monotonic=asyncio.get_running_loop().time(),

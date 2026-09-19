@@ -96,8 +96,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         boundary = asyncio.get_running_loop().time()
         frame = CameraFrame("serial", 1, 0, 0, boundary, 2, 2, 17301505, 0, b"1234")
         measurement = FrequencyMeasurement(
-            session.session_id, session.frequency_source_id, uuid4().hex,
-            len(session.measurement_frequencies) + 1, value_hz,
+            session.session_id, session.frequency_source_id, value_hz,
             timestamp, boundary, timestamp,
         )
 
@@ -139,9 +138,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             ))
             await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
             self.assertEqual(session.ocr_result.selected_frames[0].camera_id, session.camera_id)
-            self.assertEqual(
-                set(session.frequency_candidates), {measurement.measurement_id},
-            )
+            self.assertIn(measurement, session.frequency_candidates.values())
 
         # 三台机器分别关闭后只保存各自证据和通道。
         await asyncio.gather(*(
@@ -209,20 +206,22 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             machine_manager = app.machine_managers["M01"]
             session = machine_manager.current_session
             frame, measurement = await self.supply_valid_inputs(session, 42.0)
-            expected_measurements[session.session_id] = measurement.measurement_id
+            expected_measurements[session.session_id] = measurement.value_hz
             await self.close_controlled_cycle(session)
             await app.wait_until_idle(10)
         await app.wait_until_idle(10)
 
-        # 相同数值在相邻两轮中使用不同身份，各自成为本轮最终测量。
+        # 相同数值按周期编号分别保存，各自成为本轮最终频率。
         records = self.read_records()
         self.assertEqual(len(records), 2)
-        self.assertEqual(len({record["final_measurement_id"] for record in records}), 2)
+        self.assertEqual(
+            {record["session_id"] for record in records}, set(expected_measurements),
+        )
         for record in records:
             self.assertEqual(record["outcome"], "COMPLETE")
             self.assertEqual(record["final_frequency_hz"], 42.0)
             self.assertEqual(
-                record["final_measurement_id"],
+                record["final_frequency_hz"],
                 expected_measurements[record["session_id"]],
             )
 
@@ -291,7 +290,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         # 同时存在旧轮和新轮时，注入没有周期归属的延迟读数。
         await self.publish_and_wait(MeasurementEvent(
             EventType.FREQUENCY_MEASURED, "M01", None,
-            replace(measurement, session_id="", measurement_id=uuid4().hex),
+            replace(measurement, session_id=""),
         ))
         self.assertEqual(len(first_session.frequency_candidates), 1)
         self.assertEqual(second_session.frequency_candidates, {})
@@ -477,7 +476,7 @@ asyncio.run(crash_after_close())
         # 冲突测量不替换原候选，并记录无效频率和异常原因。
         self.assertEqual(session.frequency_state, FrequencyState.FAILED)
         self.assertIn("AMBIGUOUS_MEASUREMENT", session.errors)
-        self.assertEqual(session.frequency_candidates[measurement.measurement_id], measurement)
+        self.assertIn(measurement, session.frequency_candidates.values())
         self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_abnormal_event_reasons())
 
 

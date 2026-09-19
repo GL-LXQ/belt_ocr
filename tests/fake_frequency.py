@@ -22,12 +22,10 @@ class FakeFrequency(FrequencyAdapter):
         Returns:
             None  # 持续交付测试测量直到任务取消
         """
-        # 初始化设备测量序号和测试数值来源。
-        source_sequence = 0
+        # 初始化测试数值来源。
         frequency_values = cycle(self.machine.simulated_frequencies_hz)
         while True:
             await asyncio.sleep(self.configuration.frequency_interval_ms / 1000)
-            source_sequence += 1
             value_hz = next(frequency_values, None)
 
             # 在设备边界过滤无读数、非有限值和超出范围的读数。
@@ -44,8 +42,6 @@ class FakeFrequency(FrequencyAdapter):
             measurement = FrequencyMeasurement(
                 session_id=session_id,
                 frequency_source_id=self.machine.frequency_source_id,
-                measurement_id=f"reading-{source_sequence}",
-                source_sequence=source_sequence,
                 value_hz=value_hz,
                 measured_at=received_at,
                 measured_monotonic=asyncio.get_running_loop().time(),

@@ -47,8 +47,6 @@ class CapturedFrame:
 class FrequencyMeasurement:
     session_id: str
     frequency_source_id: str
-    measurement_id: str
-    source_sequence: int
     value_hz: float
     measured_at: str
     measured_monotonic: float
