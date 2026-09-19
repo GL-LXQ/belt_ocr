@@ -341,7 +341,7 @@ class MachineManager:
                     frames=event.payload,
                 )
 
-                # 成功入队后登记本轮待处理数量，拒收批次只记录错误。
+                # 成功入队后登记本轮待处理数量，拒收批次按原因分别处理。
                 if accepted:
                     session.pending_recognition_batches += 1
                     # 保留已受理原图，直到终选完成或周期异常结束。
@@ -350,7 +350,11 @@ class MachineManager:
                     )
                 else:
                     session.errors.append("OCR_BATCH_REJECTED")
-                    logger.error("识别批次被拒收 machine_id=%s session_id=%s", session.machine_id, session.session_id)
+                    # 仍在接收说明拒收原因是队列满，本轮识别文字残缺，按整轮失败处理。
+                    # 已停止接收只出现在退出阶段，本轮交给退出流程中断，不在这里定因。
+                    if self.text_recognizer.accepting_batches:
+                        session.ocr_state = OCRState.FAILED
+                        await self.handle_measurement_failure(session)
 
                 # 结束批次转发，等待后续业务事件。
                 return
@@ -366,15 +370,10 @@ class MachineManager:
                 session.pending_recognition_batches -= 1
 
             case EventType.RECOGNITION_BATCH_FAILED:
-                # 记录本批识别错误，减少本轮待处理批次数。
+                # 整批识别失败会让本轮文字残缺，登记错误并结束本轮。
                 session.errors.append(event.payload)
+                session.ocr_state = OCRState.FAILED
                 session.pending_recognition_batches -= 1
-                logger.error(
-                    "识别批次失败 machine_id=%s session_id=%s error=%s",
-                    session.machine_id,
-                    session.session_id,
-                    event.payload,
-                )
 
             case EventType.EVIDENCE_VALIDATED | EventType.EVIDENCE_FAILED:
                 # 结算证据校验，登记成功状态或失败原因。

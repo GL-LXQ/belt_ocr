@@ -22,7 +22,7 @@
 1. **启动**：`load_configuration` 校验配置 → `App.start` 初始化运行库与结果库、获取实例锁 → 加载 MVS SDK 并按序列号逐台打开相机（任一机器缺序列号或打开失败，整个程序启动失败并释放已打开设备）→ 检查磁盘容量 → 按 `initial_machine_state` 确定机器状态（CLOSED 可直接接收；OPEN/UNKNOWN 等待有效关闭或状态同步）→ 启动各机事件处理、频率监听、共享存储和容量检查任务。
 2. **START**（`App.handle_start` → MACHINE_STARTED）：MachineManager 检查可接收性（无活动周期、未等待复位、积压/容量/相机/运行库均正常），创建 RUNNING 状态的 BeltSession，启动固定窗口相机采集（默认 1000 ms），登记频率接收窗口，安排周期超时（默认 60 s）和 OCR 超时（默认 30 s）。
 3. **相机采集**：生产线程取帧并复制独立内存 → 消费线程做业务边界检查（起始/截止时间、选帧上限，默认最多 5 帧）→ 帧质量筛选占位（当前全放行）→ 内存编码 BMP → 满 8 帧交付一批 FrameBatchSelected，队满丢帧只统计 → 生产与消费结束后交付尾批并发布 CaptureSealed（含帧数、耗时、丢帧和错误统计）。
-4. **OCR**：图片批次进入 TextRecognizer 有界队列（默认 32 批），App 不自动启动消费者；调用方手动运行 `listen_and_recognize_batches`，`recognize_batch` 当前为每张图片返回空 blocks 的联调占位，结果按 frame_id 关联原图并以 RecognitionBatchCompleted/Failed 回传。
+4. **OCR**：图片批次进入 TextRecognizer 有界队列（默认 32 批），App 不自动启动消费者；调用方手动运行 `listen_and_recognize_batches`，`recognize_batch` 当前为每张图片返回空 blocks 的联调占位，结果按 frame_id 关联原图并以 RecognitionBatchCompleted/Failed 回传。队列满导致入队被拒或整批识别失败时，本轮识别文字残缺，登记错误后按整轮失败处理，不生成记录；退出阶段停止接收造成的拒收交给退出流程中断。
 5. **频率**：FrequencyAdapter 是设备黑盒，`listen_measurements` 当前循环读取 `simulated_frequencies_hz` 产生联调读数（真实协议待接入），接收时固定当前周期，无活动周期不交付；有效测量按接收顺序追加到 `measurement_frequencies`，业务层不重复校验。
 6. **CLOSE**（`App.handle_close` → MACHINE_CLOSED，携带当前活动 session_id）：记录 `capture_stop_time` → 封闭频率窗口并取最后一条测量为 `final_frequency`（无读数、故障或中断时最终值为空并置 FAILED）→ 停止相机生产并等待 → 释放活动位置 → 正常关闭后 Session 继续后台收尾；迟到/身份不匹配的关闭事件进入审计，不关闭新周期。
 7. **完成检查**（`try_finalize`）：采集封口 + 批次全部结算 + `ocr_state == SUCCESS` + `frequency_state == SUCCESS` + 证据验证通过 → 冻结 payload 并计算 SHA256 → WAITING_COMMIT_DB → 单次幂等写入 SQLite → COMMITTED 并移除档案。写入内容为机器与周期身份、起止时间、`ordered_lines`、`final_frequency_hz`、`measurement_frequencies` 明细、`evidence_refs`、跳帧数、采集统计和配置版本，`payload_json` 是完整冻结内容，表列只是免解析 JSON 的查询副本。任一失败、超时、中断或提交失败 → FAILED，打印日志并清理资源；活动周期失败保留身份，等待真实 CLOSE。
@@ -88,6 +88,14 @@
 - 本机没有历史库文件，无需迁移；`error_codes` 是 NOT NULL 且无默认值，若在已有库的机器上重复此改动，需先删除旧列或重建表。
 - 文档同步：本文件 1.3 完成检查段落补全记录字段说明。
 
+**OCR 降级路径收敛**
+
+- `FRAME_BATCH_SELECTED` 入队被拒与 `RECOGNITION_BATCH_FAILED` 不再是"只记错误、周期继续"：置 `ocr_state = FAILED` 后进入 `handle_measurement_failure`，与 OCR 失败、采集失败、超时同一出口，本轮不生成记录。
+- 拒收按原因分开处理：队列满说明识别服务已经积压，按整轮失败处理；`accepting_batches` 已停止接收只出现在退出阶段，本轮交给退出流程中断，不在 OCR 侧定因（否则正常退出会被记成批次拒收）。
+- 两个分支本地重复的 logger.error 删除，失败明细统一由 `handle_measurement_failure` 打印；失败后迟到的批次结果由 `state != RUNNING` 检查丢弃。
+- 至此 OCR 侧所有残缺路径都终结本轮，"入库即完整成功"成立。
+- 本次未改测试：全量测试由 91 通过 / 40 失败变为 87 通过 / 44 失败，新增的 4 个失败用例断言的都是被推翻的旧行为（test_full_queue_rejects_tail_and_preserves_first_batch、test_failed_batch_does_not_stop_next_batch、test_failed_and_rejected_batches_preserve_successful_results、test_no_usable_text_skips_postprocessing[failed]），待与存量用例一起对齐（见 3.3 第 2 条）。
+
 **文档**
 
 - 同步更新项目规格与运行说明文档：本地数据库数据流段落、启动流程、保存与异常、本地运行库与重启、文件职责表。
@@ -96,7 +104,7 @@
 **测试**
 
 - 删除依赖旧表与旧库迁移的用例（test_startup_drops_old_checkpoint_table、test_old_database_migration_preserves_frozen_record），调整事件去重用例中的 machine_checkpoints 断言。
-- 当前全量测试 91 通过 / 40 失败，失败用例主要因仍引用旧字段与旧行为，待对齐（见 3.2）。
+- 全量测试 91 通过 / 40 失败，失败用例主要因仍引用旧字段与旧行为，待对齐（见 3.2；本次 OCR 降级收敛后为 87 通过 / 44 失败）。
 
 ## 三、当前状态与计划
 
@@ -112,16 +120,15 @@
 
 ### 3.2 当前已知问题（2026-09-19）
 
-1. **测试失败**：全量测试 91 通过 / 40 失败，失败原因主要是测试仍引用已改名的旧字段和旧行为：`BeltSession.frequency_candidates`（现为 `measurement_frequencies`）、已删除的 `commit_state`、`FakeFrequency.active_window`、`CapturedFrame` 旧构造参数、初始 UNKNOWN 状态期望 FAULT（现为 WAIT_CYCLE_RESET）、锁错误消息文案等，需要与当前代码对齐。
+1. **测试失败**：全量测试 87 通过 / 44 失败。失败分两类：4 个是 OCR 降级路径收敛后仍断言旧行为的用例（名单见 2026-09-19 进度条目），其余仍因引用已改名的旧字段和旧行为：`BeltSession.frequency_candidates`（现为 `measurement_frequencies`）、已删除的 `commit_state`、`FakeFrequency.active_window`、`CapturedFrame` 旧构造参数、初始 UNKNOWN 状态期望 FAULT（现为 WAIT_CYCLE_RESET）、锁错误消息文案等，需要与当前代码对齐。
 2. **OCR 成功路径断开**：见 3.1 第 3 条，依赖完整入库场景的测试会出现 OCR_TIMEOUT。
 3. **频率间隔换算疑点**：`listen_measurements` 中 `frequency_interval_ms` 按 `/ 10000` 换算（配置名义 100 ms 实际约 10 ms 一条读数），待确认是联调加速还是笔误。
 4. **MVS 编码容量**：BMP 输出缓冲区按 `width * height * 4 + 2048` 估算，Bayer 或大分辨率图像可能不足，需真机验证。
-5. **降级路径未终结**：`OCR_BATCH_REJECTED`（OCR 队列满拒收整批图）和 `RECOGNITION_BATCH_FAILED`（整批识别失败）目前只登记 `session.errors` 并让周期继续，`ordered_lines` 可能残缺却仍按正常记录入库，与此前确认的"降级即整轮失败"契约不一致；字段精简后这两个错误也不再入库，只能从日志查。需要和 3.1 第 3 条一起收敛。
 
 ### 3.3 建议的下一步
 
 1. 接通 OCR 成功路径：实现文字终选时确定保留文字、置 `ocr_state = SUCCESS` 并生成 `OCRResult`，让正常记录能端到端入库。
-2. 更新存量测试，对齐当前字段与行为（`frequency_candidates` → `measurement_frequencies` 等）。
+2. 更新存量测试，对齐当前字段与行为（`frequency_candidates` → `measurement_frequencies`，以及 OCR 降级收敛后断言旧行为的 4 个用例）。
 3. 接入真实频率设备协议。
 4. 实现 IO 适配层（去抖、边沿识别、状态同步）。
 5. 真机验证 MVS 采集与编码。
