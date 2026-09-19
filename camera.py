@@ -4,9 +4,9 @@ import asyncio
 import time
 import threading
 from collections.abc import Callable
-from concurrent.futures import Future
 from dataclasses import dataclass, field
 
+from async_utils import run_blocking_operation
 from configuration import MachineConfiguration, MeasurementConfiguration
 from enums import EventType
 from models import CaptureResult, MeasurementEvent, PublishEvent
@@ -24,16 +24,27 @@ class CaptureTask:
     timeout_ms: int
     report_failure: Callable[[Exception], None]
     stop_requested: threading.Event = field(default_factory=threading.Event)
-    completion_future: Future = field(default_factory=Future)
+    capture_finished: asyncio.Event = field(default_factory=asyncio.Event)
 
-    def run_capture(self) -> None:
+    def run_capture(self) -> CaptureResult:
         """循环收集全部帧，停止相机后交付整轮结果。
 
         Args:
             无外部参数。
 
         Returns:
-            None  # 结果通过 completion_future 交付
+            CaptureResult(
+                capture_id="capture-1",  # 采集编号
+                frames=(),  # 本轮原始帧集合
+                statistics={
+                    "capture_duration_seconds": 1.0,  # 采集耗时秒数
+                    "received_frame_count": 0,  # SDK 接收帧数
+                    "retained_frame_count": 0,  # 保存帧数
+                    "camera_stopped": True,  # 停流是否成功
+                    "capture_errors": [],  # 采集错误列表
+                },
+                errors=(),  # 采集错误集合
+            )
         """
         # 准备本轮帧集合、截止时间和统计基线。
         frames = []   # 存放这一轮采集到的原始帧
@@ -61,7 +72,7 @@ class CaptureTask:
             errors.append(str(error))
             self.report_failure(error)
         finally:
-            # 归还帧缓存后的同一线程停止取流，最后释放相机占用。
+            # 归还帧缓存后，在同一线程停止取流。
             try:
                 self.camera.stop_grabbing()
             except Exception as error:
@@ -69,8 +80,6 @@ class CaptureTask:
                 self.camera.faulted = True
                 errors.append(str(error))
                 self.report_failure(error)
-            finally:
-                self.camera.capture_lock.release()
 
             # 一次性整理本轮帧、采集统计和错误。
             result = CaptureResult(
@@ -86,8 +95,8 @@ class CaptureTask:
                 errors=tuple(errors),
             )
 
-            # 保存整轮结果，通知等待结果的异步任务继续执行。
-            self.completion_future.set_result(result)
+        # 返回完整采集结果。
+        return result
 
 class SessionCamera:
     """管理相机采集生命周期和周期身份。"""
@@ -180,12 +189,6 @@ class SessionCamera:
                 report_failure=lambda error: event_loop.call_soon_threadsafe(self.report_failure, error, component),
             )
 
-            # 启动后台线程，顺序完成取流、收集帧和停止取流。
-            capture_thread = threading.Thread(
-                target=capture_task.run_capture,
-                name=f"Capture-{capture_id}",
-            )
-            capture_thread.start()
         except Exception:
             # 启动失败时释放相机采集锁。
             camera.capture_lock.release()
@@ -195,7 +198,7 @@ class SessionCamera:
         self.current_capture = capture_task
 
         # 创建异步任务，等待采集结束并发布整轮采集结果。
-        self.delivery_task = asyncio.create_task(self.finish_capture(session_id, capture_task))
+        self.delivery_task = asyncio.create_task(self.capture_and_deliver_result(session_id, capture_task))
 
         # 结果交付任务结束后，清理任务引用并处理未捕获的异常。
         self.delivery_task.add_done_callback(self.handle_capture_task_finished)
@@ -209,6 +212,11 @@ class SessionCamera:
         Returns:
             None  # 任务引用已移除，异常已报告
         """
+        # 清理尚未开始执行就被取消的任务，归还相机占用。
+        if self.current_capture is not None:
+            self.current_capture.camera.capture_lock.release()
+            self.current_capture.capture_finished.set()
+            self.current_capture = None
         self.delivery_task = None
         if task.cancelled():
             return
@@ -232,10 +240,10 @@ class SessionCamera:
             return
         # 发出停止通知并等待当前读取结束和硬件释放。
         capture_task.stop_requested.set()
-        await asyncio.shield(asyncio.wrap_future(capture_task.completion_future))
+        await capture_task.capture_finished.wait()
 
-    async def finish_capture(self, session_id: str, capture_task: CaptureTask) -> None:
-        """等待采集结束并交付帧集合和统计。
+    async def capture_and_deliver_result(self, session_id: str, capture_task: CaptureTask) -> None:
+        """在线程中完成采集，再发布本轮采集结果。
 
         Args:
             session_id: 帧集合所属周期。
@@ -245,8 +253,14 @@ class SessionCamera:
             None  # 整轮结果已交付，采集引用已移除
         """
         try:
-            # 等待采集线程交付完整结果。
-            result = await asyncio.shield(asyncio.wrap_future(capture_task.completion_future))
+            # 在线程中执行采集，取消时等待实际采集结束。
+            try:
+                result = await run_blocking_operation(capture_task.run_capture)
+            finally:
+                # 采集结束后归还相机占用，唤醒等待停流的 CLOSE 处理。
+                capture_task.camera.capture_lock.release()
+                capture_task.capture_finished.set()
+                self.current_capture = None
             # 根据采集错误发布一次整轮结果事件。
             event_type = EventType.CAPTURE_FAILED if result.errors else EventType.CAPTURE_COMPLETED
             await self.publish_event(MeasurementEvent(event_type, self.machine.machine_id, session_id, result))

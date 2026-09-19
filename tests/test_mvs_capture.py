@@ -28,6 +28,7 @@ def start_capture():
     event_loop = asyncio.new_event_loop()
     adapters = []
     delivery_tasks = {}
+    results = {}
 
     async def publish_event(event):
         """接收测试采集完成事件。
@@ -38,7 +39,7 @@ def start_capture():
         Returns:
             None  # 事件已接收
         """
-        return None
+        results[event.payload.capture_id] = event.payload
 
     def begin_capture(camera, duration_seconds=1.0, timeout_ms=50):
         """在测试事件循环中调用正式采集入口。
@@ -49,7 +50,7 @@ def start_capture():
             timeout_ms: 单次取帧超时毫秒数。
 
         Returns:
-            CaptureTask  # 包含停止信号和完成 Future 的采集任务
+            CaptureTask  # 包含停止信号和采集完成信号的任务
         """
         adapter = SessionCamera(
             SimpleNamespace(machine_id="machine-1", camera_id=camera.serial),
@@ -71,7 +72,11 @@ def start_capture():
             """
             adapter.start_capture("session-1", f"capture-{len(adapters)}", time.monotonic())
             delivery_tasks[adapter.current_capture] = adapter.delivery_task
-            return adapter.current_capture
+            capture_task = adapter.current_capture
+            # 让异步主流程提交后台采集，再将控制权交给同步测试。
+            for step in range(3):
+                await asyncio.sleep(0)
+            return capture_task
 
         return event_loop.run_until_complete(begin())
 
@@ -95,7 +100,7 @@ def start_capture():
                 CaptureResult  # 包含帧集合和采集统计的结果
             """
             await asyncio.wait_for(asyncio.shield(delivery_tasks[task]), timeout_seconds)
-            return task.completion_future.result()
+            return results[task.capture_id]
 
         return event_loop.run_until_complete(receive_result())
 
@@ -369,7 +374,7 @@ def test_sdk_errors_are_recorded_and_resources_released(camera, operation, start
     assert result.errors
     assert result.statistics["camera_stopped"] == (operation != "stop")
     assert not camera.handle.buffer_outstanding
-    assert task.completion_future.done()
+    assert task.capture_finished.is_set()
     assert result.statistics["received_frame_count"] == (0 if operation in {"start", "get"} else 1)
     with pytest.raises(MvsError, match="不可用"):
         start_capture(camera)
@@ -599,7 +604,7 @@ def test_two_cameras_capture_independently(camera, start_capture, wait_capture):
         other_camera.handle.frames.put(b"second")
         second_result = wait_capture(second_task, 2)
         assert second_result.frames[0].camera_serial == "CAM002"
-        assert not first_task.completion_future.done()
+        assert not first_task.capture_finished.is_set()
     finally:
         first_task.stop_requested.set()
         wait_capture(first_task, 2)
@@ -683,11 +688,13 @@ def test_thread_start_failure_releases_camera(camera, start_capture, monkeypatch
     Returns:
         None  # 启动异常、锁释放和再次采集已验证
     """
-    def fail_start(thread):
+    async def fail_start(operation, *arguments, **keyword_arguments):
         """模拟线程启动失败。
 
         Args:
-            thread: 待启动的采集线程。
+            operation: 待执行的采集函数。
+            arguments: 位置参数。
+            keyword_arguments: 关键字参数。
 
         Returns:
             无返回值，抛出 RuntimeError。
@@ -696,12 +703,105 @@ def test_thread_start_failure_releases_camera(camera, start_capture, monkeypatch
 
     # 注入启动错误，确认相机占用已释放。
     with monkeypatch.context() as patch:
-        patch.setattr(threading.Thread, "start", fail_start)
+        patch.setattr(asyncio, "to_thread", fail_start)
+        task = start_capture(camera)
         with pytest.raises(RuntimeError, match="线程启动失败"):
-            start_capture(camera)
+            wait_capture(task)
     assert not camera.capture_lock.locked()
 
     # 恢复线程入口，确认同一相机可以正常采集。
     result = wait_capture(start_capture(camera, duration_seconds=0.05))
     assert result.statistics["camera_stopped"]
     assert not result.errors
+
+
+@pytest.mark.parametrize("cancel_delivery", [False, True])
+def test_capture_shutdown_waits_for_worker_only(camera, monkeypatch, cancel_delivery):
+    """验证取消等待真实采集结束，CLOSE 不等待被阻塞的结果发布。
+
+    Args:
+        camera: 可控 SDK 相机。
+        monkeypatch: 接口替换工具。
+        cancel_delivery: 是否取消异步采集主流程。
+
+    Returns:
+        None  # 线程结束、相机占用释放和交付等待已验证
+    """
+    entered = threading.Event()
+    release_read = threading.Event()
+
+    def read_blocked(stop_requested, timeout_ms):
+        """保持一次读取直到测试允许结束。
+
+        Args:
+            stop_requested: 停止信号。
+            timeout_ms: 读取超时。
+
+        Returns:
+            None  # 本次未取得帧
+        """
+        entered.set()
+        assert release_read.wait(3)
+        return None
+
+    async def scenario():
+        """执行取消或交付阻塞场景并释放资源。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 场景执行完成
+        """
+        release_delivery = asyncio.Event()
+        published = []
+
+        async def publish(event):
+            """等待允许后记录交付结果。
+
+            Args:
+                event: 采集结果事件。
+
+            Returns:
+                None  # 事件已记录
+            """
+            await release_delivery.wait()
+            published.append(event)
+
+        adapter = SessionCamera(
+            SimpleNamespace(machine_id="machine", camera_id="camera"),
+            SimpleNamespace(capture_window_ms=2000, camera_timeout_ms=50),
+            publish,
+            lambda error, component: None,
+        )
+        adapter.device = camera
+        adapter.start_capture("session", "capture", time.monotonic())
+        delivery_task = adapter.delivery_task
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            if cancel_delivery:
+                delivery_task.cancel()
+                await asyncio.sleep(0)
+                assert not delivery_task.done()
+                assert camera.capture_lock.locked()
+
+            # 发出停止信号并允许在途读取结束，只等待硬件停止。
+            release_read.set()
+            await asyncio.wait_for(adapter.seal_capture(), 1)
+            assert not camera.capture_lock.locked()
+            if cancel_delivery:
+                with pytest.raises(asyncio.CancelledError):
+                    await delivery_task
+                assert not published
+            else:
+                assert not delivery_task.done()
+                release_delivery.set()
+                await delivery_task
+                assert len(published) == 1
+        finally:
+            release_read.set()
+            release_delivery.set()
+            await asyncio.gather(delivery_task, return_exceptions=True)
+
+    monkeypatch.setattr(camera, "read_frame", read_blocked)
+    asyncio.run(scenario())
