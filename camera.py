@@ -1,14 +1,131 @@
-"""将单轮相机采集结果一次性交付给所属测量周期。"""
+"""启动单线程整轮采集，并将内存帧一次性交付给所属测量周期。"""
 
 import asyncio
 import time
+import threading
 from collections.abc import Callable
+from concurrent.futures import Future
+from dataclasses import dataclass, field
 
 from configuration import MachineConfiguration, MeasurementConfiguration
 from enums import EventType
 from models import CaptureSummary, MeasurementEvent, PublishEvent
-from mvs_capture import CaptureTask, start_capture
-from mvs_sdk import MvsCamera
+from mvs_sdk import CameraFrame, MvsCamera, MvsError
+
+
+@dataclass(frozen=True)
+class CaptureResult:
+    """保存一轮独立内存帧与采集统计。"""
+
+    frames: tuple[CameraFrame, ...] = field(repr=False)
+    capture_duration_seconds: float
+    received_frame_count: int
+    skipped_frame_count: int
+    camera_stopped: bool
+    capture_errors: tuple[str, ...]
+
+
+@dataclass(eq=False)
+class CaptureTask:
+    """持有单个采集线程、停止信号和完成通知。"""
+
+    camera: MvsCamera
+    capture_id: str
+    capture_start_time: float
+    duration_seconds: float
+    timeout_ms: int
+    report_failure: Callable[[Exception], None] | None = None
+    capture_stop_time: float | None = None
+    stop_requested: threading.Event = field(default_factory=threading.Event)
+    completion_future: Future = field(default_factory=Future)
+    thread: threading.Thread | None = None
+
+    def run_capture(self) -> None:
+        """按时间边界收集全部帧，停止相机后交付整轮结果。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 结果通过 completion_future 交付
+        """
+        # 准备本轮帧集合、截止时间和统计基线。
+        frames = []   # 存放这一轮采集到的原始帧
+        errors = []  # 记录采集或停止相机时的错误
+        skipped_count = 0
+        camera_stopped = True
+        initial_frame_count = self.camera.received_frame_count
+        deadline = self.capture_start_time + self.duration_seconds  # 本轮采集的截止时间
+        try:
+            # 未提前关闭时启动取流，循环保存边界内的独立内存帧。
+            if not self.stop_requested.is_set() and time.monotonic() < deadline:
+                # 没有收到停止信号；采集窗口还没过期，执行 start_grabbing
+                self.camera.start_grabbing()
+
+            # 本次采集未提前停止并且没过期，进入循环，每次读取一帧
+            while not self.stop_requested.is_set() and time.monotonic() < deadline:
+                # 读取本轮采集的剩余时间
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                frame = self.camera.read_frame(self.stop_requested, min(self.timeout_ms, remaining_ms))
+                if frame is None:
+                    continue
+                stop_time = min(deadline, self.capture_stop_time) if self.capture_stop_time is not None else deadline
+                if self.capture_start_time <= frame.received_monotonic <= stop_time:
+                    frames.append(frame)
+                else:
+                    skipped_count += 1
+        except Exception as error:
+            # 保存设备故障并通知应用退出。
+            self.camera.faulted = True
+            errors.append(str(error))
+            if self.report_failure is not None:
+                self.report_failure(error)
+        finally:
+            # 归还帧缓存后的同一线程停止取流，最后释放相机占用。
+            try:
+                self.camera.stop_grabbing()
+            except Exception as error:
+                camera_stopped = False
+                self.camera.faulted = True
+                errors.append(str(error))
+                if self.report_failure is not None:
+                    self.report_failure(error)
+            finally:
+                self.camera.capture_lock.release()
+
+            # 收集最终统计，将帧集合交给异步调用方。
+            result = CaptureResult(
+                frames=tuple(frames),
+                capture_duration_seconds=time.monotonic() - self.capture_start_time,
+                received_frame_count=self.camera.received_frame_count - initial_frame_count,
+                skipped_frame_count=skipped_count,
+                camera_stopped=camera_stopped,
+                capture_errors=tuple(errors),
+            )
+
+            # 保存整轮结果，通知等待结果的异步任务继续执行。
+            self.completion_future.set_result(result)
+
+    def wait(self, timeout_seconds: float | None = None) -> CaptureResult:
+        """等待采集线程退出并取得整轮结果。
+
+        Args:
+            timeout_seconds: 最长等待秒数，None 表示不限时。
+
+        Returns:
+            CaptureResult(
+                frames=(),  # 独立内存帧，非空时元素为 CameraFrame
+                capture_duration_seconds=1.0,  # 采集耗时
+                received_frame_count=0,  # 实际接收数量
+                skipped_frame_count=0,  # 时间边界排除数量
+                camera_stopped=True,  # 相机是否停止
+                capture_errors=(),  # 设备错误信息
+            )
+        """
+        # 等待结果和线程退出，再返回封闭数据。
+        result = self.completion_future.result(timeout_seconds)
+        self.thread.join()
+        return result
 
 
 class SessionCamera:
@@ -83,17 +200,33 @@ class SessionCamera:
             f"相机 machine_id={self.machine.machine_id} "
             f"camera_id={self.machine.camera_id} session_id={session_id}"
         )
-        capture_task = start_capture(
-            self.device,
-            # 整轮采集窗口持续时间
-            duration_seconds=self.configuration.capture_window_ms / 1000,
-            # 一次取帧最多等多久
-            timeout_ms=self.configuration.camera_timeout_ms,
-            capture_id=capture_id,
-            capture_start_time=capture_start_time,
-            report_failure=lambda error: event_loop.call_soon_threadsafe(self.report_failure, error, component),
-        )
-        
+        # 取得相机采集锁，检查设备状态。
+        camera = self.device
+        if not camera.capture_lock.acquire(blocking=False):
+            raise MvsError(f"相机正在采集：{camera.serial}")
+        try:
+            if camera.closed or camera.faulted:
+                raise MvsError(f"相机不可用：{camera.serial}")
+            # 创建本轮任务，登记采集窗口、单次取帧超时和故障入口。
+            capture_task = CaptureTask(
+                camera=camera,
+                capture_id=capture_id,
+                capture_start_time=capture_start_time,
+                duration_seconds=self.configuration.capture_window_ms / 1000,
+                timeout_ms=self.configuration.camera_timeout_ms,
+                report_failure=lambda error: event_loop.call_soon_threadsafe(self.report_failure, error, component),
+            )
+            # 启动后台线程，顺序完成取流、收集帧和停止取流。
+            capture_task.thread = threading.Thread(
+                target=capture_task.run_capture,
+                name=f"Capture-{capture_id}",
+            )
+            capture_task.thread.start()
+        except Exception:
+            # 启动失败时释放相机采集锁。
+            camera.capture_lock.release()
+            raise
+
         # 保存本轮采集任务，供停止采集时使用。
         self.current_capture = capture_task
 
