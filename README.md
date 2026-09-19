@@ -25,7 +25,7 @@
 4. **OCR**：图片批次进入 TextRecognizer 有界队列（默认 32 批），App 不自动启动消费者；调用方手动运行 `listen_and_recognize_batches`，`recognize_batch` 当前为每张图片返回空 blocks 的联调占位，结果按 frame_id 关联原图并以 RecognitionBatchCompleted/Failed 回传。
 5. **频率**：FrequencyAdapter 是设备黑盒，`listen_measurements` 当前循环读取 `simulated_frequencies_hz` 产生联调读数（真实协议待接入），接收时固定当前周期，无活动周期不交付；有效测量按接收顺序追加到 `measurement_frequencies`，业务层不重复校验。
 6. **CLOSE**（`App.handle_close` → MACHINE_CLOSED，携带当前活动 session_id）：记录 `capture_stop_time` → 封闭频率窗口并取最后一条测量为 `final_frequency`（无读数、故障或中断时最终值为空并置 FAILED）→ 停止相机生产并等待 → 释放活动位置 → 正常关闭后 Session 继续后台收尾；迟到/身份不匹配的关闭事件进入审计，不关闭新周期。
-7. **完成检查**（`try_finalize`）：采集封口 + 批次全部结算 + `ocr_state == SUCCESS` + `frequency_state == SUCCESS` + 证据验证通过 → 冻结 payload 并计算 SHA256 → WAITING_COMMIT_DB → 单次幂等写入 SQLite → COMMITTED 并移除档案。任一失败、超时、中断或提交失败 → FAILED，打印日志并清理资源；活动周期失败保留身份，等待真实 CLOSE。
+7. **完成检查**（`try_finalize`）：采集封口 + 批次全部结算 + `ocr_state == SUCCESS` + `frequency_state == SUCCESS` + 证据验证通过 → 冻结 payload 并计算 SHA256 → WAITING_COMMIT_DB → 单次幂等写入 SQLite → COMMITTED 并移除档案。写入内容为机器与周期身份、起止时间、`ordered_lines`、`final_frequency_hz`、`measurement_frequencies` 明细、`evidence_refs`、跳帧数、采集统计和配置版本，`payload_json` 是完整冻结内容，表列只是免解析 JSON 的查询副本。任一失败、超时、中断或提交失败 → FAILED，打印日志并清理资源；活动周期失败保留身份，等待真实 CLOSE。
 8. **故障与退出**：相机采集、图片编码、频率监听或后台任务异常 → `report_failure` 关闭信号入口、记录机器/设备身份和原始异常堆栈，统一停止全部机器，命令行以退出码 1 结束，不自动重启。正常退出先中断活动周期，在 `shutdown_timeout_ms` 内排空，再释放相机、SDK 和实例锁。
 
 ### 1.4 模块与文件清单
@@ -81,6 +81,13 @@
 - 删除其余旧库升级代码：machine_checkpoints 检查点表清理、PRAGMA user_version、outcome/is_simulated 旧列删除、measurement_frequencies 缺列回填。database.py 现仅管理两张业务表：abnormal_events（运行库审计）和 measurements（结果库）。
 - 删除 runtime/ 下旧演示数据库文件（measurements.sqlite3、measurements.recovery.sqlite3、.lock），下次运行自动按新结构重建。
 
+**测量记录字段精简**
+
+- 删除 measurements 表的 `error_codes` 与 `final_measurement_id` 两列，payload 同步去掉这两个键：前者只在 OCR 批次拒收、整批识别失败两条不终止周期的降级路径上有值，其余情况恒为空数组；后者恒等于 `measurement_frequencies` 最后一条的 measurement_id，可从已存明细推导。
+- 建表、INSERT 与 payload 组装同步收缩，`session.errors` 保留为内存错误清单，继续供失败日志使用。
+- 本机没有历史库文件，无需迁移；`error_codes` 是 NOT NULL 且无默认值，若在已有库的机器上重复此改动，需先删除旧列或重建表。
+- 文档同步：本文件 1.3 完成检查段落补全记录字段说明。
+
 **文档**
 
 - 同步更新项目规格与运行说明文档：本地数据库数据流段落、启动流程、保存与异常、本地运行库与重启、文件职责表。
@@ -109,6 +116,7 @@
 2. **OCR 成功路径断开**：见 3.1 第 3 条，依赖完整入库场景的测试会出现 OCR_TIMEOUT。
 3. **频率间隔换算疑点**：`listen_measurements` 中 `frequency_interval_ms` 按 `/ 10000` 换算（配置名义 100 ms 实际约 10 ms 一条读数），待确认是联调加速还是笔误。
 4. **MVS 编码容量**：BMP 输出缓冲区按 `width * height * 4 + 2048` 估算，Bayer 或大分辨率图像可能不足，需真机验证。
+5. **降级路径未终结**：`OCR_BATCH_REJECTED`（OCR 队列满拒收整批图）和 `RECOGNITION_BATCH_FAILED`（整批识别失败）目前只登记 `session.errors` 并让周期继续，`ordered_lines` 可能残缺却仍按正常记录入库，与此前确认的"降级即整轮失败"契约不一致；字段精简后这两个错误也不再入库，只能从日志查。需要和 3.1 第 3 条一起收敛。
 
 ### 3.3 建议的下一步
 

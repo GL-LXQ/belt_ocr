@@ -651,16 +651,12 @@ class MachineManager:
             "ordered_lines": list(ocr_result.ordered_lines) if ocr_result else [],
             "evidence_refs": list(ocr_result.evidence_refs) if ocr_result else [],
             "final_frequency_hz": final_frequency.value_hz if final_frequency else None,
-            "final_measurement_id": (
-                final_frequency.measurement_id if final_frequency else None
-            ),
             "measurement_frequencies": [
                 asdict(measurement)
                 for measurement in session.measurement_frequencies
             ],
             "skipped_frame_count": session.skipped_frame_count,
             "capture_summary": session.capture_summary,
-            "error_codes": session.errors.copy(),
             "configuration_version": self.configuration.configuration_version,
         }
 

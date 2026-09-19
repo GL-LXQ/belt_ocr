@@ -164,9 +164,7 @@ class Database:
                     ordered_lines TEXT NOT NULL,
                     final_frequency_hz REAL,
                     measurement_frequencies TEXT NOT NULL DEFAULT '[]',
-                    final_measurement_id TEXT,
                     evidence_refs TEXT NOT NULL,
-                    error_codes TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     payload_hash TEXT NOT NULL
                 );
@@ -283,17 +281,16 @@ class Database:
             connection.execute(
                 "INSERT INTO measurements ("
                 "session_id, machine_id, start_time, finish_time, ordered_lines, "
-                "final_frequency_hz, final_measurement_id, evidence_refs, error_codes, "
+                "final_frequency_hz, evidence_refs, "
                 "payload_json, payload_hash, measurement_frequencies) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     request.session_id, request.machine_id, payload["start_time"],
                     payload["finish_time"],
                     json.dumps(payload["ordered_lines"], ensure_ascii=False),
-                    payload["final_frequency_hz"], payload["final_measurement_id"],
+                    payload["final_frequency_hz"],
                     json.dumps(payload["evidence_refs"], ensure_ascii=False),
-                    json.dumps(payload["error_codes"]), request.payload_json,
-                    request.payload_hash,
+                    request.payload_json, request.payload_hash,
                     json.dumps(payload["measurement_frequencies"], ensure_ascii=False),
                 ),
             )
