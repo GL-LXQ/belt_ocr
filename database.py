@@ -89,7 +89,7 @@ class Database:
         self.initialized = True
 
     def initialize_runtime_database(self) -> None:
-        """锁定本地实例，创建兼容表并迁移异常事件表。
+        """锁定本地实例并创建本地运行表。
 
         Args:
             无外部参数。
@@ -152,18 +152,6 @@ class Database:
                         payload_json TEXT NOT NULL
                     );
                 """)
-
-                # 将旧审计表数据迁移到异常事件记录表。
-                old_table_exists = connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_entries'"
-                ).fetchone()
-                if old_table_exists:
-                    connection.execute(
-                        "INSERT INTO abnormal_events "
-                        "(created_at, machine_id, session_id, reason, payload_json) "
-                        "SELECT created_at, machine_id, session_id, reason, payload_json FROM audit_entries"
-                    )
-                    connection.execute("DROP TABLE audit_entries")
 
                 # 删除旧版本检查点，并清理不再恢复的待提交记录。
                 connection.execute("DROP TABLE IF EXISTS machine_checkpoints")

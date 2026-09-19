@@ -40,7 +40,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         return self.app
 
     async def test_startup_clears_old_work_before_capacity_check(self) -> None:
-        """验证启动清理旧状态，并迁移历史异常事件。
+        """验证启动清理旧积压和旧检查点表。
 
         Args:
             无外部参数。
@@ -50,23 +50,13 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             返回示例：
                 None  # 无返回数据
         """
-        # 停止应用后创建旧异常审计表和历史数据。
+        # 停止应用，准备写入旧版运行状态。
         app = await self.start_app()
         await app.stop()
 
-        # 写入旧版待提交数据、检查点和异常审计数据。
+        # 写入旧版待提交数据和检查点。
         with closing(sqlite3.connect(app.configuration.recovery_path)) as connection:
             with connection:
-                connection.execute(
-                    "CREATE TABLE audit_entries ("
-                    "audit_id INTEGER PRIMARY KEY AUTOINCREMENT, created_at REAL NOT NULL, "
-                    "machine_id TEXT, session_id TEXT, reason TEXT NOT NULL, payload_json TEXT NOT NULL)"
-                )
-                connection.execute(
-                    "INSERT INTO audit_entries "
-                    "(created_at, machine_id, session_id, reason, payload_json) VALUES (?, ?, ?, ?, ?)",
-                    (1, "M01", None, "PREVIOUS_RUN_EVENT", "{}"),
-                )
                 connection.executemany(
                     "INSERT INTO pending_records "
                     "(record_id, machine_id, record_type, payload_json, payload_hash, blocked) "
@@ -90,16 +80,9 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             checkpoint_table = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'machine_checkpoints'"
             ).fetchone()
-            old_abnormal_event_table = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_entries'"
-            ).fetchone()
         self.assertEqual(pending_count, 0)
         self.assertIsNone(checkpoint_table)
-        self.assertIsNone(old_abnormal_event_table)
         self.assertTrue(all(not manager.sessions for manager in restarted.machine_managers.values()))
-
-        # 确认旧表中的异常事件已经迁移。
-        self.assertIn("PREVIOUS_RUN_EVENT", self.read_abnormal_event_reasons())
 
     async def test_machine_state_stays_in_memory_without_event_receipts(self) -> None:
         """验证机器状态只保留在内存，且不创建事件去重表。
