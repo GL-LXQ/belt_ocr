@@ -305,55 +305,6 @@ def test_listener_failure_raises_error(frequency_context, caplog):
     assert session.machine_id in caplog.text
 
 
-def test_old_database_migration_preserves_frozen_record(frequency_context):
-    """验证旧库回填频率明细，同时保留历史最终值及原始提交哈希。
-
-    Args:
-        frequency_context: 应用、处理器和周期。
-
-    Returns:
-        None  # 已验证重复初始化和历史冻结内容保持不变
-    """
-    app, manager, session = frequency_context
-    historical_payload = json.dumps({
-        "outcome": "REVIEW_REQUIRED",
-        "is_simulated": True,
-        "frequency_candidates": [
-            {"measured_monotonic": 15, "source_sequence": 1, "value_hz": 42},
-            {"measured_monotonic": 11, "source_sequence": 2, "value_hz": 41},
-        ],
-    })
-    # 构造上一版本表结构和已有历史记录。
-    with sqlite3.connect(app.configuration.database_path) as connection:
-        connection.execute("ALTER TABLE measurements DROP COLUMN measurement_frequencies")
-        connection.execute("ALTER TABLE measurements ADD COLUMN outcome TEXT NOT NULL DEFAULT 'COMPLETE'")
-        connection.execute("ALTER TABLE measurements ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 1")
-        connection.execute(
-            "INSERT INTO measurements ("
-            "session_id, machine_id, start_time, finish_time, "
-            "ordered_lines, final_frequency_hz, final_measurement_id, "
-            "evidence_refs, outcome, error_codes, is_simulated, payload_json, "
-            "payload_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("old-session", "M01", "start", "finish", "[]", 42, "old-reading",
-             "[]", "REVIEW_REQUIRED", "[]", 1, historical_payload, "original-hash"),
-        )
-
-    # 重复初始化不重复迁移，原始 JSON 和哈希不被改写。
-    app.database.initialize()
-    app.database.initialize()
-    with sqlite3.connect(app.configuration.database_path) as connection:
-        columns = connection.execute("PRAGMA table_info(measurements)").fetchall()
-        assert "close_time" not in {column[1] for column in columns}
-        assert "outcome" not in {column[1] for column in columns}
-        assert "is_simulated" not in {column[1] for column in columns}
-        row = connection.execute(
-            "SELECT measurement_frequencies, final_frequency_hz, payload_json, payload_hash "
-            "FROM measurements WHERE session_id = 'old-session'"
-        ).fetchone()
-    assert [measurement["value_hz"] for measurement in json.loads(row[0])] == [41, 42]
-    assert row[1:] == (42, historical_payload, "original-hash")
-
-
 def test_placeholder_listener_delivers_only_active_session(frequency_context):
     """验证联调监听过滤无效值、保留相同新读数，并在关闭后停止交付。
 

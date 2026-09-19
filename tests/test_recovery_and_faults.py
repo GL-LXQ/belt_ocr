@@ -39,51 +39,6 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await self.app.start()
         return self.app
 
-    async def test_startup_clears_old_work_before_capacity_check(self) -> None:
-        """验证启动清理旧积压和旧检查点表。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            None: 完成断言，无返回数据。
-            返回示例：
-                None  # 无返回数据
-        """
-        # 停止应用，准备写入旧版运行状态。
-        app = await self.start_app()
-        await app.stop()
-
-        # 写入旧版待提交数据和检查点。
-        with closing(sqlite3.connect(app.configuration.recovery_path)) as connection:
-            with connection:
-                connection.executemany(
-                    "INSERT INTO pending_records "
-                    "(record_id, machine_id, record_type, payload_json, payload_hash, blocked) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        ("old_measurement", "M01", "measurement", "{}", "hash-1", 0),
-                        ("old_conflict", "M01", "measurement", "{}", "hash-2", 1),
-                        ("old_rejection", "M01", "rejected_cycle", "{}", "hash-3", 0),
-                    ),
-                )
-                connection.execute("CREATE TABLE machine_checkpoints (machine_id TEXT PRIMARY KEY, payload_json TEXT)")
-                connection.execute("INSERT INTO machine_checkpoints VALUES (?, ?)", ("OLD_MACHINE", "{}"))
-
-        # 使用低于旧积压数量的容量上限启动，确认先清理再检查容量。
-        restarted = await self.restart_app(max_persistent_records=1)
-        self.assertEqual(restarted.machine_managers["M01"].acceptance_state, "READY")
-
-        # 确认旧待提交数据和检查点表已清理，机器档案只存在于内存。
-        with closing(sqlite3.connect(restarted.configuration.recovery_path)) as connection:
-            pending_count = connection.execute("SELECT COUNT(*) FROM pending_records").fetchone()[0]
-            checkpoint_table = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'machine_checkpoints'"
-            ).fetchone()
-        self.assertEqual(pending_count, 0)
-        self.assertIsNone(checkpoint_table)
-        self.assertTrue(all(not manager.sessions for manager in restarted.machine_managers.values()))
-
     async def test_machine_state_stays_in_memory_without_event_receipts(self) -> None:
         """验证机器状态只保留在内存，且不创建事件去重表。
 
@@ -104,16 +59,12 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         session_id = machine_manager.active_session_id
         self.assertIn(session_id, machine_manager.sessions)
 
-        # 确认运行期间不创建事件去重表和机器检查点表。
+        # 确认运行期间不创建事件去重表。
         with closing(sqlite3.connect(app.configuration.recovery_path)) as connection:
             receipt_table = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'event_receipts'"
             ).fetchone()
-            checkpoint_table = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'machine_checkpoints'"
-            ).fetchone()
         self.assertIsNone(receipt_table)
-        self.assertIsNone(checkpoint_table)
 
         # 活动周期内重放启动事件，确认机器状态阻止创建新周期。
         await app.publish_event(event)

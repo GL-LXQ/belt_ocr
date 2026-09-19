@@ -55,7 +55,6 @@ class DatabaseRequest:
     session_id: str
     payload_json: str
     payload_hash: str
-    record_type: str = "measurement"
 
 
 class Database:
@@ -123,26 +122,12 @@ class Database:
             self.lock_file = None
             raise RuntimeError("该测量系统已经在运行。") from None
 
-        # 创建运行兼容表和异常事件记录表。
+        # 创建异常事件审计表。
         with closing(sqlite3.connect(runtime_database_path, timeout=1)) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
             with connection:
                 connection.executescript("""
-                    CREATE TABLE IF NOT EXISTS pending_records (
-                        record_id TEXT PRIMARY KEY,
-                        machine_id TEXT NOT NULL,
-                        record_type TEXT NOT NULL,
-                        payload_json TEXT NOT NULL,
-                        payload_hash TEXT NOT NULL,
-                        retry_at REAL NOT NULL DEFAULT 0,
-                        attempts INTEGER NOT NULL DEFAULT 0,
-                        blocked INTEGER NOT NULL DEFAULT 0
-                    );
-                    CREATE TABLE IF NOT EXISTS committed_records (
-                        record_id TEXT PRIMARY KEY,
-                        payload_hash TEXT NOT NULL
-                    );
                     CREATE TABLE IF NOT EXISTS abnormal_events (
                         abnormal_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                         created_at REAL NOT NULL,
@@ -153,26 +138,21 @@ class Database:
                     );
                 """)
 
-                # 删除旧版本检查点，并清理不再恢复的待提交记录。
-                connection.execute("DROP TABLE IF EXISTS machine_checkpoints")
-                connection.execute("DELETE FROM pending_records")
-                connection.execute("PRAGMA user_version=2")
-
         # 保持本次运行的运行库连接。
         self.anchor_connection = sqlite3.connect(runtime_database_path, check_same_thread=False)
 
     def initialize_result_database(self) -> None:
-        """创建结果表、移除废弃列并升级历史频率明细字段。
+        """创建测量结果表。
 
         Args:
             无外部参数。
 
         Returns:
-            None: 结果库已就绪，历史记录保留原始提交内容和哈希。
+            None: 结果库已就绪。
             返回示例：
                 None  # 无返回数据
         """
-        # 创建存储目录和当前版本的测量、未受理记录表。
+        # 创建存储目录和测量表。
         self.configuration.database_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.configuration.database_path)) as connection, connection:
             connection.executescript("""
@@ -190,38 +170,7 @@ class Database:
                     payload_json TEXT NOT NULL,
                     payload_hash TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS rejected_cycles (
-                    event_id TEXT PRIMARY KEY,
-                    machine_id TEXT NOT NULL,
-                    payload_json TEXT NOT NULL
-                );
             """)
-            # 检查旧库字段，首次升级时增加频率明细列并回填已有记录。
-            column_names = {column[1] for column in connection.execute("PRAGMA table_info(measurements)")}
-            # 删除旧库的固定状态与模拟标记列，保留历史 JSON 和哈希。
-            connection.execute("BEGIN IMMEDIATE")
-            for column_name in ("outcome", "is_simulated"):
-                if column_name in column_names:
-                    connection.execute(f"ALTER TABLE measurements DROP COLUMN {column_name}")
-
-            # 为尚无频率明细列的旧库补齐查询数据。
-            if "measurement_frequencies" not in column_names:
-                connection.execute(
-                    "ALTER TABLE measurements ADD COLUMN measurement_frequencies TEXT NOT NULL DEFAULT '[]'"
-                )
-                # 按测量时间回填旧明细，仅更新新增查询列。
-                for session_id, payload_json in connection.execute(
-                    "SELECT session_id, payload_json FROM measurements"
-                ).fetchall():
-                    payload = json.loads(payload_json)
-                    frequencies = payload.get("frequency_candidates", [])
-                    frequencies.sort(key=lambda measurement: (
-                        measurement["measured_monotonic"], measurement["source_sequence"],
-                    ))
-                    connection.execute(
-                        "UPDATE measurements SET measurement_frequencies = ? WHERE session_id = ?",
-                        (json.dumps(frequencies, ensure_ascii=False), session_id),
-                    )
 
     def close(self) -> None:
         """关闭运行库连接并释放进程锁。
@@ -317,14 +266,6 @@ class Database:
         """
         connection = sqlite3.connect(self.configuration.database_path, timeout=1)
         with closing(connection), connection:
-            # 保存本轮未受理事件。
-            if request.record_type == "rejected_cycle":
-                connection.execute(
-                    "INSERT OR IGNORE INTO rejected_cycles VALUES (?, ?, ?)",
-                    (request.session_id, request.machine_id, request.payload_json),
-                )
-                return
-
             # 检查同一 Session 已有记录是否与本次提交一致。
             connection.execute("BEGIN IMMEDIATE")
             existing_record = connection.execute(

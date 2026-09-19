@@ -130,11 +130,11 @@ FROM measurements
 ORDER BY start_time;
 ```
 
-Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正常 CLOSE 后仍为 RUNNING，结果与证据齐全后进入 WAITING_COMMIT_DB，数据库确认后进入 COMMITTED。数据库初始化移除旧表的 `outcome`、`is_simulated` 列，新记录不包含这两个键及 `model_version`；历史 JSON 和哈希保持不变。
+Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正常 CLOSE 后仍为 RUNNING，结果与证据齐全后进入 WAITING_COMMIT_DB，数据库确认后进入 COMMITTED。新建记录不包含 `outcome`、`is_simulated` 和 `model_version`。
 
 整轮 OCR、频率或证据失败、中断、存储队列满、写入异常和内容冲突均进入 FAILED，只打印日志并清理资源。关闭前失败保留活动 Session 身份和关闭期限，真实 CLOSE 后再移除；失败不代表实体机器已经停止。局部 OCR 批次失败仍允许其他成功批次进入终选，由整轮状态决定是否失败。
 
-未受理周期只打印日志并等待真实关闭，不再写 rejected_cycles。待提交内容只保存在内存，不持久暂存，不执行单次提交重试或后台自动补交，已删除主动补交入口。正常结果仍按 session_id 和冻结内容进行幂等写入，内容冲突不覆盖历史数据。
+未受理周期只打印日志并等待真实关闭，不写入数据库。待提交内容只保存在内存，不持久暂存，不执行单次提交重试或后台自动补交，已删除主动补交入口。正常结果仍按 session_id 和冻结内容进行幂等写入，内容冲突不覆盖历史数据。
 
 如果数据库写入成功但回调未被处理，历史结果仍可能已经存在；Session 的失败日志不能证明数据库里没有记录。
 
@@ -145,18 +145,16 @@ Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正
 
 | 表 | 内容 |
 |---|---|
-| `pending_records` | 旧版兼容表，启动时清理，当前不新增待提交记录 |
-| `committed_records` | 旧版已提交身份保留，当前幂等检查直接读取最终库 |
-| `abnormal_events` | 来源冲突、迟到结果等异常事件；旧 `audit_entries` 数据不迁移 |
+| `abnormal_events` | 来源冲突、迟到结果等异常事件 |
 
-`Database` 统一管理单实例锁、旧表兼容清理、`abnormal_events` 写入和最终结果提交。旧版待提交记录的暂存、查询、完成登记、延迟重试及计数方法已删除；正常结果仅通过本次运行的内存队列提交最终数据库。
+`Database` 统一管理单实例锁、`abnormal_events` 审计写入和最终结果提交。旧版待提交表及暂存、查询、完成登记、延迟重试方法已删除；正常结果仅通过本次运行的内存队列提交最终数据库。
 
 机器状态和未完成 Session 只保留在内存；业务事件不再持久登记去重身份；新库不创建 event_receipts 表，旧库已有的该表保留但不再读写。本地运行库使用 SQLite 事务和 WAL；进程锁禁止两个实例同时操作同一运行库。
 每次启动从空的 Session 集合开始，按以下顺序处理：
 
-- 获得运行库独占锁后，在同一事务中移除旧版本检查点表并清理全部待提交记录，包括内容冲突和未受理周期记录。
-- 清理完成后才检查容量、启动存储及维护任务；不恢复旧 OCR、超时或提交任务。
-- 保留最终数据库的历史结果、已提交身份、异常事件和证据图片。
+- 获得运行库独占锁后，初始化本地运行库与结果库。
+- 初始化完成后才检查容量、启动存储及维护任务；不恢复旧 OCR、超时或提交任务。
+- 保留最终数据库的历史结果和证据图片，以及本地运行库的异常事件。
 - 初始状态为 CLOSED 时等待新启动；OPEN 或 UNKNOWN 时等待有效关闭或明确的关闭状态同步，再接收下一次启动。
 
 当前模拟实现从 initial_machine_state 配置读取初始状态，尚未直接读取硬件状态。初始运行中或未知时等待关闭或现场状态同步；设备故障则退出程序，修复后手动重启。
@@ -187,10 +185,10 @@ Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正
 | `mvs_capture.py` | 固定窗口流式采集、独立有界队列、逐帧回调和统计 |
 | `text_recognition.py` | 批次接收、监听、整批模型调用和原始结果回传；模型接口待实现 |
 | `frequency_adapter.py` | 持续监听黑盒、当前 Session 归属和读取故障交付 |
-| `database.py` | SQLite 建表、实例锁、历史兼容清理、异常事件记录和结果提交 |
+| `database.py` | SQLite 建表、实例锁、异常事件审计和结果提交 |
 | `async_utils.py` | 在线程中安全执行文件、设备和数据库阻塞操作 |
 | `tests/test_measurement_flow.py` | 并行、跨轮次、重复、失败和超时测试 |
-| `tests/test_recovery_and_faults.py` | 历史恢复与故障测试，部分场景仍基于旧版自动补交规则 |
+| `tests/test_recovery_and_faults.py` | 重启不恢复旧周期、进程锁、异常事件审计和故障退出测试 |
 | `tests/test_acceptance_scenarios.py` | 验收事件注入、跨轮回调、调度公平性、证据失败和强制崩溃测试 |
 
 ## 当前边界
