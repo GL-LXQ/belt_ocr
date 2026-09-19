@@ -220,8 +220,8 @@ class SessionCamera:
         if error is not None:
             self.report_failure(error, f"采集交付 machine_id={self.machine.machine_id}")
 
-    async def seal_capture(self) -> None:
-        """发出停止信号并等待对应相机停止。
+    async def inform_capture_workflow_stop(self) -> None:
+        """系统运行出问题时，发出停止信号告知相机采集流程提前停止。
 
         Args:
             无外部参数。
@@ -251,7 +251,7 @@ class SessionCamera:
         try:
             result = await run_blocking_operation(capture_task.run_capture)
         finally:
-            # 采集结束后归还相机占用，唤醒等待停流的 CLOSE 处理。
+            # 释放相机占用，并通知等待方：本轮采集已结束，相机已完成停流处理。
             capture_task.camera.capture_lock.release()
             capture_task.capture_finished.set()
             self.current_capture = None

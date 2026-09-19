@@ -67,7 +67,7 @@ def frequency_context(tmp_path):
     )
     manager.current_session = session
     manager.frequency_adapter.active_session_id = session.session_id
-    manager.camera.seal_capture = AsyncMock()
+    manager.camera.inform_capture_workflow_stop = AsyncMock()
     try:
         yield app, manager, session
     finally:

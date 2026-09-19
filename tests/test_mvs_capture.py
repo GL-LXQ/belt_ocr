@@ -791,7 +791,7 @@ def test_capture_shutdown_waits_for_worker_only(camera, monkeypatch, cancel_deli
 
             # 发出停止信号并允许在途读取结束，只等待硬件停止。
             release_read.set()
-            await asyncio.wait_for(adapter.seal_capture(), 1)
+            await asyncio.wait_for(adapter.inform_capture_workflow_stop(), 1)
             assert not camera.capture_lock.locked()
             if cancel_delivery:
                 with pytest.raises(asyncio.CancelledError):

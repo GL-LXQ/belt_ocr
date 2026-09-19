@@ -233,7 +233,7 @@ class MachineManager:
             session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
 
         # 停止本轮采集，当前周期继续占用机器直到保存或失败清理完成。
-        await self.camera.seal_capture()
+        await self.camera.inform_capture_workflow_stop()
 
         # 从任务表移除本轮 CycleTimeout；任务仍存在时，取消它后续的超时通知。
         deadline_task = self.deadline_tasks.pop(EventType.CYCLE_TIMEOUT, None)
@@ -460,7 +460,7 @@ class MachineManager:
         session.frequency_window_sealed = True
         if session.frequency_state == FrequencyState.RUNNING:
             session.frequency_state = FrequencyState.FAILED
-        await self.camera.seal_capture()
+        await self.camera.inform_capture_workflow_stop()
         self.release_finished_session()
 
     def release_finished_session(self) -> None:
