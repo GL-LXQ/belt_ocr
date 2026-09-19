@@ -295,15 +295,14 @@ def test_next_session_is_not_changed_by_old_frequency_event(frequency_context):
     asyncio.run(close_then_receive_old_data())
 
 
-def test_listener_failure_raises_error(frequency_context, caplog):
-    """验证频率监听异常记录日志并向应用抛出，不发送故障恢复事件。
+def test_listener_failure_raises_error(frequency_context):
+    """验证频率监听异常交给后台任务入口，不发送故障恢复事件。
 
     Args:
         frequency_context: 应用、处理器和周期。
-        caplog: 日志捕获器。
 
     Returns:
-        None  # 原始异常已抛出，日志包含机器身份
+        None  # 原始异常已抛出，原周期未收到伪造事件
     """
     # 准备读取失败的频率适配器。
     app, manager, session = frequency_context
@@ -315,8 +314,6 @@ def test_listener_failure_raises_error(frequency_context, caplog):
     with pytest.raises(OSError, match="读取失败"):
         asyncio.run(adapter.run())
     adapter.publish_event.assert_not_awaited()
-    assert "频率设备监听失败" in caplog.text
-    assert session.machine_id in caplog.text
 
 
 def test_placeholder_listener_delivers_only_active_session(frequency_context):

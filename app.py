@@ -86,17 +86,13 @@ class App:
                 machine = manager.machine
                 if not machine.camera_serial:
                     raise RuntimeError(f"未配置相机序列号 machine_id={machine.machine_id} camera_id={machine.camera_id}")
-                try:
-                    manager.camera.device = await run_blocking_operation(
-                        self.camera_sdk.open_camera,
-                        machine.camera_serial,
-                        pixel_format=machine.camera_pixel_format,
-                        exposure_time_us=machine.camera_exposure_time_us,
-                        gain=machine.camera_gain,
-                    )
-                except Exception:
-                    logger.exception("相机不可用 machine_id=%s serial=%s", machine.machine_id, machine.camera_serial)
-                    raise
+                manager.camera.device = await run_blocking_operation(
+                    self.camera_sdk.open_camera,
+                    machine.camera_serial,
+                    pixel_format=machine.camera_pixel_format,
+                    exposure_time_us=machine.camera_exposure_time_us,
+                    gain=machine.camera_gain,
+                )
 
             # 设置容量和现场初始状态，运行中或未知时等待真实关闭。
             capacity_available = await self.check_disk_capacity()
@@ -121,10 +117,19 @@ class App:
             self.worker_tasks.append(asyncio.create_task(self.run_worker("容量检查", self.maintain_system)))
             self.has_started = True
             self.accepting_signals = True
-        except BaseException:
+        except BaseException as error:
             # 启动失败时记录异常并释放已打开的设备和本地记录库。
             logger.exception("测量系统初始化失败")
-            await self.stop()
+            if isinstance(error, Exception) and self.failure is None:
+                self.failure = error
+            # 等待启动资源清理完成，保留取消期间发生的原始启动异常。
+            while True:
+                try:
+                    await self.stop()
+                    break
+                except asyncio.CancelledError:
+                    if self.shutdown_task.cancelled():
+                        raise
             raise
 
     async def handle_start(self, machine_id: str) -> None:
@@ -273,9 +278,8 @@ class App:
                 # 标记本地运行库可用。
                 self.database.runtime_available = True
             except Exception:
-                # 标记本地运行库不可用并记录维护异常。
+                # 标记本地运行库不可用，将异常交给后台任务入口。
                 self.database.runtime_available = False
-                logger.exception("本地运行库或容量检查失败，停止程序。")
                 raise
 
             # 等待配置的维护间隔，再开始下一轮处理。
@@ -308,18 +312,16 @@ class App:
             for disk_state in disk_states
         )
 
-    def report_failure(self, error: Exception, component: str) -> None:
-        """记录故障、关闭信号入口并安排整个应用退出。
+    def report_failure(self, error: Exception) -> None:
+        """保存故障、关闭信号入口并安排整个应用退出。
 
         Args:
             error: 设备或后台任务抛出的异常。
-            component: 故障模块及机器、设备身份。
 
         Returns:
             None  # 故障已记录，资源清理已安排
         """
-        # 输出原始异常堆栈，并保存首次故障供主流程接收。
-        logger.error("程序故障，停止全部测量 component=%s", component, exc_info=(type(error), error, error.__traceback__))
+        # 保存首次故障供主流程接收，通知所有状态等待方。
         if self.failure is None:
             self.failure = error
         self.accepting_signals = False
@@ -348,11 +350,13 @@ class App:
         except asyncio.CancelledError:
             # 退出期间允许取消，其余取消视为后台任务故障。
             if not self.stopping:
-                self.report_failure(RuntimeError(f"后台任务意外取消：{component}"), component)
+                logger.exception("后台任务意外取消 component=%s", component)
+                self.report_failure(RuntimeError(f"后台任务意外取消：{component}"))
             raise
         except Exception as error:
-            # 将异常传给统一退出入口，不重启任务。
-            self.report_failure(error, component)
+            # 记录后台运行异常，再安排整个应用退出。
+            logger.exception("后台任务失败 component=%s", component)
+            self.report_failure(error)
 
     async def wait_for_failure(self) -> None:
         """等待首次故障并向主流程抛出原始异常。
@@ -448,7 +452,9 @@ class App:
         except asyncio.TimeoutError:
             logger.warning("退出等待到期，未完成测量将标记失败并释放资源。")
         except Exception as error:
-            self.report_failure(error, "退出测量")
+            if error is not self.failure:
+                logger.exception("退出测量失败")
+            self.report_failure(error)
 
         # 停止事件交付并取消业务任务，禁止退出期间启动新的采集。
         self.releasing_resources = True
@@ -464,9 +470,9 @@ class App:
         camera_results = await asyncio.gather(*(
             manager.camera.stop() for manager in self.machine_managers.values()
         ), return_exceptions=True)
-        for manager, result in zip(self.machine_managers.values(), camera_results):
+        for result in camera_results:
             if isinstance(result, Exception):
-                self.report_failure(result, f"停止相机 machine_id={manager.machine.machine_id}")
+                self.report_failure(result)
 
         # 取消后台工作并等待在途阻塞操作完成。
         background_tasks = []
@@ -490,7 +496,7 @@ class App:
                     try:
                         await machine_manager.handle_measurement_failure(session)
                     except Exception as error:
-                        self.report_failure(error, f"清理测量 machine_id={session.machine_id}")
+                        self.report_failure(error)
             # 清空退出后的周期身份与未完成档案。
             machine_manager.current_session = None
             machine_manager.frequency_adapter.active_session_id = None
@@ -510,10 +516,12 @@ class App:
             if self.camera_sdk is not None:
                 await run_blocking_operation(self.camera_sdk.close)
         except Exception as error:
-            self.report_failure(error, "关闭相机驱动")
+            logger.exception("关闭相机驱动失败")
+            self.report_failure(error)
         finally:
             try:
                 self.database.close()
             except Exception as error:
-                self.report_failure(error, "关闭本地记录库")
+                logger.exception("关闭本地记录库失败")
+                self.report_failure(error)
             self.state_changed.set()

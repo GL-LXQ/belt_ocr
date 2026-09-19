@@ -112,11 +112,7 @@ class MachineManager:
                     if not event.acknowledgement.done():
                         event.acknowledgement.set_result(None)
             except Exception as error:
-                # 记录事件处理异常，唤醒请求方并交给应用停止全部任务。
-                logger.exception(
-                    "业务处理失败 machine_id=%s session_id=%s event=%s",
-                    event.machine_id, event.session_id, event.event_type,
-                )
+                # 将事件处理异常交给请求方和后台任务入口。
                 if event.acknowledgement is not None and not event.acknowledgement.done():
                     event.acknowledgement.set_exception(error)
                 raise
@@ -339,22 +335,18 @@ class MachineManager:
         # 分派采集结果，保留各事件是否继续结算的处理决定。
         should_finalize = True
         match event.event_type:
-            case EventType.CAPTURE_COMPLETED | EventType.CAPTURE_FAILED:
+            case EventType.CAPTURE_COMPLETED:
                 # 仅接收等待阶段的采集结果，保留整轮统计。
                 if session.ocr_state != OCRState.WAITING:
                     return
                 capture_result = event.payload
                 session.capture_summary = capture_result.statistics
-                if capture_result.errors:
-                    session.ocr_state = OCRState.FAILED
-                    session.errors.extend(capture_result.errors)
-                else:
-                    # 启动一个整轮后台任务并登记完成回调。
-                    session.ocr_state = OCRState.RUNNING
-                    task = asyncio.create_task(self.recognize_session(session, capture_result.frames))
-                    self.recognition_task = task
-                    task.add_done_callback(self.handle_recognition_task_finished)
-                    return
+                # 启动一个整轮后台任务并登记完成回调。
+                session.ocr_state = OCRState.RUNNING
+                task = asyncio.create_task(self.recognize_session(session, capture_result.frames))
+                self.recognition_task = task
+                task.add_done_callback(self.handle_recognition_task_finished)
+                return
             case EventType.OCR_COMPLETED:
                 # 只接收正在处理周期的一次最终结果。
                 if session.ocr_state != OCRState.RUNNING:
@@ -500,12 +492,12 @@ class MachineManager:
         Returns:
             None  # 任务引用已释放，已关闭的结束周期已清理
         """
-        # 读取后台交付异常，取消不作为设备故障。
+        # 读取编码或结果交付异常，正常取消不作为设备故障。
         self.recognition_task = None
         if not task.cancelled():
             error = task.exception()
             if error is not None:
-                self.camera.report_failure(error, f"OCR 结果交付 machine_id={self.machine.machine_id}")
+                self.camera.report_failure(error)
         # 线程实际结束后，失败周期才允许释放当前空位。
         self.release_finished_session()
 
@@ -532,20 +524,26 @@ class MachineManager:
                     frames,
                     self.camera.device.encode_image,
                 )
+            except ImageEncodingError as error:
+                # 编码设备异常已经记录，继续抛给任务结束回调处理应用退出。
+                self.camera.device.faulted = True
+                raise error.__cause__
             except Exception as error:
                 logger.exception("OCR 处理失败 session_id=%s", session.session_id)
-                if isinstance(error, ImageEncodingError):
-                    self.camera.report_failure(
-                        error.__cause__,
-                        f"相机编码 machine_id={session.machine_id} camera_id={session.camera_id}",
-                    )
+                # 恢复取消中的退出流程，未取消时继续生成本轮失败事件。
+                await asyncio.sleep(0)
                 event_type, payload = EventType.OCR_FAILED, str(error)
             else:
                 event_type, payload = EventType.OCR_COMPLETED, result
         # 释放原始帧后只交付仍然有效周期的结果。
         frames = ()
         if session.state == SessionState.RUNNING:
-            await self.publish_event(MeasurementEvent(event_type, session.machine_id, session.session_id, payload))
+            try:
+                await self.publish_event(MeasurementEvent(event_type, session.machine_id, session.session_id, payload))
+            except Exception:
+                # 记录结果交付异常并结束后台任务。
+                logger.exception("OCR 结果交付失败 session_id=%s", session.session_id)
+                raise
 
     async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> bool:
         """按接收顺序保存黑盒交付的新有效测量。

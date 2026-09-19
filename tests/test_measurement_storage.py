@@ -3,14 +3,91 @@
 import asyncio
 import json
 import sqlite3
+import threading
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 import database
 from test_frequency_pipeline import create_measurement, frequency_context
+
+
+def test_cancelled_storage_failure_stops_before_next_request(frequency_context, monkeypatch, caplog):
+    """验证取消中的写入失败不会继续消费下一条存储请求。
+
+    Args:
+        frequency_context: 已准备 OCR 结果的应用、处理器和周期。
+        monkeypatch: 存储操作替换工具。
+        caplog: 日志捕获器。
+
+    Returns:
+        None  # 首条请求已释放，下一条请求未执行，写入错误只记录一次
+    """
+    app, manager, session = frequency_context
+    writing_started = threading.Event()
+    release_write = threading.Event()
+    writing_failure = OSError("取消期间写入失败")
+
+    def fail_write_after_release(request):
+        """等待测试释放后抛出存储异常。
+
+        Args:
+            request: 当前冻结的存储请求。
+
+        Returns:
+            无返回值  # 等待结束后抛出 OSError
+        """
+        writing_started.set()
+        assert release_write.wait(5)
+        raise writing_failure
+
+    async def cancel_storage_during_write():
+        """准备两个请求并在首条写入期间取消消费者。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 消费者已取消，第二条请求仍在队列中
+        """
+        # 通过正式结算流程准备请求，并追加下一条待处理请求。
+        session.measurement_frequencies.append(create_measurement(session, 1, 12, 42))
+        await manager.handle_machine_close()
+        app.database.queue.put_nowait(database.DatabaseRequest("M01", "next-session", "{}", "hash"))
+        publisher = AsyncMock()
+        app.database.publish_event = publisher
+        worker = asyncio.create_task(app.database.run())
+        try:
+            # 重复取消仍等待实际写入结束。
+            assert await asyncio.to_thread(writing_started.wait, 2)
+            worker.cancel()
+            await asyncio.sleep(0)
+            worker.cancel()
+            await asyncio.sleep(0)
+            assert not worker.done()
+            release_write.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(worker, 2)
+
+            # 不发布取消后的结果，也不开始下一条存储请求。
+            publisher.assert_not_awaited()
+            assert session.session_id not in app.database.queued_records
+            pending_request = app.database.queue.get_nowait()
+            assert pending_request.session_id == "next-session"
+            app.database.queue.task_done()
+            await asyncio.wait_for(app.database.queue.join(), 1)
+        finally:
+            release_write.set()
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    monkeypatch.setattr(app.database, "persist_measurement", fail_write_after_release)
+    asyncio.run(cancel_storage_during_write())
+    failure_logs = [record for record in caplog.records if record.exc_info]
+    assert len(failure_logs) == 1
+    assert failure_logs[0].exc_info[1] is writing_failure
 
 
 @pytest.mark.parametrize("failure", ["save", "sync", "replace", "write", "acknowledgement", "unknown", "none"])

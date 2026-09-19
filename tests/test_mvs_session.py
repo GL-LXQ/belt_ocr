@@ -3,11 +3,12 @@
 import asyncio
 import threading
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import test_measurement_flow as flow_support
 from enums import EventType, OCRState, SessionState
 from models import MeasurementEvent
+from mvs_sdk import MvsError
 
 
 class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -166,6 +167,71 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(shutdown, 2)
         self.assertTrue(app.camera_sdk.closed)
         self.assertFalse(app.text_recognizer.processing_lock.locked())
+        self.assertEqual(self.read_records(), [])
+
+    async def test_encoding_failure_after_timeout_stops_application(self):
+        """验证取消后的编码故障只记录一次，并停止应用释放设备。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 原始故障已传播，设备关闭且没有生成测量记录
+        """
+        # 建立可控编码线程和设备故障观察入口。
+        app = await self.start_app()
+        manager = app.machine_managers["M01"]
+        encoding_started = threading.Event()
+        release_encoding = threading.Event()
+        encoding_failure = MvsError("测试编码设备故障")
+        failure_reporter = Mock(wraps=manager.camera.report_failure)
+        manager.camera.report_failure = failure_reporter
+
+        def fail_encoding_after_release(frame):
+            """等待测试释放后抛出编码设备故障。
+
+            Args:
+                frame: 本轮待编码的原始帧。
+
+            Returns:
+                无返回值  # 等待结束后抛出 MvsError
+            """
+            encoding_started.set()
+            assert release_encoding.wait(5)
+            assert not manager.camera.device.closed
+            raise encoding_failure
+
+        manager.camera.device.encode_image = fail_encoding_after_release
+        with self.assertLogs(level="ERROR") as captured_logs:
+            try:
+                # 等待编码开始，注入 OCR 超时并确认线程仍占用设备。
+                await app.handle_start("M01")
+                session = manager.current_session
+                self.assertTrue(await asyncio.to_thread(encoding_started.wait, 2))
+                await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "M01", session.session_id))
+                await self.wait_for_state(lambda: session.state == SessionState.FAILED)
+                self.assertFalse(manager.recognition_task.done())
+                self.assertTrue(app.text_recognizer.processing_lock.locked())
+                self.assertFalse(manager.camera.device.closed)
+
+                # 取消中的编码操作报错后，等待自动故障退出。
+                release_encoding.set()
+                await asyncio.wait_for(app.failure_event.wait(), 2)
+                self.assertFalse(app.accepting_signals)
+                await asyncio.wait_for(app.stop(), 2)
+            finally:
+                release_encoding.set()
+
+        # 核对异常身份、唯一日志、资源释放和测量结果。
+        self.assertIs(app.failure, encoding_failure)
+        failure_reporter.assert_called_once_with(encoding_failure)
+        failure_logs = [record for record in captured_logs.records if record.exc_info]
+        self.assertEqual(len(failure_logs), 1)
+        self.assertIs(failure_logs[0].exc_info[1], encoding_failure)
+        self.assertTrue(manager.camera.device.closed)
+        self.assertTrue(app.camera_sdk.closed)
+        self.assertFalse(app.text_recognizer.processing_lock.locked())
+        self.assertIsNone(manager.recognition_task)
         self.assertEqual(self.read_records(), [])
 
     async def test_empty_capture_and_empty_filter_fail_without_saving(self):

@@ -64,11 +64,10 @@ class OCRResult:
 
 @dataclass(frozen=True)
 class CaptureResult:
-    """保存本次采集的全部原始帧、统计和错误。"""
+    """保存成功采集的全部原始帧和统计。"""
 
     frames: tuple[CameraFrame, ...] = field(default=(), repr=False)
     statistics: dict = field(default_factory=dict)
-    errors: tuple[str, ...] = ()
 
 
 @dataclass

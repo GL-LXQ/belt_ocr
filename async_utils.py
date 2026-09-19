@@ -1,10 +1,6 @@
 """提供异步业务中复用的阻塞操作执行工具。"""
 
 import asyncio
-import logging
-
-
-logger = logging.getLogger(__name__)
 
 
 async def run_blocking_operation(operation, *arguments, **keyword_arguments):
@@ -36,8 +32,8 @@ async def run_blocking_operation(operation, *arguments, **keyword_arguments):
             cancelled = True
         except Exception:
             if cancelled:
-                logger.exception("释放阻塞操作时发生异常")
-                raise asyncio.CancelledError
+                # 保留取消请求，同时向调用方传播工作线程的真实异常。
+                asyncio.current_task().cancel()
             raise
     if cancelled:
         raise asyncio.CancelledError

@@ -1,12 +1,16 @@
 """按整轮顺序执行图片编码、筛选、识别和文字图片终选。"""
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from models import CapturedFrame, OCRResult
 from mvs_sdk import CameraFrame
+
+
+logger = logging.getLogger(__name__)
 
 
 class ImageEncodingError(RuntimeError):
@@ -69,6 +73,10 @@ class TextRecognizer:
             try:
                 image_extension, image_data = encode_image(frame)
             except Exception as error:
+                # 记录编码设备异常及所属周期，再终止本轮识别。
+                logger.exception(
+                    "相机编码失败 camera_id=%s session_id=%s", camera_id, session_id,
+                )
                 raise ImageEncodingError("相机图片编码失败") from error
             captured_at = datetime.now(timezone.utc) - timedelta(seconds=time.monotonic() - frame.received_monotonic)
             captured_frames.append(CapturedFrame(

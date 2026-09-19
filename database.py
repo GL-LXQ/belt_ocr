@@ -405,6 +405,8 @@ class Database:
                         request.machine_id,
                         request.session_id,
                     )
+                    # 响应阻塞写入期间的取消请求，停止后续结果发布和队列消费。
+                    await asyncio.sleep(0)
 
                 # 将本次提交结果返回原 Session。
                 await self.publish_event(MeasurementEvent(

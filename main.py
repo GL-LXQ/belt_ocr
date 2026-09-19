@@ -19,8 +19,12 @@ async def run_measurement_demo(configuration_path: Path) -> None:
         None  # 演示正常结束；设备或后台故障时抛出异常
     """
     # 读取配置并准备应用和本次主流程任务。
-    configuration = load_configuration(configuration_path)
-    app = App(configuration)
+    try:
+        configuration = load_configuration(configuration_path)
+        app = App(configuration)
+    except Exception:
+        logging.exception("测量配置初始化失败")
+        raise
     tasks = []
     try:
         # 启动应用，并同时等待测量完成或设备故障。
@@ -34,6 +38,11 @@ async def run_measurement_demo(configuration_path: Path) -> None:
         if app.failure is not None:
             raise app.failure
         await measurement_task
+    except Exception:
+        # 记录尚未由设备或后台任务处理的演示流程异常。
+        if app.failure is None:
+            logging.exception("测量流程失败")
+        raise
     finally:
         # 取消未完成的演示和故障等待，统一释放所有应用资源。
         for task in tasks:
@@ -100,8 +109,7 @@ def main() -> None:
     try:
         asyncio.run(run_measurement_demo(arguments.config))
     except Exception:
-        # 记录主流程异常，并以失败退出码结束程序。
-        logging.exception("测量程序异常退出")
+        # 异常已经在业务入口记录，此处仅设置失败退出码。
         raise SystemExit(1) from None
 
 

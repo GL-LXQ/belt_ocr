@@ -57,7 +57,7 @@ def start_capture():
             SimpleNamespace(machine_id="machine-1", camera_id=camera.serial),
             SimpleNamespace(capture_window_ms=duration_seconds * 1000, camera_timeout_ms=timeout_ms),
             publish_event,
-            lambda error, component: None,
+            lambda error: None,
         )
         adapter.device = camera
         adapters.append(adapter)
@@ -301,7 +301,7 @@ def test_empty_capture_waits_until_deadline(camera, start_capture, wait_capture)
     result = wait_capture(task, 2)
     assert result.statistics["received_frame_count"] == 0
     assert 0.18 <= result.statistics["capture_duration_seconds"] < 1
-    assert result.statistics["camera_stopped"]
+    assert not camera.grabbing
 
 
 
@@ -373,13 +373,12 @@ def test_sdk_errors_are_recorded_and_resources_released(camera, operation, start
     camera.handle.failure_operation = operation
     camera.handle.frames.put(b"frame")
     task = start_capture(camera, duration_seconds=0.05)
-    result = wait_capture(task, 2)
-    assert bool(result.errors)
-    assert result.errors
-    assert result.statistics["camera_stopped"] == (operation != "stop")
+    with pytest.raises(MvsError):
+        wait_capture(task, 2)
+    assert camera.grabbing == (operation == "stop")
     assert not camera.handle.buffer_outstanding
     assert task.capture_finished.is_set()
-    assert result.statistics["received_frame_count"] == (0 if operation in {"start", "get"} else 1)
+    assert camera.received_frame_count == (0 if operation in {"start", "get"} else 1)
     with pytest.raises(MvsError, match="不可用"):
         start_capture(camera)
 
@@ -388,6 +387,81 @@ def test_sdk_errors_are_recorded_and_resources_released(camera, operation, start
     camera.close()
     operations = [name for name, arguments in camera.handle.calls]
     assert operations[-2:] == ["MV_CC_CloseDevice", "MV_CC_DestroyHandle"]
+
+
+def test_capture_and_stop_errors_preserve_both_failures(camera, monkeypatch, start_capture, wait_capture, caplog):
+    """验证取帧和停流同时失败时保留两个异常及各自日志。
+
+    Args:
+        camera: 假 SDK 相机。
+        monkeypatch: 设备方法替换工具。
+        start_capture: 正式采集启动入口。
+        wait_capture: 正式结果等待入口。
+        caplog: 日志捕获器。
+
+    Returns:
+        None  # 两个错误均已记录，异常链完整且采集锁已释放
+    """
+    from unittest.mock import Mock
+
+    # 注入读取和停流两个独立异常。
+    reading_failure = MvsError("测试取帧失败")
+    stopping_failure = MvsError("测试停流失败")
+    monkeypatch.setattr(camera, "read_frame", Mock(side_effect=reading_failure))
+    monkeypatch.setattr(camera, "stop_grabbing", Mock(side_effect=stopping_failure))
+
+    # 采集失败后仍执行停流，并将后续异常连同原始异常传出。
+    capture_task = start_capture(camera)
+    with pytest.raises(MvsError) as captured_failure:
+        wait_capture(capture_task)
+    assert captured_failure.value is stopping_failure
+    assert stopping_failure.__context__ is reading_failure
+    assert capture_task.capture_finished.is_set()
+    assert not camera.capture_lock.locked()
+
+    # 每个独立异常只在对应操作失败时记录一次。
+    failure_logs = [record for record in caplog.records if record.exc_info]
+    assert [record.exc_info[1] for record in failure_logs] == [reading_failure, stopping_failure]
+
+
+def test_task_creation_failure_releases_camera(camera, monkeypatch, start_capture, wait_capture):
+    """验证异步任务创建失败后无锁和未关闭协程遗留。
+
+    Args:
+        camera: 假 SDK 相机。
+        monkeypatch: 异步任务创建入口替换工具。
+        start_capture: 正式采集启动入口。
+        wait_capture: 正式结果等待入口。
+
+    Returns:
+        None  # 未启动协程已关闭，相机锁已释放且可再次采集
+    """
+    failed_workflows = []
+
+    def fail_task_creation(workflow):
+        """记录待启动协程并模拟任务创建异常。
+
+        Args:
+            workflow: 尚未启动的采集协程。
+
+        Returns:
+            无返回值  # 抛出 RuntimeError
+        """
+        failed_workflows.append(workflow)
+        raise RuntimeError("测试任务创建失败")
+
+    # 创建失败必须同时清理协程和相机占用。
+    with monkeypatch.context() as patch:
+        patch.setattr(asyncio, "create_task", fail_task_creation)
+        with pytest.raises(RuntimeError, match="测试任务创建失败"):
+            start_capture(camera)
+    assert failed_workflows[0].cr_frame is None
+    assert not camera.capture_lock.locked()
+
+    # 恢复任务入口后，同一设备可以完成新一轮采集。
+    result = wait_capture(start_capture(camera, duration_seconds=0.01))
+    assert result.frames == ()
+    assert not camera.grabbing
 
 
 def test_copy_exception_still_frees_sdk_buffer(camera, monkeypatch, start_capture, wait_capture):
@@ -416,10 +490,9 @@ def test_copy_exception_still_frees_sdk_buffer(camera, monkeypatch, start_captur
 
     monkeypatch.setattr(mvs_sdk.ctypes, "string_at", fail_copy)
     camera.handle.frames.put(b"frame")
-    result = wait_capture(start_capture(camera))
-    assert result.statistics["received_frame_count"] == 1
-    assert len(result.frames) == 0
-    assert bool(result.errors)
+    with pytest.raises(MemoryError, match="无法复制图像"):
+        wait_capture(start_capture(camera))
+    assert camera.received_frame_count == 1
     assert camera.handle.released_frames.get_nowait() == 1
     assert not camera.handle.buffer_outstanding
 
@@ -542,9 +615,9 @@ def test_stop_exception_blocks_next_capture(camera, monkeypatch, start_capture, 
         raise RuntimeError("停流接口异常")
 
     monkeypatch.setattr(camera.handle, "MV_CC_StopGrabbing", fail_stop)
-    result = wait_capture(start_capture(camera, duration_seconds=0.05))
-    assert not result.statistics["camera_stopped"]
-    assert bool(result.errors)
+    with pytest.raises(RuntimeError, match="停流接口异常"):
+        wait_capture(start_capture(camera, duration_seconds=0.05))
+    assert camera.grabbing
     with pytest.raises(MvsError, match="不可用"):
         start_capture(camera)
 
@@ -676,7 +749,7 @@ def test_close_keeps_inflight_tail_frame(camera, monkeypatch, start_capture, wai
         release.set()
     result = wait_capture(task, 2)
     assert [frame.data for frame in result.frames] == [b"late"]
-    assert result.statistics["camera_stopped"]
+    assert not camera.grabbing
 
 
 
@@ -715,8 +788,7 @@ def test_thread_start_failure_releases_camera(camera, start_capture, monkeypatch
 
     # 恢复线程入口，确认同一相机可以正常采集。
     result = wait_capture(start_capture(camera, duration_seconds=0.05))
-    assert result.statistics["camera_stopped"]
-    assert not result.errors
+    assert not camera.grabbing
 
 
 @pytest.mark.parametrize("cancel_delivery", [False, True])
@@ -776,7 +848,7 @@ def test_capture_shutdown_waits_for_worker_only(camera, monkeypatch, cancel_deli
             SimpleNamespace(machine_id="machine", camera_id="camera"),
             SimpleNamespace(capture_window_ms=2000, camera_timeout_ms=50),
             publish,
-            lambda error, component: None,
+            lambda error: None,
         )
         adapter.device = camera
         adapter.start_capture("session", time.monotonic())

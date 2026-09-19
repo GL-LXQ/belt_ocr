@@ -53,7 +53,6 @@ class EventType(str, Enum):
     CAPACITY_CHANGED = "CapacityChanged"  # 可用容量变化
     CAPTURE_COMPLETED = "CaptureCompleted"  # 整轮采集结果
     OCR_COMPLETED = "OCRCompleted"  # 整轮识别结果
-    CAPTURE_FAILED = "CaptureFailed"  # 采集失败
     OCR_FAILED = "OCRFailed"  # 整轮文字识别失败
     OCR_TIMEOUT = "OCRTimeout"  # 文字识别超时
     FREQUENCY_MEASURED = "FrequencyMeasured"  # 收到有效频率测量

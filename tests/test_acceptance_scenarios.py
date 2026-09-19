@@ -39,13 +39,29 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             """
             await asyncio.Future()
 
+        def start_controlled_capture(camera, session_id, capture_start_time):
+            """登记不自动交付图片的测试采集任务。
+
+            Args:
+                camera: 本机相机适配器。
+                session_id: 测量周期编号。
+                capture_start_time: 采集窗口起点。
+
+            Returns:
+                None  # 任务已创建，结束后清理引用，图片由测试主动交付
+            """
+            # 模拟启动成功后的任务引用及结束回调。
+            camera.delivery_task = asyncio.create_task(asyncio.sleep(0))
+            camera.delivery_task.add_done_callback(camera.handle_capture_task_finished)
+
         for target in (
             "camera.SessionCamera.start_capture",
             "fake_frequency.FakeFrequency.listen_measurements",
         ):
             replacement = (
                 patch(target, side_effect=wait_for_cancellation)
-                if target.endswith("listen_measurements") else patch(target)
+                if target.endswith("listen_measurements")
+                else patch(target, autospec=True, side_effect=start_controlled_capture)
             )
             replacement.start()
             self.addCleanup(replacement.stop)
@@ -336,7 +352,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_app()
         for machine_id in app.machine_managers:
             await app.handle_start(machine_id)
-        app.report_failure(OSError("IO 连接断开"), "IO")
+        app.report_failure(OSError("IO 连接断开"))
 
         # 等待退出，确认不会继续恢复或接收测量。
         await app.stop()

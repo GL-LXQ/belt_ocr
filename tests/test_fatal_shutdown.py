@@ -1,6 +1,7 @@
 """验证设备故障日志、全局退出和资源释放。"""
 
 import asyncio
+import threading
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import DEFAULT, AsyncMock, Mock
@@ -86,6 +87,71 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
     assert "测量系统初始化失败" in caplog.text
 
 
+def test_cancelled_startup_failure_preserves_error_and_cleanup(device_environment, monkeypatch, caplog):
+    """验证启动取消后的设备异常仍保留，且资源清理完成后才退出。
+
+    Args:
+        device_environment: 测量配置与假驱动。
+        monkeypatch: SDK 加载入口替换工具。
+        caplog: 日志捕获器。
+
+    Returns:
+        None  # 原始异常已传播一次，数据库实例锁已释放
+    """
+    configuration, sdk = device_environment
+    loading_started = threading.Event()
+    release_loading = threading.Event()
+    loading_failure = OSError("取消期间驱动加载失败")
+
+    def fail_driver_loading(*arguments):
+        """等待测试释放后抛出驱动异常。
+
+        Args:
+            arguments: SDK 目录配置。
+
+        Returns:
+            无返回值  # 等待结束后抛出 OSError
+        """
+        loading_started.set()
+        assert release_loading.wait(5)
+        raise loading_failure
+
+    async def cancel_startup():
+        """取消启动并核对原始故障和资源清理结果。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 启动失败，清理任务正常结束且没有实例锁遗留
+        """
+        application = App(configuration)
+        startup_task = asyncio.create_task(application.start())
+        try:
+            # 驱动加载期间取消启动，并释放工作线程让其报错。
+            assert await asyncio.to_thread(loading_started.wait, 2)
+            startup_task.cancel()
+            await asyncio.sleep(0)
+            release_loading.set()
+            with pytest.raises(OSError) as captured_failure:
+                await asyncio.wait_for(startup_task, 2)
+            assert captured_failure.value is loading_failure
+            assert application.failure is loading_failure
+            assert application.shutdown_task.done()
+            assert not application.shutdown_task.cancelled()
+            assert not application.database.lock_acquired
+        finally:
+            release_loading.set()
+            await asyncio.gather(startup_task, return_exceptions=True)
+            await application.stop()
+
+    monkeypatch.setattr("app.load_mvs_sdk", fail_driver_loading)
+    asyncio.run(cancel_startup())
+    failure_logs = [record for record in caplog.records if record.exc_info]
+    assert len(failure_logs) == 1
+    assert failure_logs[0].exc_info[1] is loading_failure
+
+
 @pytest.mark.parametrize("worker_kind", ["frequency", "storage", "return", "cancel"])
 def test_background_failure_stops_all_devices(device_environment, caplog, worker_kind):
     """验证后台异常、意外返回和取消均停止全部设备且不重启。
@@ -139,7 +205,7 @@ def test_background_failure_stops_all_devices(device_environment, caplog, worker
             operation.assert_awaited_once()
 
     asyncio.run(run_failure())
-    assert "程序故障，停止全部测量" in caplog.text
+    assert "后台任务" in caplog.text
     assert any(record.exc_info for record in caplog.records)
 
 
@@ -195,7 +261,13 @@ def test_camera_fault_interrupts_main_workflow(device_environment, monkeypatch, 
         asyncio.run(asyncio.wait_for(main.run_measurement_demo(Path("unused")), 3))
     assert sdk.closed
     assert all(camera.closed for camera in sdk.cameras.values())
-    assert "camera_id=CAM1" in caplog.text
+    assert ("camera_id=CAM1" if operation == "encode" else "serial=SERIAL1") in caplog.text
+    # 同一设备故障只在发生位置记录一次异常堆栈。
+    failure_logs = [
+        record for record in caplog.records
+        if record.exc_info and str(record.exc_info[1]) == "相机连接断开"
+    ]
+    assert len(failure_logs) == 1
 
 
 def test_no_data_and_normal_shutdown_are_not_faults(device_environment):
@@ -242,14 +314,14 @@ def test_command_line_failure_returns_nonzero(monkeypatch, caplog):
         None  # 命令行以退出码 1 结束
     """
     # 替换主流程为设备异常并清空测试命令行参数。
-    monkeypatch.setattr(main, "run_measurement_demo", AsyncMock(side_effect=OSError("设备断开")))
+    monkeypatch.setattr(main, "load_configuration", Mock(side_effect=OSError("配置读取失败")))
     monkeypatch.setattr("sys.argv", ["main.py"])
 
     # 验证日志和失败退出码。
     with pytest.raises(SystemExit) as failure:
         main.main()
     assert failure.value.code == 1
-    assert "测量程序异常退出" in caplog.text
+    assert "测量配置初始化失败" in caplog.text
 
 
 def test_failure_releases_publishers_waiting_for_queue(device_environment):
@@ -282,7 +354,7 @@ def test_failure_releases_publishers_waiting_for_queue(device_environment):
         assert all(not task.done() for task in publishers)
 
         # 退出释放队列容量，所有旧交付均丢弃而不再阻塞。
-        application.report_failure(OSError("设备故障"), "CAM1")
+        application.report_failure(OSError("设备故障"))
         await asyncio.wait_for(application.stop(), 2)
         await asyncio.wait_for(asyncio.gather(*publishers), 2)
         await asyncio.wait_for(manager.queue.join(), 2)

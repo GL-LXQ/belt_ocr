@@ -288,7 +288,7 @@ asyncio.run(crash_after_start())
         app = await self.start_app()
         await app.handle_start("M01")
         await app.handle_start("M02")
-        app.report_failure(OSError("相机断开"), "machine_id=M01 camera_id=CAM01")
+        app.report_failure(OSError("相机断开"))
 
         # 等待统一清理，确认其他机器也已停止。
         await app.stop()

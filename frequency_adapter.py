@@ -2,7 +2,6 @@
 
 from enums import EventType
 import asyncio
-import logging
 import math
 from datetime import datetime, timezone
 from itertools import cycle
@@ -10,9 +9,6 @@ from uuid import uuid4
 
 from configuration import MachineConfiguration, MeasurementConfiguration
 from models import FrequencyMeasurement, MeasurementEvent, PublishEvent
-
-
-logger = logging.getLogger(__name__)
 
 
 class FrequencyAdapter:
@@ -43,7 +39,7 @@ class FrequencyAdapter:
         self.active_session_id: str | None = None
 
     async def run(self) -> None:
-        """运行持续监听入口，记录读取异常并向应用抛出。
+        """运行持续监听入口，将读取异常交给后台任务入口处理。
 
         Args:
             无外部参数。
@@ -52,11 +48,7 @@ class FrequencyAdapter:
             None  # 监听被取消；读取失败时抛出异常
         """
         # 调用设备黑盒，连接和持续读取由该接口完成。
-        try:
-            await self.listen_measurements()
-        except Exception:
-            logger.exception("频率设备监听失败 machine_id=%s", self.machine.machine_id)
-            raise
+        await self.listen_measurements()
 
     async def listen_measurements(self) -> None:
         """按配置循环产生联调频率，向当前 Session 交付新有效测量。
