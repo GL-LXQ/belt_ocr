@@ -26,17 +26,16 @@ class CaptureResult:
 
 @dataclass(eq=False)
 class CaptureTask:
-    """持有单个采集线程、停止信号和完成通知。"""
+    """保存采集参数、故障回调、停止信号和完成通知。"""
 
     camera: MvsCamera
     capture_id: str
     capture_start_time: float
     duration_seconds: float
     timeout_ms: int
-    report_failure: Callable[[Exception], None] | None = None
+    report_failure: Callable[[Exception], None]
     stop_requested: threading.Event = field(default_factory=threading.Event)
     completion_future: Future = field(default_factory=Future)
-    thread: threading.Thread | None = None
 
     def run_capture(self) -> None:
         """循环收集全部帧，停止相机后交付整轮结果。
@@ -71,8 +70,7 @@ class CaptureTask:
             # 保存设备故障并通知应用退出。
             self.camera.faulted = True
             errors.append(str(error))
-            if self.report_failure is not None:
-                self.report_failure(error)
+            self.report_failure(error)
         finally:
             # 归还帧缓存后的同一线程停止取流，最后释放相机占用。
             try:
@@ -81,8 +79,7 @@ class CaptureTask:
                 camera_stopped = False
                 self.camera.faulted = True
                 errors.append(str(error))
-                if self.report_failure is not None:
-                    self.report_failure(error)
+                self.report_failure(error)
             finally:
                 self.camera.capture_lock.release()
 
@@ -190,11 +187,11 @@ class SessionCamera:
             )
 
             # 启动后台线程，顺序完成取流、收集帧和停止取流。
-            capture_task.thread = threading.Thread(
+            capture_thread = threading.Thread(
                 target=capture_task.run_capture,
                 name=f"Capture-{capture_id}",
             )
-            capture_task.thread.start()
+            capture_thread.start()
         except Exception:
             # 启动失败时释放相机采集锁。
             camera.capture_lock.release()

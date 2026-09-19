@@ -49,7 +49,7 @@ def start_capture():
             timeout_ms: 单次取帧超时毫秒数。
 
         Returns:
-            CaptureTask  # 包含停止信号、完成 Future 和采集线程的任务
+            CaptureTask  # 包含停止信号和完成 Future 的采集任务
         """
         adapter = SessionCamera(
             SimpleNamespace(machine_id="machine-1", camera_id=camera.serial),
