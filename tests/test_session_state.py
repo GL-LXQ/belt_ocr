@@ -93,7 +93,6 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
         assert "close_time" not in {column[1] for column in columns}
         assert "outcome" not in {column[1] for column in columns}
         assert "is_simulated" not in {column[1] for column in columns}
-    assert app.recovery.pending_count() == 0
 
 
 @pytest.mark.parametrize("readable", [True, False])
@@ -289,7 +288,6 @@ def test_database_failure_is_terminal_without_retry(frequency_context, failure_m
         assert session.frozen_payload is None
         await manager.try_finalize(session)
         assert app.database.queue.empty()
-        assert app.recovery.pending_count() == 0
 
     asyncio.run(submit_and_fail())
     with sqlite3.connect(app.configuration.database_path) as connection:

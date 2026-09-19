@@ -355,29 +355,6 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.read_records()), 1)
         self.assertEqual(self.read_records()[0], json.loads(session.frozen_payload))
 
-    async def test_failed_commit_retains_frozen_payload_for_retry(self) -> None:
-        app = await self.start_app()
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
-
-        # 写入失败后保留冻结记录，并用同一内容重新提交。
-        with patch.object(
-            app.database, "write_record", side_effect=OSError("模拟写入失败"),
-        ):
-            with self.assertLogs(level="ERROR"):
-                await app.handle_close("M01")
-                await self.wait_for_state(
-                    lambda: session.commit_state == "RETRY_PENDING",
-                )
-        frozen_payload = session.frozen_payload
-        self.assertFalse(session.finished)
-        await app.retry_pending_records()
-        await app.wait_until_idle()
-        self.assertEqual(session.frozen_payload, frozen_payload)
-        self.assertEqual(len(self.read_records()), 1)
-
     async def test_ocr_capacity_failure_creates_review_record(self) -> None:
         app = await self.start_app(
             ocr_queue_capacity=1, max_frames_per_session=1,

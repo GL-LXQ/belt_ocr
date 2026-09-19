@@ -149,6 +149,8 @@ Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正
 | `committed_records` | 旧版已提交身份保留，当前幂等检查直接读取最终库 |
 | `audit_entries` | 来源冲突、重复事件、迟到结果、设备故障等审计内容 |
 
+`RecoveryStore` 当前只管理单实例锁、旧表兼容清理和 `audit_entries` 写入。旧版待提交记录的暂存、查询、完成登记、延迟重试及计数方法已删除；正常结果仅通过本次运行的内存队列提交最终数据库。
+
 机器状态和未完成 Session 只保留在内存；业务事件不再持久登记去重身份；新库不创建 event_receipts 表，旧库已有的该表保留但不再读写。恢复库使用 SQLite 事务和 WAL；进程锁禁止两个实例同时操作同一恢复库。
 每次启动从空的 Session 集合开始，按以下顺序处理：
 

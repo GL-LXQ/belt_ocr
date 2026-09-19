@@ -1,10 +1,9 @@
-"""验证重启清理、故障隔离、本次运行内自动补交和事件审计。"""
+"""验证重启清理、进程锁、事件审计和故障退出。"""
 
 import asyncio
 import json
 import sqlite3
 import sys
-import threading
 import unittest
 from contextlib import closing
 from dataclasses import replace
@@ -16,7 +15,6 @@ from app import App
 from enums import OCRState, EventType
 from models import MeasurementEvent
 from recovery import serialize_value
-from database import DatabaseRequest
 
 
 class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
@@ -41,86 +39,8 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await self.app.start()
         return self.app
 
-    async def test_database_failure_is_automatically_retried(self) -> None:
-        app = await self.start_app(
-        )
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
-
-        # 暂时禁止最终库写入，确认记录先进入本地待提交区。
-        with patch.object(
-            app.database, "write_record", side_effect=OSError("模拟断库"),
-        ):
-            with self.assertLogs(level="ERROR"):
-                await app.handle_close("M01")
-                await self.wait_for_state(
-                    lambda: session.commit_state == "RETRY_PENDING",
-                )
-            self.assertEqual(app.recovery.pending_count(), 1)
-            frozen_payload = session.frozen_payload
-
-        # 故障解除后自动补交，不调用手动重试入口。
-        await app.wait_until_idle(10)
-        self.assertEqual(self.read_records()[0], json.loads(frozen_payload))
-        self.assertEqual(app.recovery.pending_count(), 0)
-
-    async def test_restart_discards_pending_payload_and_accepts_new_cycle(self) -> None:
-        """验证重启清理旧待提交记录并正常保存新周期。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            None: 完成断言，无返回数据。
-            返回示例：
-                None  # 无返回数据
-        """
-        # 创建待写入的完整测量结果。
-        app = await self.start_app(
-            shutdown_timeout_ms=100,
-        )
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
-
-        # 持续写入失败后退出，保存同一份冻结内容。
-        with patch.object(
-            app.database, "write_record", side_effect=OSError("模拟断库"),
-        ):
-            with self.assertLogs(level="WARNING"):
-                await app.handle_close("M01")
-                await self.wait_for_state(
-                    lambda: session.commit_state == "RETRY_PENDING",
-                )
-                await app.stop()
-        # 确认退出时旧结果仍在待提交区，并保留证据路径。
-        self.assertEqual(app.recovery.pending_count(), 1)
-        evidence_paths = session.ocr_result.evidence_refs
-        restarted = await self.restart_app(shutdown_timeout_ms=2000)
-
-        # 确认旧记录已清理，多次补交检查也不会生成旧结果。
-        self.assertEqual(restarted.recovery.pending_count(), 0)
-        self.assertEqual(restarted.machine_managers["M01"].sessions, {})
-        await restarted.database.enqueue_pending_records()
-        await restarted.database.enqueue_pending_records()
-        await restarted.wait_until_idle(10)
-        self.assertEqual(self.read_records(), [])
-        self.assertTrue(all(Path(image_path).is_file() for image_path in evidence_paths))
-
-        # 接收并保存本次运行的新周期。
-        await restarted.handle_start("M01")
-        machine_manager = restarted.machine_managers["M01"]
-        new_session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: new_session.ocr_state == OCRState.SUCCESS)
-        await restarted.handle_close("M01")
-        await restarted.wait_until_idle(10)
-        self.assertEqual([record["session_id"] for record in self.read_records()], [new_session.session_id])
-
     async def test_startup_clears_old_work_before_capacity_check(self) -> None:
-        """验证启动清理旧积压并移除旧检查点表，保留历史结果与审计。
+        """验证启动清理旧积压和旧检查点表，同时保留历史审计。
 
         Args:
             无外部参数。
@@ -130,51 +50,43 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             返回示例：
                 None  # 无返回数据
         """
-        # 保存一轮历史结果和审计，然后停止应用实例。
+        # 保存一条历史审计后停止应用实例。
         app = await self.start_app()
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
-        await app.handle_close("M01")
-        await app.wait_until_idle(10)
-        expected_records = self.read_records()
         app.recovery.audit("PREVIOUS_RUN_AUDIT", machine_id="M01")
         await app.stop()
 
-        # 登记普通、冲突和未受理类型的旧待提交记录。
-        for record_id, record_type in (
-            ("old_measurement", "measurement"),
-            ("old_conflict", "measurement"),
-            ("old_rejection", "rejected_cycle"),
-        ):
-            app.recovery.stage_record(DatabaseRequest("M01", record_id, "{}", record_id, record_type))
-        app.recovery.delay_record("old_conflict", 0, blocked=True)
-
-        # 创建旧版本检查点表并保存旧机器状态。
+        # 直接写入旧版待提交数据，并创建旧版本检查点表。
         with closing(sqlite3.connect(app.configuration.recovery_path)) as connection:
             with connection:
+                connection.executemany(
+                    "INSERT INTO pending_records "
+                    "(record_id, machine_id, record_type, payload_json, payload_hash, blocked) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        ("old_measurement", "M01", "measurement", "{}", "hash-1", 0),
+                        ("old_conflict", "M01", "measurement", "{}", "hash-2", 1),
+                        ("old_rejection", "M01", "rejected_cycle", "{}", "hash-3", 0),
+                    ),
+                )
                 connection.execute("CREATE TABLE machine_checkpoints (machine_id TEXT PRIMARY KEY, payload_json TEXT)")
                 connection.execute("INSERT INTO machine_checkpoints VALUES (?, ?)", ("OLD_MACHINE", "{}"))
 
         # 使用低于旧积压数量的容量上限启动，确认先清理再检查容量。
         restarted = await self.restart_app(max_persistent_records=1)
-        self.assertEqual(restarted.recovery.pending_count(), 0)
         self.assertEqual(restarted.machine_managers["M01"].acceptance_state, "READY")
 
-        # 确认旧检查点表已删除，机器档案只存在于内存。
+        # 确认旧待提交数据和检查点表已清理，机器档案只存在于内存。
         with closing(sqlite3.connect(restarted.configuration.recovery_path)) as connection:
+            pending_count = connection.execute("SELECT COUNT(*) FROM pending_records").fetchone()[0]
             checkpoint_table = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'machine_checkpoints'"
             ).fetchone()
+        self.assertEqual(pending_count, 0)
         self.assertIsNone(checkpoint_table)
         self.assertTrue(all(not manager.sessions for manager in restarted.machine_managers.values()))
 
-        # 确认历史结果、提交身份、审计和证据仍然保留。
-        self.assertEqual(self.read_records(), expected_records)
-        self.assertTrue(restarted.recovery.record_status(session.session_id)["committed"])
+        # 确认历史审计仍然保留。
         self.assertIn("PREVIOUS_RUN_AUDIT", self.read_audit_reasons())
-        self.assertTrue(all(Path(image_path).is_file() for image_path in expected_records[0]["evidence_refs"]))
 
     async def test_machine_state_stays_in_memory_without_event_receipts(self) -> None:
         """验证机器状态只保留在内存，且不创建事件去重表。
@@ -467,104 +379,6 @@ asyncio.run(crash_after_start())
             with self.assertRaisesRegex(RuntimeError, "初始化失败"):
                 await second_app.start()
         self.assertTrue(app.accepting_signals)
-
-    async def test_database_unavailable_at_startup_uses_local_spool(self) -> None:
-        blocked_directory = self.output_directory / "blocked"
-        blocked_directory.write_text("模拟不可用路径", encoding="utf-8")
-        with self.assertLogs(level="ERROR"):
-            app = await self.start_app(
-                database_path=blocked_directory / "measurements.sqlite3",
-                recovery_database_path=self.output_directory / "recovery.sqlite3",
-            )
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
-        with self.assertLogs(level="ERROR"):
-            await app.handle_close("M01")
-            await self.wait_for_state(lambda: session.commit_state == "RETRY_PENDING")
-        self.assertEqual(app.recovery.pending_count(), 1)
-
-        # 恢复最终库路径后自动创建数据库并补交。
-        blocked_directory.unlink()
-        blocked_directory.mkdir()
-        await app.wait_until_idle(10)
-        self.assertEqual(self.read_records()[0]["outcome"], "COMPLETE")
-
-    async def test_storage_queue_full_keeps_all_records_durable(self) -> None:
-        app = await self.start_app(
-            storage_queue_capacity=1, max_frames_per_session=1,
-        )
-        original_write = app.database.write_record
-        write_release = threading.Event()
-
-        # 暂停真实写库，等待三份记录全部进入持久化待提交区。
-        def hold_write(request):
-            if not write_release.wait(30):
-                raise TimeoutError("测试写入等待超时。")
-            original_write(request)
-
-        await asyncio.gather(*(
-            app.handle_start(machine_id) for machine_id in app.machine_managers
-        ))
-        await self.wait_for_state(lambda: all(
-            next(iter(machine_manager.sessions.values())).is_capture_finished
-            for machine_manager in app.machine_managers.values()
-        ))
-
-        # 注入频率失败，使关闭后的待复核记录直接进入存储流程。
-        for machine_manager in app.machine_managers.values():
-            session = machine_manager.sessions[machine_manager.active_session_id]
-            await app.publish_event(MeasurementEvent(
-                EventType.FREQUENCY_FAILED,
-                session.machine_id,
-                session.session_id,
-                "FREQUENCY_UNAVAILABLE",
-            ))
-            await machine_manager.queue.join()
-
-        # 暂停写库，检查队列之外的待提交记录仍已持久化。
-        with patch.object(app.database, "write_record", hold_write):
-            try:
-                await asyncio.gather(*(
-                    app.handle_close(machine_id) for machine_id in app.machine_managers
-                ))
-                await self.wait_for_state(lambda: (
-                    app.recovery.pending_count() == 3
-                    and any(
-                        session.commit_state == "RETRY_PENDING"
-                        for machine_manager in app.machine_managers.values()
-                        for session in machine_manager.sessions.values()
-                    )
-                ))
-                self.assertEqual(app.database.queue.qsize(), 1)
-                self.assertEqual(self.read_records(), [])
-            finally:
-                write_release.set()
-
-            # 释放写库后，内存队列外的记录也会自动补交。
-            await app.wait_until_idle(10)
-        self.assertEqual(len(self.read_records()), 3)
-        self.assertEqual(app.recovery.pending_count(), 0)
-
-    async def test_conflicting_commit_is_retained_without_overwrite(self) -> None:
-        app = await self.start_app(shutdown_timeout_ms=100)
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
-        session = machine_manager.sessions[machine_manager.active_session_id]
-        await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
-
-        # 模拟目标库检测到同一 Session 的不同内容。
-        with patch.object(
-            app.database, "write_record", side_effect=ValueError("冲突"),
-        ):
-            with self.assertLogs(level="ERROR"):
-                await app.handle_close("M01")
-                await self.wait_for_state(lambda: session.commit_state == "CONFLICT")
-        status = app.recovery.record_status(session.session_id)
-        self.assertEqual(status["pending"]["blocked"], 1)
-        self.assertEqual(self.read_records(), [])
-        self.assertIn("COMMIT_INTEGRITY_CONFLICT", self.read_audit_reasons())
 
     async def test_repeated_cycles_remain_independent(self) -> None:
         app = await self.start_app(max_frames_per_session=1)

@@ -199,7 +199,6 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
     assert session.final_frequency is None
     assert len(session.measurement_frequencies) == (0 if outcome == "empty" else 1)
     assert app.database.queue.empty()
-    assert app.recovery.pending_count() == 0
     assert session.session_id not in manager.sessions
     assert session.frequency_window_sealed
     assert session.frequency_state == FrequencyState.FAILED
