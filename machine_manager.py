@@ -234,7 +234,7 @@ class MachineManager:
             session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
 
         # 停止本轮采集，当前周期继续占用机器直到保存或失败清理完成。
-        await self.camera.seal_capture(session.capture_stop_time)
+        await self.camera.seal_capture()
 
         # 从任务表移除本轮 CycleTimeout；任务仍存在时，取消它后续的超时通知。
         deadline_task = self.deadline_tasks.pop(EventType.CYCLE_TIMEOUT, None)
@@ -345,24 +345,14 @@ class MachineManager:
                 if session.ocr_state != OCRState.WAITING:
                     return
                 summary = event.payload
-                session.skipped_frame_count = summary.skipped_frame_count
                 session.capture_summary = summary.statistics
                 if summary.errors:
                     session.ocr_state = OCRState.FAILED
                     session.errors.extend(summary.errors)
                 else:
-                    # 按信号接收时间排除关闭后取得的帧，更新交付统计。
-                    frames = summary.frames
-                    if session.capture_stop_time is not None:
-                        frames = tuple(
-                            frame for frame in frames if frame.received_monotonic <= session.capture_stop_time
-                        )
-                        session.skipped_frame_count += len(summary.frames) - len(frames)
-                        session.capture_summary["retained_frame_count"] = len(frames)
-                        session.capture_summary["skipped_frame_count"] = session.skipped_frame_count
                     # 启动一个整轮后台任务并登记完成回调。
                     session.ocr_state = OCRState.RUNNING
-                    task = asyncio.create_task(self.recognize_session(session, frames))
+                    task = asyncio.create_task(self.recognize_session(session, summary.frames))
                     self.recognition_task = task
                     task.add_done_callback(self.handle_recognition_task_finished)
                     return
@@ -642,7 +632,6 @@ class MachineManager:
                 asdict(measurement)
                 for measurement in session.measurement_frequencies
             ],
-            "skipped_frame_count": session.skipped_frame_count,
             "capture_summary": session.capture_summary,
             "configuration_version": self.configuration.configuration_version,
         }

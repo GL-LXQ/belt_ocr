@@ -577,8 +577,8 @@ def test_collects_all_owned_frames_without_encoding(camera, start_capture):
     assert not camera.capture_lock.locked()
 
 
-def test_close_excludes_inflight_frame_after_boundary(camera, monkeypatch, start_capture):
-    """验证关闭后才取得的在途帧不进入本轮集合。
+def test_close_keeps_inflight_tail_frame(camera, monkeypatch, start_capture):
+    """验证关闭时的在途尾帧保留在本轮集合。
 
     Args:
         start_capture: 使用正式相机入口的测试启动函数。
@@ -586,7 +586,7 @@ def test_close_excludes_inflight_frame_after_boundary(camera, monkeypatch, start
         monkeypatch: 接口替换工具。
 
     Returns:
-        None  # 截止边界、丢弃统计和资源释放已验证
+        None  # 尾帧保留和资源释放已验证
     """
     import time
 
@@ -606,20 +606,18 @@ def test_close_excludes_inflight_frame_after_boundary(camera, monkeypatch, start
         """
         reading.set()
         assert release.wait(2)
-        return replace(original_read(threading.Event(), timeout_ms), received_monotonic=task.capture_stop_time + 0.01)
+        return replace(original_read(threading.Event(), timeout_ms), received_monotonic=time.monotonic())
 
     monkeypatch.setattr(camera, "read_frame", read_delayed)
     camera.handle.frames.put(b"late")
     task = start_capture(camera, duration_seconds=2)
     try:
         assert reading.wait(1)
-        task.capture_stop_time = time.monotonic()
         task.stop_requested.set()
     finally:
         release.set()
     result = task.wait(2)
-    assert not result.frames
-    assert result.skipped_frame_count == 1
+    assert [frame.data for frame in result.frames] == [b"late"]
     assert result.camera_stopped
 
 

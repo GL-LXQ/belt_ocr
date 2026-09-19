@@ -68,7 +68,6 @@ class CaptureSummary:
 
     capture_id: str
     frames: tuple[CameraFrame, ...] = field(default=(), repr=False)
-    skipped_frame_count: int = 0
     statistics: dict = field(default_factory=dict)
     errors: tuple[str, ...] = ()
 
@@ -85,7 +84,6 @@ class BeltSession:
     capture_stop_time: float | None = None  # 本轮相机采集图片的停止截止时间，关闭或中断时记录，单调时钟秒数
     finish_time: str | None = None
     state: SessionState = SessionState.RUNNING  # 本轮任务的整体处理状态
-    skipped_frame_count: int = 0
     capture_summary: dict = field(default_factory=dict)  # 本轮相机采集汇总，包含帧数、耗时和错误信息
     ocr_state: OCRState = OCRState.WAITING  # 本轮文字识别状态
     ocr_result: OCRResult | None = None

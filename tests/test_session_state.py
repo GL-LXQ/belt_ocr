@@ -326,14 +326,14 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(manager.current_session is None for manager in app.machine_managers.values()))
 
 
-def test_delayed_close_uses_signal_time_for_pending_capture(frequency_context):
-    """验证排队的 CLOSE 按信号时间排除后来采到的帧。
+def test_delayed_close_keeps_all_delivered_frames(frequency_context):
+    """验证排队的 CLOSE 不再筛除已交付的尾帧。
 
     Args:
         frequency_context: 已建立的活动周期和独立存储。
 
     Returns:
-        None  # OCR 只收到关闭边界内的帧
+        None  # OCR 收到本轮交付的全部帧
     """
     from mvs_sdk import CameraFrame
     from models import CaptureSummary
@@ -357,7 +357,7 @@ def test_delayed_close_uses_signal_time_for_pending_capture(frequency_context):
             无外部参数。
 
         Returns:
-            None  # 后台 OCR 已执行且参数经过时间边界筛选
+            None  # 后台 OCR 已执行且保留全部交付帧
         """
         await manager.handle_event(MeasurementEvent(
             EventType.MACHINE_CLOSED, "M01", session.session_id, received_monotonic=12,
@@ -367,8 +367,6 @@ def test_delayed_close_uses_signal_time_for_pending_capture(frequency_context):
             CaptureSummary(session.capture_id, frames=frames),
         ))
         await asyncio.gather(*tuple((manager.recognition_task,)))
-        assert app.text_recognizer.process_session_frames.call_args.args[3] == (frames[0],)
-        assert session.skipped_frame_count == 1
-        assert session.capture_summary["retained_frame_count"] == 1
+        assert app.text_recognizer.process_session_frames.call_args.args[3] == frames
 
     asyncio.run(close_then_deliver())
