@@ -236,7 +236,7 @@ def test_database_failure_is_terminal_without_retry(frequency_context, failure_m
         failure_mode: 写入失败、内容冲突、队列满或提交接口异常。
 
     Returns:
-        None  # 本轮已失败且恢复库无待提交记录
+        None  # 本轮已失败且本地运行库无待提交记录
     """
     app, manager, session = frequency_context
     session.measurement_frequencies.append(create_measurement(session, 1, 12, 42))

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from configuration import MeasurementConfiguration
 from models import CapturedFrame, MeasurementEvent, PublishEvent
-from recovery import run_blocking_operation
+from async_utils import run_blocking_operation
 
 
 logger = logging.getLogger(__name__)

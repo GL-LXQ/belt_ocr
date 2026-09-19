@@ -14,7 +14,7 @@ import test_measurement_flow as flow_support
 import test_recovery_and_faults as recovery_support
 from enums import OCRState, FrequencyState, EventType
 from models import CapturedFrame, CaptureSummary, FrequencyMeasurement, MeasurementEvent
-from recovery import serialize_value
+from database import serialize_value
 
 
 class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
@@ -23,7 +23,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
     start_app = flow_support.MeasurementFlowTests.start_app
     wait_for_state = flow_support.MeasurementFlowTests.wait_for_state
     read_records = flow_support.MeasurementFlowTests.read_records
-    read_audit_reasons = recovery_support.RecoveryAndFaultTests.read_audit_reasons
+    read_abnormal_event_reasons = recovery_support.RecoveryAndFaultTests.read_abnormal_event_reasons
 
     async def start_controlled_app(self, **overrides):
         """暂停自动图像与频率输入，由测试按确定顺序发布事件。"""
@@ -140,7 +140,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
                 record["frequency_candidates"][0]["frequency_source_id"],
                 record["frequency_source_id"],
             )
-        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_audit_reasons())
+        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_abnormal_event_reasons())
 
     async def test_06_repeated_start_input_creates_one_cycle(self):
         # 并发重复启动后，只为唯一活动周期完成一次测量。
@@ -182,7 +182,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(machine_manager.active_session_id, second_session.session_id)
         self.assertIsNone(second_session.capture_stop_time)
         self.assertFalse(second_session.is_capture_finished)
-        self.assertIn("CLOSE_SESSION_MISMATCH", self.read_audit_reasons())
+        self.assertIn("CLOSE_SESSION_MISMATCH", self.read_abnormal_event_reasons())
 
         # 两轮分别结算一次，旧关闭事件不生成第三条记录。
         await self.close_controlled_cycle(second_session)
@@ -246,7 +246,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             replace(old_measurement, session_id=second_session.session_id),
         ))
         self.assertEqual(second_session.frequency_candidates, {})
-        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_audit_reasons())
+        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_abnormal_event_reasons())
 
         # 仅补充新周期图像，关闭后应保存缺少有效频率的待复核记录。
         await self.publish_and_wait(MeasurementEvent(
@@ -267,7 +267,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(record["final_frequency_hz"])
         self.assertEqual(record["frequency_candidates"], [])
 
-    async def test_11_unassigned_delayed_frequency_is_audited_without_guessing(self):
+    async def test_11_unassigned_delayed_frequency_is_recorded_without_guessing(self):
         # 保留关闭后尚未封口的旧轮，同时启动新轮。
         app = await self.start_controlled_app()
         await app.handle_start("M01")
@@ -286,7 +286,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(first_session.frequency_candidates), 1)
         self.assertEqual(second_session.frequency_candidates, {})
         self.assertEqual(machine_manager.active_session_id, second_session.session_id)
-        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_audit_reasons())
+        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_abnormal_event_reasons())
 
         # 为两轮分别完成已有的有效输入，不把无归属读数写入任何记录。
         await self.publish_and_wait(MeasurementEvent(
@@ -559,11 +559,11 @@ asyncio.run(crash_after_close())
             await self.publish_and_wait(event)
             finalize.assert_awaited_once_with(session)
 
-        # 冲突测量不替换原候选，并记录无效频率和审计原因。
+        # 冲突测量不替换原候选，并记录无效频率和异常原因。
         self.assertEqual(session.frequency_state, FrequencyState.FAILED)
         self.assertIn("AMBIGUOUS_MEASUREMENT", session.errors)
         self.assertEqual(session.frequency_candidates[measurement.measurement_id], measurement)
-        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_audit_reasons())
+        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_abnormal_event_reasons())
 
 
 if __name__ == "__main__":

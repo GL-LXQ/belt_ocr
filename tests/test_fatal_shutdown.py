@@ -81,7 +81,7 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
         asyncio.run(application.start())
     assert not application.accepting_signals
     assert not application.worker_tasks
-    assert not application.recovery.lock_acquired
+    assert not application.database.lock_acquired
     assert all(camera.closed for camera in sdk.cameras.values())
     assert "测量系统初始化失败" in caplog.text
 
@@ -134,7 +134,7 @@ def test_background_failure_stops_all_devices(device_environment, caplog, worker
         assert sdk.closed
         assert not application.worker_tasks
         assert not application.accepting_signals
-        assert not application.recovery.lock_acquired
+        assert not application.database.lock_acquired
         if worker_kind != "cancel":
             operation.assert_awaited_once()
 

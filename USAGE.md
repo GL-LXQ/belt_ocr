@@ -2,7 +2,7 @@
 
 > 当前已实现 TextRecognizer 的批次接收、手动消费和原始结果回传。recognize_batch 当前为每张图片返回空 blocks 作为联调占位结果，App 不自动启动消费者。模型未接入时不可进行真实识别；当前已实现按 Session 触发一次后处理，但不执行跨帧融合算法或正常结果入库，原有超时仍可能触发。
 
-当前版本包含三机测量、跨轮后台收尾、内存机器状态、Session 四态、失败日志清理、重启清理和设备审计。
+当前版本包含三机测量、跨轮后台收尾、内存机器状态、Session 四态、失败日志清理、重启清理和异常事件记录。
 信号统一从 `App.handle_start()` 和 `handle_close()` 进入，尚未接入现场 IO。
 
 海康 MVS 采集已接入 App，文件夹模拟相机已删除。设备配置及底层接口见 [MVS 采集说明](MVS_CAPTURE.md)。任一已配置机器没有相机、未填写序列号或 SDK 加载失败时，记录错误并终止整个程序，已打开的设备会被释放。
@@ -23,7 +23,7 @@ uv run python -X utf8 main.py
 
 演示向所有可用机器发送启动和关闭信号，再向第一台可用机器发送第二轮信号并等待结果。当前频率使用配置列表产生联调读数，仍需要可用相机；这些读数不代表真实仪器测量。
 默认数据库为 `runtime/measurements.sqlite3`，终选图片的预留目录为 `runtime/evidence/<session_id>/`，当前不写入采集图片。
-独立恢复库默认为 `runtime/measurements.recovery.sqlite3`。
+独立运行库默认为 `runtime/measurements.recovery.sqlite3`。
 重复执行演示会为可用机器增加新记录。`runtime/` 已加入 Git 忽略列表。
 
 ## 配置相机与测量输入
@@ -54,10 +54,10 @@ uv run python -X utf8 main.py --config config.example.json
 | `ocr_queue_capacity` | 当前 OCR 待处理批次队列上限，默认 32 批；本阶段没有消费者 |
 | `event_queue_capacity` / `storage_queue_capacity` | 单机事件队列和存储队列上限，默认 128 / 32 |
 | `shutdown_timeout_ms` | 正常退出等待后台收尾的上限，默认 10000 毫秒 |
-| `recovery_database_path` | 独立恢复库路径；省略时使用最终库同目录的 `.recovery.sqlite3` 文件 |
+| `recovery_database_path` | 独立运行库路径；省略时使用最终库同目录的 `.recovery.sqlite3` 文件 |
 | `maintenance_interval_ms` | 容量检查间隔，默认 250 毫秒 |
 | `max_persistent_records` | 正在排队或写入的记录数量达到该值时停止接收新周期，默认 1000 |
-| `minimum_free_disk_bytes` | 恢复库和证据所在磁盘的最低剩余空间，默认 100 MiB |
+| `minimum_free_disk_bytes` | 本地运行库和证据所在磁盘的最低剩余空间，默认 100 MiB |
 | `ocr_job_timeout_ms` | 证据文件读取期限 |
 | `event_max_age_ms` | 兼容旧配置保留，当前不再用于过滤 START/CLOSE |
 | `initial_machine_state` | 新机器的模拟初始状态，默认 `CLOSED`；也支持 `OPEN`、`UNKNOWN` |
@@ -102,7 +102,7 @@ asyncio.run(run_measurement())
 仅有 `machine_id` 的入口无法辨别来自硬件的跨周期旧信号，真实接入层必须先确定周期身份。
 业务事件使用 `event_type` 区分业务，以 `machine_id` 和 `session_id` 确定归属，保留 `event_id` 和时间；不再包含公共 `source_id`。
 系统不按 event_id 持久化去重；START/CLOSE 按接收顺序处理，不按事件创建时间过滤；事件处理保留 Session 归属及采集数据中的设备身份检查，结果提交保留幂等写入。
-带旧 Session 的关闭事件会进入审计，不关闭新周期。
+带旧 Session 的关闭事件会写入异常事件记录，不关闭新周期。
 
 ## 业务处理顺序
 
@@ -138,30 +138,30 @@ Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正
 
 如果数据库写入成功但回调未被处理，历史结果仍可能已经存在；Session 的失败日志不能证明数据库里没有记录。
 
-## 恢复库与重启
+## 本地运行库与重启
 
-恢复库与最终结果库必须是不同文件；可以通过配置放在不同的可写目录。
-恢复库包含：
+本地运行库与最终结果库必须是不同文件；可以通过配置放在不同的可写目录。
+本地运行库包含：
 
 | 表 | 内容 |
 |---|---|
 | `pending_records` | 旧版兼容表，启动时清理，当前不新增待提交记录 |
 | `committed_records` | 旧版已提交身份保留，当前幂等检查直接读取最终库 |
-| `audit_entries` | 来源冲突、重复事件、迟到结果、设备故障等审计内容 |
+| `abnormal_events` | 来源冲突、迟到结果等异常事件；旧 `audit_entries` 数据在启动时迁入此表 |
 
-`RecoveryStore` 当前只管理单实例锁、旧表兼容清理和 `audit_entries` 写入。旧版待提交记录的暂存、查询、完成登记、延迟重试及计数方法已删除；正常结果仅通过本次运行的内存队列提交最终数据库。
+`Database` 统一管理单实例锁、旧表兼容清理、`abnormal_events` 写入和最终结果提交。旧版待提交记录的暂存、查询、完成登记、延迟重试及计数方法已删除；正常结果仅通过本次运行的内存队列提交最终数据库。
 
-机器状态和未完成 Session 只保留在内存；业务事件不再持久登记去重身份；新库不创建 event_receipts 表，旧库已有的该表保留但不再读写。恢复库使用 SQLite 事务和 WAL；进程锁禁止两个实例同时操作同一恢复库。
+机器状态和未完成 Session 只保留在内存；业务事件不再持久登记去重身份；新库不创建 event_receipts 表，旧库已有的该表保留但不再读写。本地运行库使用 SQLite 事务和 WAL；进程锁禁止两个实例同时操作同一运行库。
 每次启动从空的 Session 集合开始，按以下顺序处理：
 
-- 获得恢复库独占锁后，在同一事务中移除旧版本检查点表并清理全部待提交记录，包括内容冲突和未受理周期记录。
+- 获得运行库独占锁后，在同一事务中迁移旧异常事件表、移除旧版本检查点表并清理全部待提交记录，包括内容冲突和未受理周期记录。
 - 清理完成后才检查容量、启动存储及维护任务；不恢复旧 OCR、超时或提交任务。
-- 保留最终数据库的历史结果、已提交身份、审计和证据图片。
+- 保留最终数据库的历史结果、已提交身份、异常事件和证据图片。
 - 初始状态为 CLOSED 时等待新启动；OPEN 或 UNKNOWN 时等待有效关闭或明确的关闭状态同步，再接收下一次启动。
 
 当前模拟实现从 initial_machine_state 配置读取初始状态，尚未直接读取硬件状态。初始运行中或未知时等待关闭或现场状态同步；设备故障则退出程序，修复后手动重启。
 退出等待到期时放弃内存中的未完成测量；尚未完成的 Session 标记 FAILED，释放内存与排队请求，不保存待补交记录。已写入最终库但尚未收到确认的历史结果仍保留。
-请保留恢复库及 SQLite 的配套文件，不要在程序运行时手工删除或只复制其中一个文件。
+请保留运行库及 SQLite 的配套文件，不要在程序运行时手工删除或只复制其中一个文件。
 
 ## 故障退出
 
@@ -187,8 +187,8 @@ Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正
 | `mvs_capture.py` | 固定窗口流式采集、独立有界队列、逐帧回调和统计 |
 | `text_recognition.py` | 批次接收、监听、整批模型调用和原始结果回传；模型接口待实现 |
 | `frequency_adapter.py` | 持续监听黑盒、当前 Session 归属和读取故障交付 |
-| `database.py` | SQLite 建表、单次幂等写入和提交结果回调 |
-| `recovery.py` | 历史记录兼容清理、审计和实例锁 |
+| `database.py` | SQLite 建表、实例锁、历史兼容清理、异常事件记录和结果提交 |
+| `async_utils.py` | 在线程中安全执行文件、设备和数据库阻塞操作 |
 | `tests/test_measurement_flow.py` | 并行、跨轮次、重复、失败和超时测试 |
 | `tests/test_recovery_and_faults.py` | 历史恢复与故障测试，部分场景仍基于旧版自动补交规则 |
 | `tests/test_acceptance_scenarios.py` | 验收事件注入、跨轮回调、调度公平性、证据失败和强制崩溃测试 |
@@ -198,7 +198,7 @@ Session 状态统一为 `RUNNING / WAITING_COMMIT_DB / COMMITTED / FAILED`。正
 App 已接入官方 MVS 相机；IO、频率、图像质量评估和 OCR 融合尚未完成真实设备或算法接入。没有真实相机时仅能执行假 SDK 自动化验证。
 现场初始电平、脉冲去抖、设备时间映射和重连基线必须由真实设备适配层提供，不能用模拟结果替代现场验证。
 有限多轮及故障注入测试不代表已经完成工控机现场的持续运行和吞吐验收。
-最终库写入失败时只打印日志并清理本轮，不暂存补交。设备与路由审计仍使用本地恢复库，该库初始化或后台检查异常时退出。
+最终库写入失败时只打印日志并清理本轮，不暂存补交。路由异常事件写入本地运行库，该库初始化或后台检查异常时退出。
 
 ## 测试
 

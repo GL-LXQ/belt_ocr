@@ -14,7 +14,7 @@ from configuration import MachineConfiguration, MeasurementConfiguration
 from frequency_adapter import FrequencyAdapter
 from enums import OCRState, FrequencyState, MachineState, SessionState, EventType
 from models import BeltSession, MeasurementEvent, PublishEvent
-from recovery import run_blocking_operation
+from async_utils import run_blocking_operation
 from text_recognition import TextRecognizer
 from database import Database, DatabaseRequest
 
@@ -50,7 +50,6 @@ class MachineManager:
         self.waiting_cycle_reset = False
         self.interrupted_session_id: str | None = None
         self.deadline_tasks: dict[tuple[str, EventType], asyncio.Task[None]] = {}
-        self.recovery = database.recovery
         self.capacity_available = True
         self.initialized = False
         self.background_tasks: set[asyncio.Task[None]] = set()
@@ -59,7 +58,7 @@ class MachineManager:
     def acceptance_state(self) -> str:
         if not self.initialized:
             return "INITIALIZING"
-        if not self.recovery.available or not self.camera.available:
+        if not self.database.runtime_available or not self.camera.available:
             return "FAULT"
         if self.waiting_cycle_reset:
             return "WAIT_CYCLE_RESET"
@@ -118,11 +117,11 @@ class MachineManager:
         if self.active_session_id is not None or self.waiting_cycle_reset:
             return
 
-        # 检查本机积压、存储容量、设备故障和恢复库状态。
+        # 检查本机积压、存储容量、设备故障和本地运行库状态。
         if (
             len(self.sessions) >= self.configuration.max_pending_sessions_per_machine
             or not self.capacity_available
-            or not self.recovery.available
+            or not self.database.runtime_available
             or not self.camera.available
             or self.camera.is_capturing
         ):
@@ -265,7 +264,9 @@ class MachineManager:
             case EventType.MACHINE_CLOSED:
                 # 判断此次收到的关闭事件是否对应当前活动session或已中断的session
                 if not self.is_close_event_for_active_session(event):
-                    await run_blocking_operation(self.recovery.audit, "CLOSE_SESSION_MISMATCH", event)
+                    await run_blocking_operation(
+                        self.database.save_abnormal_event, "CLOSE_SESSION_MISMATCH", event,
+                    )
                     return
                 await self.handle_machine_close()
                 return
@@ -279,16 +280,16 @@ class MachineManager:
                 self.waiting_cycle_reset = event.payload != MachineState.CLOSED
                 if event.payload == MachineState.CLOSED:
                     self.interrupted_session_id = None
-                await run_blocking_operation(self.recovery.audit, "MACHINE_SYNCHRONIZED", event)
                 return
             case EventType.CAPACITY_CHANGED:
                 self.capacity_available = event.payload
-                await run_blocking_operation(self.recovery.audit, "CAPACITY_CHANGED", event)
                 return
 
         # 隔离没有周期身份的频率，不分配给当前或历史 Session。
         if event.event_type == EventType.FREQUENCY_MEASURED and not event.session_id:
-            await run_blocking_operation(self.recovery.audit, "AMBIGUOUS_MEASUREMENT", event)
+            await run_blocking_operation(
+                self.database.save_abnormal_event, "AMBIGUOUS_MEASUREMENT", event,
+            )
             return
 
         # 将异步结果定位到原 Session。
@@ -409,7 +410,9 @@ class MachineManager:
                 session.final_frequency = None
                 session.errors.append(event.payload)
             case _:
-                await run_blocking_operation(self.recovery.audit, "UNKNOWN_EVENT_TYPE", event)
+                await run_blocking_operation(
+                    self.database.save_abnormal_event, "UNKNOWN_EVENT_TYPE", event,
+                )
 
         # 已忽略的事件不继续处理本轮结果。
         if not should_finalize:
@@ -531,10 +534,12 @@ class MachineManager:
         if session.is_capture_finished:
             return False
 
-        # 校验封口摘要的采集编号，冲突事件只记录审计。
+        # 校验封口摘要的采集编号，冲突事件只记录异常信息。
         summary = event.payload
         if summary.capture_id != session.capture_id:
-            await run_blocking_operation(self.recovery.audit, "CAPTURE_IDENTITY_CONFLICT", event)
+            await run_blocking_operation(
+                self.database.save_abnormal_event, "CAPTURE_IDENTITY_CONFLICT", event,
+            )
             return False
 
         # 标记图像清单已封闭，保存跳帧数量和完整采集统计。
@@ -576,9 +581,11 @@ class MachineManager:
                 True  # 继续检查本轮能否结算
                 False  # 忽略当前事件，不执行完成检查
         """
-        # 终态后到达的测量只记录审计，不修改已封闭列表。
+        # 终态后到达的测量只记录异常信息，不修改已封闭列表。
         if session.frequency_window_sealed:
-            await run_blocking_operation(self.recovery.audit, "LATE_FREQUENCY", event)
+            await run_blocking_operation(
+                self.database.save_abnormal_event, "LATE_FREQUENCY", event,
+            )
             return False
 
         # 按机器事件队列的接收顺序追加明细，不重复检查黑盒保证的数据约束。

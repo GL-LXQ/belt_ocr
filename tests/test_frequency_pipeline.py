@@ -38,7 +38,6 @@ def frequency_context(tmp_path):
         evidence_directory=tmp_path / "evidence",
     )
     app = App(configuration)
-    app.recovery.initialize()
     app.database.initialize()
     manager = app.machine_managers["M01"]
 
@@ -63,7 +62,7 @@ def frequency_context(tmp_path):
     try:
         yield app, manager, session
     finally:
-        app.recovery.close()
+        app.database.close()
 
 
 def create_measurement(session, sequence, measured_time, value):

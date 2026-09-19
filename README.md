@@ -1,6 +1,6 @@
 # 多皮带机并行采集与 OCR 系统：Codex 开发规格
 
-> 当前已接入 MVS 相机与 Session 流程；OCR 支持内存图片批次及终选占位入口；频率采用设备黑盒接口，接收及关闭结算与数据库存储已接通，设备协议内部待实现。支持正常结果 SQLite 保存和设备审计；异常、中断及提交失败只打印日志，不自动补交；重启不恢复旧 Session。
+> 当前已接入 MVS 相机与 Session 流程；OCR 支持内存图片批次及终选占位入口；频率采用设备黑盒接口，接收及关闭结算与数据库存储已接通，设备协议内部待实现。支持正常结果 SQLite 保存和异常事件记录；异常、中断及提交失败只打印日志，不自动补交；重启不恢复旧 Session。
 > 启动方法、配置说明、信号入口及当前边界见 [运行说明](USAGE.md)。
 > 下文保留完整开发规格，不表示所有生产能力均已交付。
 
@@ -14,13 +14,13 @@
 
 测量数据由 START 创建 Session，经相机内存组批、OCR 终选和 CLOSE 频率结算，在证据验证通过后冻结并写入 SQLite。Session 不再保存 `process_epoch`、`configuration_snapshot`，新写入的 `payload_json` 不再保存这两个键及 `software_version`、`model_version`、`outcome`、`is_simulated`，配置版本直接从应用配置读取；初始化旧库时删除 `outcome`、`is_simulated` 独立列，历史记录的 JSON 和哈希保持不变。图片以 `frame_id` 关联内存内容，已删除未使用的图片路径、来源批次、接收时间和 OCR 结果帧编号列表。本次仅清理字段与废弃配置，频率监听和自动启停入口另行处理。
 
-采集完成事件 CaptureSealed 由 MachineManager.handle_capture_finished 处理，登记采集结束状态、统计和错误，再进入批次结算与文字终选检查。事件类型统一由 enums.EventType 定义，发送端构造带枚举类型的 MeasurementEvent，处理端按枚举分派；枚举值保留原事件字符串，审计与序列化格式保持兼容。事件处理入口：MachineManager.listen_events 持续读取本机 FIFO 队列，将事件交给 handle_event 并反馈处理结果；MachineManager.handle_event 按 FIFO 顺序处理机器及 Session 事件并检查测量完成条件，START/CLOSE 不按事件创建时间过滤，关闭事件通过 is_close_event_for_active_session 核对当前活动或已中断周期的身份，无周期编号时允许关闭或复位，不匹配时记录审计并忽略。启停处理入口：MachineManager.handle_machine_start 接收启动处理请求，创建 Session 并启动相机采集、登记频率归属和超时任务；MachineManager.handle_machine_close 处理正常关闭或 interrupted=True 的异常中断，停止现场采集并结算频率，正常关闭后继续等待 OCR 和证据处理，结果完整后提交 SQLite，失败则记录日志并清理资源。
+采集完成事件 CaptureSealed 由 MachineManager.handle_capture_finished 处理，登记采集结束状态、统计和错误，再进入批次结算与文字终选检查。事件类型统一由 enums.EventType 定义，发送端构造带枚举类型的 MeasurementEvent，处理端按枚举分派；枚举值保留原事件字符串，异常事件与序列化格式保持兼容。事件处理入口：MachineManager.listen_events 持续读取本机 FIFO 队列，将事件交给 handle_event 并反馈处理结果；MachineManager.handle_event 按 FIFO 顺序处理机器及 Session 事件并检查测量完成条件，START/CLOSE 不按事件创建时间过滤，关闭事件通过 is_close_event_for_active_session 核对当前活动或已中断周期的身份，无周期编号时允许关闭或复位，不匹配时记录异常事件并忽略。启停处理入口：MachineManager.handle_machine_start 接收启动处理请求，创建 Session 并启动相机采集、登记频率归属和超时任务；MachineManager.handle_machine_close 处理正常关闭或 interrupted=True 的异常中断，停止现场采集并结算频率，正常关闭后继续等待 OCR 和证据处理，结果完整后提交 SQLite，失败则记录日志并清理资源。
 
 异常处理：仅将原本全英文的 SDK 报错补充为简明中文，保留接口名和错误码；已有中文及中英混合提示保持不变。设备异常仍沿原有事件流程交付本机处理器，更新测量状态并清理资源。
 
 初版故障数据流：启动时任一已配置相机、驱动或数据库初始化失败即记录日志并释放已打开资源；运行中相机采集、编码、频率监听或后台任务异常通过 App.report_failure 记录模块、机器、设备身份和原始异常堆栈，关闭信号入口并统一停止全部机器。主流程同时等待测量完成与故障通知，故障打断等待后清理 Session、队列、线程、相机 SDK 和实例锁，命令行以退出码 1 结束。已删除设备故障/恢复事件、健康恢复接口及后台自动重启配置；正常取帧超时、暂时无频率读数不退出，单轮 OCR 失败及单次入库失败仍按原规则清理本轮。修复设备后手动重启，不续办旧 Session。
 
-本地运行库的数据流：App 启动时由 RecoveryStore 获取单实例锁，创建或兼容旧版 pending_records、committed_records 和 audit_entries 表，删除旧检查点并清空历史待提交数据；运行中只向 audit_entries 写入归属冲突、迟到事件等审计信息，正常测量直接通过内存队列写入最终数据库。旧版暂存、查询、完成登记和延迟重试方法已删除，不再提供持久化补交入口；程序退出时关闭本地运行库并释放实例锁。
+本地数据库的数据流：App 启动时由 Database 获取单实例锁，创建或兼容旧版 pending_records、committed_records 和 abnormal_events 表，将旧 audit_entries 数据迁移后删除旧表，再删除旧检查点并清空历史待提交数据；运行中只向 abnormal_events 写入归属冲突、迟到事件等异常信息，机器同步和容量变化不写入该表，正常测量通过内存队列写入最终结果库。旧版暂存、查询、完成登记和延迟重试方法已删除，不再提供持久化补交入口；程序退出时由 Database 关闭本地运行库并释放实例锁。
 
 ## 1. 项目目标与边界
 
@@ -321,7 +321,7 @@ CaptureSealed 已收到
 
 `FrequencyAdapter.listen_measurements()` 是设备黑盒，负责连接、持续读取、有效性检查、新测量去重、来源确认、旧缓冲处理和资源释放，当前内部按配置生成联调读数，真实协议仍待替换。黑盒在接收时固定 active_session_id，无活动周期则不交付；有效测量按接收顺序立即通过 publish_event 入队，不创建延迟交付任务。频率值有效性和测量身份仅在黑盒边界处理，业务层不重复检查。
 
-频率事件与 START/CLOSE 在同一事件循环中按接收顺序进入同一机器 FIFO 队列。排在 CLOSE 前的 FrequencyMeasured 先追加到 measurement_frequencies；处理 CLOSE 时清空适配器活动周期、封闭列表，并取最后一条为最终频率。排在 CLOSE 后的旧轮测量进入迟到审计，不修改旧轮，也不改绑新轮。
+频率事件与 START/CLOSE 在同一事件循环中按接收顺序进入同一机器 FIFO 队列。排在 CLOSE 前的 FrequencyMeasured 先追加到 measurement_frequencies；处理 CLOSE 时清空适配器活动周期、封闭列表，并取最后一条为最终频率。排在 CLOSE 后的旧轮测量写入迟到异常事件，不修改旧轮，也不改绑新轮。
 
 每条 FrequencyMeasurement 保留测量身份、设备测量时间、接收时间和频率值。设备测量时间仅供追溯，不用于重新排序或关闭后补收。没有有效测量、读取故障或周期中断时保留已收到的明细，final_frequency_hz 为空并记录错误。
 
@@ -459,7 +459,7 @@ CommitSession(session_id, frozen_payload, payload_hash)
 
 先按 machine_id 进入对应 机器管理员，再按 session_id 找到对象。必须校验 Session 与 machine_id、来源设备相匹配。
 
-未知 Session、机器不匹配、来源不匹配、过期重试和已冻结结果的迟到更新进入隔离/审计处理，不随意重新分配。不得按字符串相似、队列顺序或“当前只有一台在测量”猜测归属。
+未知 Session、机器不匹配、来源不匹配、过期重试和已冻结结果的迟到更新进入隔离或异常事件记录，不随意重新分配。不得按字符串相似、队列顺序或“当前只有一台在测量”猜测归属。
 
 帧被选中后，先登记 frame_id 和待完成 job_id，再向 OCR 队列提交。必须保证 CaptureSealed 之后该采集窗口的图像清单已经完整，不能在任务未登记时误判待完成数量为零。
 
@@ -524,14 +524,14 @@ payload_hash
 
 ### 17.3 运行持久化
 
-Session 和正常结果待提交队列只保存在内存，不创建新的持久化待提交记录。原恢复库继续承担实例锁、设备及路由审计、旧版本启动清理；历史待提交和已提交身份表保留兼容，不参与当前测量自动补交。整轮失败和中断仅打印日志，不生成异常测量记录；未受理周期也仅打印日志并等待机器关闭复位。
+Session 和正常结果待提交队列只保存在内存，不创建新的持久化待提交记录。本地运行库继续承担实例锁、路由异常记录和旧版本启动清理；历史待提交和已提交身份表保留兼容，不参与当前测量自动补交。整轮失败和中断仅打印日志，不生成异常测量记录；未受理周期也仅打印日志并等待机器关闭复位。
 
 ### 17.4 重启
 
 启动时处理：
 
 - 后台任务启动前：在独占锁保护下移除旧版本检查点表并清理全部待提交记录，包括冲突及未受理周期记录。
-- 历史数据：保留最终结果、提交身份、审计和证据图片。
+- 历史数据：保留最终结果、提交身份、异常事件和证据图片。
 - 旧周期：不恢复 Session、OCR、超时或提交任务，不生成旧周期的中断结果。
 - 初始状态：已关闭则等待新启动；运行中或未知则等待有效关闭或明确的关闭状态同步。
 
@@ -553,7 +553,7 @@ Session 和正常结果待提交队列只保存在内存，不创建新的持久
 | 长时间无 CLOSE | 超出 max_cycle_open_ms 后标记 FAILED 并记录中断日志，不伪造正常关闭 |
 | OCR 超时/工作进程退出 | 标记本轮 FAILED 并清理，不写异常记录 |
 | 数据库写失败 | 标记 FAILED，打印日志并清理，不自动重试或补交 |
-| 旧结果在新 Session 期间返回 | 只更新旧 Session；旧记录已冻结则保留为迟到审计 |
+| 旧结果在新 Session 期间返回 | 只更新旧 Session；旧记录已冻结则保存为迟到异常事件 |
 | 队列/待处理 Session 超限 | 不再接收新的正常采集周期，记录本轮未受理并报警 |
 | 磁盘不足/证据写失败 | 不提交缺证据的正常记录，限制受影响的新周期 |
 | 程序退出 | 停止接收新周期、有限时间排空后台、未完成任务标记 FAILED 并打印日志；不伪造设备 CLOSE |
@@ -634,7 +634,7 @@ app/
     repository.py
     db_writer.py
     evidence_store.py
-    recovery_store.py
+    abnormal_event_store.py
   observability/
     logging.py
     health.py

@@ -7,7 +7,7 @@ import pytest
 
 from configuration import load_configuration
 from enums import MachineState
-from recovery import serialize_value
+from database import serialize_value
 
 
 @pytest.mark.parametrize("configured_state", [None, "CLOSED", "OPEN", "UNKNOWN"])

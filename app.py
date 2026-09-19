@@ -13,7 +13,7 @@ from frequency_adapter import FrequencyAdapter
 from machine_manager import MachineManager
 from enums import MachineState, SessionState, EventType
 from models import MeasurementEvent
-from recovery import run_blocking_operation, RecoveryStore
+from async_utils import run_blocking_operation
 from text_recognition import TextRecognizer
 from database import Database
 
@@ -26,8 +26,7 @@ class App:
         configuration.validate()
         self.configuration = configuration
         self.state_changed = asyncio.Event()
-        self.recovery = RecoveryStore(configuration.recovery_path)
-        self.database = Database(configuration, self.publish_event, self.recovery)
+        self.database = Database(configuration, self.publish_event)
         self.text_recognizer = TextRecognizer(configuration)
         self.machine_managers: dict[str, MachineManager] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
@@ -70,8 +69,7 @@ class App:
         if self.has_started:
             raise RuntimeError("请为新一次运行创建新的测量应用实例。")
         try:
-            # 初始化本地记录库、图片目录和最终结果库。
-            await run_blocking_operation(self.recovery.initialize)
+            # 初始化图片目录、本地运行库和最终结果库。
             await run_blocking_operation(
                 self.configuration.evidence_directory.mkdir, parents=True, exist_ok=True,
             )
@@ -195,7 +193,7 @@ class App:
         # 查找对应机器管理员，登记并隔离未知机器的事件。
         machine_manager = self.machine_managers.get(event.machine_id)
         if machine_manager is None:
-            await run_blocking_operation(self.recovery.audit, "UNKNOWN_MACHINE", event)
+            await run_blocking_operation(self.database.save_abnormal_event, "UNKNOWN_MACHINE", event)
             logger.warning("隔离未知机器事件 machine_id=%s", event.machine_id)
             return
 
@@ -266,12 +264,12 @@ class App:
                             )
                         )
 
-                # 标记本地恢复库可用。
-                self.recovery.available = True
+                # 标记本地运行库可用。
+                self.database.runtime_available = True
             except Exception:
-                # 标记本地恢复库不可用并记录维护异常。
-                self.recovery.available = False
-                logger.exception("本地恢复库或容量检查失败，停止程序。")
+                # 标记本地运行库不可用并记录维护异常。
+                self.database.runtime_available = False
+                logger.exception("本地运行库或容量检查失败，停止程序。")
                 raise
 
             # 等待配置的维护间隔，再开始下一轮处理。
@@ -502,7 +500,7 @@ class App:
             self.database.queue.get_nowait()
             self.database.queue.task_done()
         self.database.queued_records.clear()
-        # 最后关闭相机设备与共享 SDK，再释放恢复库。
+        # 最后关闭相机设备与共享 SDK，再释放数据库实例锁。
         try:
             if self.camera_sdk is not None:
                 await run_blocking_operation(self.camera_sdk.close)
@@ -510,7 +508,7 @@ class App:
             self.report_failure(error, "关闭相机驱动")
         finally:
             try:
-                self.recovery.close()
+                self.database.close()
             except Exception as error:
                 self.report_failure(error, "关闭本地记录库")
             self.state_changed.set()

@@ -1,4 +1,4 @@
-"""验证重启清理、进程锁、事件审计和故障退出。"""
+"""验证重启清理、进程锁、异常事件记录和故障退出。"""
 
 import asyncio
 import json
@@ -14,7 +14,7 @@ import test_measurement_flow as flow_support
 from app import App
 from enums import OCRState, EventType
 from models import MeasurementEvent
-from recovery import serialize_value
+from database import serialize_value
 
 
 class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
@@ -24,11 +24,11 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
     wait_for_state = flow_support.MeasurementFlowTests.wait_for_state
     read_records = flow_support.MeasurementFlowTests.read_records
 
-    def read_audit_reasons(self) -> list[str]:
-        """读取恢复库中的异常审计原因。"""
+    def read_abnormal_event_reasons(self) -> list[str]:
+        """读取本地运行库中的异常事件原因。"""
         connection = sqlite3.connect(self.app.configuration.recovery_path)
         with closing(connection):
-            rows = connection.execute("SELECT reason FROM audit_entries").fetchall()
+            rows = connection.execute("SELECT reason FROM abnormal_events").fetchall()
         return [row[0] for row in rows]
 
     async def restart_app(self, **overrides) -> App:
@@ -40,7 +40,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         return self.app
 
     async def test_startup_clears_old_work_before_capacity_check(self) -> None:
-        """验证启动清理旧积压和旧检查点表，同时保留历史审计。
+        """验证启动清理旧状态，并迁移历史异常事件。
 
         Args:
             无外部参数。
@@ -50,14 +50,23 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             返回示例：
                 None  # 无返回数据
         """
-        # 保存一条历史审计后停止应用实例。
+        # 停止应用后创建旧异常审计表和历史数据。
         app = await self.start_app()
-        app.recovery.audit("PREVIOUS_RUN_AUDIT", machine_id="M01")
         await app.stop()
 
-        # 直接写入旧版待提交数据，并创建旧版本检查点表。
+        # 写入旧版待提交数据、检查点和异常审计数据。
         with closing(sqlite3.connect(app.configuration.recovery_path)) as connection:
             with connection:
+                connection.execute(
+                    "CREATE TABLE audit_entries ("
+                    "audit_id INTEGER PRIMARY KEY AUTOINCREMENT, created_at REAL NOT NULL, "
+                    "machine_id TEXT, session_id TEXT, reason TEXT NOT NULL, payload_json TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO audit_entries "
+                    "(created_at, machine_id, session_id, reason, payload_json) VALUES (?, ?, ?, ?, ?)",
+                    (1, "M01", None, "PREVIOUS_RUN_EVENT", "{}"),
+                )
                 connection.executemany(
                     "INSERT INTO pending_records "
                     "(record_id, machine_id, record_type, payload_json, payload_hash, blocked) "
@@ -81,12 +90,16 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
             checkpoint_table = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'machine_checkpoints'"
             ).fetchone()
+            old_abnormal_event_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_entries'"
+            ).fetchone()
         self.assertEqual(pending_count, 0)
         self.assertIsNone(checkpoint_table)
+        self.assertIsNone(old_abnormal_event_table)
         self.assertTrue(all(not manager.sessions for manager in restarted.machine_managers.values()))
 
-        # 确认历史审计仍然保留。
-        self.assertIn("PREVIOUS_RUN_AUDIT", self.read_audit_reasons())
+        # 确认旧表中的异常事件已经迁移。
+        self.assertIn("PREVIOUS_RUN_EVENT", self.read_abnormal_event_reasons())
 
     async def test_machine_state_stays_in_memory_without_event_receipts(self) -> None:
         """验证机器状态只保留在内存，且不创建事件去重表。
@@ -123,7 +136,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         await app.publish_event(event)
         await machine_manager.queue.join()
         self.assertEqual(machine_manager.active_session_id, session_id)
-        self.assertNotIn("DUPLICATE", self.read_audit_reasons())
+        self.assertNotIn("DUPLICATE", self.read_abnormal_event_reasons())
 
     async def test_initial_unknown_state_requires_close_or_synchronization(self) -> None:
         """验证未知初始状态在有效关闭或关闭状态同步后接收新周期。
@@ -287,7 +300,7 @@ asyncio.run(crash_after_start())
         await restarted.publish_event(event)
         await restarted.machine_managers["M01"].queue.join()
         self.assertIsNotNone(restarted.machine_managers["M01"].active_session_id)
-        self.assertNotIn("DUPLICATE", self.read_audit_reasons())
+        self.assertNotIn("DUPLICATE", self.read_abnormal_event_reasons())
         self.assertEqual(len(self.read_records()), 1)
 
     async def test_stale_close_cannot_close_a_new_cycle(self) -> None:
@@ -304,7 +317,7 @@ asyncio.run(crash_after_start())
         ))
         await app.machine_managers["M01"].queue.join()
         self.assertEqual(app.machine_managers["M01"].active_session_id, new_session_id)
-        self.assertIn("CLOSE_SESSION_MISMATCH", self.read_audit_reasons())
+        self.assertIn("CLOSE_SESSION_MISMATCH", self.read_abnormal_event_reasons())
 
     async def test_frequency_identity_conflict_requires_review(self) -> None:
         app = await self.start_app()
@@ -324,7 +337,7 @@ asyncio.run(crash_after_start())
         record = self.read_records()[0]
         self.assertEqual(record["outcome"], "REVIEW_REQUIRED")
         self.assertIn("AMBIGUOUS_MEASUREMENT", record["error_codes"])
-        self.assertIn("MEASUREMENT_ID_CONFLICT", self.read_audit_reasons())
+        self.assertIn("MEASUREMENT_ID_CONFLICT", self.read_abnormal_event_reasons())
 
     async def test_device_fault_stops_all_machines(self) -> None:
         """验证单台设备故障停止全部机器并释放资源。
@@ -372,7 +385,7 @@ asyncio.run(crash_after_start())
         await app.handle_start("M01")
         self.assertIsNotNone(machine_manager.active_session_id)
 
-    async def test_second_process_instance_cannot_share_recovery_store(self) -> None:
+    async def test_second_process_instance_cannot_share_runtime_database(self) -> None:
         app = await self.start_app()
         second_app = App(app.configuration)
         with self.assertLogs(level="ERROR"):
