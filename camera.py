@@ -252,20 +252,17 @@ class SessionCamera:
         Returns:
             None  # 整轮结果已交付，采集引用已移除
         """
+        # 在线程中执行采集，取消时等待实际采集结束。
         try:
-            # 在线程中执行采集，取消时等待实际采集结束。
-            try:
-                result = await run_blocking_operation(capture_task.run_capture)
-            finally:
-                # 采集结束后归还相机占用，唤醒等待停流的 CLOSE 处理。
-                capture_task.camera.capture_lock.release()
-                capture_task.capture_finished.set()
-                self.current_capture = None
-            # 根据采集错误发布一次整轮结果事件。
-            event_type = EventType.CAPTURE_FAILED if result.errors else EventType.CAPTURE_COMPLETED
-            await self.publish_event(MeasurementEvent(event_type, self.machine.machine_id, session_id, result))
+            result = await run_blocking_operation(capture_task.run_capture)
         finally:
+            # 采集结束后归还相机占用，唤醒等待停流的 CLOSE 处理。
+            capture_task.camera.capture_lock.release()
+            capture_task.capture_finished.set()
             self.current_capture = None
+        # 根据采集错误发布一次整轮结果事件。
+        event_type = EventType.CAPTURE_FAILED if result.errors else EventType.CAPTURE_COMPLETED
+        await self.publish_event(MeasurementEvent(event_type, self.machine.machine_id, session_id, result))
 
     async def stop(self) -> None:
         """停止当前采集并等待结果交付结束。
