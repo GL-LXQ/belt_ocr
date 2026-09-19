@@ -40,7 +40,6 @@ class MeasurementConfiguration:
     maintenance_interval_ms: int = 250
     max_persistent_records: int = 1000
     minimum_free_disk_bytes: int = 104857600
-    event_max_age_ms: int = 30000
     initial_machine_state: MachineState = MachineState.CLOSED
     mvs_dll_directory: Path | None = None
 
@@ -74,7 +73,6 @@ class MeasurementConfiguration:
             "shutdown_timeout_ms",
             "maintenance_interval_ms",
             "max_persistent_records",
-            "event_max_age_ms",
         )
         for parameter in positive_parameters:
             if getattr(self, parameter) <= 0:

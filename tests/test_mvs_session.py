@@ -43,7 +43,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
                 frame: 本轮原始帧。
 
             Returns:
-                (".bmp", image_data)  # BMP 扩展名及图片字节
+                b"BM..."  # 完整 BMP 文件字节，示例省略图片内容
             """
             nonlocal encoded_count
             assert not manager.camera.is_capturing
@@ -146,7 +146,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
                 frame: 原始帧。
 
             Returns:
-                (".bmp", image_data)  # 图片编码结果
+                b"BM..."  # 完整 BMP 文件字节，示例省略图片内容
             """
             started.set()
             assert release.wait(5)

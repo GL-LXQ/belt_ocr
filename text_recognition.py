@@ -37,7 +37,7 @@ class TextRecognizer:
         capture_id: str,
         camera_id: str,
         frames: tuple[CameraFrame, ...],
-        encode_image: Callable[[CameraFrame], tuple[str, bytes]],
+        encode_image: Callable[[CameraFrame], bytes],
     ) -> OCRResult:
         """将整轮原始帧顺序处理为最终文字和对应内存图片。
 
@@ -71,7 +71,7 @@ class TextRecognizer:
         captured_frames = []
         for frame in frames:
             try:
-                image_extension, image_data = encode_image(frame)
+                image_data = encode_image(frame)
             except Exception as error:
                 # 记录编码设备异常及所属周期，再终止本轮识别。
                 logger.exception(

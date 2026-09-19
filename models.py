@@ -90,16 +90,3 @@ class BeltSession:
     frozen_payload: str | None = None
     payload_hash: str | None = None
     errors: list[str] = field(default_factory=list)
-
-    @property
-    def finished(self) -> bool:
-        """判断本轮结果是否已确认入库。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            True  # 本轮结果已确认入库
-            False  # 本轮尚未入库或已失败
-        """
-        return self.state == SessionState.COMMITTED

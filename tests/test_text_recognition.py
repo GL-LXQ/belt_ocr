@@ -26,7 +26,7 @@ def recognition_inputs():
     )
     return (
         frames,
-        Mock(return_value=(".bmp", b"BM-image")),
+        Mock(return_value=b"BM-image"),
     )
 
 
@@ -65,7 +65,7 @@ def test_processing_order_and_image_identity(recognition_inputs):
         Returns:
             [{"blocks": []}, {"blocks": []}]  # 两张图片的测试模型结果
         """
-        assert len(images) == 2
+        assert images == [b"BM-image", b"BM-image"]
         calls.append("recognize")
         return [{"blocks": []}, {"blocks": []}]
 

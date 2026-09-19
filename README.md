@@ -168,3 +168,7 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 本次频率字段精简：删除监听中的 source_epoch、source_sequence 以及 FrequencyMeasurement 中的 measurement_id、source_sequence 字段。START 建立周期后，频率适配器过滤无效读数，并携带周期编号、设备来源、频率值和时间信息交给机器事件队列；周期按接收顺序保存明细，CLOSE 时取最后一条有效读数作为最终频率，OCR 成功后由存储队列先保存图片再写入数据库。新写入的频率明细不再包含测量编号和来源序号，已有记录不改写。
 
 本次全量 pytest：100 通过、11 个既有失败，失败名单与修改前一致；频率测试继续验证接收顺序、最后有效读数、周期隔离，并确认入库明细不再包含已删除字段。
+
+本次无用字段清理：删除未参与事件处理的 event_max_age_ms 配置、只赋值不读取的 Database.available 和仅测试使用的 BeltSession.finished 属性；图片编码接口改为直接返回 BMP 字节，OCR 不再接收未使用的扩展名。START 建立周期并采集图片和频率，采集帧编码为 BMP 后依次筛选、识别和终选；CLOSE 确定最后有效频率，结果完整后先保存 BMP 图片再写入数据库，提交状态统一读取 SessionState。
+
+本次全量 pytest：100 通过、11 个既有失败，失败名单不变；编码测试已同步仅返回 BMP 字节的接口，并核对识别阶段实际收到的图片字节。

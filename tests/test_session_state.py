@@ -69,7 +69,6 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
         assert session.state == SessionState.COMMITTED
-        assert session.finished
         assert manager.current_session is None
 
     asyncio.run(process_measurement())

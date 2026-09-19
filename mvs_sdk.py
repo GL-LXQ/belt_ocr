@@ -134,17 +134,14 @@ class MvsCamera:
         # Buffer 归还完成后，交付程序独立持有的图像。
         return frame
 
-    def encode_image(self, frame: CameraFrame) -> tuple[str, bytes]:
+    def encode_image(self, frame: CameraFrame) -> bytes:
         """通过 MVS SDK 将独立原始帧编码成 BMP 图片。
 
         Args:
             frame: 已复制到程序内存的图像及像素格式信息。
 
         Returns:
-            (
-                ".bmp",  # 证据图片扩展名
-                b"BM...",  # 完整 BMP 文件字节，示例省略图片内容
-            )
+            b"BM..."  # 完整 BMP 文件字节，示例省略图片内容
         """
         # 为当前帧建立输入缓存和 BMP 输出缓存。
         source_buffer = (ctypes.c_ubyte * len(frame.data)).from_buffer_copy(frame.data)
@@ -172,11 +169,8 @@ class MvsCamera:
             raise MvsError(f"图像编码为 BMP 失败（SaveImageEx3(BMP)），错误码：0x{return_code:08X}")
         if parameters.nImageLen == 0:
             raise MvsError("SaveImageEx3(BMP) 未返回图片内容")
-        # 复制编码后的文件内容，并返回扩展名与图片字节。
-        return (
-            ".bmp",
-            ctypes.string_at(output_buffer, parameters.nImageLen),
-        )
+        # 复制编码后的 BMP 文件字节并返回。
+        return ctypes.string_at(output_buffer, parameters.nImageLen)
 
     def stop_grabbing(self) -> None:
         """停止相机取流并更新取流状态。

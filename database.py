@@ -91,7 +91,6 @@ class Database:
         self.configuration = configuration
         self.publish_event = publish_event
         self.queue: asyncio.Queue[DatabaseRequest] = asyncio.Queue(configuration.storage_queue_capacity)
-        self.available = True
         self.runtime_available = True
         self.queued_records: set[str] = set()
         self.initialized = False
@@ -388,10 +387,8 @@ class Database:
                     if not self.initialized:
                         await run_blocking_operation(self.initialize)
                     await run_blocking_operation(self.persist_measurement, request)
-                    self.available = True
                 except Exception as error:
                     # 判断是否为内容冲突，打印错误并准备失败回调。
-                    self.available = False
                     event_type = EventType.COMMIT_FAILED
                     payload = {
                         "error_code": (
