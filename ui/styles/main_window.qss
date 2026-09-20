@@ -1,0 +1,44 @@
+/* 设置全局字体和主窗口分区背景。 */
+QWidget { font-family: "Microsoft YaHei UI", "Segoe UI"; font-size: 13px; color: @text; }
+QWidget#appRoot, QWidget#pageContainer { background: @background; }
+QWidget#titleBar { background: @title; border: none; }
+QWidget#sideBar { background: @sidebar; border: none; }
+QLabel { background: transparent; border: none; }
+/* 设置标题栏的品牌、时钟和状态文字。 */
+QLabel#brand { color: @light; font-size: 15px; font-weight: 600; }
+QLabel#titleCaption { color: @caption; }
+QLabel#clock { color: @clock; }
+QLabel#systemStatus { color: @status; }
+QFrame#titleDivider { background: @divider; border: none; }
+/* 设置窗口控制按钮及悬停颜色。 */
+QPushButton#windowButton, QPushButton#closeButton, QPushButton#settingsButton {
+    background: transparent; border: none; border-radius: 0;
+}
+QPushButton#windowButton:hover, QPushButton#settingsButton:hover {
+    background: rgba(255,255,255,0.08);
+}
+QPushButton#closeButton:hover { background: @close; }
+/* 设置导航按钮的默认、悬停和选中状态。 */
+QPushButton[navigation="true"] {
+    background: transparent; color: @navigation; border: none;
+    border-radius: 6px; text-align: left; padding: 0 14px; font-size: 14px;
+}
+QPushButton[navigation="true"]:hover { background: @hover; }
+QPushButton[navigation="true"]:checked { background: @blue; color: @white; }
+QPushButton[navigation="true"] QLabel#navigationText { color: @navigation; font-size: 14px; }
+QPushButton[navigation="true"]:checked QLabel#navigationText { color: @white; }
+QPushButton:focus { border: 1px solid @secondary; }
+/* 设置侧栏底部信息和状态圆点。 */
+QLabel#serviceStatus { color: @navigation; font-size: 12px; }
+QLabel#version { color: @version; font-size: 11px; }
+QLabel[statusDot="true"] { border-radius: 4px; background: @normal; }
+QLabel[statusDot="true"][status="warning"] { background: @warning; }
+QLabel[statusDot="true"][status="error"] { background: @error; }
+QLabel[statusDot="true"][status="disconnected"] { background: @version; }
+/* 设置页面头部、空白内容卡片和操作提示。 */
+QStackedWidget#pageStack { border: none; background: transparent; }
+QWidget#pageHeader { background: transparent; }
+QLabel#pageTitle { color: @text; font-size: 24px; font-weight: bold; }
+QLabel#pageSubtitle { color: @muted; font-size: 13px; }
+QFrame#pageContent { background: @white; border: 1px solid @border; border-radius: 10px; }
+QToolTip { background: @white; color: @text; border: 1px solid @border; padding: 4px; }
