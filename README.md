@@ -76,7 +76,7 @@ uv run python -X utf8 -m pytest -q
 
 OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 frame_id 唯一的选中图片）和 `line_frame_ids`（与文字逐项对应的来源帧编号集合）。没有选中的中间图片不进入 Session，最终图片在提交时转交存储请求。
 
-数据库仅保存周期编号、机器编号、起止时间、`ordered_lines`、`evidence_refs`、最终频率和频率明细，不保存整包 JSON、内容哈希及文字与图片对应关系。同一周期重复提交时直接比较这些业务字段，相同则成功，不同则报错。OCR 内存结果仍保留来源帧关系，不写入数据库。图片保存失败不写数据库；确认没有提交时只清理本次新建图片，已存在的图片不覆盖或删除；提交结果未知时保留图片并记录日志。文件与 SQLite 不构成跨资源原子事务，本次未增加崩溃恢复或孤立图片清理。
+测量表仅保存周期编号、机器编号、起止时间、`ordered_lines`、`evidence_refs`、最终频率和频率明细，不保存整包 JSON、内容哈希及文字与图片对应关系。同一周期重复提交时直接比较这些业务字段，相同则成功，不同则报错。OCR 内存结果仍保留来源帧关系，不写入数据库。图片保存失败不写数据库；确认没有提交时只清理本次新建图片，已存在的图片不覆盖或删除；提交结果未知时保留图片并记录日志。文件与 SQLite 不构成跨资源原子事务，本次未增加崩溃恢复或孤立图片清理。
 
 #### 1.2.5 模块职责
 
@@ -89,7 +89,8 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 | `src/mvs_sdk.py` | SDK 加载、相机打开、取帧、内存 BMP 编码和关闭 |
 | `src/text_recognition.py` | 共享处理锁、OCR 主流程、筛帧与终选黑盒 |
 | `src/frequency_adapter.py` | 联调频率监听与当前周期归属 |
-| `src/database.py` | 双库、实例锁、审计、图片保存与幂等测量提交 |
+| `src/database.py` | 双库初始化、实例锁、事件整理、图片保存与存储队列调度 |
+| `src/repo/` | 按表封装建表 SQL、异常事件插入及测量记录幂等写入和查询 |
 | `src/models.py` / `src/enums.py` | 事件、帧、结果和周期状态 |
 | `src/configuration.py` / `src/async_utils.py` | 配置解析、取消期间等待阻塞操作结束 |
 
@@ -209,6 +210,22 @@ UI 专项 pytest：5 项通过；全量 pytest：114 项通过、10 项失败，
 #### GUI：移除画面固定时间
 
 设备卡片继续读取固定图片并展示画面标识，移除三张图片上写死的时间；设备状态、频率、步骤和事件仍由演示数据填入，顶部系统时钟及事件、日志时间保持原有更新与展示逻辑。
+
+#### 后端：设备基础表
+
+`Database.initialize()` 在初始化双库时，通过 `initialize_result_database()` 在业务库中幂等创建 `machine` 表，与 `measurements` 共用数据库；设备表包含自增主键 `id`、唯一机器编号 `machine_id`、名称 `machine_name`、相机序列号 `camera_serial`、频率仪序列号 `frequency_meter_serial`、启用状态 `enabled`、创建时间 `created_at`、修改时间 `updated_at` 和可空备注 `remark`。启用状态默认 1，两个时间字段默认写入 UTC 时间（YYYY-MM-DD HH:MM:SS）；后续修改接口需显式更新 `updated_at`，当前未创建自动更新时间触发器。本次只创建表结构，不插入设备数据；后端仍从原配置读取设备，实时监测页仍使用固定展示数据，采集、识别、图片保存和测量提交的数据流不变。
+
+设备表与测量存储专项 pytest：18 项通过，覆盖首次建表、重复初始化保留记录、默认值、字段约束及原有测量存储行为。
+
+#### 后端：按表拆分 Repository
+
+设备表改名为 `machine`，由 `src/repo/machine_repository.py` 中的 `MachineRepository` 管理；测量表和异常事件表分别由 `measurement_repository.py` 中的 `MeasurementRepository`、`abnormal_event_repository.py` 中的 `AbnormalEventRepository` 管理。`Database.initialize()` 调用各 Repository 建表；测量结果进入共享队列后，由 Database 先保存图片，再调用测量 Repository 在事务中完成幂等写入，失败时通过 Repository 查询提交状态后决定是否清理图片；异常事件由 Database 整理为 JSON 后交给异常事件 Repository 插入。本次迁移已有表操作，未额外增加尚未使用的更新、删除或查询接口，设备表暂时只有建表逻辑。未发现本地旧数据库，本次不增加旧 `machines` 表迁移。
+
+全量 pytest：116 项通过、10 项既有失败，与修改前的通过数量及失败名单一致。
+
+#### 后端：统一 Repository 命名
+
+数据访问目录统一为 `src/repo/`，按表使用 `MachineRepository`、`MeasurementRepository` 和 `AbnormalEventRepository`；Database 调用 Repository 初始化表结构、插入异常事件及幂等保存测量结果，仍按先保存图片、再提交测量记录、失败时查询提交结果的顺序处理，业务行为不变。
 
 #### 后端：取流顺序修正
 

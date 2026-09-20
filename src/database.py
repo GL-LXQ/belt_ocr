@@ -1,4 +1,4 @@
-"""管理本地数据库、实例锁、异常事件和测量结果写入。"""
+"""管理本地数据库、设备表、实例锁、异常事件和测量结果写入。"""
 
 from enums import EventType
 import asyncio
@@ -15,6 +15,9 @@ from pathlib import Path
 from async_utils import run_blocking_operation
 from configuration import MeasurementConfiguration
 from models import CapturedFrame, MeasurementEvent, PublishEvent
+from repo.machine_repository import MachineRepository
+from repo.measurement_repository import MeasurementRepository
+from repo.abnormal_event_repository import AbnormalEventRepository
 
 
 logger = logging.getLogger(__name__)
@@ -92,8 +95,25 @@ class DatabaseRequest:
 
 class Database:
     def __init__(self, configuration: MeasurementConfiguration, publish_event: PublishEvent) -> None:
+        """初始化各表访问对象、存储队列和连接状态。
+
+        Args:
+            configuration: 数据库路径和存储队列配置。
+            publish_event: 提交结果的异步事件发布函数。
+
+        Returns:
+            返回示例：
+                None  # 数据库管理对象已初始化，尚未打开数据库
+        """
+        # 保存存储配置和结果事件发布入口。
         self.configuration = configuration
         self.publish_event = publish_event
+        # 创建各表的数据库访问对象。
+        self.machine_repository = MachineRepository()
+        self.measurement_repository = MeasurementRepository(configuration.database_path)
+        self.abnormal_event_repository = AbnormalEventRepository(configuration.recovery_path)
+
+        # 创建存储队列并初始化连接与实例锁状态。
         self.queue: asyncio.Queue[DatabaseRequest] = asyncio.Queue(configuration.storage_queue_capacity)
         self.runtime_available = True
         self.queued_records: set[str] = set()
@@ -159,46 +179,30 @@ class Database:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
             with connection:
-                connection.executescript("""
-                    CREATE TABLE IF NOT EXISTS abnormal_events (
-                        abnormal_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        created_at REAL NOT NULL,
-                        machine_id TEXT,
-                        session_id TEXT,
-                        reason TEXT NOT NULL,
-                        payload_json TEXT NOT NULL
-                    );
-                """)
+                self.abnormal_event_repository.create_table(connection)
 
         # 保持本次运行的运行库连接。
         self.anchor_connection = sqlite3.connect(runtime_database_path, check_same_thread=False)
 
     def initialize_result_database(self) -> None:
-        """创建测量结果表。
+        """创建业务数据库中的设备表和测量结果表。
 
         Args:
             无外部参数。
 
         Returns:
-            None: 结果库已就绪。
+            None: 设备表和测量结果表已就绪。
             返回示例：
                 None  # 无返回数据
         """
-        # 创建存储目录和测量表。
+        # 创建业务数据库目录并打开连接。
         self.configuration.database_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.configuration.database_path)) as connection, connection:
-            connection.executescript("""
-                CREATE TABLE IF NOT EXISTS measurements (
-                    session_id TEXT PRIMARY KEY,
-                    machine_id TEXT NOT NULL,
-                    start_time TEXT NOT NULL,
-                    finish_time TEXT NOT NULL,
-                    ordered_lines TEXT NOT NULL,
-                    final_frequency_hz REAL,
-                    measurement_frequencies TEXT NOT NULL DEFAULT '[]',
-                    evidence_refs TEXT NOT NULL
-                );
-            """)
+            # 创建机器身份、设备绑定和维护信息表。
+            self.machine_repository.create_table(connection)
+
+            # 创建测量结果表。
+            self.measurement_repository.create_table(connection)
 
     def close(self) -> None:
         """关闭运行库连接并释放进程锁。
@@ -244,26 +248,19 @@ class Database:
         """
         # 序列化事件，并写入异常事件记录表。
         payload = serialize_value(event) if event is not None else {}
-        with closing(sqlite3.connect(self.configuration.recovery_path, timeout=1)) as connection:
-            with connection:
-                connection.execute(
-                    "INSERT INTO abnormal_events "
-                    "(created_at, machine_id, session_id, reason, payload_json) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (
-                        time.time(),
-                        getattr(event, "machine_id", machine_id),
-                        getattr(event, "session_id", None),
-                        reason,
-                        json.dumps(payload, ensure_ascii=False),
-                    ),
-                )
+        self.abnormal_event_repository.insert(
+            time.time(),
+            getattr(event, "machine_id", machine_id),
+            getattr(event, "session_id", None),
+            reason,
+            json.dumps(payload, ensure_ascii=False),
+        )
 
     async def submit(self, request: DatabaseRequest) -> bool:
         """将正常结果加入存储队列，不保存待补交记录。
 
         Args:
-            request: 本轮机器身份、冻结 JSON 和内容哈希。
+            request: 本轮机器身份、业务字段和选中图片。
 
         Returns:
             True  # 请求已在队列中或本次入队成功，等待数据库回调
@@ -282,48 +279,6 @@ class Database:
         # 登记本轮排队身份。
         self.queued_records.add(request.session_id)
         return True
-
-    def write_record(self, request: DatabaseRequest) -> None:
-        """在事务中幂等写入冻结记录及频率明细和最终值。
-
-        Args:
-            request: 包含记录身份、业务字段和选中图片的提交请求。
-
-        Returns:
-            None  # 记录已写入或已存在相同内容，冲突时抛出异常
-        """
-        # 将列表字段编码为对应列的 JSON，整理本轮业务内容。
-        record_values = (
-            request.machine_id,
-            request.start_time,
-            request.finish_time,
-            json.dumps(request.ordered_lines, ensure_ascii=False),
-            request.final_frequency_hz,
-            json.dumps(request.evidence_refs, ensure_ascii=False),
-            json.dumps(request.measurement_frequencies, ensure_ascii=False, sort_keys=True),
-        )
-        connection = sqlite3.connect(self.configuration.database_path, timeout=1)
-        with closing(connection), connection:
-            # 比较同一周期已保存的业务字段，拒绝内容冲突。
-            connection.execute("BEGIN IMMEDIATE")
-            existing_record = connection.execute(
-                "SELECT machine_id, start_time, finish_time, ordered_lines, "
-                "final_frequency_hz, evidence_refs, measurement_frequencies "
-                "FROM measurements WHERE session_id = ?",
-                (request.session_id,),
-            ).fetchone()
-            if existing_record is not None:
-                if existing_record != record_values:
-                    raise ValueError("同一 Session 的提交内容不一致。")
-                return
-
-            # 将本轮业务字段写入测量表。
-            connection.execute(
-                "INSERT INTO measurements (session_id, machine_id, start_time, "
-                "finish_time, ordered_lines, final_frequency_hz, evidence_refs, "
-                "measurement_frequencies) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (request.session_id, *record_values),
-            )
 
     def persist_measurement(self, request: DatabaseRequest) -> None:
         """保存最终图片后写入测量记录，明确未提交时清理本次新建图片。
@@ -345,18 +300,13 @@ class Database:
                     save_evidence_image(frame.image_data, image_path)
             # 全部图片写入成功后才执行数据库事务。
             database_attempted = True
-            self.write_record(request)
+            self.measurement_repository.write_record(request)
         except Exception:
             # 查询提交结果，无法确认时保留图片并记录异常。
             definitely_uncommitted = not database_attempted
             if database_attempted:
                 try:
-                    with closing(sqlite3.connect(self.configuration.database_path, timeout=1)) as connection:
-                        record = connection.execute(
-                            "SELECT 1 FROM measurements WHERE session_id = ?",
-                            (request.session_id,),
-                        ).fetchone()
-                    definitely_uncommitted = record is None
+                    definitely_uncommitted = not self.measurement_repository.exists_by_session_id(request.session_id)
                 except Exception:
                     logger.exception("无法确认提交结果，保留图片 session_id=%s", request.session_id)
             # 仅清理本次创建且确认没有入库的图片。
