@@ -294,3 +294,7 @@ START 创建周期后，相机先启动取流，再清空 SDK 缓存，随后在
 3. 尚未进行真机验证：MVS 采集、BMP 编码缓冲容量、GigE 稳定性及全部帧驻留内存的现场占用需验证。
 4. 更新剩余历史测试中的旧频率字段、旧异常入库规则和初始机器状态期望；不为迎合旧测试恢复已删除业务。
 5. 设备故障不自动重启或重连，修复后手动重启程序。
+
+### 设备信息插入
+
+调用 `MachineRepo(database_path).insert(machine_id, machine_name, camera_serial, frequency_meter_serial, enabled=True, remark=None)` 将单台机器信息写入业务库的 `machine` 表；方法打开连接、执行参数化 INSERT、提交事务并关闭连接，返回新增记录的自增主键。创建时间和修改时间由表默认值生成 UTC 时间，机器编号重复时由唯一约束抛出异常，不覆盖已有记录；Database 初始化时提供业务库路径并负责建表，界面和采集配置的数据来源暂不变。

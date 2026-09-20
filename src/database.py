@@ -109,7 +109,7 @@ class Database:
         self.configuration = configuration
         self.publish_event = publish_event
         # 创建各表的数据库访问对象。
-        self.machine_repo = MachineRepo()
+        self.machine_repo = MachineRepo(configuration.database_path)
         self.measurement_repo = MeasurementRepo(configuration.database_path)
         self.abnormal_event_repo = AbnormalEventRepo(configuration.recovery_path)
 
