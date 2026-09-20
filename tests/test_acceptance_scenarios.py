@@ -379,6 +379,8 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+# 添加子进程使用的后端模块目录。
+sys.path.insert(0, "src")
 from configuration import load_configuration
 from enums import OCRState
 from app import App

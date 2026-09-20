@@ -41,10 +41,10 @@ BeltVision 主窗口默认 1600 × 900、最小 1280 × 720，支持标题栏拖
 
 一台工控机管理三台皮带机，每台机器绑定海康 MVS 相机、启停输入和频率来源。一次 START → CLOSE 对应一个 BeltSession。仅将 OCR、频率和图片保存均成功的正常测量写入结果库；失败和中断打印日志，不写异常测量记录。运行库保存异常事件审计并提供进程级实例锁。
 
-后端使用 Python 3.10 及以上，运行时使用标准库和 MVS 官方绑定，pytest 用于测试。保持扁平模块结构，采用单进程、每机一个当前周期和串行事件处理、每轮一个相机采集线程、共享串行 OCR 和共享存储队列。
+后端使用 Python 3.10 及以上，运行时使用标准库和 MVS 官方绑定，pytest 用于测试。后端 Python 文件集中在 `src/`，保持扁平模块结构，采用单进程、每机一个当前周期和串行事件处理、每轮一个相机采集线程、共享串行 OCR 和共享存储队列。
 
 ```powershell
-uv run python -X utf8 main.py --config config.example.json
+uv run python -X utf8 src/main.py --config config.example.json
 uv run python -X utf8 -m pytest -q
 ```
 
@@ -52,7 +52,7 @@ uv run python -X utf8 -m pytest -q
 
 #### 1.2.2 数据流动逻辑
 
-每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`camera.py` 的 `SessionCamera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器管理器在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，设备故障停止整个应用。
+入口 `src/main.py` 从项目根目录读取默认配置，由 `src/app.py` 初始化相机、频率接收、共享 OCR 和存储任务；采集帧与频率读数按周期汇入机器管理器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera.py` 的 `SessionCamera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器管理器在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，设备故障停止整个应用。
 
 #### 1.2.3 处理阶段与职责
 
@@ -82,16 +82,16 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 
 | 文件 | 职责 |
 |---|---|
-| `main.py` | 演示启停、故障等待和退出码 |
-| `app.py` | 初始化、信号路由、容量维护、全局故障与资源释放 |
-| `machine_manager.py` | 每机周期状态、启停、频率、整轮 OCR 调度及提交条件 |
-| `camera.py` | 创建采集任务、启动单线程收集整轮帧、停止采集并一次性交付结果 |
-| `mvs_sdk.py` | SDK 加载、相机打开、取帧、内存 BMP 编码和关闭 |
-| `text_recognition.py` | 共享处理锁、OCR 主流程、筛帧与终选黑盒 |
-| `frequency_adapter.py` | 联调频率监听与当前周期归属 |
-| `database.py` | 双库、实例锁、审计、图片保存与幂等测量提交 |
-| `models.py` / `enums.py` | 事件、帧、结果和周期状态 |
-| `configuration.py` / `async_utils.py` | 配置解析、取消期间等待阻塞操作结束 |
+| `src/main.py` | 演示启停、故障等待和退出码 |
+| `src/app.py` | 初始化、信号路由、容量维护、全局故障与资源释放 |
+| `src/machine_manager.py` | 每机周期状态、启停、频率、整轮 OCR 调度及提交条件 |
+| `src/camera.py` | 创建采集任务、启动单线程收集整轮帧、停止采集并一次性交付结果 |
+| `src/mvs_sdk.py` | SDK 加载、相机打开、取帧、内存 BMP 编码和关闭 |
+| `src/text_recognition.py` | 共享处理锁、OCR 主流程、筛帧与终选黑盒 |
+| `src/frequency_adapter.py` | 联调频率监听与当前周期归属 |
+| `src/database.py` | 双库、实例锁、审计、图片保存与幂等测量提交 |
+| `src/models.py` / `src/enums.py` | 事件、帧、结果和周期状态 |
+| `src/configuration.py` / `src/async_utils.py` | 配置解析、取消期间等待阻塞操作结束 |
 
 #### 1.2.6 关键配置
 

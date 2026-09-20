@@ -103,7 +103,7 @@ def main() -> None:
     )
     argument_parser = argparse.ArgumentParser(description="MVS 相机测量信号演示，频率设备接口待接入")
     argument_parser.add_argument(
-        "--config", type=Path, default=Path(__file__).with_name("config.example.json"),
+        "--config", type=Path, default=Path(__file__).resolve().parents[1] / "config.example.json",
     )
     arguments = argument_parser.parse_args()
     try:
