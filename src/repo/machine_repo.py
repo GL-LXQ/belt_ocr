@@ -51,13 +51,20 @@ class MachineRepo:
             )
             return cursor.lastrowid
 
-    def find_duplicate_field(self, machine_name: str, camera_serial: str, frequency_meter_serial: str) -> str | None:
+    def find_duplicate_field(
+        self,
+        machine_name: str,
+        camera_serial: str,
+        frequency_meter_serial: str,
+        exclude_id: int | None = None,
+    ) -> str | None:
         """查询机器名称、相机和频率仪序列号，返回首个重复字段。
 
         Args:
-            machine_name: 待新增的机器名称。
+            machine_name: 待保存的机器名称。
             camera_serial: 待绑定的相机序列号。
             frequency_meter_serial: 待绑定的频率仪序列号。
+            exclude_id: 编辑时排除的设备编号，新增时为 None。
 
         Returns:
             返回示例：
@@ -66,14 +73,18 @@ class MachineRepo:
                 "frequency_meter_serial"  # 频率仪序列号重复
                 None  # 三个字段均未重复
         """
-        # 一次查询三个字段是否已有对应记录。
+        # 一次查询三个字段在未删除记录中是否已有对应记录，并排除正在编辑的设备。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
             duplicates = connection.execute(
                 "SELECT "
-                "EXISTS(SELECT 1 FROM machine WHERE machine_name = ?), "
-                "EXISTS(SELECT 1 FROM machine WHERE camera_serial = ?), "
-                "EXISTS(SELECT 1 FROM machine WHERE frequency_meter_serial = ?)",
-                (machine_name, camera_serial, frequency_meter_serial),
+                "EXISTS(SELECT 1 FROM machine WHERE machine_name = ? AND is_deleted = 0 AND id IS NOT ?), "
+                "EXISTS(SELECT 1 FROM machine WHERE camera_serial = ? AND is_deleted = 0 AND id IS NOT ?), "
+                "EXISTS(SELECT 1 FROM machine WHERE frequency_meter_serial = ? AND is_deleted = 0 AND id IS NOT ?)",
+                (
+                    machine_name, exclude_id,
+                    camera_serial, exclude_id,
+                    frequency_meter_serial, exclude_id,
+                ),
             ).fetchone()
 
         # 按表单字段顺序返回首个重复项。
@@ -84,7 +95,7 @@ class MachineRepo:
         return None
 
     def list_all(self) -> list[dict]:
-        """按编号读取全部设备信息。
+        """按编号读取全部未删除设备信息。
 
         Args:
             无。
@@ -102,12 +113,13 @@ class MachineRepo:
                     "remark": "",  # 备注，无备注时为空字符串
                 }]
         """
-        # 查询设备字段并关闭读取连接。
+        # 查询未删除设备字段并关闭读取连接。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 "SELECT id, machine_name, camera_serial, frequency_meter_serial, "
-                "enabled, created_at, updated_at, remark FROM machine ORDER BY id"
+                "enabled, created_at, updated_at, remark FROM machine "
+                "WHERE is_deleted = 0 ORDER BY id"
             ).fetchall()
 
         # 将数据库字段转换为页面使用的数据格式。
@@ -119,9 +131,59 @@ class MachineRepo:
             devices.append(device)
         return devices
 
+    def update(
+        self,
+        device_id: int,
+        machine_name: str,
+        camera_serial: str,
+        frequency_meter_serial: str,
+        enabled: bool,
+        remark: str | None,
+    ) -> int:
+        """按编号更新设备信息并返回受影响行数。
+
+        Args:
+            device_id: 要修改的设备编号。
+            machine_name: 修改后的机器名称。
+            camera_serial: 修改后的相机序列号。
+            frequency_meter_serial: 修改后的频率仪序列号。
+            enabled: 修改后的启用状态。
+            remark: 修改后的备注，无备注时为 None。
+
+        Returns:
+            返回示例：
+                1  # 受影响行数，0 表示没有对应记录
+        """
+        # 更新设备字段并显式刷新修改时间。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection, connection:
+            cursor = connection.execute(
+                "UPDATE machine SET machine_name = ?, camera_serial = ?, frequency_meter_serial = ?, "
+                "enabled = ?, remark = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (machine_name, camera_serial, frequency_meter_serial, enabled, remark, device_id),
+            )
+            return cursor.rowcount
+
+    def soft_delete(self, device_id: int) -> int:
+        """按编号标记删除设备并返回受影响行数。
+
+        Args:
+            device_id: 要删除的设备编号。
+
+        Returns:
+            返回示例：
+                1  # 受影响行数，0 表示没有对应记录
+        """
+        # 置删除标记并显式刷新修改时间，保留原记录。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection, connection:
+            cursor = connection.execute(
+                "UPDATE machine SET is_deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (device_id,),
+            )
+            return cursor.rowcount
+
     @staticmethod
     def create_table(connection: sqlite3.Connection) -> None:
-        """创建设备表并保留已有数据。
+        """创建设备表和只约束未删除记录的唯一索引，保留已有记录。
 
         Args:
             connection: 初始化流程提供的数据库连接。
@@ -134,12 +196,26 @@ class MachineRepo:
         connection.execute("""
             CREATE TABLE IF NOT EXISTS machine (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, -- 数据库内部自增主键
-                machine_name TEXT NOT NULL UNIQUE, -- 机器显示名称
-                camera_serial TEXT NOT NULL UNIQUE, -- 绑定的相机序列号
-                frequency_meter_serial TEXT NOT NULL UNIQUE, -- 绑定的频率仪序列号
+                machine_name TEXT NOT NULL, -- 机器显示名称
+                camera_serial TEXT NOT NULL, -- 绑定的相机序列号
+                frequency_meter_serial TEXT NOT NULL, -- 绑定的频率仪序列号
                 enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)), -- 是否启用，1启用、0停用
+                is_deleted INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)), -- 是否已删除，1已删除、0正常
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, -- 创建时间，UTC，格式为YYYY-MM-DD HH:MM:SS
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, -- 修改时间，UTC，保存修改时由写入方更新
                 remark TEXT -- 设备备注，可为空
             );
         """)
+
+        # 机器名称、相机和频率仪序列号只在未删除记录中保持唯一。
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS machine_name_active ON machine(machine_name) WHERE is_deleted = 0"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS machine_camera_serial_active "
+            "ON machine(camera_serial) WHERE is_deleted = 0"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS machine_frequency_meter_serial_active "
+            "ON machine(frequency_meter_serial) WHERE is_deleted = 0"
+        )

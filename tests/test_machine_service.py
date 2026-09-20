@@ -88,7 +88,6 @@ def test_create_returns_success_and_duplicate_results(tmp_path, duplicate_field)
         "success": True,
         "device_id": 1,
         "field": None,
-        "message": "设备创建成功",
     }
 
     # 仅重复指定字段并验证返回值和数据库记录数量。
@@ -127,3 +126,66 @@ def test_concurrent_duplicate_is_rejected_by_database(tmp_path, monkeypatch):
         service.create_machine("皮带机", "CAM002", "FREQ002")
     assert isinstance(captured.value.__cause__, sqlite3.IntegrityError)
     assert len(service.list_machines()) == 1
+
+
+def test_update_machine_keeps_own_fields_and_rejects_other_devices(tmp_path):
+    """验证编辑保持自身字段通过，与其他设备重复被拒绝。
+
+    Args:
+        tmp_path: 临时数据库目录。
+
+    Returns:
+        返回示例：
+            None  # 自身字段可保存，他行字段重复返回字段名且记录不变
+    """
+    # 建表并写入两台设备。
+    database_path = tmp_path / "machines.sqlite3"
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        MachineRepo.create_table(connection)
+    service = MachineService(MachineRepo(database_path))
+    service.create_machine("1号皮带机", "CAM001", "FREQ001")
+    service.create_machine("2号皮带机", "CAM002", "FREQ002")
+
+    # 原样保留自身三个字段，只修改启用状态和备注。
+    result = service.update_machine(1, "1号皮带机", "CAM001", "FREQ001", False, "一号产线")
+    assert result == {"success": True, "device_id": 1, "field": None}
+    record = service.list_machines()[0]
+    assert record["machine_name"] == "1号皮带机"
+    assert record["enabled"] is False
+    assert record["remark"] == "一号产线"
+
+    # 改成第二台设备的相机序列号时返回重复字段且不修改记录。
+    result = service.update_machine(1, "1号皮带机", "CAM002", "FREQ001")
+    assert result["success"] is False
+    assert result["device_id"] == 1
+    assert result["field"] == "camera_serial"
+    assert result["message"]
+    assert service.list_machines()[0]["camera_serial"] == "CAM001"
+
+
+def test_delete_machine_hides_record_and_frees_fields(tmp_path):
+    """验证软删除后列表不再返回记录且字段可以重新使用。
+
+    Args:
+        tmp_path: 临时数据库目录。
+
+    Returns:
+        返回示例：
+            None  # 记录保留在表中，名称和序列号可被新设备复用
+    """
+    # 建表并写入一台设备。
+    database_path = tmp_path / "machines.sqlite3"
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        MachineRepo.create_table(connection)
+    service = MachineService(MachineRepo(database_path))
+    service.create_machine("1号皮带机", "CAM001", "FREQ001")
+
+    # 删除后列表为空，数据库中仍保留该行。
+    service.delete_machine(1)
+    assert service.list_machines() == []
+    with closing(sqlite3.connect(database_path)) as connection:
+        assert connection.execute("SELECT id, is_deleted FROM machine ORDER BY id").fetchall() == [(1, 1)]
+
+    # 相同名称和序列号可以重新新增。
+    result = service.create_machine("1号皮带机", "CAM001", "FREQ001")
+    assert result == {"success": True, "device_id": 2, "field": None}

@@ -69,11 +69,12 @@ def test_machine_table_defaults_and_reinitialization(machine_database):
         record = connection.execute("SELECT * FROM machine").fetchone()
         assert record.keys() == [
             "id", "machine_name", "camera_serial", "frequency_meter_serial",
-            "enabled", "created_at", "updated_at", "remark",
+            "enabled", "is_deleted", "created_at", "updated_at", "remark",
         ]
         assert record["id"] == 1
         assert record["machine_name"] == "1# 皮带机"
         assert record["enabled"] == 1
+        assert record["is_deleted"] == 0
         assert record["remark"] is None
         assert record["created_at"] == record["updated_at"]
         created_at = datetime.strptime(record["created_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
@@ -86,14 +87,14 @@ def test_machine_table_defaults_and_reinitialization(machine_database):
 
 
 def test_machine_table_constraints(machine_database):
-    """验证设备必填字段和启用值约束。
+    """验证设备必填字段、启用值和未删除记录唯一约束。
 
     Args:
         machine_database: 已初始化的临时数据库管理对象。
 
     Returns:
         返回示例：
-            None  # 数据库拒绝必填字段空值和非法启用值
+            None  # 数据库拒绝必填字段空值和重复的未删除记录
     """
     # 写入一条停用设备并保留备注。
     statement = (
@@ -113,4 +114,13 @@ def test_machine_table_constraints(machine_database):
         for record in invalid_records:
             with pytest.raises(sqlite3.IntegrityError):
                 connection.execute(statement, record)
+
+        # 已删除记录不占用机器名称和序列号，未删除记录之间仍然拒绝重复。
+        connection.execute(
+            "INSERT INTO machine (machine_name, camera_serial, frequency_meter_serial, is_deleted) "
+            "VALUES (?, ?, ?, 1)",
+            ("1# 皮带机", "CAM001", "METER001"),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(statement, ("1# 皮带机", "CAM001", "METER001", 1, None))
         assert connection.execute("SELECT enabled, remark FROM machine").fetchone() == (0, "一号产线")

@@ -289,8 +289,8 @@ def test_device_create_persists_and_reloads(window, application, monkeypatch):
     assert page.devices[0]["enabled"] is False
     assert page.devices[0]["remark"] == ""
     assert page.devices[0]["created_at"] == page.devices[0]["updated_at"]
-    assert not page.findChild(QPushButton, "editDevice_1").isEnabled()
-    assert not page.findChild(QPushButton, "deleteDevice_1").isEnabled()
+    assert page.findChild(QPushButton, "editDevice_1").isEnabled()
+    assert page.findChild(QPushButton, "deleteDevice_1").isEnabled()
 
     # 新页面读取同一数据库，并验证取消不新增记录。
     fresh_page = DevicesPage(MachineService(MachineRepo(page.machine_service.machine_repo.database_path)))
@@ -433,3 +433,160 @@ def test_device_layout_keeps_editor_actions_accessible(window, application):
         assert page.editor_scroll.horizontalScrollBar().maximum() == 0
         page.cancel_button.click()
         assert page.editor.isHidden()
+
+
+def test_device_edit_updates_record_and_selects_row(window, application):
+    """验证编辑回填表单、保存后刷新列表并写回数据库。
+
+    Args:
+        window: 测试主窗口。
+        application: 界面应用实例。
+
+    Returns:
+        返回示例：
+            None  # 修改后的名称、启用状态和备注写入数据库
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    # 写入一台设备并刷新列表。
+    page = window.page_stack.widget(4)
+    device_id = page.machine_service.machine_repo.insert("1号皮带机", "CAM001", "FREQ001")
+    page.devices = page.machine_service.list_machines()
+    page.populate_devices()
+
+    # 点击编辑入口应回填表单并进入编辑状态。
+    QTest.mouseClick(page.findChild(QPushButton, f"editDevice_{device_id}"), Qt.MouseButton.LeftButton)
+    application.processEvents()
+    assert page.editor.isVisible()
+    assert page.editor.windowTitle() == "编辑设备"
+    assert page.field_inputs["machine_name"].text() == "1号皮带机"
+    assert page.field_inputs["camera_serial"].text() == "CAM001"
+    assert page.enabled_checkbox.isChecked()
+    assert page.table.currentRow() == 0
+
+    # 修改名称、启用状态和备注后保存。
+    page.field_inputs["machine_name"].setText("1号皮带机A")
+    page.enabled_checkbox.setChecked(False)
+    page.remark_input.setPlainText("换线停用")
+    page.save_button.click()
+    application.processEvents()
+
+    # 核对弹窗、表格和数据库中的修改结果。
+    assert page.editor.isHidden()
+    assert page.devices[0]["machine_name"] == "1号皮带机A"
+    assert page.devices[0]["enabled"] is False
+    assert page.devices[0]["remark"] == "换线停用"
+    assert page.table.item(0, 1).text() == "1号皮带机A"
+    assert page.table.currentRow() == 0
+    assert page.machine_service.machine_repo.list_all()[0]["machine_name"] == "1号皮带机A"
+
+
+def test_device_edit_keeps_own_fields(window, application, monkeypatch):
+    """验证编辑不改动唯一字段时不会被判为重复。
+
+    Args:
+        window: 测试主窗口。
+        application: 界面应用实例。
+        monkeypatch: 消息框替换工具。
+
+    Returns:
+        返回示例：
+            None  # 表单关闭且记录保持一条
+    """
+    from PySide6.QtWidgets import QMessageBox, QPushButton
+
+    # 写入设备并打开编辑弹窗。
+    page = window.page_stack.widget(4)
+    device_id = page.machine_service.machine_repo.insert("1号皮带机", "CAM001", "FREQ001")
+    page.devices = page.machine_service.list_machines()
+    page.populate_devices()
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *arguments: warnings.append(arguments))
+    QTest.mouseClick(page.findChild(QPushButton, f"editDevice_{device_id}"), Qt.MouseButton.LeftButton)
+
+    # 只修改备注并保存。
+    page.remark_input.setPlainText("只改备注")
+    page.save_button.click()
+    application.processEvents()
+
+    # 核对没有重复提示且记录内容已更新。
+    assert warnings == []
+    assert page.editor.isHidden()
+    assert len(page.machine_service.machine_repo.list_all()) == 1
+    assert page.devices[0]["remark"] == "只改备注"
+
+
+def test_device_delete_after_confirmation(window, application, monkeypatch):
+    """验证确认后标记删除设备并刷新列表。
+
+    Args:
+        window: 测试主窗口。
+        application: 界面应用实例。
+        monkeypatch: 确认框替换工具。
+
+    Returns:
+        返回示例：
+            None  # 列表移除该设备且数据库保留删除标记
+    """
+    from PySide6.QtWidgets import QMessageBox, QPushButton
+
+    # 写入设备并刷新列表。
+    page = window.page_stack.widget(4)
+    repository = page.machine_service.machine_repo
+    device_id = repository.insert("1号皮带机", "CAM001", "FREQ001")
+    page.devices = page.machine_service.list_machines()
+    page.populate_devices()
+
+    # 让确认框直接返回“删除”按钮，再点击删除入口。
+    monkeypatch.setattr(QMessageBox, "exec", lambda box: 0)
+    monkeypatch.setattr(
+        QMessageBox,
+        "clickedButton",
+        lambda box: next(button for button in box.buttons() if button.text() == "删除"),
+    )
+    QTest.mouseClick(page.findChild(QPushButton, f"deleteDevice_{device_id}"), Qt.MouseButton.LeftButton)
+    application.processEvents()
+
+    # 核对列表、内存数据和数据库中的删除标记。
+    assert page.table.rowCount() == 0
+    assert page.devices == []
+    assert repository.list_all() == []
+    with closing(sqlite3.connect(repository.database_path)) as connection:
+        assert connection.execute("SELECT is_deleted FROM machine WHERE id = ?", (device_id,)).fetchone() == (1,)
+
+
+def test_device_delete_cancel_keeps_record(window, application, monkeypatch):
+    """验证取消确认后不修改设备记录。
+
+    Args:
+        window: 测试主窗口。
+        application: 界面应用实例。
+        monkeypatch: 确认框替换工具。
+
+    Returns:
+        返回示例：
+            None  # 设备仍在列表和数据库中
+    """
+    from PySide6.QtWidgets import QMessageBox, QPushButton
+
+    # 写入设备并刷新列表。
+    page = window.page_stack.widget(4)
+    repository = page.machine_service.machine_repo
+    device_id = repository.insert("1号皮带机", "CAM001", "FREQ001")
+    page.devices = page.machine_service.list_machines()
+    page.populate_devices()
+
+    # 让确认框返回“取消”按钮，再点击删除入口。
+    monkeypatch.setattr(QMessageBox, "exec", lambda box: 0)
+    monkeypatch.setattr(
+        QMessageBox,
+        "clickedButton",
+        lambda box: next(button for button in box.buttons() if button.text() == "取消"),
+    )
+    QTest.mouseClick(page.findChild(QPushButton, f"deleteDevice_{device_id}"), Qt.MouseButton.LeftButton)
+    application.processEvents()
+
+    # 核对设备仍在列表和数据库中。
+    assert page.table.rowCount() == 1
+    assert page.devices[0]["id"] == device_id
+    assert len(repository.list_all()) == 1
