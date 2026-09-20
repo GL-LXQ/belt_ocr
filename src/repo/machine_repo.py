@@ -22,7 +22,6 @@ class MachineRepo:
 
     def insert(
         self,
-        machine_id: str,
         machine_name: str,
         camera_serial: str,
         frequency_meter_serial: str,
@@ -32,7 +31,6 @@ class MachineRepo:
         """插入一台机器的信息并返回自增主键。
 
         Args:
-            machine_id: 唯一的机器业务编号。
             machine_name: 机器显示名称。
             camera_serial: 绑定的相机序列号。
             frequency_meter_serial: 绑定的频率仪序列号。
@@ -47,9 +45,9 @@ class MachineRepo:
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection, connection:
             cursor = connection.execute(
                 "INSERT INTO machine "
-                "(machine_id, machine_name, camera_serial, frequency_meter_serial, enabled, remark) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (machine_id, machine_name, camera_serial, frequency_meter_serial, enabled, remark),
+                "(machine_name, camera_serial, frequency_meter_serial, enabled, remark) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (machine_name, camera_serial, frequency_meter_serial, enabled, remark),
             )
             return cursor.lastrowid
 
@@ -68,7 +66,6 @@ class MachineRepo:
         connection.execute("""
             CREATE TABLE IF NOT EXISTS machine (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, -- 数据库内部自增主键
-                machine_id TEXT NOT NULL UNIQUE, -- 机器业务编号，唯一标识机器
                 machine_name TEXT NOT NULL, -- 机器显示名称
                 camera_serial TEXT NOT NULL, -- 绑定的相机序列号
                 frequency_meter_serial TEXT NOT NULL, -- 绑定的频率仪序列号

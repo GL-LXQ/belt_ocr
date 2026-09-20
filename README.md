@@ -297,4 +297,6 @@ START 创建周期后，相机先启动取流，再清空 SDK 缓存，随后在
 
 ### 设备信息插入
 
-调用 `MachineRepo(database_path).insert(machine_id, machine_name, camera_serial, frequency_meter_serial, enabled=True, remark=None)` 将单台机器信息写入业务库的 `machine` 表；方法打开连接、执行参数化 INSERT、提交事务并关闭连接，返回新增记录的自增主键。创建时间和修改时间由表默认值生成 UTC 时间，机器编号重复时由唯一约束抛出异常，不覆盖已有记录；Database 初始化时提供业务库路径并负责建表，界面和采集配置的数据来源暂不变。
+调用 `MachineRepo(database_path).insert(machine_name, camera_serial, frequency_meter_serial, enabled=True, remark=None)` 将单台机器信息写入业务库的 `machine` 表；方法打开连接、执行参数化 INSERT、提交事务并关闭连接，返回新增记录的自增主键。创建时间和修改时间由表默认值生成 UTC 时间，机器身份使用数据库自增 `id`，不再维护独立的 `machine_id` 字段；Database 初始化时提供业务库路径并负责建表，界面和采集配置的数据来源暂不变。
+
+设备表身份字段精简为自增 `id` 和显示名称 `machine_name`，相机与频率仪序列号、启用状态、时间及备注保持不变；调用方提交机器信息后，Repo 在事务中插入并返回 `id`。本次仅调整设备表和插入接口，采集周期及测量记录中的现有 `machine_id` 暂不调整。

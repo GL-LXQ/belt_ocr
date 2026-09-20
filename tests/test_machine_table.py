@@ -59,16 +59,16 @@ def test_machine_table_defaults_and_reinitialization(machine_database):
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'machines'").fetchone() is None
         with connection:
             connection.execute(
-                "INSERT INTO machine (machine_id, machine_name, camera_serial, frequency_meter_serial) "
-                "VALUES (?, ?, ?, ?)",
-                ("M01", "1# 皮带机", "CAM001", "METER001"),
+                "INSERT INTO machine (machine_name, camera_serial, frequency_meter_serial) "
+                "VALUES (?, ?, ?)",
+                ("1# 皮带机", "CAM001", "METER001"),
             )
 
         # 重复初始化后验证字段、默认启用状态和 UTC 时间。
         machine_database.initialize()
         record = connection.execute("SELECT * FROM machine").fetchone()
         assert record.keys() == [
-            "id", "machine_id", "machine_name", "camera_serial", "frequency_meter_serial",
+            "id", "machine_name", "camera_serial", "frequency_meter_serial",
             "enabled", "created_at", "updated_at", "remark",
         ]
         assert record["id"] == 1
@@ -86,31 +86,29 @@ def test_machine_table_defaults_and_reinitialization(machine_database):
 
 
 def test_machine_table_constraints(machine_database):
-    """验证机器编号唯一、设备必填字段和启用值约束。
+    """验证设备必填字段和启用值约束。
 
     Args:
         machine_database: 已初始化的临时数据库管理对象。
 
     Returns:
         返回示例：
-            None  # 数据库拒绝重复编号、空值和非法启用值
+            None  # 数据库拒绝必填字段空值和非法启用值
     """
     # 写入一条停用设备并保留备注。
     statement = (
-        "INSERT INTO machine (machine_id, machine_name, camera_serial, frequency_meter_serial, enabled, remark) "
-        "VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT INTO machine (machine_name, camera_serial, frequency_meter_serial, enabled, remark) "
+        "VALUES (?, ?, ?, ?, ?)"
     )
     with closing(sqlite3.connect(machine_database.configuration.database_path)) as connection, connection:
-        connection.execute(statement, ("M01", "1# 皮带机", "CAM001", "METER001", 0, "一号产线"))
+        connection.execute(statement, ("1# 皮带机", "CAM001", "METER001", 0, "一号产线"))
 
-        # 分别验证重复业务编号、必填字段空值和非法启用值。
+        # 分别验证必填字段空值和非法启用值。
         invalid_records = [
-            ("M01", "重复设备", "CAM002", "METER002", 1, None),
-            (None, "缺少编号", "CAM002", "METER002", 1, None),
-            ("M02", None, "CAM002", "METER002", 1, None),
-            ("M02", "2# 皮带机", None, "METER002", 1, None),
-            ("M02", "2# 皮带机", "CAM002", None, 1, None),
-            ("M02", "2# 皮带机", "CAM002", "METER002", 2, None),
+            (None, "CAM002", "METER002", 1, None),
+            ("2# 皮带机", None, "METER002", 1, None),
+            ("2# 皮带机", "CAM002", None, 1, None),
+            ("2# 皮带机", "CAM002", "METER002", 2, None),
         ]
         for record in invalid_records:
             with pytest.raises(sqlite3.IntegrityError):
