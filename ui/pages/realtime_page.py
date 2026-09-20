@@ -27,6 +27,10 @@ from ui.demo_data import LOG_ROWS
 from ui.theme import create_icon
 
 
+# 卡片区每行固定放置的设备数量。
+CARDS_PER_ROW = 3
+
+
 class CapturePreview(QLabel):
     """暂无实时画面时的灰色占位区域。"""
 
@@ -155,6 +159,8 @@ class MachineCard(QFrame):
         super().__init__()
         self.setObjectName("machineCard")
         self.setMinimumWidth(326)
+        # 高度按内容决定，可以被拉高但不会被压扁。
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 14)
         layout.setSpacing(5)
@@ -354,9 +360,11 @@ class RealtimePage(QWidget):
             button.setToolTip("暂未接入")
         layout.addLayout(header)
 
-        # 创建卡片容器，卡片在读取设备表后生成。
-        cards_layout = QHBoxLayout()
+        # 创建卡片网格，每行固定放置几台设备。
+        cards_layout = QGridLayout()
         cards_layout.setSpacing(12)
+        for column in range(CARDS_PER_ROW):
+            cards_layout.setColumnStretch(column, 1)
         self.cards_layout = cards_layout
         self.machine_cards = []
         self.empty_hint = None
@@ -423,6 +431,8 @@ class RealtimePage(QWidget):
             QMessageBox.warning(self, "设备读取失败", str(error))
             self.devices = []
         self.populate_cards()
+        # 通知滚动区按新的卡片行数重新计算内容高度。
+        self.scroll_area.widget().updateGeometry()
 
     def populate_cards(self):
         """按当前设备记录重建设备卡片区。
@@ -432,27 +442,28 @@ class RealtimePage(QWidget):
 
         Returns:
             返回示例：
-                None  # 卡片数量与设备记录一致
+                None  # 卡片数量与设备记录一致，每行固定排满后换行
         """
         # 移除上一次创建的卡片。
         while self.cards_layout.count():
             widget = self.cards_layout.takeAt(0).widget()
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
         self.machine_cards = []
         self.empty_hint = None
 
-        # 没有设备时显示空态提示。
+        # 没有设备时显示横跨整行的空态提示。
         if not self.devices:
             hint = QLabel("暂无设备，请先在设备管理页添加。")
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             hint.setStyleSheet("color: #73849B;")
             self.empty_hint = hint
-            self.cards_layout.addWidget(hint, 1)
+            self.cards_layout.addWidget(hint, 0, 0, 1, CARDS_PER_ROW)
             return
 
-        # 逐台设备创建卡片，实时状态字段暂时显示占位内容。
-        for device in self.devices:
+        # 逐台设备创建卡片，每行固定几台，实时状态字段暂时显示占位内容。
+        for index, device in enumerate(self.devices):
             card = MachineCard({
                 "title": device["machine_name"],
                 "tone": "idle",
@@ -462,7 +473,7 @@ class RealtimePage(QWidget):
                 "completed_steps": 0,
                 "events": (),
             })
-            self.cards_layout.addWidget(card, 1)
+            self.cards_layout.addWidget(card, index // CARDS_PER_ROW, index % CARDS_PER_ROW)
             self.machine_cards.append(card)
 
     def fill_demo_logs(self):

@@ -214,6 +214,18 @@ def test_realtime_cards_follow_machine_table(window, application):
     application.processEvents()
     assert [card.title.text() for card in page.machine_cards] == ["2号皮带机"]
 
+    # 每行固定三台，第四台自动换到下一行。
+    for number in (3, 4, 5):
+        repository.insert(f"{number}号皮带机", f"CAM00{number}", f"FREQ00{number}")
+    page.reload_devices()
+    application.processEvents()
+    assert len(page.machine_cards) == 4
+    position = page.cards_layout.getItemPosition(page.cards_layout.indexOf(page.machine_cards[3]))
+    assert position[:2] == (1, 0)
+    # 等布局稳定后核对第二行不会压扁卡片，卡片保持自身高度并由页面滚动。
+    QTest.qWait(10)
+    assert all(card.height() >= card.sizeHint().height() for card in page.machine_cards)
+
 
 def test_realtime_log_appending_and_clearing(window, application):
     """验证演示日志填充、追加滚动和清空。
