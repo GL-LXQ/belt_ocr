@@ -131,6 +131,28 @@ class MachineRepo:
             devices.append(device)
         return devices
 
+    def list_enabled(self) -> list[dict]:
+        """按编号读取全部已启用设备信息。
+
+        Args:
+            无。
+
+        Returns:
+            返回示例：
+                [{
+                    "id": 1,  # 设备编号
+                    "machine_name": "皮带机",  # 机器名称
+                    "camera_serial": "CAM001",  # 相机序列号
+                    "frequency_meter_serial": "FREQ001",  # 频率仪序列号
+                    "enabled": True,  # 是否启用
+                    "created_at": "2026-09-20 08:00:00",  # UTC 创建时间
+                    "updated_at": "2026-09-20 08:00:00",  # UTC 修改时间
+                    "remark": "",  # 备注，无备注时为空字符串
+                }]
+        """
+        # 复用全部设备查询并过滤出已启用设备。
+        return [device for device in self.list_all() if device["enabled"]]
+
     def update(
         self,
         device_id: int,

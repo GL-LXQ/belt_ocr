@@ -227,6 +227,32 @@ def test_realtime_cards_follow_machine_table(window, application):
     assert all(card.height() >= card.sizeHint().height() for card in page.machine_cards)
 
 
+def test_realtime_hides_disabled_machines(window, application):
+    """验证停用设备不进入实时监测卡片，但仍保留在设备列表数据中。
+
+    Args:
+        window: 测试主窗口。
+        application: 界面应用实例。
+
+    Returns:
+        返回示例：
+            None  # 卡片只包含已启用设备
+    """
+    # 写入一台启用设备和一台停用设备。
+    repository = window.machine_service.machine_repo
+    repository.insert("1号皮带机", "CAM001", "FREQ001")
+    repository.insert("2号皮带机", "CAM002", "FREQ002", False)
+
+    # 实时监测只展示已启用设备。
+    page = window.page_stack.widget(0)
+    page.reload_devices()
+    application.processEvents()
+    assert [card.title.text() for card in page.machine_cards] == ["1号皮带机"]
+
+    # 设备管理页的数据源仍包含停用设备。
+    assert len(window.machine_service.list_machines()) == 2
+
+
 def test_realtime_log_appending_and_clearing(window, application):
     """验证演示日志填充、追加滚动和清空。
 

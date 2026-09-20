@@ -424,9 +424,9 @@ class RealtimePage(QWidget):
             返回示例：
                 None  # 卡片跟随数据库内容，读取失败时提示并清空卡片区
         """
-        # 读取未删除设备，失败时提示并把卡片区置空。
+        # 读取已启用设备，失败时提示并把卡片区置空。
         try:
-            self.devices = self.machine_service.list_machines()
+            self.devices = self.machine_service.list_enabled_machines()
         except MachineServiceError as error:
             QMessageBox.warning(self, "设备读取失败", str(error))
             self.devices = []

@@ -188,3 +188,28 @@ class MachineService:
             return self.machine_repo.list_all()
         except sqlite3.Error as error:
             raise MachineServiceError(f"设备列表读取失败：{error}") from error
+
+    def list_enabled_machines(self) -> list[dict]:
+        """按编号读取全部已启用设备信息。
+
+        Args:
+            无。
+
+        Returns:
+            返回示例：
+                [{
+                    "id": 1,  # 设备编号
+                    "machine_name": "皮带机",  # 机器名称
+                    "camera_serial": "CAM001",  # 相机序列号
+                    "frequency_meter_serial": "FREQ001",  # 频率仪序列号
+                    "enabled": True,  # 是否启用
+                    "created_at": "2026-09-20 08:00:00",  # UTC 创建时间
+                    "updated_at": "2026-09-20 08:00:00",  # UTC 修改时间
+                    "remark": "",  # 备注，无备注时为空字符串
+                }]
+        """
+        # 读取已启用设备列表并将数据库异常转换为业务提示。
+        try:
+            return self.machine_repo.list_enabled()
+        except sqlite3.Error as error:
+            raise MachineServiceError(f"设备列表读取失败：{error}") from error
