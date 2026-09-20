@@ -193,18 +193,15 @@ class MachineCard(QFrame):
         heading.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(heading)
 
-        # 将画面标识和时间叠放在图片顶部。
+        # 将画面标识叠放在图片顶部。
         self.preview = CapturePreview(data["number"])
         preview_layout = QVBoxLayout(self.preview)
         preview_layout.setContentsMargins(8, 7, 8, 7)
         preview_caption = QHBoxLayout()
         live_caption = QLabel('<span style="color:#18C35D">●</span> 演示画面')
         live_caption.setObjectName("previewCaption")
-        timestamp = QLabel("2026-09-20 14:32:18")
-        timestamp.setObjectName("previewCaption")
         preview_caption.addWidget(live_caption)
         preview_caption.addStretch()
-        preview_caption.addWidget(timestamp)
         preview_layout.addLayout(preview_caption)
         preview_layout.addStretch()
         layout.addWidget(self.preview, 1)
