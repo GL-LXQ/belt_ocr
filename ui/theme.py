@@ -32,6 +32,19 @@ COLORS = {
 
 # 保存各入口和窗口操作的 SVG 图形片段。
 ICON_PATHS = {
+    "pulse": '<path d="M2 12h5l3-9 4 18 3-9h5"/>',
+    "play": '<path d="m9 5 10 7-10 7z" fill="{white}" stroke="none"/>',
+    "pause": '<path d="M8 6v12m8-12v12" stroke-width="3"/>',
+    "hourglass": '<path d="M7 3h10M7 21h10M8 3v5l8 8v5M16 3v5l-8 8v5M9 17h6"/>',
+    "check": '<path d="m6 12 4 4 8-9" stroke-width="2.3"/>',
+    "camera": '<path d="M8 6 10 3h5l2 3h4v14H3V6z"/><circle cx="12" cy="12" r="4"/>',
+    "alarm": '<circle cx="12" cy="13" r="8"/><path d="m3 5 3-3m12 0 3 3M7 21l-2 2m12-2 2 2M12 8v5l3 2"/>',
+    "warning_mark": '<path d="M12 5v9m0 4v1" stroke-width="2.5"/>',
+    "fan": (
+        '<circle cx="12" cy="12" r="2"/>'
+        '<path d="M11 9C2 7 8 0 13 3c3 2 1 5-1 7M15 12c7-6 11 2 6 6c-3 2-5-1-7-4'
+        'M11 15c2 9-7 8-8 3c0-4 4-4 7-4" fill="{blue}" stroke="none"/>'
+    ),
     "realtime": '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4M5 11h3l2-4 4 7 2-3h3"/>',
     "history": '<path d="M3 10a9 9 0 1 1 2 8M3 4v6h6m3-4v6l4 2"/>',
     "images": (

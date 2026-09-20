@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.theme import COLORS, create_icon
+from ui.pages.realtime_page import RealtimePage
 
 
 # 按导航顺序配置页面标题和说明。
@@ -384,11 +385,14 @@ class MainWindow(QMainWindow):
             返回示例：
                 QStackedWidget()  # 持有六个页面的容器
         """
-        # 创建页面栈，并按导航顺序添加六个占位页面。
+        # 创建实时监测页，并按导航顺序添加其他占位页面。
         stack = QStackedWidget()
         stack.setObjectName("pageStack")
         for page_key in PAGES:
-            stack.addWidget(self.create_placeholder_page(page_key))
+            if page_key == "realtime":
+                stack.addWidget(RealtimePage())
+            else:
+                stack.addWidget(self.create_placeholder_page(page_key))
         return stack
 
     def create_placeholder_page(self, page_key: str) -> QWidget:

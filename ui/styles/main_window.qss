@@ -56,3 +56,51 @@ QLabel#pageTitle { color: @text; font-size: 24px; font-weight: bold; }
 QLabel#pageSubtitle { color: @muted; font-size: 13px; }
 QFrame#pageContent { background: @white; border: 1px solid @border; border-radius: 10px; }
 QToolTip { background: @white; color: @text; border: 1px solid @border; padding: 4px; }
+
+/* 设置实时监测页、卡片和状态面板。 */
+QWidget#monitorContent, QWidget#realtime QScrollArea { background: @background; }
+QFrame#machineCard, QFrame#logPanel {
+    background: @white; border: 1px solid @border; border-radius: 8px;
+}
+QFrame#machineCard { border-top: 3px solid @blue; }
+QFrame#machineCard[tone="running"] { border-top-color: #18AE59; }
+QFrame#machineCard[tone="waiting"] { border-top-color: #FF9818; }
+QLabel#machineTitle { font-size: 18px; font-weight: bold; }
+QLabel#machineBadge { background: #DBEAFE; color: #2373E8; border-radius: 14px; padding: 5px 12px; font-weight: bold; }
+QFrame[tone="running"] QLabel#machineBadge { background: #DCF9DF; color: #138B3F; }
+QFrame[tone="waiting"] QLabel#machineBadge { background: #FFF0D8; color: #F58A09; }
+QFrame#metricPanel { background: #F5F8FB; border: 1px solid #F0F4F8; border-radius: 7px; }
+QLabel[smallText="true"] { color: #73849B; font-size: 11px; }
+QLabel#metricValue { font-size: 18px; font-weight: bold; color: #73849B; }
+QFrame[tone="running"] QLabel#metricValue { color: #18AE59; }
+QFrame[tone="waiting"] QLabel#metricValue { color: #FF9818; }
+QFrame#previewFrame, QLabel#capturePreview { background: #151B20; border: none; border-radius: 6px; }
+QLabel#previewCaption { color: #E7ECEF; background: rgba(0, 0, 0, 155); border-radius: 3px; padding: 3px 5px; font-size: 11px; }
+QLabel#eventLine { color: #526681; font-size: 12px; }
+
+/* 设置操作按钮和禁用状态。 */
+QPushButton#startAll, QPushButton#stopAll { border: none; border-radius: 6px; color: white; font-weight: bold; }
+QPushButton#startAll:disabled { background: #79C79A; color: #F5FFF8; }
+QPushButton#stopAll:disabled { background: #ED9296; color: #FFF7F7; }
+QPushButton#refreshDemo, QPushButton#clearLogs {
+    background: white; border: 1px solid #DCE5EF; border-radius: 5px; padding: 5px 16px; color: #445671;
+}
+QPushButton#refreshDemo:hover, QPushButton#clearLogs:hover { background: #EFF5FF; }
+QPushButton#moreEvents { border: none; background: transparent; padding: 0; font-size: 12px; }
+QPushButton#moreEvents:disabled { color: #9AB4DC; }
+
+/* 设置日志表格、表头和滚动条。 */
+QLabel#logTitle { font-size: 15px; font-weight: bold; }
+QTableWidget { background: white; border: 1px solid #E5EBF3; gridline-color: #EDF1F6; color: #526681; font-size: 12px; }
+QHeaderView::section { background: #F3F7FA; color: #526681; border: none; padding: 4px 10px; text-align: left; }
+QTableWidget::item:selected { background: #E8F1FF; color: #234A7B; }
+QCheckBox { color: #64748B; font-size: 11px; spacing: 6px; }
+QScrollBar:vertical { background: #F4F7FA; width: 9px; margin: 0; }
+QScrollBar::handle:vertical { background: #D4DEE9; border-radius: 4px; min-height: 20px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+
+/* 设置当前状态的圆形图标和卡片内的小标题。 */
+QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #AAB6C2, stop:1 #738393); border-radius: 17px; }
+QFrame[tone="running"] QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #49CF82, stop:1 #0C9F48); }
+QFrame[tone="waiting"] QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFC267, stop:1 #FF900A); }
+QLabel#machineBadge { border: 1px solid transparent; }

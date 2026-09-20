@@ -11,6 +11,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
 from ui.main_window import MainWindow, PAGES
+from ui.demo_data import LOG_ROWS
 
 
 @pytest.fixture(scope="module")
@@ -155,3 +156,85 @@ def test_resize_and_window_controls(window, application):
     window.showNormal()
     QTest.mouseClick(window.title_bar.control_buttons["close"], Qt.MouseButton.LeftButton)
     assert not window.isVisible()
+
+
+def test_realtime_demo_refresh_preserves_cards_and_restores_logs(window, application):
+    """验证演示展示、清空日志和刷新复用已有卡片。
+
+    Args:
+        window: 主窗口。
+        application: 界面应用实例。
+
+    Returns:
+        None  # 演示交互和卡片复用断言通过
+    """
+    # 检查三台设备的不同状态、图片资源和禁用入口。
+    page = window.page_stack.widget(0)
+    cards = tuple(page.machine_cards)
+    assert [card.badge.text() for card in cards] == ["运行中", "待机中", "等待关闭"]
+    assert all(not card.preview.source.isNull() for card in cards)
+    assert all(not card.state_icon.pixmap().isNull() for card in cards)
+    assert not page.start_button.isEnabled()
+    assert not page.stop_button.isEnabled()
+    assert all(not card.more_button.isEnabled() for card in cards)
+
+    # 清空日志后刷新，同时恢复被改动的卡片文字。
+    QTest.mouseClick(page.clear_button, Qt.MouseButton.LeftButton)
+    assert page.log_table.rowCount() == 0
+    cards[0].state_label.setText("临时展示")
+    page.auto_scroll.setChecked(False)
+    QTest.mouseClick(page.refresh_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+    assert tuple(page.machine_cards) == cards
+    assert cards[0].state_label.text() == "测量中"
+    assert page.log_table.rowCount() == len(LOG_ROWS)
+    assert page.log_table.item(3, 3).text() == LOG_ROWS[-1][-1]
+    assert not page.auto_scroll.isChecked()
+
+
+def test_realtime_log_scrolling_and_small_window_access(window, application):
+    """验证日志滚动选项和小窗口中的完整内容访问。
+
+    Args:
+        window: 主窗口。
+        application: 界面应用实例。
+
+    Returns:
+        None  # 日志滚动和页面布局断言通过
+    """
+    # 填入超出可见范围的日志，并验证自动滚动至最新行。
+    page = window.page_stack.widget(0)
+    for number in range(30):
+        page.append_log(("14:33:00", "INFO", "Demo", f"测试日志 {number}"))
+    application.processEvents()
+    scrollbar = page.log_table.verticalScrollBar()
+    assert scrollbar.maximum() > 0
+    assert scrollbar.value() == scrollbar.maximum()
+
+    # 关闭自动滚动后追加日志，保持当前阅读位置。
+    page.auto_scroll.setChecked(False)
+    scrollbar.setValue(0)
+    page.append_log(("14:34:00", "INFO", "Demo", "追加日志"))
+    application.processEvents()
+    assert scrollbar.value() == 0
+    page.auto_scroll.setChecked(True)
+    assert scrollbar.value() == scrollbar.maximum()
+
+    # 在最小窗口下保留三列卡片，并通过纵向滚动访问日志。
+    window.resize(1280, 720)
+    application.processEvents()
+    assert page.scroll_area.horizontalScrollBar().maximum() == 0
+    assert page.scroll_area.verticalScrollBar().maximum() > 0
+    for card in page.machine_cards:
+        assert card.width() >= card.minimumWidth()
+        assert card.preview.pixmap().width() <= card.preview.width()
+        # 检查连接线横跨相邻圆点之间的空间。
+        for index, connector in enumerate(card.steps.connectors):
+            left_dot = card.steps.dots[index].geometry()
+            right_dot = card.steps.dots[index + 1].geometry()
+            assert connector.width() > 20
+            assert abs(connector.geometry().left() - left_dot.right()) <= 3
+            assert abs(connector.geometry().right() - right_dot.left()) <= 4
+    page.scroll_area.verticalScrollBar().setValue(page.scroll_area.verticalScrollBar().maximum())
+    log_position = page.log_table.mapTo(page.scroll_area.viewport(), page.log_table.rect().topLeft())
+    assert page.scroll_area.viewport().rect().intersects(page.log_table.rect().translated(log_position))
