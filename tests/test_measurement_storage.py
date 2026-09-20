@@ -1,7 +1,6 @@
 """验证图片与记录统一提交、幂等写入和失败文件清理。"""
 
 import asyncio
-import json
 import sqlite3
 import threading
 from dataclasses import replace
@@ -55,7 +54,10 @@ def test_cancelled_storage_failure_stops_before_next_request(frequency_context, 
         # 通过正式结算流程准备请求，并追加下一条待处理请求。
         session.measurement_frequencies.append(create_measurement(session, 42))
         await manager.handle_machine_close()
-        app.database.queue.put_nowait(database.DatabaseRequest("M01", "next-session", "{}", "hash"))
+        first_request = app.database.queue.get_nowait()
+        app.database.queue.task_done()
+        app.database.queue.put_nowait(first_request)
+        app.database.queue.put_nowait(replace(first_request, session_id="next-session"))
         publisher = AsyncMock()
         app.database.publish_event = publisher
         worker = asyncio.create_task(app.database.run())
@@ -106,8 +108,7 @@ def test_persistence_failure_cleanup_and_idempotency(frequency_context, monkeypa
     session.measurement_frequencies.append(create_measurement(session, 42))
     asyncio.run(manager.handle_machine_close())
     request = app.database.queue.get_nowait()
-    payload = json.loads(request.payload_json)
-    image_path = Path(payload["evidence_refs"][0])
+    image_path = Path(request.evidence_refs[0])
     original_write = app.database.write_record
     write_calls = []
 
@@ -167,7 +168,7 @@ def test_existing_image_is_never_deleted_on_failure(frequency_context, monkeypat
     session.measurement_frequencies.append(create_measurement(session, 42))
     asyncio.run(manager.handle_machine_close())
     request = app.database.queue.get_nowait()
-    image_path = Path(json.loads(request.payload_json)["evidence_refs"][0])
+    image_path = Path(request.evidence_refs[0])
     image_path.parent.mkdir(parents=True)
     image_path.write_bytes(b"existing")
     monkeypatch.setattr(app.database, "write_record", Mock(side_effect=OSError("写入失败")))
@@ -175,3 +176,41 @@ def test_existing_image_is_never_deleted_on_failure(frequency_context, monkeypat
         app.database.persist_measurement(request)
     assert image_path.read_bytes() == b"existing"
     app.database.queue.task_done()
+
+
+@pytest.mark.parametrize("field_name, changed_value", [
+    ("machine_id", "M02"),
+    ("start_time", "changed-start"),
+    ("finish_time", "changed-finish"),
+    ("ordered_lines", ("OTHER",)),
+    ("final_frequency_hz", 99.0),
+    ("measurement_frequencies", ()),
+    ("evidence_refs", ("other.bmp",)),
+])
+def test_repeated_session_rejects_changed_business_fields(
+    frequency_context,
+    field_name,
+    changed_value,
+):
+    """验证同一周期的任一业务字段变化都会拒绝重复提交。
+
+    Args:
+        frequency_context: 已准备 OCR 结果的应用、处理器和周期。
+        field_name: 被修改的业务字段名称。
+        changed_value: 与原始记录不同的字段内容。
+
+    Returns:
+        None  # 原记录保持不变，重复提交抛出内容冲突
+    """
+    # 完成周期并保存原始业务内容。
+    app, manager, session = frequency_context
+    session.measurement_frequencies.append(create_measurement(session, 42))
+    asyncio.run(manager.handle_machine_close())
+    request = app.database.queue.get_nowait()
+    app.database.write_record(request)
+    app.database.queue.task_done()
+    # 修改单个字段，确认冲突后原记录仍可幂等提交。
+    changed_request = replace(request, **{field_name: changed_value})
+    with pytest.raises(ValueError, match="同一 Session 的提交内容不一致"):
+        app.database.write_record(changed_request)
+    app.database.write_record(request)

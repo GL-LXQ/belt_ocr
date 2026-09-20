@@ -1,14 +1,17 @@
 """验证整轮采集交付、共享 OCR 调度和退出资源顺序。"""
 
 import asyncio
+import ctypes
 import threading
 import unittest
-from unittest.mock import AsyncMock, Mock
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
 
 import test_measurement_flow as flow_support
 from enums import EventType, OCRState, SessionState
 from models import MeasurementEvent
 from mvs_sdk import MvsError
+from fake_mvs import FakeCameraHandle
 
 
 class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -19,6 +22,116 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
     start_app = flow_support.MeasurementFlowTests.start_app
     wait_for_state = flow_support.MeasurementFlowTests.wait_for_state
     read_records = flow_support.MeasurementFlowTests.read_records
+
+    async def test_three_simultaneous_cameras_keep_image_contents_isolated(self):
+        """验证三机并发取帧、OCR 和落盘图片的内容及周期归属。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            None  # 三台相机的原始帧、OCR 图片和落盘图片均未混用
+        """
+        # 为三台相机设置不同灰度值，并同步第一帧读取线程。
+        app = await self.start_app(capture_window_ms=400)
+        capture_barrier = threading.Barrier(3)
+        pixel_values = {"M01": 32, "M02": 96, "M03": 160}
+        handle_pixels = {}
+        publishers = {}
+        for machine_id, manager in app.machine_managers.items():
+            handle_pixels[manager.camera.device.handle] = pixel_values[machine_id]
+            publisher = AsyncMock(wraps=manager.camera.publish_event)
+            manager.camera.publish_event = publisher
+            publishers[machine_id] = publisher
+        original_read = FakeCameraHandle.MV_CC_GetImageBuffer
+
+        def read_distinct_camera_image(handle, frame, timeout_ms):
+            """同步三机首帧读取并向各自 SDK 缓存写入独有像素。
+
+            Args:
+                handle: 当前相机的测试 SDK 句柄。
+                frame: 接收 SDK 缓存地址及元数据的对象。
+                timeout_ms: 单次读取等待毫秒数。
+
+            Returns:
+                0  # 成功返回独有像素，失败时返回原 SDK 状态码
+            """
+            # 等待三条采集线程同时进入首帧读取。
+            if handle.frame_number == 0:
+                capture_barrier.wait(timeout=3)
+            return_code = original_read(handle, frame, timeout_ms)
+            # 在正式封装复制缓存前写入相机专属像素。
+            if return_code == 0:
+                ctypes.memset(frame.pBufAddr, handle_pixels[handle], 4)
+            return return_code
+
+        # 并发启动三机，记录进入 OCR 的全部图片并等待处理成功。
+        frame_filter = Mock(wraps=app.text_recognizer.filter_qualified_frames)
+        app.text_recognizer.filter_qualified_frames = frame_filter
+        with patch.object(
+            FakeCameraHandle, "MV_CC_GetImageBuffer", read_distinct_camera_image
+        ):
+            await asyncio.gather(*(
+                app.handle_start(machine_id) for machine_id in app.machine_managers
+            ))
+            sessions = {
+                machine_id: manager.current_session
+                for machine_id, manager in app.machine_managers.items()
+            }
+            await self.wait_for_state(lambda: all(
+                session.ocr_state == OCRState.SUCCESS for session in sessions.values()
+            ))
+
+        # 核对整轮交付的机器、周期、序列号及每一帧的实际像素。
+        self.assertEqual(len({session.session_id for session in sessions.values()}), 3)
+        for machine_id, publisher in publishers.items():
+            publisher.assert_awaited_once()
+            event = publisher.call_args.args[0]
+            session = sessions[machine_id]
+            self.assertEqual(event.machine_id, machine_id)
+            self.assertEqual(event.session_id, session.session_id)
+            self.assertGreater(len(event.payload.frames), 1)
+            device = app.machine_managers[machine_id].camera.device
+            for frame in event.payload.frames:
+                self.assertEqual(frame.camera_serial, device.serial)
+                self.assertEqual(frame.data, bytes([pixel_values[machine_id]]) * 4)
+
+        # 检查 OCR 全部输入的周期身份和 BMP 像素内容。
+        self.assertEqual(frame_filter.call_count, 3)
+        sessions_by_id = {session.session_id: session for session in sessions.values()}
+        observed_sessions = set()
+        expected_images = {}
+        for invocation in frame_filter.call_args_list:
+            frames = invocation.args[0]
+            session = sessions_by_id[frames[0].session_id]
+            observed_sessions.add(session.session_id)
+            pixel_value = pixel_values[session.machine_id]
+            expected_pixels = (bytes([pixel_value]) * 6 + b"\0\0") * 2
+            for frame in frames:
+                self.assertEqual(frame.session_id, session.session_id)
+                self.assertEqual(frame.camera_id, session.camera_id)
+                self.assertEqual(frame.capture_id, session.capture_id)
+                pixel_offset = int.from_bytes(frame.image_data[10:14], "little")
+                self.assertEqual(frame.image_data[pixel_offset:], expected_pixels)
+            expected_images[session.machine_id] = frames[0].image_data
+        self.assertEqual(observed_sessions, set(sessions_by_id))
+
+        # 同时关闭三机，检查数据库图片引用和落盘字节的归属。
+        await asyncio.gather(*(
+            app.handle_close(machine_id) for machine_id in app.machine_managers
+        ))
+        await app.wait_until_idle(3)
+        records = self.read_records()
+        self.assertEqual(len(records), 3)
+        self.assertEqual({record["machine_id"] for record in records}, set(sessions))
+        for record in records:
+            session = sessions[record["machine_id"]]
+            self.assertEqual(record["session_id"], session.session_id)
+            self.assertEqual(len(record["evidence_refs"]), 1)
+            image_path = Path(record["evidence_refs"][0])
+            self.assertEqual(image_path.parent.name, session.session_id)
+            self.assertEqual(image_path.parent.parent.name, session.machine_id)
+            self.assertEqual(image_path.read_bytes(), expected_images[session.machine_id])
 
     async def test_capture_delivers_once_before_encoding(self):
         """验证整轮只交付一个事件且编码时已经停采。

@@ -125,25 +125,25 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
                 EventType.FREQUENCY_MEASURED, "M01", session.session_id, measurement,
             ))
         assert len(session.measurement_frequencies) == 3
-        assert session.frozen_payload is None
+        assert session.state != SessionState.WAITING_COMMIT_DB
 
         # CLOSE 返回时频率已结算，没有等待设备或另发封口事件。
         await manager.handle_machine_close()
         assert manager.frequency_adapter.active_session_id is None
         assert session.frequency_window_sealed
         assert session.final_frequency is session.measurement_frequencies[-1]
-        assert session.frozen_payload is not None
+        assert session.state == SessionState.WAITING_COMMIT_DB
 
     asyncio.run(receive_and_close())
 
-    # 重复写入同一请求，检查两个查询字段与完整冻结内容一致。
+    # 重复写入同一请求，检查频率明细与最终频率一致。
     request = app.database.queue.get_nowait()
     app.database.write_record(request)
     app.database.write_record(request)
     app.database.queue.task_done()
     with sqlite3.connect(app.configuration.database_path) as connection:
         rows = connection.execute(
-            "SELECT measurement_frequencies, final_frequency_hz, payload_json FROM measurements"
+            "SELECT measurement_frequencies, final_frequency_hz FROM measurements"
         ).fetchall()
     assert len(rows) == 1
     frequencies = json.loads(rows[0][0])
@@ -153,7 +153,6 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
         set(measurement) == {"session_id", "frequency_source_id", "value_hz"}
         for measurement in frequencies
     )
-    assert json.loads(rows[0][2])["measurement_frequencies"] == frequencies
 
 
 @pytest.mark.parametrize("outcome", ["empty", "failure", "interrupted"])
@@ -195,7 +194,6 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
 
     asyncio.run(receive_and_close())
     assert session.state == SessionState.FAILED
-    assert session.frozen_payload is None
     assert session.final_frequency is None
     assert len(session.measurement_frequencies) == (0 if outcome == "empty" else 1)
     assert app.database.queue.empty()

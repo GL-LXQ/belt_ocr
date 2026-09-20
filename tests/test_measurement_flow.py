@@ -14,7 +14,6 @@ from configuration import MachineConfiguration, MeasurementConfiguration
 from app import App
 from enums import OCRState
 from models import MeasurementEvent, OCRResult
-from database import DatabaseRequest
 from fake_mvs import FakeMvsSdk
 from fake_frequency import FakeFrequency
 
@@ -108,13 +107,38 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.fail(f"等待业务状态超时：{states}；工作任务：{workers}")
 
     def read_records(self) -> list[dict]:
-        """读取已经提交的完整结果。"""
+        """读取测量表业务字段并解码列表。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            list[dict]: 测量记录列表。
+            返回示例：
+                [{
+                    "session_id": "session-1",  # 周期编号
+                    "machine_id": "M01",  # 机器编号
+                    "start_time": "2026-09-20T00:00:00+00:00",  # 开始时间
+                    "finish_time": "2026-09-20T00:00:01+00:00",  # 结算时间
+                    "ordered_lines": ["MODEL"],  # 识别文字
+                    "final_frequency_hz": 42.0,  # 最终频率
+                    "evidence_refs": ["frame.bmp"],  # 图片路径
+                    "measurement_frequencies": [],  # 频率明细
+                }]
+        """
+        # 按列名读取测量记录。
         connection = sqlite3.connect(self.app.configuration.database_path)
+        connection.row_factory = sqlite3.Row
         with closing(connection):
             records = connection.execute(
-                "SELECT payload_json FROM measurements ORDER BY start_time"
+                "SELECT * FROM measurements ORDER BY start_time"
             ).fetchall()
-        return [json.loads(record[0]) for record in records]
+        # 解码各业务列表列。
+        measurements = [dict(record) for record in records]
+        for measurement in measurements:
+            for field_name in ("ordered_lines", "evidence_refs", "measurement_frequencies"):
+                measurement[field_name] = json.loads(measurement[field_name])
+        return measurements
 
 
     async def test_three_machines_save_independent_records(self):
@@ -132,6 +156,12 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             manager.current_session.ocr_state == OCRState.SUCCESS
             for manager in app.machine_managers.values()
         ))
+        # 检查每台机器的采集帧数。
+        for manager in app.machine_managers.values():
+            self.assertGreater(
+                manager.current_session.capture_summary["retained_frame_count"],
+                5,
+            )
         # OCR 完成时图片仍在内存，没有提前写入。
         self.assertEqual(self.read_records(), [])
         self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])
@@ -140,9 +170,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         records = self.read_records()
         self.assertEqual(len(records), 3)
         for record in records:
-            self.assertGreater(record["capture_summary"]["retained_frame_count"], 5)
             self.assertEqual(record["ordered_lines"], ["MODEL"])
-            self.assertEqual(record["line_evidence_refs"], [record["evidence_refs"]])
             self.assertTrue(all(Path(path).read_bytes().startswith(b"BM") for path in record["evidence_refs"]))
             self.assertTrue(all(
                 value["session_id"] == record["session_id"] for value in record["measurement_frequencies"]

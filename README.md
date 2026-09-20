@@ -1,5 +1,7 @@
 # 项目概述与进度
 
+三机图片隔离测试：`tests/test_mvs_session.py` 中的 `test_three_simultaneous_cameras_keep_image_contents_isolated` 使用三个 SDK 替身和线程屏障让三台相机同时进入首帧读取，各自生成不同像素的图片；测试沿 START、独立采集、共享串行 OCR、CLOSE、图片保存和 SQLite 提交的完整数据流，逐帧核对像素与周期身份，并检查最终图片文件和数据库引用，验证程序侧三机图片隔离。该测试不替代三台真实相机的现场联调。
+
 2026-09-20 取流顺序修正：START 创建周期后，相机先启动取流，再清空 SDK 缓存，随后在采集窗口内读取并复制全部帧；即使清缓存失败，已启动的取流也会在采集收尾时停止。采集结果交给 OCR 编码、筛帧、识别和终选，CLOSE 确定最后有效频率，结果完整后由存储队列先保存图片，再写入 SQLite。
 
 > 本文档是项目结构、数据流和进度的入口，内容依据 2026-09-19 的代码整理。
@@ -30,7 +32,7 @@ uv run python -X utf8 -m pytest -q
 3. **一次性交付**：CAPTURE_COMPLETED 携带原始帧和统计；设备采集失败在捕获处记录日志并抛出异常，由任务结束回调安排全局退出，不再生成失败采集结果。统计只包含采集耗时、接收帧数和保留帧数。
 4. **OCR**：每台机器最多一个识别任务，三台机器共用处理锁。`process_session_frames` 顺序完成编码 → `filter_qualified_frames` → `recognize_images` → `generate_final_text_and_images`。锁覆盖整轮处理，无批次队列和消费者。成功只发送一次 OCR_COMPLETED，普通识别失败发送 OCR_FAILED；SDK 编码异常在编码处记录日志，再沿后台任务传播并触发全局退出，不转换为普通识别失败。
 5. **关闭与结算**：CLOSE 停止本轮采集，封闭频率接收并选取最后一条有效读数；没有读数或周期中断则失败。关闭后当前周期继续占用本机，直到图片、数据库保存或失败清理全部完成，才接收下一轮。机器管理器不参与 OCR 中间结果整理。
-6. **提交**：正常关闭、OCR 成功和频率成功后，生成 `evidence_directory / machine_id / session_id / frame_id.bmp` 路径，冻结 JSON 和 SHA256，进入 WAITING_COMMIT_DB。存储线程先原子保存图片，再写数据库，完成后返回 COMMIT_SUCCEEDED 或 COMMIT_FAILED，不自动重试。
+6. **提交**：正常关闭、OCR 成功和频率成功后，生成 `evidence_directory / machine_id / session_id / frame_id.bmp` 路径，生成包含业务字段和选中图片的存储请求，进入 WAITING_COMMIT_DB。存储线程先原子保存图片，再写数据库，完成后返回 COMMIT_SUCCEEDED 或 COMMIT_FAILED，不自动重试。
 7. **失败与退出**：整轮 OCR 超时从 START 计时，包含采集、排队和处理。等待锁的任务取消后不执行模型；已开始的阻塞操作等线程实际结束后再释放锁，迟到结果丢弃。退出时关闭入口、排空事件、停止采集、收尾后台处理，最后关闭相机、SDK 和数据库。退出等待期限不能强制终止已经运行的线程。
 
 ### 1.4 两个黑盒与结果契约
@@ -45,7 +47,7 @@ uv run python -X utf8 -m pytest -q
 
 OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 frame_id 唯一的选中图片）和 `line_frame_ids`（与文字逐项对应的来源帧编号集合）。没有选中的中间图片不进入 Session，最终图片在提交时转交存储请求。
 
-数据库继续保留 `ordered_lines`、`evidence_refs`、频率明细等查询列，完整 `payload_json` 增加 `line_evidence_refs`，按文字顺序保存对应图片路径。此次不增加表列，不提供旧 OCR 接口兼容层。图片保存失败不写数据库；确认没有提交时只清理本次新建图片，已存在的图片不覆盖或删除；提交结果未知时保留图片并记录日志。文件与 SQLite 不构成跨资源原子事务，本次未增加崩溃恢复或孤立图片清理。
+数据库仅保存周期编号、机器编号、起止时间、`ordered_lines`、`evidence_refs`、最终频率和频率明细，不保存整包 JSON、内容哈希及文字与图片对应关系。同一周期重复提交时直接比较这些业务字段，相同则成功，不同则报错。OCR 内存结果仍保留来源帧关系，不写入数据库。图片保存失败不写数据库；确认没有提交时只清理本次新建图片，已存在的图片不覆盖或删除；提交结果未知时保留图片并记录日志。文件与 SQLite 不构成跨资源原子事务，本次未增加崩溃恢复或孤立图片清理。
 
 ### 1.5 模块职责
 
@@ -178,3 +180,9 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 本次频率时间精简：FrequencyMeasurement 仅保留 session_id、frequency_source_id 和 value_hz，删除 measured_at、received_at、measured_monotonic。START 建立周期后，有效频率按接收顺序进入本机事件队列并追加至明细列表，相同值也完整保留；CLOSE 封闭列表并选取最后一条，OCR 成功后由存储队列先保存图片再写入数据库。新入库明细不再包含读数时间，已有记录不改写，周期起止时间和通用事件时间保持不变。
 
 本次全量 pytest：101 通过、10 个既有失败；原先依赖读数时间的历史验收用例已改为验证旧周期读数隔离及无有效频率不入库，其余失败名单不变。频率测试同时核对重复值保留、接收顺序、最终读数和仅含三个字段的入库明细。
+
+### 2026-09-20 测量存储字段精简
+
+删除 measurements 表的 payload_json、payload_hash 以及周期中的整包 JSON 和哈希字段，不新增文字与图片对应关系列。START 创建周期后采集图片和频率，采集结果依次编码、筛帧、识别和终选；CLOSE 选取最后有效频率，结果完整后直接组装业务字段及选中图片的存储请求，由存储队列先保存图片，再幂等写入测量表，最后释放周期。运行库 abnormal_events 的 payload_json 继续用于异常审计。本地未发现 SQLite 库文件，本次只更新建表结构，未添加旧库迁移；已有旧 measurements 表的部署环境需先移除这两个旧列才能使用新写入逻辑。
+
+本次全量 pytest：110 通过、10 个既有失败，与修改前 103 通过、10 个失败相比无新增失败；新增 7 项业务字段冲突验证，原有图片保存、失败清理、三机隔离和重复提交测试继续通过。

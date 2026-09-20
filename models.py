@@ -84,6 +84,4 @@ class BeltSession:
     measurement_frequencies: list[FrequencyMeasurement] = field(default_factory=list)
     frequency_state: FrequencyState = FrequencyState.RUNNING
     final_frequency: FrequencyMeasurement | None = None
-    frozen_payload: str | None = None
-    payload_hash: str | None = None
     errors: list[str] = field(default_factory=list)

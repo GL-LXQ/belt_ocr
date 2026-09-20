@@ -81,8 +81,12 @@ def serialize_value(value):
 class DatabaseRequest:
     machine_id: str
     session_id: str
-    payload_json: str
-    payload_hash: str
+    start_time: str
+    finish_time: str
+    ordered_lines: tuple[str, ...]
+    final_frequency_hz: float
+    measurement_frequencies: tuple[dict, ...]
+    evidence_refs: tuple[str, ...]
     selected_frames: tuple[CapturedFrame, ...] = ()
 
 
@@ -192,9 +196,7 @@ class Database:
                     ordered_lines TEXT NOT NULL,
                     final_frequency_hz REAL,
                     measurement_frequencies TEXT NOT NULL DEFAULT '[]',
-                    evidence_refs TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    payload_hash TEXT NOT NULL
+                    evidence_refs TEXT NOT NULL
                 );
             """)
 
@@ -285,42 +287,42 @@ class Database:
         """在事务中幂等写入冻结记录及频率明细和最终值。
 
         Args:
-            request: 包含记录身份、冻结 JSON 和内容哈希的提交请求。
+            request: 包含记录身份、业务字段和选中图片的提交请求。
 
         Returns:
             None  # 记录已写入或已存在相同内容，冲突时抛出异常
         """
+        # 将列表字段编码为对应列的 JSON，整理本轮业务内容。
+        record_values = (
+            request.machine_id,
+            request.start_time,
+            request.finish_time,
+            json.dumps(request.ordered_lines, ensure_ascii=False),
+            request.final_frequency_hz,
+            json.dumps(request.evidence_refs, ensure_ascii=False),
+            json.dumps(request.measurement_frequencies, ensure_ascii=False, sort_keys=True),
+        )
         connection = sqlite3.connect(self.configuration.database_path, timeout=1)
         with closing(connection), connection:
-            # 检查同一 Session 已有记录是否与本次提交一致。
+            # 比较同一周期已保存的业务字段，拒绝内容冲突。
             connection.execute("BEGIN IMMEDIATE")
             existing_record = connection.execute(
-                "SELECT payload_hash, payload_json FROM measurements "
-                "WHERE session_id = ?",
+                "SELECT machine_id, start_time, finish_time, ordered_lines, "
+                "final_frequency_hz, evidence_refs, measurement_frequencies "
+                "FROM measurements WHERE session_id = ?",
                 (request.session_id,),
             ).fetchone()
             if existing_record is not None:
-                if existing_record != (request.payload_hash, request.payload_json):
+                if existing_record != record_values:
                     raise ValueError("同一 Session 的提交内容不一致。")
                 return
 
-            # 写入查询字段和完整冻结内容。
-            payload = json.loads(request.payload_json)
+            # 将本轮业务字段写入测量表。
             connection.execute(
-                "INSERT INTO measurements ("
-                "session_id, machine_id, start_time, finish_time, ordered_lines, "
-                "final_frequency_hz, evidence_refs, "
-                "payload_json, payload_hash, measurement_frequencies) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    request.session_id, request.machine_id, payload["start_time"],
-                    payload["finish_time"],
-                    json.dumps(payload["ordered_lines"], ensure_ascii=False),
-                    payload["final_frequency_hz"],
-                    json.dumps(payload["evidence_refs"], ensure_ascii=False),
-                    request.payload_json, request.payload_hash,
-                    json.dumps(payload["measurement_frequencies"], ensure_ascii=False),
-                ),
+                "INSERT INTO measurements (session_id, machine_id, start_time, "
+                "finish_time, ordered_lines, final_frequency_hz, evidence_refs, "
+                "measurement_frequencies) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (request.session_id, *record_values),
             )
 
     def persist_measurement(self, request: DatabaseRequest) -> None:
@@ -333,11 +335,10 @@ class Database:
             None  # 图片和测量记录保存成功，失败时抛出原始异常
         """
         # 读取冻结路径，记录本次创建的文件。
-        payload = json.loads(request.payload_json)
         created_paths = []
         database_attempted = False
         try:
-            for frame, evidence_ref in zip(request.selected_frames, payload["evidence_refs"]):
+            for frame, evidence_ref in zip(request.selected_frames, request.evidence_refs):
                 image_path = Path(evidence_ref)
                 if not image_path.exists():
                     created_paths.append(image_path)

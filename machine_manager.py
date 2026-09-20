@@ -1,8 +1,6 @@
 """串行处理一台机器的启动、关闭和后台结果。"""
 
 import asyncio
-import hashlib
-import json
 import logging
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -438,8 +436,6 @@ class MachineManager:
         if recognition_task is not None:
             recognition_task.cancel()
         session.ocr_result = None
-        session.frozen_payload = None
-        session.payload_hash = None
 
         # 取消处理期限，未关闭的失败周期继续等待真实 CLOSE。
         for event_type in tuple(self.deadline_tasks):
@@ -605,61 +601,32 @@ class MachineManager:
         final_frequency = session.final_frequency
         ocr_result = session.ocr_result
         # 按机器、周期和帧编号生成最终图片路径。
-        evidence_directory = self.configuration.evidence_directory / session.machine_id / session.session_id
-        image_paths = {
-            frame.frame_id: str(evidence_directory / f"{frame.frame_id}.bmp")
+        evidence_directory = (
+            self.configuration.evidence_directory / session.machine_id / session.session_id
+        )
+        evidence_refs = tuple(
+            str(evidence_directory / f"{frame.frame_id}.bmp")
             for frame in ocr_result.selected_frames
-        }
-        # 组装本轮身份、测量结果、采集统计和配置数据。
-        payload = {
-            "session_id": session.session_id,
-            "machine_id": session.machine_id,
-            "camera_id": session.camera_id,
-            "frequency_source_id": session.frequency_source_id,
-            "start_time": session.start_time,
-            "finish_time": session.finish_time,
-            "ordered_lines": list(ocr_result.ordered_lines),
-            "evidence_refs": list(image_paths.values()),
-            "line_evidence_refs": [
-                [image_paths[frame_id] for frame_id in frame_ids]
-                for frame_ids in ocr_result.line_frame_ids
-            ],
-            "final_frequency_hz": final_frequency.value_hz,
-            "measurement_frequencies": [
-                asdict(measurement)
-                for measurement in session.measurement_frequencies
-            ],
-            "capture_summary": session.capture_summary,
-            "configuration_version": self.configuration.configuration_version,
-        }
-
-        # 冻结提交内容并计算内容哈希。
-        session.frozen_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        session.payload_hash = hashlib.sha256(
-            session.frozen_payload.encode()
-        ).hexdigest()
-        # 撤销本轮剩余期限任务。
+        )
+        # 将本轮业务字段和选中图片交给存储请求。
+        request = DatabaseRequest(
+            machine_id=session.machine_id,
+            session_id=session.session_id,
+            start_time=session.start_time,
+            finish_time=session.finish_time,
+            ordered_lines=tuple(ocr_result.ordered_lines),
+            final_frequency_hz=final_frequency.value_hz,
+            measurement_frequencies=tuple(
+                asdict(measurement) for measurement in session.measurement_frequencies
+            ),
+            evidence_refs=evidence_refs,
+            selected_frames=ocr_result.selected_frames,
+        )
+        # 撤销剩余期限任务，并标记本轮等待入库。
         for task in self.deadline_tasks.values():
             task.cancel()
         self.deadline_tasks.clear()
-        # 提交本轮冻结记录。
-        await self.submit_frozen_record(session)
-
-    async def submit_frozen_record(self, session: BeltSession) -> None:
-        """提交本轮正常结果，提交异常或队列满时结束本轮任务。
-
-        Args:
-            session: 已冻结正常结果的测量档案。
-
-        Returns:
-            None  # 本轮等待数据库回调，或已标记失败并完成清理
-        """
-        # 标记等待入库，组装本轮冻结记录。
         session.state = SessionState.WAITING_COMMIT_DB
-        request = DatabaseRequest(
-            session.machine_id, session.session_id,
-            session.frozen_payload, session.payload_hash, session.ocr_result.selected_frames,
-        )
 
         # 将最终图片所有权交给提交请求，Session 不再保留图片。
         session.ocr_result = None

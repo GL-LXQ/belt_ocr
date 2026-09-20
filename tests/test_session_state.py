@@ -1,7 +1,6 @@
 """验证 Session 四态、机器启停隔离和失败不入库。"""
 
 import asyncio
-import json
 import sqlite3
 import threading
 import unittest
@@ -73,23 +72,13 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
 
     asyncio.run(process_measurement())
     with sqlite3.connect(app.configuration.database_path) as connection:
-        records = connection.execute(
-            "SELECT payload_json FROM measurements"
-        ).fetchall()
-        assert len(records) == 1
-        payload = json.loads(records[0][0])
-        assert "close_time" not in payload
-        assert "selected_frames" not in payload
-        # 检查入库内容已移除运行批次和配置快照，保留配置版本。
-        assert "process_epoch" not in payload
-        assert "configuration_snapshot" not in payload
-        assert "software_version" not in payload
-        assert "outcome" not in payload
-        assert "is_simulated" not in payload
-        assert "model_version" not in payload
-        assert payload["configuration_version"] == app.configuration.configuration_version
+        records = connection.execute("SELECT session_id FROM measurements").fetchall()
+        assert records == [(session.session_id,)]
+        # 测量表只保存业务列，不保存整包内容、哈希或文字图片对应关系。
         columns = connection.execute("PRAGMA table_info(measurements)").fetchall()
-        assert "close_time" not in {column[1] for column in columns}
+        assert not {
+            "payload_json", "payload_hash", "line_evidence_refs", "close_time",
+        } & {column[1] for column in columns}
         assert "outcome" not in {column[1] for column in columns}
         assert "is_simulated" not in {column[1] for column in columns}
 
@@ -219,10 +208,9 @@ def test_database_failure_is_terminal_without_retry(frequency_context, failure_m
             app.database.queue.get_nowait()
             app.database.queue.task_done()
 
-        # 失败后再次检查不重新入队，也不保留冻结数据供补交。
+        # 失败后再次检查不重新入队。
         assert session.state == SessionState.FAILED
         assert manager.current_session is None
-        assert session.frozen_payload is None
         await manager.try_finalize(session)
         assert app.database.queue.empty()
 
