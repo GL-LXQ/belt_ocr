@@ -3,6 +3,20 @@ QWidget { font-family: "Microsoft YaHei UI", "Segoe UI"; font-size: 13px; color:
 QWidget#appRoot, QWidget#pageContainer { background: @background; }
 QWidget#titleBar { background: @title; border: none; }
 QWidget#sideBar { background: @sidebar; border: none; }
+/* 为普通窗口设置 10px 外轮廓圆角，最大化时恢复直角。 */
+QWidget#appRoot { border-radius: 10px; }
+QWidget#titleBar { border-top-left-radius: 10px; border-top-right-radius: 10px; }
+QWidget#sideBar { border-bottom-left-radius: 10px; }
+QWidget#pageContainer { border-bottom-right-radius: 10px; }
+QWidget#appRoot[windowMaximized="true"],
+QWidget#appRoot[windowMaximized="true"] QWidget#titleBar,
+QWidget#appRoot[windowMaximized="true"] QWidget#sideBar,
+QWidget#appRoot[windowMaximized="true"] QWidget#pageContainer {
+    border-top-left-radius: 0px;
+    border-top-right-radius: 0px;
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
+}
 QLabel { background: transparent; border: none; }
 /* 设置标题栏的品牌、时钟和状态文字。 */
 QLabel#brand { color: @light; font-size: 15px; font-weight: 600; }

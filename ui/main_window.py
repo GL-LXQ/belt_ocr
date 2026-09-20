@@ -223,6 +223,7 @@ class MainWindow(QMainWindow):
         """
         # 设置无边框窗口、窗口标题和尺寸约束。
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setWindowTitle("BeltVision | 实时监测")
         self.setWindowIcon(create_icon("logo", "white"))
         self.resize(1600, 900)
@@ -576,14 +577,14 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(stylesheet)
 
     def changeEvent(self, event):
-        """在窗口状态变化后同步最大化按钮。
+        """在窗口状态变化后同步最大化按钮和外轮廓圆角。
 
         Args:
             event: 窗口状态变化事件。
 
         Returns:
             返回示例：
-                None  # 更新按钮图标和提示
+                None  # 更新按钮图标、提示和窗口圆角
         """
         # 根据窗口状态同步最大化按钮的图标、提示和无障碍名称。
         if event.type() == QEvent.Type.WindowStateChange:
@@ -592,6 +593,11 @@ class MainWindow(QMainWindow):
             title = "还原窗口" if self.isMaximized() else "最大化"
             button.setToolTip(title)
             button.setAccessibleName(title)
+
+            # 最大化时移除外轮廓圆角，还原时恢复圆角。
+            root = self.centralWidget()
+            root.setProperty("windowMaximized", self.isMaximized())
+            self.apply_style()
         super().changeEvent(event)
 
     def eventFilter(self, watched, event):
