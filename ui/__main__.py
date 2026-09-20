@@ -1,9 +1,15 @@
 """通过 python -m ui 启动桌面预览。"""
 
+import json
+import sqlite3
 import sys
+from contextlib import closing
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
+from src.machine_service import MachineService
+from src.repo.machine_repo import MachineRepo
 from ui.main_window import MainWindow
 
 
@@ -22,8 +28,19 @@ def run_desktop_preview() -> int:
     application.setApplicationName("BeltVision")
     application.setApplicationVersion("1.0.0")
 
+    # 从项目配置读取业务库路径并初始化设备表。
+    configuration_path = Path(__file__).resolve().parents[1] / "config.example.json"
+    settings = json.loads(configuration_path.read_text(encoding="utf-8"))
+    database_path = configuration_path.parent / settings["database_path"]
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        MachineRepo.create_table(connection)
+    # 创建数据访问对象和设备业务服务。
+    machine_repo = MachineRepo(database_path)
+    machine_service = MachineService(machine_repo)
+
     # 创建并显示桌面主窗口。
-    window = MainWindow()
+    window = MainWindow(machine_service)
     window.show()
 
     # 运行事件循环，等待窗口关闭。

@@ -1,6 +1,8 @@
 """桌面主窗口的导航、状态和窗口行为测试。"""
 
 import os
+import sqlite3
+from contextlib import closing
 
 # 默认使用离屏平台运行界面测试。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -10,6 +12,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
+from src.machine_service import MachineService
+from src.repo.machine_repo import MachineRepo
 from ui.main_window import MainWindow, PAGES
 from ui.demo_data import LOG_ROWS
 
@@ -29,11 +33,12 @@ def application():
 
 
 @pytest.fixture
-def window(application):
+def window(application, tmp_path):
     """创建窗口并在测试后释放。
 
     Args:
         application: 界面应用实例。
+        tmp_path: 临时数据库目录。
 
     Yields:
         MainWindow()  # 测试期间可操作的主窗口
@@ -43,7 +48,10 @@ def window(application):
             None  # 测试结束后释放窗口，生成器不返回额外结果
     """
     # 显示测试窗口并处理初始化事件。
-    main_window = MainWindow()
+    database_path = tmp_path / "machines.sqlite3"
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        MachineRepo.create_table(connection)
+    main_window = MainWindow(MachineService(MachineRepo(database_path)))
     main_window.show()
     application.processEvents()
     yield main_window
@@ -240,123 +248,158 @@ def test_realtime_log_scrolling_and_small_window_access(window, application):
     assert page.scroll_area.viewport().rect().intersects(page.log_table.rect().translated(log_position))
 
 
-def test_device_edit_validation_cancel_and_page_reuse(window, application, monkeypatch):
-    """验证设备编辑、必填校验、取消和页面复用。
+def test_device_create_persists_and_reloads(window, application, monkeypatch):
+    """验证新增持久化、必填校验、取消和重载。
 
     Args:
-        window: 主窗口。
+        window: 测试主窗口。
         application: 界面应用实例。
         monkeypatch: 消息框替换工具。
 
     Returns:
         返回示例：
-            None  # 编辑与取消行为断言通过
+            None  # 新增设备在新页面中可读取
     """
     from PySide6.QtWidgets import QMessageBox, QPushButton
+    from ui.pages.devices_page import DevicesPage
 
-    # 打开设备页并检查默认记录与启用状态。
+    # 在空列表中打开表单并验证必填提示。
     window.switch_page("devices")
     page = window.page_stack.currentWidget()
-    assert page.table.rowCount() == 3
-    assert page.editor.isHidden()
-    position = page.table.visualItemRect(page.table.item(2, 1)).center()
-    QTest.mouseClick(page.table.viewport(), Qt.MouseButton.LeftButton, pos=position)
-    assert page.table.currentRow() == 2
-    assert page.editor.isHidden()
-    page.findChild(QPushButton, "editDevice_3").click()
-    assert page.editor.isVisible()
-    assert page.editor.isModal()
-    assert page.editor.windowTitle() == "编辑设备"
-    assert not page.enabled_checkbox.isChecked()
-
-    # 保存编辑内容并验证导航切换保留页面内存。
-    page.field_inputs["machine_name"].setText("测试设备")
-    page.enabled_checkbox.setChecked(True)
-    page.save_button.click()
-    assert page.devices[2]["machine_name"] == "测试设备"
-    assert page.devices[2]["enabled"] is True
-    assert page.editor.isHidden()
-    window.switch_page("realtime")
-    window.switch_page("devices")
-    assert window.page_stack.currentWidget() is page
-
-    # 缺少必填字段时保留原记录，并展示提示。
-    page.show_device(2)
+    assert page.table.rowCount() == 0
     warnings = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *arguments: warnings.append(arguments))
-    page.field_inputs["camera_serial"].setText("  ")
+    page.create_button.click()
     page.save_button.click()
-    assert warnings
+    assert warnings[-1][1] == "请填写必填信息"
     assert page.editor.isVisible()
-    assert page.devices[2]["camera_serial"] == "MV-CA013458"
 
-    # 取消未保存内容后重新打开，恢复内存中的记录。
-    page.cancel_button.click()
+    # 保存输入并验证数据库编号、默认时间和选中行。
+    for field, value in (
+        ("machine_name", " 新设备 "),
+        ("camera_serial", " CAM001 "),
+        ("frequency_meter_serial", " FREQ001 "),
+    ):
+        page.field_inputs[field].setText(value)
+    page.enabled_checkbox.setChecked(False)
+    page.save_button.click()
     assert page.editor.isHidden()
-    page.show_device(2)
-    assert page.field_inputs["camera_serial"].text() == "MV-CA013458"
-    page.field_inputs["machine_name"].setText("未保存修改")
-    page.editor.close()
-    page.show_device(2)
-    assert page.field_inputs["machine_name"].text() == "测试设备"
+    assert page.table.currentRow() == 0
+    assert page.devices[0]["machine_name"] == "新设备"
+    assert page.devices[0]["enabled"] is False
+    assert page.devices[0]["remark"] == ""
+    assert page.devices[0]["created_at"] == page.devices[0]["updated_at"]
+    assert not page.findChild(QPushButton, "editDevice_1").isEnabled()
+    assert not page.findChild(QPushButton, "deleteDevice_1").isEnabled()
+
+    # 新页面读取同一数据库，并验证取消不新增记录。
+    fresh_page = DevicesPage(MachineService(MachineRepo(page.machine_service.machine_repo.database_path)))
+    assert fresh_page.devices == page.devices
+    fresh_page.deleteLater()
+    page.create_button.click()
+    page.field_inputs["machine_name"].setText("未保存设备")
+    page.cancel_button.click()
+    page.create_button.click()
+    assert page.field_inputs["machine_name"].text() == ""
     QTest.keyClick(page.editor, Qt.Key.Key_Escape)
     assert page.editor.isHidden()
+    assert len(page.machine_service.machine_repo.list_all()) == 1
     application.processEvents()
 
 
-def test_device_create_delete_and_restart(window, monkeypatch):
-    """验证新增、删除确认、空列表及重新创建页面恢复演示数据。
+@pytest.mark.parametrize("duplicate_field, expected_message", [
+    ("machine_name", "机器名称已存在，请修改。"),
+    ("camera_serial", "相机序列号已被其他设备使用。"),
+    ("frequency_meter_serial", "频率仪序列号已被其他设备使用。"),
+])
+def test_device_duplicate_keeps_form(window, monkeypatch, duplicate_field, expected_message):
+    """验证三个字段分别拒绝重复且保留表单。
 
     Args:
-        window: 主窗口。
-        monkeypatch: 确认对话框替换工具。
+        window: 测试主窗口。
+        monkeypatch: 消息框替换工具。
+        duplicate_field: 重复字段名。
+        expected_message: 对应中文提示。
 
     Returns:
         返回示例：
-            None  # 设备内存操作与初始数据隔离断言通过
+            None  # 重复记录未写入且表单内容保留
     """
     from PySide6.QtWidgets import QMessageBox
-    from ui.pages.devices_page import DevicesPage
 
-    # 新增设备并核对编号和表格结果。
-    window.switch_page("devices")
-    page = window.page_stack.currentWidget()
+    # 写入已有设备并准备只重复一个字段的新记录。
+    page = window.page_stack.widget(4)
+    original = {
+        "machine_name": "原设备",
+        "camera_serial": "CAM001",
+        "frequency_meter_serial": "FREQ001",
+    }
+    page.machine_service.machine_repo.insert(**original)
     page.create_button.click()
-    for field, value in (
-        ("machine_name", "4号皮带机"),
-        ("camera_serial", "MV-CA013459"),
-        ("frequency_meter_serial", "FM-1004"),
-    ):
-        page.field_inputs[field].setText(value)
+    for field, value in original.items():
+        page.field_inputs[field].setText(value if field == duplicate_field else value + "新")
+
+    # 提交重复记录并验证中文提示、表单和数据库内容。
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *arguments: warnings.append(arguments))
     page.save_button.click()
-    assert page.editor.isHidden()
-    assert page.devices[-1]["id"] == 4
-    assert page.table.rowCount() == 4
-    assert page.devices[-1]["created_at"] == page.devices[-1]["updated_at"]
-
-    # 取消删除时保留记录，确认后可删除到空列表。
-    monkeypatch.setattr(QMessageBox, "exec", lambda dialog: None)
-    monkeypatch.setattr(QMessageBox, "clickedButton", lambda dialog: dialog.defaultButton())
-    page.delete_device(3)
-    assert len(page.devices) == 4
-    monkeypatch.setattr(
-        QMessageBox,
-        "clickedButton",
-        lambda dialog: next(button for button in dialog.buttons() if button.text() == "删除"),
-    )
-    for row in reversed(range(4)):
-        page.delete_device(row)
-    assert page.table.rowCount() == 0
-    assert page.editor.isHidden()
-    page.create_button.click()
+    assert warnings[-1][2] == expected_message
     assert page.editor.isVisible()
-    assert page.field_inputs["machine_name"].text() == ""
+    assert page.field_inputs[duplicate_field].text() == original[duplicate_field]
+    assert len(page.machine_service.machine_repo.list_all()) == 1
+    page.editor.reject()
 
-    # 新页面读取原始演示记录，不继承已删除的数据。
-    fresh_page = DevicesPage()
-    assert len(fresh_page.devices) == 3
-    assert fresh_page.devices[0]["machine_name"] == "1号皮带机"
-    fresh_page.deleteLater()
+
+@pytest.mark.parametrize("failed_operation", ["insert", "list_all"])
+def test_device_database_failure_message(window, monkeypatch, failed_operation):
+    """验证插入失败和提交后刷新失败使用不同提示。
+
+    Args:
+        window: 测试主窗口。
+        monkeypatch: 数据库和消息框替换工具。
+        failed_operation: 模拟失败的数据库方法。
+
+    Returns:
+        返回示例：
+            None  # 提示和表单状态与提交结果一致
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    # 填写完整表单并替换指定数据库操作。
+    page = window.page_stack.widget(4)
+    page.create_button.click()
+    for field in page.field_inputs:
+        page.field_inputs[field].setText(field)
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *arguments: warnings.append(arguments))
+
+    def fail_database_operation(*arguments, **keywords):
+        """模拟数据库访问失败。
+
+        Args:
+            arguments: 数据库方法的位置参数。
+            keywords: 数据库方法的关键字参数。
+
+        Returns:
+            返回示例：
+                None  # 不返回结果，抛出数据库异常
+        """
+        raise sqlite3.OperationalError("测试数据库不可用")
+
+    monkeypatch.setattr(page.machine_service.machine_repo, failed_operation, fail_database_operation)
+    page.save_button.click()
+
+    # 用新 Repo 核对实际提交结果与弹窗状态。
+    records = MachineRepo(page.machine_service.machine_repo.database_path).list_all()
+    if failed_operation == "insert":
+        assert warnings[-1][1] == "保存失败"
+        assert page.editor.isVisible()
+        assert records == []
+        page.editor.reject()
+    else:
+        assert "设备已保存" in warnings[-1][2]
+        assert page.editor.isHidden()
+        assert len(records) == 1
 
 
 def test_device_layout_keeps_editor_actions_accessible(window, application):

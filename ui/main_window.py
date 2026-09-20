@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.machine_service import MachineService
 from ui.theme import COLORS, create_icon
 from ui.pages.realtime_page import RealtimePage
 from ui.pages.devices_page import DevicesPage
@@ -188,11 +189,11 @@ class TitleBar(QWidget):
 class MainWindow(QMainWindow):
     """提供六个页面的统一桌面容器。"""
 
-    def __init__(self):
+    def __init__(self, machine_service: MachineService):
         """依次初始化窗口、页面、导航、时钟和样式。
 
         Args:
-            无。
+            machine_service: 设备业务服务。
 
         Returns:
             返回示例：
@@ -200,6 +201,7 @@ class MainWindow(QMainWindow):
         """
         # 初始化当前页面和导航按钮集合。
         super().__init__()
+        self.machine_service = machine_service
         self.nav_buttons = {}
         self.current_page_key = "realtime"
 
@@ -393,7 +395,7 @@ class MainWindow(QMainWindow):
             if page_key == "realtime":
                 stack.addWidget(RealtimePage())
             elif page_key == "devices":
-                stack.addWidget(DevicesPage())
+                stack.addWidget(DevicesPage(self.machine_service))
             else:
                 stack.addWidget(self.create_placeholder_page(page_key))
         return stack

@@ -1,6 +1,6 @@
-"""设备管理演示页面。"""
+"""设备管理页面。"""
 
-from PySide6.QtCore import QDateTime, QSize, Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -20,28 +20,28 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui.demo_data import DEVICES
+from src.machine_service import MachineService, MachineServiceError
 from ui.theme import create_icon
 
 
 class DevicesPage(QWidget):
-    """展示设备列表与新增、编辑共用的弹窗。"""
+    """展示设备列表与新增设备弹窗。"""
 
-    def __init__(self):
-        """初始化演示数据、列表、表单和页面展示。
+    def __init__(self, machine_service: MachineService):
+        """读取设备数据并初始化列表、表单和页面展示。
 
         Args:
-            无。
+            machine_service: 设备业务服务。
 
         Returns:
             返回示例：
                 None  # 完成设备页面初始化
         """
-        # 复制演示数据并创建页面布局。
+        # 读取数据库设备记录并创建页面布局。
         super().__init__()
         self.setObjectName("devices")
-        self.devices = [dict(device) for device in DEVICES]
-        self.next_device_id = max(device["id"] for device in self.devices) + 1
+        self.machine_service = machine_service
+        self.devices = self.machine_service.list_machines()
         self.field_inputs = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
@@ -107,13 +107,12 @@ class DevicesPage(QWidget):
 
         layout.addWidget(content, 1)
 
-        # 创建新增和编辑共用的标准模态弹窗。
+        # 创建新增设备的标准模态弹窗。
         self.editor = QDialog(self)
         self.editor.setObjectName("deviceEditor")
         self.editor.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
         self.editor.resize(440, 590)
         self.editor.setMinimumSize(400, 540)
-        self.editing_row = None
         self.build_device_editor()
         self.populate_devices()
 
@@ -123,7 +122,7 @@ class DevicesPage(QWidget):
         self.cancel_button.clicked.connect(self.editor.reject)
 
     def build_device_editor(self):
-        """创建带滚动内容和固定操作区的设备表单。
+        """创建带滚动内容和固定操作区的新增设备表单。
 
         Args:
             无。
@@ -255,43 +254,14 @@ class DevicesPage(QWidget):
                 button.setProperty("buttonRole", "text")
                 button.setIcon(create_icon(action, "muted"))
                 button.setObjectName(f"{action}Device_{device['id']}")
-                if action == "edit":
-                    button.clicked.connect(
-                        lambda checked=False, selected_row=row: self.show_device(selected_row)
-                    )
-                else:
-                    button.clicked.connect(
-                        lambda checked=False, selected_row=row: self.delete_device(selected_row)
-                    )
+                # 编辑和删除入口暂未接入数据库。
+                button.setEnabled(False)
+                button.setToolTip("暂未接入")
                 actions_layout.addWidget(button)
             self.table.setCellWidget(row, 7, actions)
 
-    def show_device(self, row: int):
-        """将选中设备信息填入共用表单。
-
-        Args:
-            row: 设备在内存列表中的行号。
-
-        Returns:
-            返回示例：
-                None  # 展示设备信息
-        """
-        # 将设备字段与启用状态填入表单。
-        device = self.devices[row]
-        self.editing_row = row
-        for field, field_input in self.field_inputs.items():
-            field_input.setText(device[field])
-        self.enabled_checkbox.setChecked(device["enabled"])
-        self.remark_input.setPlainText(device["remark"])
-
-        # 选中目标设备并打开编辑弹窗。
-        self.editor.setWindowTitle("编辑设备")
-        self.table.selectRow(row)
-        self.editor.open()
-        self.field_inputs["machine_name"].setFocus()
-
     def create_device(self):
-        """清空共用表单并进入新增设备状态。
+        """清空新增表单并进入新增设备状态。
 
         Args:
             无。
@@ -301,7 +271,6 @@ class DevicesPage(QWidget):
                 None  # 展示未保存的新设备表单
         """
         # 清空当前设备选择和输入内容。
-        self.editing_row = None
         self.table.clearSelection()
         for field_input in self.field_inputs.values():
             field_input.clear()
@@ -314,14 +283,14 @@ class DevicesPage(QWidget):
         self.field_inputs["machine_name"].setFocus()
 
     def save_device(self):
-        """校验必填字段并将设备信息保存到当前页面内存。
+        """校验表单、写入新设备并刷新列表。
 
         Args:
             无。
 
         Returns:
             返回示例：
-                None  # 保存设备或提示缺少必填字段
+                None  # 保存设备并刷新列表，或提示输入与数据库错误
         """
         # 读取并校验三个必填输入。
         values = {}
@@ -333,49 +302,32 @@ class DevicesPage(QWidget):
                 return
             values[field] = value
 
-        # 合并启用状态、备注和当前演示时间。
+        # 读取启用状态和备注，并提交设备业务服务。
         values["enabled"] = self.enabled_checkbox.isChecked()
-        values["remark"] = self.remark_input.toPlainText().strip()
-        current_time = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
-        values["updated_at"] = current_time
-        if self.editing_row is None:
-            values["id"] = self.next_device_id
-            values["created_at"] = current_time
-            self.next_device_id += 1
-            self.devices.append(values)
-            self.editing_row = len(self.devices) - 1
-        else:
-            self.devices[self.editing_row].update(values)
-
-        # 刷新列表、选中已保存的设备并关闭弹窗。
-        self.populate_devices()
-        self.table.selectRow(self.editing_row)
-        self.editor.accept()
-
-    def delete_device(self, row: int):
-        """确认后删除内存设备并同步列表与表单。
-
-        Args:
-            row: 要删除设备的列表行号。
-
-        Returns:
-            返回示例：
-                None  # 删除设备或保留原有数据
-        """
-        # 显示设备名称并确认本地删除。
-        device = self.devices[row]
-        confirmation = QMessageBox(self)
-        confirmation.setWindowTitle("删除设备")
-        confirmation.setIcon(QMessageBox.Icon.Question)
-        confirmation.setText(f"确定删除“{device['machine_name']}”吗？")
-        confirmation.setInformativeText("本次操作仅修改当前演示数据。")
-        delete_button = confirmation.addButton("删除", QMessageBox.ButtonRole.DestructiveRole)
-        cancel_button = confirmation.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        confirmation.setDefaultButton(cancel_button)
-        confirmation.exec()
-        if confirmation.clickedButton() is not delete_button:
+        values["remark"] = self.remark_input.toPlainText().strip() or None
+        try:
+            result = self.machine_service.create_machine(**values)
+        except MachineServiceError as error:
+            QMessageBox.warning(self.editor, "保存失败", str(error))
             return
 
-        # 删除目标记录并刷新列表。
-        del self.devices[row]
+        # 重复时展示返回提示并将焦点移到对应字段。
+        if not result["success"]:
+            QMessageBox.warning(self.editor, "设备信息重复", result["message"])
+            self.field_inputs[result["field"]].setFocus()
+            return
+
+        # 插入成功后关闭表单，并重新读取数据库记录。
+        self.editor.accept()
+        try:
+            self.devices = self.machine_service.list_machines()
+        except MachineServiceError as error:
+            QMessageBox.warning(self, "列表刷新失败", f"设备已保存，列表刷新失败：{error}")
+            return
+
+        # 刷新列表并按数据库编号选中新设备。
         self.populate_devices()
+        for row, device in enumerate(self.devices):
+            if device["id"] == result["device_id"]:
+                self.table.selectRow(row)
+                break
