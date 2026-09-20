@@ -56,7 +56,6 @@ class EventType(str, Enum):
     OCR_FAILED = "OCRFailed"  # 整轮文字识别失败
     OCR_TIMEOUT = "OCRTimeout"  # 文字识别超时
     FREQUENCY_MEASURED = "FrequencyMeasured"  # 收到有效频率测量
-    FREQUENCY_FAILED = "FrequencyFailed"  # 频率采集失败
     CYCLE_TIMEOUT = "CycleTimeout"  # 测量周期超时
     COMMIT_SUCCEEDED = "CommitSucceeded"  # 数据库提交成功
     COMMIT_FAILED = "CommitFailed"  # 数据库提交失败xian

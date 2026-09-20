@@ -330,8 +330,7 @@ class MachineManager:
             )
             return
 
-        # 分派采集结果，保留各事件是否继续结算的处理决定。
-        should_finalize = True
+        # 分派采集、识别和频率事件。
         match event.event_type:
             case EventType.CAPTURE_COMPLETED:
                 # 仅接收等待阶段的采集结果，保留整轮统计。
@@ -362,22 +361,12 @@ class MachineManager:
                 session.ocr_state = OCRState.TIMED_OUT if event.event_type == EventType.OCR_TIMEOUT else OCRState.FAILED
                 session.errors.append(event.payload or "OCR_TIMEOUT")
             case EventType.FREQUENCY_MEASURED:
-                should_finalize = await self.handle_frequency_measured(session, event)
-            case EventType.FREQUENCY_FAILED:
-                # 登记本轮频率故障，保留明细但不确认最终频率。
-                if session.frequency_window_sealed:
-                    return
-                session.frequency_state = FrequencyState.FAILED
-                session.final_frequency = None
-                session.errors.append(event.payload)
+                await self.handle_frequency_measured(session, event)
+                return
             case _:
                 await run_blocking_operation(
                     self.database.save_abnormal_event, "UNKNOWN_EVENT_TYPE", event,
                 )
-
-        # 已忽略的事件不继续处理本轮结果。
-        if not should_finalize:
-            return
 
         # 统一处理本轮失败或满足条件后的提交。
         await self.try_finalize(session)
@@ -541,7 +530,7 @@ class MachineManager:
                 logger.exception("OCR 结果交付失败 session_id=%s", session.session_id)
                 raise
 
-    async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> bool:
+    async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> None:
         """按接收顺序保存黑盒交付的新有效测量。
 
         Args:
@@ -549,21 +538,17 @@ class MachineManager:
             event: 包含事件类型、机器编号、测量编号和数据的业务事件。
 
         Returns:
-            bool: 是否继续执行本轮完成检查。
-            返回示例：
-                True  # 继续检查本轮能否结算
-                False  # 忽略当前事件，不执行完成检查
+            None  # 已追加有效频率，或记录迟到频率审计后忽略事件
         """
         # 终态后到达的测量只记录异常信息，不修改已封闭列表。
         if session.frequency_window_sealed:
             await run_blocking_operation(
                 self.database.save_abnormal_event, "LATE_FREQUENCY", event,
             )
-            return False
+            return
 
         # 按机器事件队列的接收顺序追加明细，不重复检查黑盒保证的数据约束。
         session.measurement_frequencies.append(event.payload)
-        return True
 
     async def try_finalize(self, session: BeltSession) -> None:
         """检查本轮结果，失败时清理，正常结果冻结后提交数据库。

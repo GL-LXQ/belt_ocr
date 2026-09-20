@@ -155,13 +155,13 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
     )
 
 
-@pytest.mark.parametrize("outcome", ["empty", "failure", "interrupted"])
+@pytest.mark.parametrize("outcome", ["empty", "interrupted"])
 def test_close_preserves_partial_data_without_final_value(frequency_context, outcome):
-    """验证无读数、频率失败及中断时保留明细但不确认最终频率。
+    """验证无读数及中断时保留明细但不确认最终频率。
 
     Args:
         frequency_context: 应用、处理器和周期。
-        outcome: 无测量、读取失败或周期中断场景。
+        outcome: 无测量或周期中断场景。
 
     Returns:
         None  # 异常周期已清理且未入库，最终频率为空
@@ -177,15 +177,11 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
         Returns:
             None  # 本轮频率已封闭，失败周期未提交数据库
         """
-        # 接收部分有效数据，读取失败事件不覆盖已有明细。
+        # 中断场景先接收部分有效数据。
         if outcome != "empty":
             await manager.handle_event(MeasurementEvent(
                 EventType.FREQUENCY_MEASURED, "M01", session.session_id,
                 create_measurement(session, 42.0),
-            ))
-        if outcome == "failure":
-            await manager.handle_event(MeasurementEvent(
-                EventType.FREQUENCY_FAILED, "M01", session.session_id, "FREQUENCY_RECEIVE_FAILED",
             ))
 
         # 正常关闭或明确中断均立即完成频率结算。
