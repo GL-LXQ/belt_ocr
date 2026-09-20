@@ -3,7 +3,6 @@
 from enums import EventType
 import asyncio
 import math
-from datetime import datetime, timezone
 from itertools import cycle
 
 from configuration import MachineConfiguration, MeasurementConfiguration
@@ -76,14 +75,10 @@ class FrequencyAdapter:
             session_id = self.active_session_id
             if session_id is None:
                 continue
-            received_at = datetime.now(timezone.utc).isoformat()
             measurement = FrequencyMeasurement(
                 session_id=session_id,
                 frequency_source_id=self.machine.frequency_source_id,
                 value_hz=value_hz,
-                measured_at=received_at,
-                measured_monotonic=asyncio.get_running_loop().time(),
-                received_at=received_at,
             )
 
             # 顺序等待测量事件入队，不安排延迟交付任务。

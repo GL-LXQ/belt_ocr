@@ -53,7 +53,7 @@ def test_cancelled_storage_failure_stops_before_next_request(frequency_context, 
             None  # 消费者已取消，第二条请求仍在队列中
         """
         # 通过正式结算流程准备请求，并追加下一条待处理请求。
-        session.measurement_frequencies.append(create_measurement(session, 12, 42))
+        session.measurement_frequencies.append(create_measurement(session, 42))
         await manager.handle_machine_close()
         app.database.queue.put_nowait(database.DatabaseRequest("M01", "next-session", "{}", "hash"))
         publisher = AsyncMock()
@@ -103,7 +103,7 @@ def test_persistence_failure_cleanup_and_idempotency(frequency_context, monkeypa
         None  # 图片、记录和幂等写入结果已核对
     """
     app, manager, session = frequency_context
-    session.measurement_frequencies.append(create_measurement(session, 12, 42))
+    session.measurement_frequencies.append(create_measurement(session, 42))
     asyncio.run(manager.handle_machine_close())
     request = app.database.queue.get_nowait()
     payload = json.loads(request.payload_json)
@@ -164,7 +164,7 @@ def test_existing_image_is_never_deleted_on_failure(frequency_context, monkeypat
         None  # 原有文件保留原始内容
     """
     app, manager, session = frequency_context
-    session.measurement_frequencies.append(create_measurement(session, 12, 42))
+    session.measurement_frequencies.append(create_measurement(session, 42))
     asyncio.run(manager.handle_machine_close())
     request = app.database.queue.get_nowait()
     image_path = Path(json.loads(request.payload_json)["evidence_refs"][0])

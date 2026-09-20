@@ -5,7 +5,6 @@ import json
 import sys
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -92,12 +91,10 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
 
     async def supply_valid_inputs(self, session, value_hz=42.0):
         """生成独立证据和新测量，并送入本轮真实业务队列。"""
-        timestamp = datetime.now(timezone.utc).isoformat()
         boundary = asyncio.get_running_loop().time()
         frame = CameraFrame("serial", 1, 0, 0, boundary, 2, 2, 17301505, 0, b"1234")
         measurement = FrequencyMeasurement(
             session.session_id, session.frequency_source_id, value_hz,
-            timestamp, boundary, timestamp,
         )
 
         # 依次确认图像与频率已被业务层接收。
@@ -225,8 +222,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
                 expected_measurements[record["session_id"]],
             )
 
-    async def test_10_previous_display_value_is_not_a_new_measurement(self):
-        """验证早于新周期的旧读数不能作为新周期测量。
+    async def test_10_old_cycle_reading_does_not_enter_new_cycle(self):
+        """验证旧周期读数不会进入新周期，无有效读数的新周期不入库。
 
         Args:
             无外部参数。
@@ -247,18 +244,14 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         await app.handle_start("M01")
         second_session = machine_manager.current_session
 
-        # 将旧读数时间设为新周期开始前一秒。
-        old_measurement = replace(old_measurement, measured_monotonic=second_session.capture_start_time - 1)
-
-        # 旧显示值沿用旧测量时间，即使重贴新周期身份也不能成为新读数。
+        # 保留旧读数的周期归属，向机器队列交付迟到事件。
         await self.publish_and_wait(MeasurementEvent(
-            EventType.FREQUENCY_MEASURED, "M01", second_session.session_id,
-            replace(old_measurement, session_id=second_session.session_id),
+            EventType.FREQUENCY_MEASURED, "M01", first_session.session_id,
+            old_measurement,
         ))
-        self.assertEqual(second_session.frequency_candidates, {})
-        self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_abnormal_event_reasons())
+        self.assertEqual(second_session.measurement_frequencies, [])
 
-        # 仅补充新周期图像，关闭后应保存缺少有效频率的待复核记录。
+        # 仅补充新周期图像，关闭后确认缺少有效频率的周期未入库。
         await self.publish_and_wait(MeasurementEvent(
             EventType.CAPTURE_COMPLETED, "M01", second_session.session_id,
             CaptureResult(
@@ -267,13 +260,11 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         ))
         await self.close_controlled_cycle(second_session)
         await app.wait_until_idle(10)
-        record = next(
-            record for record in self.read_records()
-            if record["session_id"] == second_session.session_id
+        self.assertEqual(second_session.frequency_state, FrequencyState.FAILED)
+        self.assertEqual(
+            [record["session_id"] for record in self.read_records()],
+            [first_session.session_id],
         )
-        self.assertEqual(record["outcome"], "REVIEW_REQUIRED")
-        self.assertIsNone(record["final_frequency_hz"])
-        self.assertEqual(record["frequency_candidates"], [])
 
     async def test_11_unassigned_delayed_frequency_is_recorded_without_guessing(self):
         # 保留关闭后尚未封口的旧轮，同时启动新轮。

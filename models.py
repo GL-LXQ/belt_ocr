@@ -48,9 +48,6 @@ class FrequencyMeasurement:
     session_id: str
     frequency_source_id: str
     value_hz: float
-    measured_at: str
-    measured_monotonic: float
-    received_at: str
 
 
 @dataclass(frozen=True)
