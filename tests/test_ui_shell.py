@@ -238,3 +238,155 @@ def test_realtime_log_scrolling_and_small_window_access(window, application):
     page.scroll_area.verticalScrollBar().setValue(page.scroll_area.verticalScrollBar().maximum())
     log_position = page.log_table.mapTo(page.scroll_area.viewport(), page.log_table.rect().topLeft())
     assert page.scroll_area.viewport().rect().intersects(page.log_table.rect().translated(log_position))
+
+
+def test_device_edit_validation_cancel_and_page_reuse(window, application, monkeypatch):
+    """验证设备编辑、必填校验、取消和页面复用。
+
+    Args:
+        window: 主窗口。
+        application: 界面应用实例。
+        monkeypatch: 消息框替换工具。
+
+    Returns:
+        返回示例：
+            None  # 编辑与取消行为断言通过
+    """
+    from PySide6.QtWidgets import QMessageBox, QPushButton
+
+    # 打开设备页并检查默认记录与启用状态。
+    window.switch_page("devices")
+    page = window.page_stack.currentWidget()
+    assert page.table.rowCount() == 3
+    assert page.editor.isHidden()
+    position = page.table.visualItemRect(page.table.item(2, 1)).center()
+    QTest.mouseClick(page.table.viewport(), Qt.MouseButton.LeftButton, pos=position)
+    assert page.table.currentRow() == 2
+    assert page.editor.isHidden()
+    page.findChild(QPushButton, "editDevice_3").click()
+    assert page.editor.isVisible()
+    assert page.editor.isModal()
+    assert page.editor.windowTitle() == "编辑设备"
+    assert not page.enabled_checkbox.isChecked()
+
+    # 保存编辑内容并验证导航切换保留页面内存。
+    page.field_inputs["machine_name"].setText("测试设备")
+    page.enabled_checkbox.setChecked(True)
+    page.save_button.click()
+    assert page.devices[2]["machine_name"] == "测试设备"
+    assert page.devices[2]["enabled"] is True
+    assert page.editor.isHidden()
+    window.switch_page("realtime")
+    window.switch_page("devices")
+    assert window.page_stack.currentWidget() is page
+
+    # 缺少必填字段时保留原记录，并展示提示。
+    page.show_device(2)
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *arguments: warnings.append(arguments))
+    page.field_inputs["camera_serial"].setText("  ")
+    page.save_button.click()
+    assert warnings
+    assert page.editor.isVisible()
+    assert page.devices[2]["camera_serial"] == "MV-CA013458"
+
+    # 取消未保存内容后重新打开，恢复内存中的记录。
+    page.cancel_button.click()
+    assert page.editor.isHidden()
+    page.show_device(2)
+    assert page.field_inputs["camera_serial"].text() == "MV-CA013458"
+    page.field_inputs["machine_name"].setText("未保存修改")
+    page.editor.close()
+    page.show_device(2)
+    assert page.field_inputs["machine_name"].text() == "测试设备"
+    QTest.keyClick(page.editor, Qt.Key.Key_Escape)
+    assert page.editor.isHidden()
+    application.processEvents()
+
+
+def test_device_create_delete_and_restart(window, monkeypatch):
+    """验证新增、删除确认、空列表及重新创建页面恢复演示数据。
+
+    Args:
+        window: 主窗口。
+        monkeypatch: 确认对话框替换工具。
+
+    Returns:
+        返回示例：
+            None  # 设备内存操作与初始数据隔离断言通过
+    """
+    from PySide6.QtWidgets import QMessageBox
+    from ui.pages.devices_page import DevicesPage
+
+    # 新增设备并核对编号和表格结果。
+    window.switch_page("devices")
+    page = window.page_stack.currentWidget()
+    page.create_button.click()
+    for field, value in (
+        ("machine_name", "4号皮带机"),
+        ("camera_serial", "MV-CA013459"),
+        ("frequency_meter_serial", "FM-1004"),
+    ):
+        page.field_inputs[field].setText(value)
+    page.save_button.click()
+    assert page.editor.isHidden()
+    assert page.devices[-1]["id"] == 4
+    assert page.table.rowCount() == 4
+    assert page.devices[-1]["created_at"] == page.devices[-1]["updated_at"]
+
+    # 取消删除时保留记录，确认后可删除到空列表。
+    monkeypatch.setattr(QMessageBox, "exec", lambda dialog: None)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda dialog: dialog.defaultButton())
+    page.delete_device(3)
+    assert len(page.devices) == 4
+    monkeypatch.setattr(
+        QMessageBox,
+        "clickedButton",
+        lambda dialog: next(button for button in dialog.buttons() if button.text() == "删除"),
+    )
+    for row in reversed(range(4)):
+        page.delete_device(row)
+    assert page.table.rowCount() == 0
+    assert page.editor.isHidden()
+    page.create_button.click()
+    assert page.editor.isVisible()
+    assert page.field_inputs["machine_name"].text() == ""
+
+    # 新页面读取原始演示记录，不继承已删除的数据。
+    fresh_page = DevicesPage()
+    assert len(fresh_page.devices) == 3
+    assert fresh_page.devices[0]["machine_name"] == "1号皮带机"
+    fresh_page.deleteLater()
+
+
+def test_device_layout_keeps_editor_actions_accessible(window, application):
+    """验证默认和最小窗口下的表单操作区均可访问。
+
+    Args:
+        window: 主窗口。
+        application: 界面应用实例。
+
+    Returns:
+        返回示例：
+            None  # 设备页面布局断言通过
+    """
+    # 分别检查两种尺寸下的全宽表格和共用弹窗。
+    window.switch_page("devices")
+    page = window.page_stack.currentWidget()
+    editor = page.editor
+    for width, height in ((1600, 900), (1280, 720)):
+        window.resize(width, height)
+        application.processEvents()
+        assert page.table.width() > page.width() - 100
+        assert page.table.horizontalScrollBar().maximum() == 0
+        page.create_button.click()
+        application.processEvents()
+        assert page.editor is editor
+        assert page.editor.windowTitle() == "新建设备"
+        assert page.save_button.isVisible()
+        assert page.editor.rect().contains(
+            page.save_button.mapTo(page.editor, page.save_button.rect().bottomRight())
+        )
+        assert page.editor_scroll.horizontalScrollBar().maximum() == 0
+        page.cancel_button.click()
+        assert page.editor.isHidden()

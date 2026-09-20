@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from ui.theme import COLORS, create_icon
 from ui.pages.realtime_page import RealtimePage
+from ui.pages.devices_page import DevicesPage
 
 
 # 按导航顺序配置页面标题和说明。
@@ -27,7 +28,7 @@ PAGES = {
     "history": ("历史记录", "查看历史检测记录和测量结果"),
     "images": ("图片管理", "查看和管理检测图片"),
     "settings": ("系统配置", "配置检测系统运行参数"),
-    "devices": ("设备管理", "管理相机、皮带机及相关设备"),
+    "devices": ("设备管理", "管理检测设备的基本信息，包括相机、频率仪等设备的绑定与启用状态。"),
     "logs": ("日志查看", "查看系统运行日志和异常信息"),
 }
 
@@ -385,12 +386,14 @@ class MainWindow(QMainWindow):
             返回示例：
                 QStackedWidget()  # 持有六个页面的容器
         """
-        # 创建实时监测页，并按导航顺序添加其他占位页面。
+        # 创建实时监测页、设备管理页和其他占位页面。
         stack = QStackedWidget()
         stack.setObjectName("pageStack")
         for page_key in PAGES:
             if page_key == "realtime":
                 stack.addWidget(RealtimePage())
+            elif page_key == "devices":
+                stack.addWidget(DevicesPage())
             else:
                 stack.addWidget(self.create_placeholder_page(page_key))
         return stack

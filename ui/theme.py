@@ -32,6 +32,8 @@ COLORS = {
 
 # 保存各入口和窗口操作的 SVG 图形片段。
 ICON_PATHS = {
+    "edit": '<path d="m15 4 5 5M4 20l5-1L21 7l-5-5L4 14z"/>',
+    "delete": '<path d="M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/>',
     "pulse": '<path d="M2 12h5l3-9 4 18 3-9h5"/>',
     "play": '<path d="m9 5 10 7-10 7z" fill="{white}" stroke="none"/>',
     "pause": '<path d="M8 6v12m8-12v12" stroke-width="3"/>',
