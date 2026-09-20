@@ -3,7 +3,7 @@
 import sqlite3
 
 
-class MachineRepository:
+class MachineRepo:
     """管理设备表结构，设备读写接口按后续业务需求添加。"""
 
     @staticmethod

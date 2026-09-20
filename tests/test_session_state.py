@@ -188,7 +188,7 @@ def test_database_failure_is_terminal_without_retry(frequency_context, failure_m
                 if failure_mode == "conflict"
                 else OSError("磁盘错误")
             )
-            app.database.measurement_repository.write_record = Mock(side_effect=error)
+            app.database.measurement_repo.write_record = Mock(side_effect=error)
 
         # 正常关闭后尝试提交，入队成功时执行存储工作任务。
         await manager.handle_machine_close()
@@ -202,7 +202,7 @@ def test_database_failure_is_terminal_without_retry(frequency_context, failure_m
             finally:
                 worker.cancel()
                 await asyncio.gather(worker, return_exceptions=True)
-            assert app.database.measurement_repository.write_record.call_count == 1
+            assert app.database.measurement_repo.write_record.call_count == 1
             assert not app.database.queued_records
         elif failure_mode == "queue":
             app.database.queue.get_nowait()

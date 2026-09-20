@@ -109,7 +109,7 @@ def test_persistence_failure_cleanup_and_idempotency(frequency_context, monkeypa
     asyncio.run(manager.handle_machine_close())
     request = app.database.queue.get_nowait()
     image_path = Path(request.evidence_refs[0])
-    original_write = app.database.measurement_repository.write_record
+    original_write = app.database.measurement_repo.write_record
     write_calls = []
 
     def write_with_failure(current_request):
@@ -129,7 +129,7 @@ def test_persistence_failure_cleanup_and_idempotency(frequency_context, monkeypa
             raise OSError("提交确认丢失")
 
     # 注入图片保存或数据库边界故障。
-    monkeypatch.setattr(app.database.measurement_repository, "write_record", write_with_failure)
+    monkeypatch.setattr(app.database.measurement_repo, "write_record", write_with_failure)
     if failure in {"save", "sync", "replace"}:
         target = {"save": "save_evidence_image", "sync": "os.fsync", "replace": "os.replace"}[failure]
         monkeypatch.setattr(f"database.{target}", Mock(side_effect=OSError("图片保存失败")))
@@ -171,7 +171,7 @@ def test_existing_image_is_never_deleted_on_failure(frequency_context, monkeypat
     image_path = Path(request.evidence_refs[0])
     image_path.parent.mkdir(parents=True)
     image_path.write_bytes(b"existing")
-    monkeypatch.setattr(app.database.measurement_repository, "write_record", Mock(side_effect=OSError("写入失败")))
+    monkeypatch.setattr(app.database.measurement_repo, "write_record", Mock(side_effect=OSError("写入失败")))
     with pytest.raises(OSError):
         app.database.persist_measurement(request)
     assert image_path.read_bytes() == b"existing"
@@ -207,10 +207,10 @@ def test_repeated_session_rejects_changed_business_fields(
     session.measurement_frequencies.append(create_measurement(session, 42))
     asyncio.run(manager.handle_machine_close())
     request = app.database.queue.get_nowait()
-    app.database.measurement_repository.write_record(request)
+    app.database.measurement_repo.write_record(request)
     app.database.queue.task_done()
     # 修改单个字段，确认冲突后原记录仍可幂等提交。
     changed_request = replace(request, **{field_name: changed_value})
     with pytest.raises(ValueError, match="同一 Session 的提交内容不一致"):
-        app.database.measurement_repository.write_record(changed_request)
-    app.database.measurement_repository.write_record(request)
+        app.database.measurement_repo.write_record(changed_request)
+    app.database.measurement_repo.write_record(request)

@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from database import DatabaseRequest
 
 
-class MeasurementRepository:
+class MeasurementRepo:
     """管理测量记录的幂等写入和提交确认查询。"""
 
     @staticmethod

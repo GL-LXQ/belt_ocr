@@ -138,8 +138,8 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
 
     # 重复写入同一请求，检查频率明细与最终频率一致。
     request = app.database.queue.get_nowait()
-    app.database.measurement_repository.write_record(request)
-    app.database.measurement_repository.write_record(request)
+    app.database.measurement_repo.write_record(request)
+    app.database.measurement_repo.write_record(request)
     app.database.queue.task_done()
     with sqlite3.connect(app.configuration.database_path) as connection:
         rows = connection.execute(

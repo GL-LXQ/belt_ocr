@@ -5,7 +5,7 @@ from contextlib import closing
 from pathlib import Path
 
 
-class AbnormalEventRepository:
+class AbnormalEventRepo:
     """管理运行库中的异常事件记录。"""
 
     @staticmethod

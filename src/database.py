@@ -15,9 +15,9 @@ from pathlib import Path
 from async_utils import run_blocking_operation
 from configuration import MeasurementConfiguration
 from models import CapturedFrame, MeasurementEvent, PublishEvent
-from repo.machine_repository import MachineRepository
-from repo.measurement_repository import MeasurementRepository
-from repo.abnormal_event_repository import AbnormalEventRepository
+from repo.machine_repo import MachineRepo
+from repo.measurement_repo import MeasurementRepo
+from repo.abnormal_event_repo import AbnormalEventRepo
 
 
 logger = logging.getLogger(__name__)
@@ -109,9 +109,9 @@ class Database:
         self.configuration = configuration
         self.publish_event = publish_event
         # 创建各表的数据库访问对象。
-        self.machine_repository = MachineRepository()
-        self.measurement_repository = MeasurementRepository(configuration.database_path)
-        self.abnormal_event_repository = AbnormalEventRepository(configuration.recovery_path)
+        self.machine_repo = MachineRepo()
+        self.measurement_repo = MeasurementRepo(configuration.database_path)
+        self.abnormal_event_repo = AbnormalEventRepo(configuration.recovery_path)
 
         # 创建存储队列并初始化连接与实例锁状态。
         self.queue: asyncio.Queue[DatabaseRequest] = asyncio.Queue(configuration.storage_queue_capacity)
@@ -179,7 +179,7 @@ class Database:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
             with connection:
-                self.abnormal_event_repository.create_table(connection)
+                self.abnormal_event_repo.create_table(connection)
 
         # 保持本次运行的运行库连接。
         self.anchor_connection = sqlite3.connect(runtime_database_path, check_same_thread=False)
@@ -199,10 +199,10 @@ class Database:
         self.configuration.database_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.configuration.database_path)) as connection, connection:
             # 创建机器身份、设备绑定和维护信息表。
-            self.machine_repository.create_table(connection)
+            self.machine_repo.create_table(connection)
 
             # 创建测量结果表。
-            self.measurement_repository.create_table(connection)
+            self.measurement_repo.create_table(connection)
 
     def close(self) -> None:
         """关闭运行库连接并释放进程锁。
@@ -248,7 +248,7 @@ class Database:
         """
         # 序列化事件，并写入异常事件记录表。
         payload = serialize_value(event) if event is not None else {}
-        self.abnormal_event_repository.insert(
+        self.abnormal_event_repo.insert(
             time.time(),
             getattr(event, "machine_id", machine_id),
             getattr(event, "session_id", None),
@@ -300,13 +300,13 @@ class Database:
                     save_evidence_image(frame.image_data, image_path)
             # 全部图片写入成功后才执行数据库事务。
             database_attempted = True
-            self.measurement_repository.write_record(request)
+            self.measurement_repo.write_record(request)
         except Exception:
             # 查询提交结果，无法确认时保留图片并记录异常。
             definitely_uncommitted = not database_attempted
             if database_attempted:
                 try:
-                    definitely_uncommitted = not self.measurement_repository.exists_by_session_id(request.session_id)
+                    definitely_uncommitted = not self.measurement_repo.exists_by_session_id(request.session_id)
                 except Exception:
                     logger.exception("无法确认提交结果，保留图片 session_id=%s", request.session_id)
             # 仅清理本次创建且确认没有入库的图片。

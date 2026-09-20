@@ -217,15 +217,15 @@ UI 专项 pytest：5 项通过；全量 pytest：114 项通过、10 项失败，
 
 设备表与测量存储专项 pytest：18 项通过，覆盖首次建表、重复初始化保留记录、默认值、字段约束及原有测量存储行为。
 
-#### 后端：按表拆分 Repository
+#### 后端：按表拆分 Repo
 
-设备表改名为 `machine`，由 `src/repo/machine_repository.py` 中的 `MachineRepository` 管理；测量表和异常事件表分别由 `measurement_repository.py` 中的 `MeasurementRepository`、`abnormal_event_repository.py` 中的 `AbnormalEventRepository` 管理。`Database.initialize()` 调用各 Repository 建表；测量结果进入共享队列后，由 Database 先保存图片，再调用测量 Repository 在事务中完成幂等写入，失败时通过 Repository 查询提交状态后决定是否清理图片；异常事件由 Database 整理为 JSON 后交给异常事件 Repository 插入。本次迁移已有表操作，未额外增加尚未使用的更新、删除或查询接口，设备表暂时只有建表逻辑。未发现本地旧数据库，本次不增加旧 `machines` 表迁移。
+设备表改名为 `machine`，由 `src/repo/machine_repo.py` 中的 `MachineRepo` 管理；测量表和异常事件表分别由 `measurement_repo.py` 中的 `MeasurementRepo`、`abnormal_event_repo.py` 中的 `AbnormalEventRepo` 管理。`Database.initialize()` 调用各 Repo 建表；测量结果进入共享队列后，由 Database 先保存图片，再调用测量 Repo 在事务中完成幂等写入，失败时通过 Repo 查询提交状态后决定是否清理图片；异常事件由 Database 整理为 JSON 后交给异常事件 Repo 插入。本次迁移已有表操作，未额外增加尚未使用的更新、删除或查询接口，设备表暂时只有建表逻辑。未发现本地旧数据库，本次不增加旧 `machines` 表迁移。
 
 全量 pytest：116 项通过、10 项既有失败，与修改前的通过数量及失败名单一致。
 
-#### 后端：统一 Repository 命名
+#### 后端：统一 Repo 命名
 
-数据访问目录统一为 `src/repo/`，按表使用 `MachineRepository`、`MeasurementRepository` 和 `AbnormalEventRepository`；Database 调用 Repository 初始化表结构、插入异常事件及幂等保存测量结果，仍按先保存图片、再提交测量记录、失败时查询提交结果的顺序处理，业务行为不变。
+数据访问目录统一为 `src/repo/`，按表使用 `MachineRepo`、`MeasurementRepo` 和 `AbnormalEventRepo`；Database 调用 Repo 初始化表结构、插入异常事件及幂等保存测量结果，仍按先保存图片、再提交测量记录、失败时查询提交结果的顺序处理，业务行为不变。
 
 #### 后端：取流顺序修正
 
