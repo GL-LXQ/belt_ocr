@@ -25,7 +25,7 @@ from ui.pages.devices_page import DevicesPage
 
 # 按导航顺序配置页面标题和说明。
 PAGES = {
-    "realtime": ("实时监测", "实时查看三台皮带机的检测画面、状态和事件"),
+    "realtime": ("实时监测", "实时查看皮带机的检测画面、状态和事件"),
     "history": ("历史记录", "查看历史检测记录和测量结果"),
     "images": ("图片管理", "查看和管理检测图片"),
     "settings": ("系统配置", "配置检测系统运行参数"),
@@ -393,7 +393,7 @@ class MainWindow(QMainWindow):
         stack.setObjectName("pageStack")
         for page_key in PAGES:
             if page_key == "realtime":
-                stack.addWidget(RealtimePage())
+                stack.addWidget(RealtimePage(self.machine_service))
             elif page_key == "devices":
                 stack.addWidget(DevicesPage(self.machine_service))
             else:

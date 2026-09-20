@@ -1,7 +1,6 @@
-"""实时监测演示页面、设备卡片和步骤进度组件。"""
+"""实时监测页面、设备卡片和步骤进度组件。"""
 
 from html import escape
-from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QPixmap
@@ -13,6 +12,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -22,50 +22,30 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui.demo_data import LOG_ROWS, MACHINES
+from src.machine_service import MachineService, MachineServiceError
+from ui.demo_data import LOG_ROWS
 from ui.theme import create_icon
 
 
 class CapturePreview(QLabel):
-    """随卡片宽度等比例缩放的固定相机画面。"""
+    """暂无实时画面时的灰色占位区域。"""
 
-    def __init__(self, number: int):
-        """加载项目内的相机演示图片。
+    def __init__(self):
+        """创建随卡片宽度伸缩的画面占位块。
 
         Args:
-            number: 设备编号，对应资源文件编号。
+            无。
 
         Returns:
             返回示例：
-                None  # 创建图片展示组件
+                None  # 创建灰色画面占位块
         """
-        # 加载原始图片并设置伸缩尺寸策略。
+        # 设置画面区域的标识、高度范围和伸缩策略。
         super().__init__()
-        self.source = QPixmap(str(Path(__file__).resolve().parents[1] / "assets" / f"belt_{number}.png"))
         self.setObjectName("capturePreview")
         self.setMinimumHeight(140)
         self.setMaximumHeight(240)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-    def resizeEvent(self, event):
-        """按展示区域缩放原始图片。
-
-        Args:
-            event: 控件尺寸变化事件。
-
-        Returns:
-            返回示例：
-                None  # 更新等比例图片
-        """
-        # 将图片等比例铺满区域，并居中裁去超出边界的部分。
-        scaled = self.source.scaled(
-            self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
-        )
-        left = (scaled.width() - self.width()) // 2
-        top = (scaled.height() - self.height()) // 2
-        self.setPixmap(scaled.copy(left, top, self.width(), self.height()))
-        super().resizeEvent(event)
 
 
 class StepProgress(QFrame):
@@ -160,13 +140,13 @@ class StepProgress(QFrame):
 
 
 class MachineCard(QFrame):
-    """展示一台设备的画面、状态、频率、进度和事件。"""
+    """展示一台设备的画面占位、状态、频率、进度和事件。"""
 
     def __init__(self, data: dict):
-        """构建设备卡片并填入演示数据。
+        """构建设备卡片并填入展示数据。
 
         Args:
-            data: demo_data.MACHINES 中的一台设备数据。
+            data: 卡片展示数据，包含标题、状态、频率、进度和事件。
 
         Returns:
             返回示例：
@@ -193,14 +173,14 @@ class MachineCard(QFrame):
         heading.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(heading)
 
-        # 将画面标识叠放在图片顶部。
-        self.preview = CapturePreview(data["number"])
+        # 将画面标识叠放在灰色占位块顶部。
+        self.preview = CapturePreview()
         preview_layout = QVBoxLayout(self.preview)
         preview_layout.setContentsMargins(8, 7, 8, 7)
         preview_caption = QHBoxLayout()
-        live_caption = QLabel('<span style="color:#18C35D">●</span> 演示画面')
-        live_caption.setObjectName("previewCaption")
-        preview_caption.addWidget(live_caption)
+        caption = QLabel('<span style="color:#C5CFDA">●</span> 暂无画面')
+        caption.setObjectName("previewCaption")
+        preview_caption.addWidget(caption)
         preview_caption.addStretch()
         preview_layout.addLayout(preview_caption)
         preview_layout.addStretch()
@@ -270,15 +250,15 @@ class MachineCard(QFrame):
         """将设备展示数据应用到已有控件。
 
         Args:
-            data: 包含身份、状态、频率、进度和四条事件的设备展示数据。
+            data: 包含标题、状态、频率、进度和事件的卡片展示数据。
 
         Returns:
             返回示例：
                 None  # 更新设备卡片，不创建新控件
         """
-        # 更新机器身份和状态文案。
+        # 更新机器标题和状态文案。
         self.setProperty("tone", data["tone"])
-        self.title.setText(f"{data['number']}# 皮带机")
+        self.title.setText(data["title"])
         self.badge.setText(data["status"])
         self.state_label.setText(data["state"])
         self.frequency_label.setText(data["frequency"])
@@ -313,13 +293,13 @@ class MachineCard(QFrame):
 
 
 class RealtimePage(QWidget):
-    """组织实时监测演示数据、设备卡片与系统日志。"""
+    """组织设备卡片、系统日志和数据库读取。"""
 
-    def __init__(self):
-        """初始化布局、展示数据和本地交互。
+    def __init__(self, machine_service: MachineService):
+        """初始化布局、设备卡片和本地交互。
 
         Args:
-            无。
+            machine_service: 设备业务服务。
 
         Returns:
             返回示例：
@@ -327,6 +307,7 @@ class RealtimePage(QWidget):
         """
         super().__init__()
         self.setObjectName("realtime")
+        self.machine_service = machine_service
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_area = QScrollArea()
@@ -349,7 +330,7 @@ class RealtimePage(QWidget):
         titles.setSpacing(2)
         title = QLabel("实时监测")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("实时查看三台皮带机的检测画面、状态和事件")
+        subtitle = QLabel("实时查看皮带机的检测画面、状态和事件")
         subtitle.setObjectName("pageSubtitle")
         titles.addWidget(title)
         titles.addWidget(subtitle)
@@ -373,14 +354,12 @@ class RealtimePage(QWidget):
             button.setToolTip("暂未接入")
         layout.addLayout(header)
 
-        # 按相同伸缩比例放置三台设备卡片。
+        # 创建卡片容器，卡片在读取设备表后生成。
         cards_layout = QHBoxLayout()
         cards_layout.setSpacing(12)
+        self.cards_layout = cards_layout
         self.machine_cards = []
-        for data in MACHINES:
-            card = MachineCard(data)
-            cards_layout.addWidget(card, 1)
-            self.machine_cards.append(card)
+        self.empty_hint = None
         layout.addLayout(cards_layout, 1)
 
         # 创建日志工具栏和只读表格。
@@ -420,26 +399,82 @@ class RealtimePage(QWidget):
         log_layout.addWidget(self.log_table)
         layout.addWidget(log_panel)
 
-        # 绑定本地交互并填入首屏演示数据。
-        self.refresh_button.clicked.connect(self.restore_demo_data)
+        # 绑定本地交互，填入演示日志并读取设备表。
+        self.refresh_button.clicked.connect(self.reload_devices)
         self.clear_button.clicked.connect(lambda: self.log_table.setRowCount(0))
         self.auto_scroll.toggled.connect(lambda checked: self.log_table.scrollToBottom() if checked else None)
-        self.restore_demo_data()
+        self.fill_demo_logs()
+        self.reload_devices()
 
-    def restore_demo_data(self):
-        """恢复设备卡片和日志表格的固定演示数据。
+    def reload_devices(self):
+        """重新读取设备表并按记录重建卡片。
 
         Args:
             无。
 
         Returns:
             返回示例：
-                None  # 恢复演示内容，保留自动滚动选项
+                None  # 卡片跟随数据库内容，读取失败时提示并清空卡片区
         """
-        # 使用现有卡片恢复三台设备信息。
-        for card, data in zip(self.machine_cards, MACHINES):
-            card.update_data(data)
+        # 读取未删除设备，失败时提示并把卡片区置空。
+        try:
+            self.devices = self.machine_service.list_machines()
+        except MachineServiceError as error:
+            QMessageBox.warning(self, "设备读取失败", str(error))
+            self.devices = []
+        self.populate_cards()
 
+    def populate_cards(self):
+        """按当前设备记录重建设备卡片区。
+
+        Args:
+            无。
+
+        Returns:
+            返回示例：
+                None  # 卡片数量与设备记录一致
+        """
+        # 移除上一次创建的卡片。
+        while self.cards_layout.count():
+            widget = self.cards_layout.takeAt(0).widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.machine_cards = []
+        self.empty_hint = None
+
+        # 没有设备时显示空态提示。
+        if not self.devices:
+            hint = QLabel("暂无设备，请先在设备管理页添加。")
+            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hint.setStyleSheet("color: #73849B;")
+            self.empty_hint = hint
+            self.cards_layout.addWidget(hint, 1)
+            return
+
+        # 逐台设备创建卡片，实时状态字段暂时显示占位内容。
+        for device in self.devices:
+            card = MachineCard({
+                "title": device["machine_name"],
+                "tone": "idle",
+                "status": "未接入",
+                "state": "空闲",
+                "frequency": "--",
+                "completed_steps": 0,
+                "events": (),
+            })
+            self.cards_layout.addWidget(card, 1)
+            self.machine_cards.append(card)
+
+    def fill_demo_logs(self):
+        """清空日志表格并按时间顺序填入固定演示日志。
+
+        Args:
+            无。
+
+        Returns:
+            返回示例：
+                None  # 日志表格显示演示日志
+        """
         # 清空旧日志，并按时间顺序填入固定日志。
         self.log_table.setRowCount(0)
         for values in LOG_ROWS:
