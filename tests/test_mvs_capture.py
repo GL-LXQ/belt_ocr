@@ -623,7 +623,7 @@ def test_stop_exception_blocks_next_capture(camera, monkeypatch, start_capture, 
 
 
 def test_old_sdk_buffer_is_cleared_before_new_capture(camera, monkeypatch, start_capture, wait_capture):
-    """验证开始新一轮前清除 SDK 残留缓存。
+    """验证启动取流后、读取本轮图像前清除 SDK 残留缓存。
 
     Args:
         wait_capture: 等待正式异步结果交付的测试入口。
@@ -634,6 +634,8 @@ def test_old_sdk_buffer_is_cleared_before_new_capture(camera, monkeypatch, start
     Returns:
         None  # 断言完成
     """
+    buffer_cleared = threading.Event()
+
     def clear_buffer():
         """清空假 SDK 中上轮未取出的图像。
 
@@ -643,20 +645,46 @@ def test_old_sdk_buffer_is_cleared_before_new_capture(camera, monkeypatch, start
         Returns:
             0  # 缓存已清空
         """
+        assert camera.grabbing
+        assert camera.handle.started.is_set()
         while True:
             try:
                 camera.handle.frames.get_nowait()
             except queue.Empty:
+                buffer_cleared.set()
                 return 0
 
     # 预置 SDK 残留帧，启动新轮后再送入本轮帧。
     monkeypatch.setattr(camera.handle, "MV_CC_ClearImageBuffer", clear_buffer)
     camera.handle.frames.put(b"stale")
     task = start_capture(camera, duration_seconds=0.1)
-    assert camera.handle.started.wait(1)
+    assert buffer_cleared.wait(1)
     camera.handle.frames.put(b"current")
     result = wait_capture(task, 2)
     assert [frame.data for frame in result.frames] == [b"current"]
+
+
+def test_clear_buffer_failure_stops_capture(camera, start_capture, wait_capture):
+    """验证启动后清缓存失败仍会停止取流并释放相机占用。
+
+    Args:
+        camera: 假 SDK 相机。
+        start_capture: 使用正式相机入口的测试启动函数。
+        wait_capture: 等待正式异步结果交付的测试入口。
+
+    Returns:
+        None  # 断言完成
+    """
+    # 注入清缓存错误并运行正式采集流程。
+    camera.handle.failure_operation = "MV_CC_ClearImageBuffer"
+    with pytest.raises(MvsError, match="ClearImageBuffer"):
+        wait_capture(start_capture(camera))
+
+    # 核对失败后的停流状态和相机占用释放。
+    assert camera.faulted
+    assert not camera.grabbing
+    assert camera.handle.stopped.is_set()
+    assert not camera.capture_lock.locked()
 
 
 def test_two_cameras_capture_independently(camera, start_capture, wait_capture):

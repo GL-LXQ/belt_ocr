@@ -46,7 +46,7 @@ class MvsCamera:
     encoding_lock: object = field(default_factory=threading.Lock)
 
     def start_grabbing(self) -> None:
-        """清理历史缓存并启动本轮连续取流。
+        """启动本轮连续取流并清理历史缓存。
 
         Args:
             无外部参数。
@@ -57,10 +57,6 @@ class MvsCamera:
         # 检查设备是否可启动。
         if self.closed or self.faulted:
             raise MvsError(f"相机不可用：{self.serial}")
-        # 清空旧缓存，然后开启本轮取流。
-        return_code = self.handle.MV_CC_ClearImageBuffer()
-        if return_code != self.binding.errors.MV_OK:
-            raise MvsError(f"清空相机图像缓存失败（ClearImageBuffer），错误码：0x{return_code:08X}")
         # 启动连续取流，失败时标记设备故障。
         return_code = self.handle.MV_CC_StartGrabbing()
         if return_code != self.binding.errors.MV_OK:
@@ -68,6 +64,10 @@ class MvsCamera:
             raise MvsError(f"启动相机采集失败（StartGrabbing），错误码：0x{return_code:08X}")
         # 登记设备已进入取流状态。
         self.grabbing = True
+        # 清空取流缓存，后续读取本轮新收到的图像。
+        return_code = self.handle.MV_CC_ClearImageBuffer()
+        if return_code != self.binding.errors.MV_OK:
+            raise MvsError(f"清空相机图像缓存失败（ClearImageBuffer），错误码：0x{return_code:08X}")
 
     def read_frame(self, stop_requested: threading.Event, timeout_ms: int) -> CameraFrame | None:
         """取得一帧、复制图像及元数据，并在返回前释放 SDK Buffer。

@@ -30,7 +30,7 @@ class FakeCameraHandle:
         self.started = threading.Event()
 
     def MV_CC_ClearImageBuffer(self):
-        """清除测试设备的历史取流状态。
+        """验证清空缓存时测试设备已启动取流。
 
         Args:
             无外部参数。
@@ -38,7 +38,7 @@ class FakeCameraHandle:
         Returns:
             0  # 操作成功
         """
-        self.started.clear()
+        assert self.grabbing
         return 0
 
     def MV_CC_StartGrabbing(self):
