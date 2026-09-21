@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import shutil
 import sqlite3
 import time
 from collections.abc import Callable
@@ -136,10 +135,8 @@ class App:
                     notify_camera_state(machine.machine_id, "相机已连接", "IO、频率仪尚未接入")
 
 
-            # 设置容量和现场初始状态，运行中或未知时等待真实关闭。
-            capacity_available = await self.check_disk_capacity()
+            # 设置现场初始状态，运行中或未知时等待真实关闭。
             for manager in self.machine_managers.values():
-                manager.capacity_available = capacity_available
                 manager.waiting_cycle_reset = self.config.initial_machine_state != MachineState.CLOSED
                 manager.initialized = True
 
@@ -154,9 +151,8 @@ class App:
                     manager.frequency_adapter.run,
                 )))
 
-            # 启动共享存储和容量检查，不执行自动重启。
+            # 启动共享存储，不执行自动重启。
             self.worker_tasks.append(asyncio.create_task(self.run_worker("STORAGE", self.database.run)))
-            self.worker_tasks.append(asyncio.create_task(self.run_worker("容量检查", self.maintain_system)))
             self.has_started = True
             self.accepting_signals = True
         except BaseException as error:
@@ -282,77 +278,6 @@ class App:
 
         # 发送状态同步事件并等待处理完成。
         await self.send_signal(EventType.MACHINE_SYNCHRONIZED, machine_id, machine_state)
-
-    async def maintain_system(self) -> None:
-        """定期检查存储容量并通知机器管理员更新容量状态。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            None: 持续运行直到任务被取消，无返回数据。
-            返回值形式示例：
-                None  # 无返回数据
-        """
-        while True:
-            try:
-                # 检查磁盘剩余空间。
-                disk_capacity_available = await self.check_disk_capacity()
-
-                # 读取正在排队或写入的数量，合并磁盘和积压检查结果。
-                pending_count = len(self.database.queued_records)
-                capacity_available = (
-                    disk_capacity_available
-                    and pending_count < self.config.max_persistent_records
-                )
-
-                # 向容量状态发生变化的机器管理员发送更新事件。
-                for machine_manager in self.machine_managers.values():
-                    if machine_manager.capacity_available != capacity_available:
-                        await self.publish_event(
-                            MeasurementEvent(
-                                EventType.CAPACITY_CHANGED,
-                                machine_manager.machine.machine_id,
-                                payload=capacity_available,
-                            )
-                        )
-
-                # 标记本地运行库可用。
-                self.database.runtime_available = True
-            except Exception:
-                # 标记本地运行库不可用，将异常交给后台任务入口。
-                self.database.runtime_available = False
-                raise
-
-            # 等待配置的维护间隔，再开始下一轮处理。
-            await asyncio.sleep(self.config.maintenance_interval_ms / 1000)
-
-    async def check_disk_capacity(self) -> bool:
-        """检查本地运行库和证据目录所在磁盘的剩余空间。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            bool: 所有检查目录所在磁盘均达到最低剩余空间时返回 True。
-            返回示例：
-                True  # 所有检查目录所在磁盘空间充足
-                False  # 至少一个检查目录所在磁盘空间不足
-        """
-        # 收集本地运行库和证据目录的路径。
-        output_paths = {
-            self.config.recovery_path.parent,
-            self.config.evidence_directory,
-        }
-        # 在线程中读取各目录所在磁盘的容量信息。
-        disk_states = await asyncio.gather(*(
-            run_blocking_operation(shutil.disk_usage, path) for path in output_paths
-        ))
-        # 检查所有磁盘的剩余空间是否达到配置下限。
-        return all(
-            disk_state.free >= self.config.minimum_free_disk_bytes
-            for disk_state in disk_states
-        )
 
     def report_failure(self, error: Exception) -> None:
         """保存故障、关闭信号入口并安排整个应用退出。

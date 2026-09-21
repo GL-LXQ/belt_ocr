@@ -50,7 +50,6 @@ class EventType(str, Enum):
     MACHINE_CLOSED = "MachineClosed"  # 机器正常关闭
     SHUTDOWN = "Shutdown"  # 应用退出
     MACHINE_SYNCHRONIZED = "MachineSynchronized"  # 机器现场状态同步
-    CAPACITY_CHANGED = "CapacityChanged"  # 可用容量变化
     CAPTURE_COMPLETED = "CaptureCompleted"  # 整轮采集结果
     OCR_COMPLETED = "OCRCompleted"  # 整轮识别结果
     OCR_FAILED = "OCRFailed"  # 整轮文字识别失败

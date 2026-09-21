@@ -57,7 +57,7 @@ uv run python -X utf8 -m pytest -q
 
 #### 1.2.3 处理阶段与职责
 
-1. **启动**：校验配置，初始化双库并获取实例锁，加载 SDK、打开全部相机，检查磁盘容量，根据初始机器状态决定是否等待关闭复位，启动机器事件、频率和存储任务。任一机器打开失败则整体启动失败并释放已打开机器。
+1. **启动**：校验配置，初始化双库并获取实例锁，加载 SDK、打开全部相机，根据初始机器状态决定是否等待关闭复位，启动机器事件、频率和存储任务。任一机器打开失败则整体启动失败并释放已打开机器。
 2. **采集**：START 的单调时间是窗口起点，默认 1000 ms；唯一采集线程顺序执行启动、取帧、复制独立内存、归还 SDK Buffer、停止和释放相机占用，移除这条串行链路中无竞争者的 buffer_lock；机器关闭继续通过 capture_lock 等待采集结束。相机只保留 current_capture 和一个结果交付任务，不维护 windows 字典；取消前 5 帧限制，不设置应用层帧队列，不执行质量筛选和图片编码。单次等帧固定使用配置超时，默认 50 ms，不按窗口剩余时间缩短；读取返回后检查是否继续采集。CLOSE 发出停止信号，当前读取结束后退出；采集和机器管理器均不再按帧时间筛除尾帧。
 3. **一次性交付**：CAPTURE_COMPLETED 携带原始帧和统计；机器采集失败在捕获处记录日志并抛出异常，由任务结束回调安排全局退出，不再生成失败采集结果。统计只包含采集耗时、接收帧数和保留帧数。
 4. **OCR**：每台机器最多一个识别任务，三台机器共用处理锁。`process_session_frames` 顺序完成编码 → `filter_qualified_frames` → `recognize_images` → `generate_final_text_and_images`。锁覆盖整轮处理，无批次队列和消费者。成功只发送一次 OCR_COMPLETED，普通识别失败发送 OCR_FAILED；SDK 编码异常在编码处记录日志，再沿后台任务传播并触发全局退出，不转换为普通识别失败。
@@ -107,11 +107,9 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 | `frequency_interval_ms` | 全局读数间隔配置；数据库机器不生成模拟频率 |
 | `minimum_frequency_hz` / `maximum_frequency_hz` | 有效频率范围，默认 0.01～10000 Hz |
 | `shutdown_timeout_ms` | 正常退出排空业务的期限，默认 10000 ms |
-| `minimum_free_disk_bytes` | 最低磁盘空间，默认 100 MiB |
-| `maintenance_interval_ms` / `max_persistent_records` | 容量检查间隔 250 ms / 存储积压限制 1000 |
 | `initial_machine_state` | 默认 CLOSED；OPEN、UNKNOWN 需要关闭或状态同步 |
 
-已删除 `camera_queue_capacity`、`max_frames_per_session`、`ocr_queue_capacity` 、`ocr_job_timeout_ms` 和 `max_pending_sessions_per_machine`。使用旧配置文件时需移除这些键。窗口内帧全部保存在内存，内存占用取决于分辨率和帧率，每台机器最多保留一个未完成周期。
+已删除 `camera_queue_capacity`、`max_frames_per_session`、`ocr_queue_capacity` 、`ocr_job_timeout_ms` 和 `max_pending_sessions_per_machine`，以及容量监控的 `minimum_free_disk_bytes`、`maintenance_interval_ms`、`max_persistent_records`。使用旧配置文件时需移除这些键。窗口内帧全部保存在内存，内存占用取决于分辨率和帧率，每台机器最多保留一个未完成周期。
 
 ## 二、项目进度（按天汇总）
 
@@ -416,3 +414,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 机器清单改由 App 读取数据库
 
 `AppConfig` 删除 `machines` 字段，`src/config_util.py` 的 `load_configuration()` 更名为 `load_config()`，只读取 `config/config.yaml` 的公共参数并校验运行参数，不再导入 `sqlite3` 与 `MachineRepo`；`App.__init__` 改为先按 `config.database_path` 建好机器表，再 `MachineRepo.list_enabled()` 读取启用机器，逐台构造 `MachineConfig(machine_id=str(row["id"]), camera_serial=..., frequency_meter_serial=...)` 与采集器、频率适配器、机器处理器，机器编号因此是数据库自增编号的字符串。`AppConfig.validate()` 删除机器相关的两条检查：没有启用机器时由 `App.__init__` 抛出「没有启用的机器，请先在机器管理页添加并启用机器。」，GUI 沿用的仍是这句提示；`camera_serial`、`frequency_meter_serial` 非空检查删除，序列号在写入前已由机器管理页与服务层保证。数据流：`load_config()` 读 YAML 公共参数 → `App.__init__` 读业务库启用机器 → 逐台建立处理器 → START 采集图片与频率 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite。测试侧新增 `tests/configuration_support.py` 的 `create_machine_database()`（建表并按顺序插入机器），原先在内存里构造机器清单的 12 处 `App(config)`、全部旧机器编号（`M01` 等）以及 `main.load_configuration` 替身一并改为数据库自增编号与新函数名，`tests/test_fatal_shutdown.py` 的启动失败阶段由「相机序列号为空」改为「机器全部停用」。全量 pytest：148 项通过、10 项既有失败，失败名单与改动前一致。
+
+### 删除容量监控
+
+删除磁盘空间与存储积压的周期性检查：`src/app.py` 移除维护循环 `maintain_system()`、磁盘检查 `check_disk_capacity()`、`import shutil`，启动阶段不再给机器写入容量状态，也不再注册"容量检查"后台任务，退出时不再清空积压计数；`src/machine_manager.py` 移除 `capacity_available` 属性、受理门禁中的容量项和 `CAPACITY_CHANGED` 处理分支，受理 START 只检查相机可用性与采集占用，`acceptance_state` 的 `DEGRADED` 只剩"相机仍被上一轮占用"，`FAULT` 只由相机不可用触发；`src/enums.py` 删除 `EventType.CAPACITY_CHANGED`；`src/database.py` 删除 `runtime_available` 标志（唯一写入者是该维护循环）。配置侧删除 `minimum_free_disk_bytes`、`maintenance_interval_ms`、`max_persistent_records` 三个键与 `AppConfig.validate()` 中的磁盘保留空间检查，`read_configuration_settings()` 与 `load_config()` 的返回示例同步收缩；共享存储队列容量 `storage_queue_capacity` 与队列满失败路径保留，`Database.queued_records` 继续用于同一周期重复入队判断，只是不再被读取长度。数据流：`load_config()` 读 YAML 公共参数 → `App.__init__` 读业务库启用机器 → 逐台建立处理器 → START 采集图片与频率 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite；启动和运行期间不再有容量计算与容量事件。测试侧删除 `tests/test_recovery_and_faults.py::test_disk_capacity_blocks_new_cycles_and_recovers`（专测被删功能），`tests/test_fatal_shutdown.py` 改用 `EventType.MACHINE_STARTED` 作为填满事件队列的占位事件，并注明该用例取消的是最后注册的共享存储任务。全量 pytest：147 项通过、10 项既有失败，与改动前实测的 148 项通过、同一 10 项失败名单一致，减少的 1 项即被删除的容量用例。

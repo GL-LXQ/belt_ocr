@@ -115,7 +115,6 @@ class Database:
 
         # 创建存储队列并初始化连接与实例锁状态。
         self.queue: asyncio.Queue[DatabaseRequest] = asyncio.Queue(config.storage_queue_capacity)
-        self.runtime_available = True
         self.queued_records: set[str] = set()
         self.initialized = False
         self.lock_file = None

@@ -35,9 +35,6 @@ class AppConfig:
     storage_queue_capacity: int = 32
     shutdown_timeout_ms: int = 10000
     recovery_database_path: Path | None = None
-    maintenance_interval_ms: int = 250
-    max_persistent_records: int = 1000
-    minimum_free_disk_bytes: int = 104857600
     initial_machine_state: MachineState = MachineState.CLOSED
     mvs_dll_directory: Path | None = None
 
@@ -71,16 +68,12 @@ class AppConfig:
             "ocr_result_timeout_ms", "max_cycle_open_ms", "event_queue_capacity",
             "storage_queue_capacity",
             "shutdown_timeout_ms",
-            "maintenance_interval_ms",
-            "max_persistent_records",
         )
         for parameter in positive_parameters:
             if getattr(self, parameter) <= 0:
                 raise ValueError(f"{parameter} 必须大于零。")
         if not 0 < self.minimum_frequency_hz < self.maximum_frequency_hz:
             raise ValueError("频率范围必须是递增的正数范围。")
-        if self.minimum_free_disk_bytes < 0:
-            raise ValueError("磁盘保留空间不能为负数。")
         if self.recovery_path.resolve() == self.database_path.resolve():
             raise ValueError("恢复库与最终结果库必须使用不同文件。")
 
@@ -99,9 +92,6 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
                 "evidence_directory": Path("D:/belt_ocr/runtime/evidence"),  # 图片绝对目录
                 "storage_queue_capacity": 32,  # 存储队列容量
                 "shutdown_timeout_ms": 10000,  # 退出期限，毫秒
-                "maintenance_interval_ms": 250,  # 容量检查间隔，毫秒
-                "max_persistent_records": 1000,  # 存储积压上限
-                "minimum_free_disk_bytes": 104857600,  # 最低磁盘空间，字节
                 "mvs_development_directory": Path("D:/app/HIK/MVS/Development"),  # SDK 目录
                 "mvs_dll_directory": None,  # 使用默认动态库目录
                 "capture_window_ms": 1000,  # 采集窗口，毫秒
@@ -163,9 +153,6 @@ def load_config(configuration_directory: Path) -> AppConfig:
                 storage_queue_capacity=32,  # 存储队列容量
                 shutdown_timeout_ms=10000,  # 退出收尾期限
                 recovery_database_path=None,  # 运行库路径覆盖值
-                maintenance_interval_ms=250,  # 容量检查间隔
-                max_persistent_records=1000,  # 存储积压上限
-                minimum_free_disk_bytes=104857600,  # 最低剩余空间
                 initial_machine_state=MachineState.CLOSED,  # 初始现场状态配置
                 mvs_dll_directory=None,  # SDK 动态库搜索目录
             )  # 路径转换为绝对路径，公共参数按实际配置返回

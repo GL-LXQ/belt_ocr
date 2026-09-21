@@ -63,7 +63,6 @@ class MachineManager:
         self.current_session: BeltSession | None = None
         self.waiting_cycle_reset = False
         self.deadline_tasks: dict[EventType, asyncio.Task[None]] = {}
-        self.capacity_available = True
         self.initialized = False
         self.recognition_task: asyncio.Task | None = None
 
@@ -75,17 +74,17 @@ class MachineManager:
             无外部参数。
 
         Returns:
-            "READY"  # 可接收新周期；其他状态表示初始化、故障、复位等待、忙碌或容量不足
+            "READY"  # 可接收新周期；其他状态表示初始化、故障、复位等待、忙碌或相机被占用
         """
         if not self.initialized:
             return "INITIALIZING"
-        if not self.database.runtime_available or not self.camera.available:
+        if not self.camera.available:
             return "FAULT"
         if self.waiting_cycle_reset:
             return "WAIT_CYCLE_RESET"
         if self.current_session is not None:
             return "ACTIVE"
-        if not self.capacity_available or self.camera.is_capturing:
+        if self.camera.is_capturing:
             return "DEGRADED"
         return "READY"
 
@@ -138,13 +137,8 @@ class MachineManager:
         if self.waiting_cycle_reset:
             return
 
-        # 检查存储容量、相机状态和本地运行库状态。
-        if (
-            not self.capacity_available
-            or not self.database.runtime_available
-            or not self.camera.available
-            or self.camera.is_capturing
-        ):
+        # 检查相机状态和采集占用。
+        if not self.camera.available or self.camera.is_capturing:
             # 标记等待周期复位并打印本轮未受理日志。
             self.waiting_cycle_reset = True
             logger.error("本轮未受理 machine_id=%s", self.machine.machine_id)
@@ -284,9 +278,6 @@ class MachineManager:
                 if self.current_session is not None:
                     await self.handle_machine_close(interrupted=True)
                 self.waiting_cycle_reset = event.payload != MachineState.CLOSED
-                return
-            case EventType.CAPACITY_CHANGED:
-                self.capacity_available = event.payload
                 return
 
         # 隔离没有周期身份的频率，不分配给当前或历史 Session。

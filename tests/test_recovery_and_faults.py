@@ -321,23 +321,6 @@ asyncio.run(crash_after_start())
         await app.handle_start("1")
         self.assertIsNotNone(app.machine_managers["1"].current_session)
 
-    async def test_disk_capacity_blocks_new_cycles_and_recovers(self) -> None:
-        app = await self.start_app(minimum_free_disk_bytes=10**30)
-        machine_manager = app.machine_managers["1"]
-        await self.wait_for_state(lambda: machine_manager.acceptance_state == "DEGRADED")
-        await app.handle_start("1")
-        self.assertIsNone(machine_manager.current_session)
-
-        # 容量恢复后仍须确认被拒收周期已经关闭。
-        app.config = replace(
-            app.config, minimum_free_disk_bytes=0,
-        )
-        await self.wait_for_state(lambda: machine_manager.capacity_available)
-        self.assertTrue(machine_manager.waiting_cycle_reset)
-        await app.handle_close("1")
-        await app.handle_start("1")
-        self.assertIsNotNone(machine_manager.current_session)
-
     async def test_second_process_instance_cannot_share_runtime_database(self) -> None:
         app = await self.start_app()
         second_app = App(app.config)

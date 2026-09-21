@@ -208,6 +208,7 @@ def test_background_failure_stops_all_devices(device_environment, caplog, worker
         await application.start()
         if worker_kind == "cancel":
             await asyncio.sleep(0)
+            # 取消最后注册的共享存储任务，验证意外取消同样触发全局退出。
             application.worker_tasks[-1].cancel()
         with pytest.raises((OSError, RuntimeError)):
             await asyncio.wait_for(application.wait_for_failure(), 2)
@@ -361,10 +362,10 @@ def test_failure_releases_publishers_waiting_for_queue(device_environment):
         Returns:
             None  # 所有交付任务已退出
         """
-        # 不启动消费者，创建多个等待容量的事件交付任务。
+        # 不启动消费者，用一个占位事件填满队列，再创建多个等待空位的交付任务。
         application = App(replace(config, event_queue_capacity=1))
         manager = application.machine_managers["1"]
-        event = MeasurementEvent(EventType.CAPACITY_CHANGED, "1", payload=True)
+        event = MeasurementEvent(EventType.MACHINE_STARTED, "1", payload=True)
         await manager.queue.put(event)
         publishers = [asyncio.create_task(application.publish_event(event)) for _ in range(3)]
         await asyncio.sleep(0)

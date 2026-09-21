@@ -11,11 +11,6 @@ application:
   storage_queue_capacity: 32
   shutdown_timeout_ms: 10000
 
-  # 容量检查间隔（毫秒）、积压上限与磁盘保留空间（字节）。
-  maintenance_interval_ms: 250
-  max_persistent_records: 1000
-  minimum_free_disk_bytes: 104857600
-
 # SDK 开发目录、可选动态库目录，以及采集窗口和单次取帧超时（毫秒）。
 camera:
   mvs_development_directory: D:/app/HIK/MVS/Development
