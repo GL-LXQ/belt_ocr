@@ -8,7 +8,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from async_utils import run_blocking_operation
-from config_util import MachineConfig, AppConfig
 from enums import EventType
 from models import CaptureResult, MeasurementEvent, PublishEvent
 from mvs_sdk import MvsCamera, MvsError
@@ -92,16 +91,18 @@ class SessionCamera:
 
     def __init__(
         self,
-        machine: MachineConfig,
-        config: AppConfig,
+        machine_id: str,
+        capture_window_ms: int,
+        camera_timeout_ms: int,
         publish_event: PublishEvent,
         report_failure: Callable[[Exception], None],
     ) -> None:
-        """登记机器配置、采集任务与业务事件入口。
+        """登记机器编号、采集任务与业务事件入口。
 
         Args:
-            machine: 机器身份。
-            config: 采集窗口和单帧超时配置。
+            machine_id: 采集结果归属的机器编号。
+            capture_window_ms: 单轮采集窗口毫秒数。
+            camera_timeout_ms: 单帧读取超时毫秒数。
             publish_event: 整轮结果交付入口。
             report_failure: 应用故障入口。
 
@@ -109,8 +110,9 @@ class SessionCamera:
             None  # 相机适配器初始化完成
         """
         # 保存外部依赖和相机句柄。
-        self.machine = machine
-        self.config = config
+        self.machine_id = machine_id
+        self.capture_window_ms = capture_window_ms
+        self.camera_timeout_ms = camera_timeout_ms
         self.publish_event = publish_event
         self.report_failure = report_failure
         self.device: MvsCamera | None = None
@@ -164,8 +166,8 @@ class SessionCamera:
             capture_task = CaptureTask(
                 camera=camera,
                 capture_start_time=capture_start_time,
-                duration_seconds=self.config.capture_window_ms / 1000,
-                timeout_ms=self.config.camera_timeout_ms,
+                duration_seconds=self.capture_window_ms / 1000,
+                timeout_ms=self.camera_timeout_ms,
             )
 
         except Exception:
@@ -241,7 +243,7 @@ class SessionCamera:
         except Exception:
             # 采集线程尚未记录的调度异常在此记录。
             if not capture_task.camera.faulted:
-                logger.exception("采集任务执行失败 machine_id=%s", self.machine.machine_id)
+                logger.exception("采集任务执行失败 machine_id=%s", self.machine_id)
             raise
         finally:
             # 释放相机占用，并通知等待方：本轮采集已结束，相机已完成停流处理。
@@ -251,11 +253,11 @@ class SessionCamera:
         # 将成功采集的整轮结果交给机器管理器。
         try:
             await self.publish_event(MeasurementEvent(
-                EventType.CAPTURE_COMPLETED, self.machine.machine_id, session_id, result,
+                EventType.CAPTURE_COMPLETED, self.machine_id, session_id, result,
             ))
         except Exception:
             # 记录结果交付异常并结束后台任务。
-            logger.exception("采集结果交付失败 machine_id=%s session_id=%s", self.machine.machine_id, session_id)
+            logger.exception("采集结果交付失败 machine_id=%s session_id=%s", self.machine_id, session_id)
             raise
 
     async def stop(self) -> None:

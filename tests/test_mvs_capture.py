@@ -54,8 +54,7 @@ def start_capture():
             CaptureTask  # 包含停止信号和采集完成信号的任务
         """
         adapter = SessionCamera(
-            SimpleNamespace(machine_id="machine-1", camera_serial=camera.serial),
-            SimpleNamespace(capture_window_ms=duration_seconds * 1000, camera_timeout_ms=timeout_ms),
+            "machine-1", duration_seconds * 1000, timeout_ms,
             publish_event,
             lambda error: None,
         )
@@ -873,8 +872,7 @@ def test_capture_shutdown_waits_for_worker_only(camera, monkeypatch, cancel_deli
             published.append(event)
 
         adapter = SessionCamera(
-            SimpleNamespace(machine_id="machine", camera_serial="camera"),
-            SimpleNamespace(capture_window_ms=2000, camera_timeout_ms=50),
+            "machine", 2000, 50,
             publish,
             lambda error: None,
         )

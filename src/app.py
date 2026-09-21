@@ -52,7 +52,10 @@ class App:
 
         # 为每台机器建立独立的采集器和业务处理器。
         for machine in config.machines:
-            camera = SessionCamera(machine, config, self.publish_event, self.report_failure)
+            camera = SessionCamera(
+                machine.machine_id, config.capture_window_ms, config.camera_timeout_ms,
+                self.publish_event, self.report_failure,
+            )
             frequency_adapter = FrequencyAdapter(machine, config, self.publish_event)
             self.machine_managers[machine.machine_id] = MachineManager(
                 machine,
