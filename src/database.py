@@ -116,7 +116,6 @@ class Database:
         # 创建存储队列并初始化连接与实例锁状态。
         self.queue: asyncio.Queue[DatabaseRequest] = asyncio.Queue(config.storage_queue_capacity)
         self.queued_records: set[str] = set()
-        self.initialized = False
         self.lock_file = None
         self.anchor_connection = None
         self.lock_acquired = False
@@ -136,7 +135,6 @@ class Database:
         if not self.lock_acquired:
             self.initialize_runtime_database()
         self.initialize_result_database()
-        self.initialized = True
 
     def initialize_runtime_database(self) -> None:
         """锁定本地实例并创建本地运行表。
@@ -317,8 +315,8 @@ class Database:
                         logger.exception("清理未提交图片失败 path=%s", image_path)
             raise
 
-    async def run(self) -> None:
-        """逐条写入正常结果，交付成功或失败回调，不自动重试。
+    async def consume_storage_queue(self) -> None:
+        """从共享存储队列逐条取出请求，保存图片与测量记录后交付回调，失败不自动重试。
 
         Args:
             无外部参数。
@@ -333,9 +331,7 @@ class Database:
             payload = None
             try:
                 try:
-                    # 初始化最终数据库并写入本轮正常结果。
-                    if not self.initialized:
-                        await run_blocking_operation(self.initialize)
+                    # 在线程中写入本轮正常结果。
                     await run_blocking_operation(self.persist_measurement, request)
                 except Exception as error:
                     # 判断是否为内容冲突，打印错误并准备失败回调。

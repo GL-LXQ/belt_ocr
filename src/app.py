@@ -88,6 +88,7 @@ class App:
                 self.text_recognizer,
                 self.database,
                 self.publish_event,
+                self.report_failure,
                 self.state_changed,
             )
 
@@ -137,12 +138,13 @@ class App:
                 if notify_camera_state is not None:
                     notify_camera_state(machine_config.machine_id, "相机已连接", "IO、频率仪尚未接入")
 
-            # 设置现场初始状态，运行中或未知时等待真实关闭。
+            # 设置现场初始状态：运行中或未知时，等一次真实关闭后才受理新的 START。
             for machine in self.machines.values():
                 machine.waiting_cycle_reset = self.config.initial_machine_state != MachineState.CLOSED
+                # 标记本机启动准备完成，对外状态不再是 INITIALIZING。
                 machine.initialized = True
 
-            # 启动独立机器处理和频率监听，任一任务异常都停止应用。
+            # 为每台机器启动事件处理和频率监听任务，任一任务异常都停止应用。
             for machine in self.machines.values():
                 machine_config = machine.machine_config
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
@@ -151,11 +153,11 @@ class App:
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
                     f"频率监听 machine_id={machine_config.machine_id} "
                     f"frequency_meter_serial={machine_config.frequency_meter_serial}",
-                    machine.frequency_adapter.run,
+                    machine.frequency_adapter.listen_measurements,
                 )))
 
-            # 启动共享存储，不执行自动重启。
-            self.worker_tasks.append(asyncio.create_task(self.run_worker("STORAGE", self.database.run)))
+            # 启动测量存储任务，逐条保存各机器提交的图片与测量记录。
+            self.worker_tasks.append(asyncio.create_task(self.run_worker("测量存储", self.database.consume_storage_queue)))
             self.has_started = True
             self.accepting_signals = True
         except BaseException as error:

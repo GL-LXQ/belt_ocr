@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -30,6 +31,7 @@ class Machine:
         text_recognizer: TextRecognizer,
         database: Database,
         publish_event: PublishEvent,
+        report_failure: Callable[[Exception], None],
         state_changed: asyncio.Event,
     ) -> None:
         """组装一台机器的唯一当前周期及其处理依赖。
@@ -42,6 +44,7 @@ class Machine:
             text_recognizer: 三台机器共享的 OCR 处理器。
             database: 共享存储入口。
             publish_event: 业务事件路由入口。
+            report_failure: 应用故障入口。
             state_changed: 周期状态变化通知。
 
         Returns:
@@ -55,6 +58,7 @@ class Machine:
         self.text_recognizer = text_recognizer
         self.database = database
         self.publish_event = publish_event
+        self.report_failure = report_failure
         self.state_changed = state_changed
         self.queue: asyncio.Queue[MeasurementEvent] = asyncio.Queue(
             config.event_queue_capacity
@@ -473,7 +477,7 @@ class Machine:
         if not task.cancelled():
             error = task.exception()
             if error is not None:
-                self.camera.report_failure(error)
+                self.report_failure(error)
         # 线程实际结束后，失败周期才允许释放当前空位。
         self.release_finished_session()
 

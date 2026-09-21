@@ -36,18 +36,6 @@ class FrequencyAdapter:
         # 由机器业务处理器在 START/CLOSE 时设置或清空当前周期。
         self.active_session_id: str | None = None
 
-    async def run(self) -> None:
-        """运行持续监听入口，将读取异常交给后台任务入口处理。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            None  # 监听被取消；读取失败时抛出异常
-        """
-        # 调用频率仪黑盒，连接和持续读取由该接口完成。
-        await self.listen_measurements()
-
     async def listen_measurements(self) -> None:
         """按配置循环产生联调频率，向当前 Session 交付新有效测量。
 
