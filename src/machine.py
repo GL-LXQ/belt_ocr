@@ -302,18 +302,17 @@ class Machine:
             )
             return
 
-        # 处理数据库提交回调。
+        # 处理数据库提交回调与周期超时。
         match event.event_type:
             case EventType.COMMIT_SUCCEEDED | EventType.COMMIT_FAILED:
                 await self.handle_commit_result(session, event)
                 return
-
-        # 判断活动周期是否超过关闭期限，超时后进入机器复位流程。
-        if event.event_type == EventType.CYCLE_TIMEOUT:
-            if session.capture_stop_time is None:
-                session.errors.append("CYCLE_TIMEOUT")
-                await self.handle_machine_close(interrupted=True)
-            return
+            case EventType.CYCLE_TIMEOUT:
+                # 周期未关闭时记为超时并进入机器复位流程。
+                if session.capture_stop_time is None:
+                    session.errors.append("CYCLE_TIMEOUT")
+                    await self.handle_machine_close(interrupted=True)
+                return
 
         # 判断本轮是否仍在处理，丢弃失败或等待入库后的迟到结果。
         if session.state != SessionState.RUNNING:
