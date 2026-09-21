@@ -1,4 +1,4 @@
-"""仅供测试使用的 MVS 设备，不读取文件夹图片。"""
+"""仅供测试使用的 MVS 相机，不读取文件夹图片。"""
 
 import ctypes
 import struct
@@ -13,13 +13,13 @@ class FakeCameraHandle:
     """按固定间隔在复用的 SDK 内存中产生测试帧。"""
 
     def __init__(self):
-        """初始化测试设备状态。
+        """初始化测试相机状态。
 
         Args:
             无外部参数。
 
         Returns:
-            None  # 测试设备已初始化
+            None  # 测试相机已初始化
         """
         self.buffer = ctypes.create_string_buffer(b"\x10\x20\x30\x40")
         self.frame_number = 0
@@ -30,7 +30,7 @@ class FakeCameraHandle:
         self.started = threading.Event()
 
     def MV_CC_ClearImageBuffer(self):
-        """验证清空缓存时测试设备已启动取流。
+        """验证清空缓存时测试相机已启动取流。
 
         Args:
             无外部参数。
@@ -42,7 +42,7 @@ class FakeCameraHandle:
         return 0
 
     def MV_CC_StartGrabbing(self):
-        """开启测试设备取流。
+        """开启测试相机取流。
 
         Args:
             无外部参数。
@@ -95,7 +95,7 @@ class FakeCameraHandle:
         return 0
 
     def MV_CC_StopGrabbing(self):
-        """停止测试设备取流。
+        """停止测试相机取流。
 
         Args:
             无外部参数。
@@ -142,7 +142,7 @@ class FakeCameraHandle:
         return 0
 
     def MV_CC_CloseDevice(self):
-        """关闭测试设备。
+        """关闭测试相机。
 
         Args:
             无外部参数。
@@ -153,7 +153,7 @@ class FakeCameraHandle:
         return 0
 
     def MV_CC_DestroyHandle(self):
-        """销毁测试设备句柄。
+        """销毁测试相机句柄。
 
         Args:
             无外部参数。
@@ -165,7 +165,7 @@ class FakeCameraHandle:
 
 
 class FakeMvsSdk:
-    """提供测试用设备枚举、打开和关闭。"""
+    """提供测试用相机枚举、打开和关闭。"""
 
     def __init__(self, *arguments):
         """建立测试 SDK。
@@ -180,14 +180,14 @@ class FakeMvsSdk:
         self.closed = False
 
     def open_camera(self, serial, **parameters):
-        """创建使用真实 MvsCamera 封装的测试设备。
+        """创建使用真实 MvsCamera 封装的测试相机。
 
         Args:
-            serial: 测试设备序列号。
+            serial: 测试相机序列号。
             parameters: 应用传入的相机配置。
 
         Returns:
-            camera  # 由真实封装管理的测试设备
+            camera  # 由真实封装管理的测试相机
         """
         binding = SimpleNamespace(
             parameters=SimpleNamespace(

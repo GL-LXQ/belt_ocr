@@ -244,7 +244,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
             无外部参数。
 
         Returns:
-            None  # 锁和设备的释放顺序已验证
+            None  # 锁和相机的释放顺序已验证
         """
         app = await self.start_app(shutdown_timeout_ms=100)
         manager = app.machine_managers["M01"]
@@ -253,7 +253,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         original_encode = manager.camera.device.encode_image
 
         def block_encoding(frame):
-            """等待测试释放并确认编码期间设备保持打开。
+            """等待测试释放并确认编码期间相机保持打开。
 
             Args:
                 frame: 原始帧。
@@ -283,25 +283,25 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.read_records(), [])
 
     async def test_encoding_failure_after_timeout_stops_application(self):
-        """验证取消后的编码故障只记录一次，并停止应用释放设备。
+        """验证取消后的编码故障只记录一次，并停止应用释放相机。
 
         Args:
             无外部参数。
 
         Returns:
-            None  # 原始故障已传播，设备关闭且没有生成测量记录
+            None  # 原始故障已传播，相机关闭且没有生成测量记录
         """
-        # 建立可控编码线程和设备故障观察入口。
+        # 建立可控编码线程和相机故障观察入口。
         app = await self.start_app()
         manager = app.machine_managers["M01"]
         encoding_started = threading.Event()
         release_encoding = threading.Event()
-        encoding_failure = MvsError("测试编码设备故障")
+        encoding_failure = MvsError("测试编码相机故障")
         failure_reporter = Mock(wraps=manager.camera.report_failure)
         manager.camera.report_failure = failure_reporter
 
         def fail_encoding_after_release(frame):
-            """等待测试释放后抛出编码设备故障。
+            """等待测试释放后抛出编码相机故障。
 
             Args:
                 frame: 本轮待编码的原始帧。
@@ -317,7 +317,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         manager.camera.device.encode_image = fail_encoding_after_release
         with self.assertLogs(level="ERROR") as captured_logs:
             try:
-                # 等待编码开始，注入 OCR 超时并确认线程仍占用设备。
+                # 等待编码开始，注入 OCR 超时并确认线程仍占用相机。
                 await app.handle_start("M01")
                 session = manager.current_session
                 self.assertTrue(await asyncio.to_thread(encoding_started.wait, 2))

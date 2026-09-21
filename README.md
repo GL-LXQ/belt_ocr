@@ -369,3 +369,7 @@ GUI 启动入口读取项目根目录 `config.example.json` 的 `database_path`�
 ### 统一机器命名
 
 皮带机这一业务实体此前存在 `machine` 与 `device` 两种叫法，本次统一为 `machine`／「机器」，改动只涉及命名，配置解析、Repo、Service、界面页面与样式、测试和文档的数据流完全不变：`src/configuration.py` 的校验文案与读取启用机器的局部变量改名；`src/repo/machine_repo.py` 与 `src/service/machine_service.py` 的中文注释、方法参数和 SQL 参数改名，Service 返回字典键由 `device_id` 改为 `machine_id`；界面侧 `ui/pages/devices_page.py` 更名为 `ui/pages/machines_page.py`、类名 `DevicesPage` 改为 `MachinesPage`，页面标识 `devices` 改为 `machines`，表格、表单、启用复选框和状态标签的 objectName 以及 `ui/styles/main_window.qss` 中的选择器同步改为 `machineTable`、`machineEditor`、`machineFields`、`machineEnabled`、`machineStatus`，`ui/main_window.py` 的导入、PAGES 键和导航标题、`ui/theme.py` 的图标名、`ui/pages/realtime_page.py` 的 `cards_by_machine_id` 与 `reload_machines()`、用户可见文案与测试断言一并更新。相机侧的 `device` 保持原义不变：`src/mvs_sdk.py` 的 SDK 设备枚举与 `src/camera.py` 的 `self.device` 仍指打开的相机句柄，`ui/theme.py` 的 devicePixelRatio 仍指显示像素比例。本次改名不涉及数据流动逻辑，数据仍从配置解析读取启用机器，经 Repo 读写 `machine` 表、Service 返回 `machine_id`，再由机器管理页与实时监测页展示，后台监测与采集流程保持原样。
+
+### 统一设备用词
+
+中文「设备」此前同时指皮带机、相机和频率仪，本次按对象拆分：皮带机统一写「机器」，相机硬件与相机句柄、取流、采集、编码流程统一写「相机」，频率仪统一写「频率仪」，`src/mvs_sdk.py` 的 SDK 术语（设备枚举、设备列表、设备时间戳）保留原词。频率监听日志的字段标签由 `device_id` 改为 `frequency_meter_serial`，与库中频率明细字段一致。本次只调整中文注释、文档字符串和日志标签，采集、OCR、频率、存储与数据库写入的数据流保持不变。

@@ -142,7 +142,7 @@ class FakeHandle:
             无外部参数。
 
         Returns:
-            None  # 假设备初始化完成
+            None  # 假相机初始化完成
         """
         self.frames = queue.Queue()
         self.released_frames = queue.Queue()
@@ -191,7 +191,7 @@ class FakeHandle:
         return operation
 
     def MV_CC_StartGrabbing(self):
-        """启动假设备取流。
+        """启动假相机取流。
 
         Args:
             无外部参数。
@@ -382,7 +382,7 @@ def test_sdk_errors_are_recorded_and_resources_released(camera, operation, start
     with pytest.raises(MvsError, match="不可用"):
         start_capture(camera)
 
-    # 清除注入错误并验证设备关闭和句柄销毁。
+    # 清除注入错误并验证相机关闭和句柄销毁。
     camera.handle.failure_operation = ""
     camera.close()
     operations = [name for name, arguments in camera.handle.calls]
@@ -394,7 +394,7 @@ def test_capture_and_stop_errors_preserve_both_failures(camera, monkeypatch, sta
 
     Args:
         camera: 假 SDK 相机。
-        monkeypatch: 设备方法替换工具。
+        monkeypatch: 相机方法替换工具。
         start_capture: 正式采集启动入口。
         wait_capture: 正式结果等待入口。
         caplog: 日志捕获器。
@@ -458,7 +458,7 @@ def test_task_creation_failure_releases_camera(camera, monkeypatch, start_captur
     assert failed_workflows[0].cr_frame is None
     assert not camera.capture_lock.locked()
 
-    # 恢复任务入口后，同一设备可以完成新一轮采集。
+    # 恢复任务入口后，同一相机可以完成新一轮采集。
     result = wait_capture(start_capture(camera, duration_seconds=0.01))
     assert result.frames == ()
     assert not camera.grabbing
@@ -524,13 +524,13 @@ def test_sdk_enumeration_configuration_and_cleanup():
         """模拟官方相机类和全局 SDK 方法。"""
 
         def __new__(cls):
-            """返回可记录操作的设备句柄。
+            """返回可记录操作的相机句柄。
 
             Args:
                 无外部参数。
 
             Returns:
-                handle  # 假设备句柄
+                handle  # 假相机句柄
             """
             return handle
 
@@ -539,7 +539,7 @@ def test_sdk_enumeration_configuration_and_cleanup():
 
         @staticmethod
         def MV_CC_EnumDevices(transport_types, device_list):
-            """填入一台可打开的设备。
+            """填入一台可打开的相机。
 
             Args:
                 transport_types: 传输类型位掩码。
@@ -574,7 +574,7 @@ def test_sdk_enumeration_configuration_and_cleanup():
 
 
 def test_close_failure_still_destroys_handle(camera):
-    """验证关闭设备失败时仍销毁句柄并报告错误。
+    """验证关闭相机失败时仍销毁句柄并报告错误。
 
     Args:
         camera: 假 SDK 相机。

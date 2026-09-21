@@ -1,4 +1,4 @@
-"""为业务测试提供按接收顺序交付测量的频率设备替身。"""
+"""为业务测试提供按接收顺序交付测量的频率仪替身。"""
 
 from enums import EventType
 import asyncio
@@ -27,7 +27,7 @@ class FakeFrequency(FrequencyAdapter):
             await asyncio.sleep(self.configuration.frequency_interval_ms / 1000)
             value_hz = next(frequency_values, None)
 
-            # 在设备边界过滤无读数、非有限值和超出范围的读数。
+            # 在频率仪边界过滤无读数、非有限值和超出范围的读数。
             if value_hz is None or not math.isfinite(value_hz):
                 continue
             if not self.configuration.minimum_frequency_hz <= value_hz <= self.configuration.maximum_frequency_hz:

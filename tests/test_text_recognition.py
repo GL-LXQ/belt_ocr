@@ -12,7 +12,7 @@ from text_recognition import TextRecognizer
 
 @pytest.fixture
 def recognition_inputs():
-    """创建原始帧和无设备依赖的编码接口。
+    """创建原始帧和无相机依赖的编码接口。
 
     Args:
         无外部参数。

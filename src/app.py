@@ -77,7 +77,7 @@ class App:
             )
             await run_blocking_operation(self.database.initialize)
 
-            # 加载相机驱动，按配置逐台打开设备。
+            # 加载相机驱动，按配置逐台打开相机。
             self.camera_sdk = await run_blocking_operation(
                 load_mvs_sdk,
                 self.configuration.mvs_development_directory,
@@ -118,7 +118,7 @@ class App:
                     f"机器处理 machine_id={machine.machine_id}", manager.listen_events,
                 )))
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
-                    f"频率监听 machine_id={machine.machine_id} device_id={machine.frequency_meter_serial}",
+                    f"频率监听 machine_id={machine.machine_id} frequency_meter_serial={machine.frequency_meter_serial}",
                     manager.frequency_adapter.run,
                 )))
 
@@ -128,7 +128,7 @@ class App:
             self.has_started = True
             self.accepting_signals = True
         except BaseException as error:
-            # 启动失败时记录异常并释放已打开的设备和本地记录库。
+            # 启动失败时记录异常并释放已打开的相机和本地记录库。
             logger.exception("测量系统初始化失败")
             if isinstance(error, Exception) and self.failure is None:
                 self.failure = error
@@ -326,7 +326,7 @@ class App:
         """保存故障、关闭信号入口并安排整个应用退出。
 
         Args:
-            error: 设备或后台任务抛出的异常。
+            error: 相机或后台任务抛出的异常。
 
         Returns:
             None  # 故障已记录，资源清理已安排
@@ -346,7 +346,7 @@ class App:
         """运行后台任务，异常或意外结束时通知应用退出。
 
         Args:
-            component: 任务名称及机器、设备身份。
+            component: 任务名称及机器身份。
             run_worker: 持续运行的异步任务入口。
 
         Returns:
@@ -424,7 +424,7 @@ class App:
             无外部参数。
 
         Returns:
-            None  # 测量、任务和设备资源已清理，清理故障保存在 failure 中
+            None  # 测量、任务和相机资源已清理，清理故障保存在 failure 中
         """
         self.accepting_signals = False
         self.stopping = True
@@ -476,7 +476,7 @@ class App:
                     event.acknowledgement.cancel()
                 manager.queue.task_done()
 
-        # 停止并排空相机线程，异常不阻止其他设备释放。
+        # 停止并排空相机线程，异常不阻止其他相机释放。
         camera_results = await asyncio.gather(*(
             manager.camera.stop() for manager in self.machine_managers.values()
         ), return_exceptions=True)
@@ -521,7 +521,7 @@ class App:
             self.database.queue.get_nowait()
             self.database.queue.task_done()
         self.database.queued_records.clear()
-        # 最后关闭相机设备与共享 SDK，再释放数据库实例锁。
+        # 最后关闭相机与共享 SDK，再释放数据库实例锁。
         try:
             if self.camera_sdk is not None:
                 await run_blocking_operation(self.camera_sdk.close)

@@ -63,7 +63,7 @@ class CaptureTask:
                 # 保存本次读取的帧，允许停止信号或窗口到期时的尾帧。
                 frames.append(frame)
         except Exception:
-            # 记录采集异常，标记设备故障并继续抛出。
+            # 记录采集异常，标记相机故障并继续抛出。
             self.camera.faulted = True
             logger.exception("相机采集失败 serial=%s", self.camera.serial)
             raise
@@ -97,10 +97,10 @@ class SessionCamera:
         publish_event: PublishEvent,
         report_failure: Callable[[Exception], None],
     ) -> None:
-        """登记设备配置、采集任务与业务事件入口。
+        """登记机器配置、采集任务与业务事件入口。
 
         Args:
-            machine: 机器和设备身份。
+            machine: 机器身份。
             configuration: 采集窗口和单帧超时配置。
             publish_event: 整轮结果交付入口。
             report_failure: 应用故障入口。
@@ -108,7 +108,7 @@ class SessionCamera:
         Returns:
             None  # 相机适配器初始化完成
         """
-        # 保存外部依赖和设备句柄。
+        # 保存外部依赖和相机句柄。
         self.machine = machine
         self.configuration = configuration
         self.publish_event = publish_event
@@ -120,13 +120,13 @@ class SessionCamera:
 
     @property
     def available(self) -> bool:
-        """返回设备是否可以采集。
+        """返回相机是否可以采集。
 
         Args:
             无外部参数。
 
         Returns:
-            True  # 设备已打开且无故障，否则为 False
+            True  # 相机已打开且无故障，否则为 False
         """
         return self.device is not None and not self.device.closed and not self.device.faulted
 
@@ -152,7 +152,7 @@ class SessionCamera:
         Returns:
             None  # 后台采集和结果交付已启动
         """
-        # 取得相机采集锁，检查设备状态。
+        # 取得相机采集锁，检查相机状态。
         camera = self.device
         if not camera.capture_lock.acquire(blocking=False):
             raise MvsError(f"相机正在采集：{camera.serial}")

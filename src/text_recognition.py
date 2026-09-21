@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class ImageEncodingError(RuntimeError):
-    """标记设备编码失败并保留原始异常。"""
+    """标记相机编码失败并保留原始异常。"""
 
 
 class TextRecognizer:
@@ -46,7 +46,7 @@ class TextRecognizer:
             capture_id: 采集编号。
             camera_serial: 相机序列号。
             frames: 本轮全部原始帧，按接收顺序排列。
-            encode_image: 将原始帧编码为内存 BMP 的设备接口。
+            encode_image: 将原始帧编码为内存 BMP 的相机接口。
 
         Returns:
             OCRResult(
@@ -73,7 +73,7 @@ class TextRecognizer:
             try:
                 image_data = encode_image(frame)
             except Exception as error:
-                # 记录编码设备异常及所属周期，再终止本轮识别。
+                # 记录编码相机异常及所属周期，再终止本轮识别。
                 logger.exception(
                     "相机编码失败 camera_serial=%s session_id=%s", camera_serial, session_id,
                 )

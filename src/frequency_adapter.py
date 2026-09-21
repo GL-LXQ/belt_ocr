@@ -1,4 +1,4 @@
-"""定义持续接收频率数据的设备黑盒及当前周期归属。"""
+"""定义持续接收频率数据的频率仪黑盒及当前周期归属。"""
 
 from enums import EventType
 import asyncio
@@ -18,17 +18,17 @@ class FrequencyAdapter:
         configuration: MeasurementConfiguration,
         publish_event: PublishEvent,
     ) -> None:
-        """登记设备配置、测量事件入口和当前周期编号。
+        """登记频率仪配置、测量事件入口和当前周期编号。
 
         Args:
             machine: 当前机器与频率来源绑定。
-            configuration: 设备参数及有效频率范围。
+            configuration: 频率仪参数及有效频率范围。
             publish_event: 与 START/CLOSE 共用机器 FIFO 队列的事件入口。
 
         Returns:
             None  # 适配器已初始化，当前没有活动周期
         """
-        # 保存设备绑定、参数和事件发布入口。
+        # 保存频率仪绑定、参数和事件发布入口。
         self.machine = machine
         self.configuration = configuration
         self.publish_event = publish_event
@@ -45,7 +45,7 @@ class FrequencyAdapter:
         Returns:
             None  # 监听被取消；读取失败时抛出异常
         """
-        # 调用设备黑盒，连接和持续读取由该接口完成。
+        # 调用频率仪黑盒，连接和持续读取由该接口完成。
         await self.listen_measurements()
 
     async def listen_measurements(self) -> None:
@@ -57,7 +57,7 @@ class FrequencyAdapter:
         Returns:
             None  # 持续发送 FrequencyMeasured 事件，直到任务取消
 
-        当前为设备读取占位实现，后续替换为真实协议读取。
+        当前为频率仪读取占位实现，后续替换为真实协议读取。
         """
         # 按配置准备联调读数。
         frequency_values = cycle(self.machine.simulated_frequencies_hz)
@@ -65,7 +65,7 @@ class FrequencyAdapter:
             await asyncio.sleep(self.configuration.frequency_interval_ms / 10000)
             value_hz = next(frequency_values, None)
 
-            # 在设备边界过滤无读数、非有限值和超出范围的读数。
+            # 在频率仪边界过滤无读数、非有限值和超出范围的读数。
             if value_hz is None or not math.isfinite(value_hz):
                 continue
             if not self.configuration.minimum_frequency_hz <= value_hz <= self.configuration.maximum_frequency_hz:

@@ -35,7 +35,7 @@ class MachineManager:
         """组装一台机器的唯一当前周期及其处理依赖。
 
         Args:
-            machine: 机器与设备身份配置。
+            machine: 机器身份配置。
             configuration: 采集、期限和存储配置。
             camera: 当前机器的相机适配器。
             frequency_adapter: 当前机器的频率接收适配器。
@@ -59,7 +59,7 @@ class MachineManager:
         self.queue: asyncio.Queue[MeasurementEvent] = asyncio.Queue(
             configuration.event_queue_capacity
         )
-        # 初始化唯一周期、设备复位状态和后台任务引用。
+        # 初始化唯一周期、机器复位状态和后台任务引用。
         self.current_session: BeltSession | None = None
         self.waiting_cycle_reset = False
         self.deadline_tasks: dict[EventType, asyncio.Task[None]] = {}
@@ -138,7 +138,7 @@ class MachineManager:
         if self.waiting_cycle_reset:
             return
 
-        # 检查存储容量、设备故障和本地运行库状态。
+        # 检查存储容量、相机状态和本地运行库状态。
         if (
             not self.capacity_available
             or not self.database.runtime_available
@@ -150,7 +150,7 @@ class MachineManager:
             logger.error("本轮未受理 machine_id=%s", self.machine.machine_id)
             return
 
-        # 创建本轮档案，记录设备绑定、开始时间和配置。
+        # 创建本轮档案，记录机器绑定、开始时间和配置。
         session = BeltSession(
             session_id=uuid4().hex,
             machine_id=self.machine.machine_id,
@@ -432,7 +432,7 @@ class MachineManager:
                 continue
             self.deadline_tasks.pop(event_type).cancel()
 
-        # 停止设备交付，已关闭周期在后台资源释放后清空。
+        # 停止本轮交付和采集，已关闭周期在后台资源释放后清空。
         self.frequency_adapter.active_session_id = None
         session.frequency_window_sealed = True
         if session.frequency_state == FrequencyState.RUNNING:
@@ -477,7 +477,7 @@ class MachineManager:
         Returns:
             None  # 任务引用已释放，已关闭的结束周期已清理
         """
-        # 读取编码或结果交付异常，正常取消不作为设备故障。
+        # 读取编码或结果交付异常，正常取消不作为相机故障。
         self.recognition_task = None
         if not task.cancelled():
             error = task.exception()
@@ -510,7 +510,7 @@ class MachineManager:
                     self.camera.device.encode_image,
                 )
             except ImageEncodingError as error:
-                # 编码设备异常已经记录，继续抛给任务结束回调处理应用退出。
+                # 相机编码异常已经记录，继续抛给任务结束回调处理应用退出。
                 self.camera.device.faulted = True
                 raise error.__cause__
             except Exception as error:

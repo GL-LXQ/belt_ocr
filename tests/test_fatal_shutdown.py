@@ -1,4 +1,4 @@
-"""验证设备故障日志、全局退出和资源释放。"""
+"""验证相机故障日志、全局退出和资源释放。"""
 
 import asyncio
 import threading
@@ -62,7 +62,7 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
         failure_stage: 驱动、序列号或第二台相机失败阶段。
 
     Returns:
-        None  # 启动失败，已打开的设备和实例锁均已释放
+        None  # 启动失败，已打开的相机和实例锁均已释放
     """
     # 按阶段注入启动故障。
     configuration, sdk = device_environment
@@ -71,7 +71,7 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
     elif failure_stage == "serial":
         machines = (configuration.machines[0], replace(configuration.machines[1], camera_serial=""))
         configuration = replace(configuration, machines=machines)
-        # 缺失序列号在配置边界拒绝，尚未加载或打开设备。
+        # 缺失序列号在配置边界拒绝，尚未加载或打开相机。
         with pytest.raises(ValueError, match="camera_serial"):
             App(configuration)
         assert not sdk.cameras
@@ -80,7 +80,7 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
         open_camera = sdk.open_camera
         monkeypatch.setattr(sdk, "open_camera", Mock(side_effect=[open_camera("SERIAL1"), OSError("连接失败")]))
 
-    # 启动并检查失败后的设备与记录库状态。
+    # 启动并检查失败后的相机与记录库状态。
     application = App(configuration)
     with pytest.raises((OSError, RuntimeError)):
         asyncio.run(application.start())
@@ -92,7 +92,7 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
 
 
 def test_cancelled_startup_failure_preserves_error_and_cleanup(device_environment, monkeypatch, caplog):
-    """验证启动取消后的设备异常仍保留，且资源清理完成后才退出。
+    """验证启动取消后的相机异常仍保留，且资源清理完成后才退出。
 
     Args:
         device_environment: 测量配置与假驱动。
@@ -158,7 +158,7 @@ def test_cancelled_startup_failure_preserves_error_and_cleanup(device_environmen
 
 @pytest.mark.parametrize("worker_kind", ["frequency", "storage", "return", "cancel"])
 def test_background_failure_stops_all_devices(device_environment, caplog, worker_kind):
-    """验证后台异常、意外返回和取消均停止全部设备且不重启。
+    """验证后台异常、意外返回和取消均停止全部相机且不重启。
 
     Args:
         device_environment: 测试配置与假驱动。
@@ -215,7 +215,7 @@ def test_background_failure_stops_all_devices(device_environment, caplog, worker
 
 @pytest.mark.parametrize("operation", ["start", "read", "encode", "stop"])
 def test_camera_fault_interrupts_main_workflow(device_environment, monkeypatch, caplog, operation):
-    """验证相机各阶段故障中断主流程等待并释放全部设备。
+    """验证相机各阶段故障中断主流程等待并释放全部相机。
 
     Args:
         device_environment: 测试配置与假驱动。
@@ -224,9 +224,9 @@ def test_camera_fault_interrupts_main_workflow(device_environment, monkeypatch, 
         operation: 故障发生的相机操作。
 
     Returns:
-        None  # 主流程抛出相机异常，全部设备已关闭
+        None  # 主流程抛出相机异常，全部相机已关闭
     """
-    # 打开相机时替换指定设备操作，停止故障在短采集窗口触发。
+    # 打开相机时替换指定相机操作，停止故障在短采集窗口触发。
     configuration, sdk = device_environment
     if operation in {"stop", "encode"}:
         configuration = replace(configuration, capture_window_ms=50)
@@ -239,7 +239,7 @@ def test_camera_fault_interrupts_main_workflow(device_environment, monkeypatch, 
     }
 
     def open_faulty_camera(serial, **parameters):
-        """打开设备并为第一台相机注入一次故障。
+        """打开相机并为第一台相机注入一次故障。
 
         Args:
             serial: 相机序列号。
@@ -266,7 +266,7 @@ def test_camera_fault_interrupts_main_workflow(device_environment, monkeypatch, 
     assert sdk.closed
     assert all(camera.closed for camera in sdk.cameras.values())
     assert ("camera_serial=SERIAL1" if operation == "encode" else "serial=SERIAL1") in caplog.text
-    # 同一设备故障只在发生位置记录一次异常堆栈。
+    # 同一相机故障只在发生位置记录一次异常堆栈。
     failure_logs = [
         record for record in caplog.records
         if record.exc_info and str(record.exc_info[1]) == "相机连接断开"
@@ -317,7 +317,7 @@ def test_command_line_failure_returns_nonzero(monkeypatch, caplog):
     Returns:
         None  # 命令行以退出码 1 结束
     """
-    # 替换主流程为设备异常并清空测试命令行参数。
+    # 替换主流程为相机异常并清空测试命令行参数。
     monkeypatch.setattr(main, "load_configuration", Mock(side_effect=OSError("配置读取失败")))
     monkeypatch.setattr("sys.argv", ["main.py"])
 
@@ -358,7 +358,7 @@ def test_failure_releases_publishers_waiting_for_queue(device_environment):
         assert all(not task.done() for task in publishers)
 
         # 退出释放队列容量，所有旧交付均丢弃而不再阻塞。
-        application.report_failure(OSError("设备故障"))
+        application.report_failure(OSError("相机故障"))
         await asyncio.wait_for(application.stop(), 2)
         await asyncio.wait_for(asyncio.gather(*publishers), 2)
         await asyncio.wait_for(manager.queue.join(), 2)

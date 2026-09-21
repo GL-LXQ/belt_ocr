@@ -1,4 +1,4 @@
-"""执行相机启停信号演示，频率设备由黑盒适配接口提供。"""
+"""执行相机启停信号演示，频率仪由黑盒适配接口提供。"""
 
 import argparse
 import asyncio
@@ -16,7 +16,7 @@ async def run_measurement_demo(configuration_path: Path) -> None:
         configuration_path: 测量配置文件路径。
 
     Returns:
-        None  # 演示正常结束；设备或后台故障时抛出异常
+        None  # 演示正常结束；相机或后台故障时抛出异常
     """
     # 读取配置并准备应用和本次主流程任务。
     try:
@@ -27,19 +27,19 @@ async def run_measurement_demo(configuration_path: Path) -> None:
         raise
     tasks = []
     try:
-        # 启动应用，并同时等待测量完成或设备故障。
+        # 启动应用，并同时等待测量完成或相机故障。
         await app.start()
         measurement_task = asyncio.create_task(run_measurement_cycles(app))
         failure_task = asyncio.create_task(app.wait_for_failure())
         tasks = [measurement_task, failure_task]
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-        # 优先传播设备故障，否则读取测量主流程的执行结果。
+        # 优先传播相机故障，否则读取测量主流程的执行结果。
         if app.failure is not None:
             raise app.failure
         await measurement_task
     except Exception:
-        # 记录尚未由设备或后台任务处理的演示流程异常。
+        # 记录尚未由相机或后台任务处理的演示流程异常。
         if app.failure is None:
             logging.exception("测量流程失败")
         raise
@@ -50,7 +50,7 @@ async def run_measurement_demo(configuration_path: Path) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
         await app.stop()
 
-    # 退出时的设备释放故障同样交给命令行报告失败。
+    # 退出时的相机释放故障同样交给命令行报告失败。
     if app.failure is not None:
         raise app.failure
 
@@ -101,7 +101,7 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    argument_parser = argparse.ArgumentParser(description="MVS 相机测量信号演示，频率设备接口待接入")
+    argument_parser = argparse.ArgumentParser(description="MVS 相机测量信号演示，频率仪接口待接入")
     argument_parser.add_argument(
         "--config", type=Path, default=Path(__file__).resolve().parents[1] / "config.example.json",
     )
