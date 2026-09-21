@@ -1,4 +1,4 @@
-"""按验收场景验证跨轮回调、设备故障和持久化边界。"""
+"""按验收场景验证跨轮回调、机器故障和持久化边界。"""
 
 import asyncio
 import json
@@ -390,7 +390,7 @@ from fake_mvs import FakeMvsSdk
 application_module.load_mvs_sdk = FakeMvsSdk
 
 async def crash_after_close():
-    # 将子进程的设备写入业务库，再通过正式配置入口读取。
+    # 将子进程的机器写入业务库，再通过正式配置入口读取。
     import json
     import sqlite3
     from contextlib import closing

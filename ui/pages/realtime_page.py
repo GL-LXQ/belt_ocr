@@ -1,4 +1,4 @@
-"""实时监测页面、设备卡片和步骤进度组件。"""
+"""实时监测页面、机器卡片和步骤进度组件。"""
 
 from html import escape
 from pathlib import Path
@@ -29,7 +29,7 @@ from ui.demo_data import LOG_ROWS
 from ui.theme import create_icon
 
 
-# 卡片区每行固定放置的设备数量。
+# 卡片区每行固定放置的机器数量。
 CARDS_PER_ROW = 3
 
 
@@ -146,17 +146,17 @@ class StepProgress(QFrame):
 
 
 class MachineCard(QFrame):
-    """展示一台设备的画面占位、状态、频率、进度和事件。"""
+    """展示一台机器的画面占位、状态、频率、进度和事件。"""
 
     def __init__(self, data: dict):
-        """构建设备卡片并填入展示数据。
+        """构建机器卡片并填入展示数据。
 
         Args:
             data: 卡片展示数据，包含标题、状态、频率、进度和事件。
 
         Returns:
             返回示例：
-                None  # 创建设备卡片
+                None  # 创建机器卡片
         """
         super().__init__()
         self.setObjectName("machineCard")
@@ -255,14 +255,14 @@ class MachineCard(QFrame):
         self.update_data(data)
 
     def update_data(self, data: dict):
-        """将设备展示数据应用到已有控件。
+        """将机器展示数据应用到已有控件。
 
         Args:
             data: 包含标题、状态、频率、进度和事件的卡片展示数据。
 
         Returns:
             返回示例：
-                None  # 更新设备卡片，不创建新控件
+                None  # 更新机器卡片，不创建新控件
         """
         # 更新机器标题和状态文案。
         self.setProperty("tone", data["tone"])
@@ -303,13 +303,13 @@ class MachineCard(QFrame):
 
 
 class RealtimePage(QWidget):
-    """组织设备卡片、系统日志和数据库读取。"""
+    """组织机器卡片、系统日志和数据库读取。"""
 
     def __init__(self, machine_service: MachineService):
-        """初始化布局、设备卡片和本地交互。
+        """初始化布局、机器卡片和本地交互。
 
         Args:
-            machine_service: 设备业务服务。
+            machine_service: 机器业务服务。
 
         Returns:
             返回示例：
@@ -321,7 +321,7 @@ class RealtimePage(QWidget):
         self.monitoring_service = None
         self.closing_requested = False
         self.connection_states = {}
-        self.cards_by_device_id = {}
+        self.cards_by_machine_id = {}
         self.configuration_path = Path(__file__).resolve().parents[2] / "config.example.json"
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -367,7 +367,7 @@ class RealtimePage(QWidget):
         self.stop_button.setEnabled(False)
         layout.addLayout(header)
 
-        # 创建卡片网格，每行固定放置几台设备。
+        # 创建卡片网格，每行固定放置几台机器。
         cards_layout = QGridLayout()
         cards_layout.setSpacing(12)
         for column in range(CARDS_PER_ROW):
@@ -414,17 +414,17 @@ class RealtimePage(QWidget):
         log_layout.addWidget(self.log_table)
         layout.addWidget(log_panel)
 
-        # 绑定本地交互，填入演示日志并读取设备表。
+        # 绑定本地交互，填入演示日志并读取机器表。
         self.start_button.clicked.connect(self.start_monitoring)
         self.stop_button.clicked.connect(self.stop_monitoring)
-        self.refresh_button.clicked.connect(self.reload_devices)
+        self.refresh_button.clicked.connect(self.reload_machines)
         self.clear_button.clicked.connect(lambda: self.log_table.setRowCount(0))
         self.auto_scroll.toggled.connect(lambda checked: self.log_table.scrollToBottom() if checked else None)
         self.fill_demo_logs()
-        self.reload_devices()
+        self.reload_machines()
 
-    def reload_devices(self):
-        """重新读取设备表并按记录重建卡片。
+    def reload_machines(self):
+        """重新读取机器表并按记录重建卡片。
 
         Args:
             无。
@@ -433,25 +433,25 @@ class RealtimePage(QWidget):
             返回示例：
                 None  # 卡片跟随数据库内容，读取失败时提示并清空卡片区
         """
-        # 读取已启用设备，失败时提示并把卡片区置空。
+        # 读取已启用机器，失败时提示并把卡片区置空。
         try:
-            self.devices = self.machine_service.list_enabled_machines()
+            self.machines = self.machine_service.list_enabled_machines()
         except MachineServiceError as error:
-            QMessageBox.warning(self, "设备读取失败", str(error))
-            self.devices = []
+            QMessageBox.warning(self, "机器读取失败", str(error))
+            self.machines = []
         self.populate_cards()
         # 通知滚动区按新的卡片行数重新计算内容高度。
         self.scroll_area.widget().updateGeometry()
 
     def populate_cards(self):
-        """按当前设备记录重建设备卡片区。
+        """按当前机器记录重建机器卡片区。
 
         Args:
             无。
 
         Returns:
             返回示例：
-                None  # 卡片数量与设备记录一致，每行固定排满后换行
+                None  # 卡片数量与机器记录一致，每行固定排满后换行
         """
         # 移除上一次创建的卡片。
         while self.cards_layout.count():
@@ -460,22 +460,22 @@ class RealtimePage(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self.machine_cards = []
-        self.cards_by_device_id = {}
+        self.cards_by_machine_id = {}
         self.empty_hint = None
 
-        # 没有设备时显示横跨整行的空态提示。
-        if not self.devices:
-            hint = QLabel("暂无设备，请先在设备管理页添加。")
+        # 没有机器时显示横跨整行的空态提示。
+        if not self.machines:
+            hint = QLabel("暂无机器，请先在机器管理页添加。")
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             hint.setStyleSheet("color: #73849B;")
             self.empty_hint = hint
             self.cards_layout.addWidget(hint, 0, 0, 1, CARDS_PER_ROW)
             return
 
-        # 按设备编号创建卡片，并恢复最近一次连接结果。
-        for index, device in enumerate(self.devices):
+        # 按机器编号创建卡片，并恢复最近一次连接结果。
+        for index, machine in enumerate(self.machines):
             card = MachineCard({
-                "title": device["machine_name"],
+                "title": machine["machine_name"],
                 "tone": "idle",
                 "status": "未启动",
                 "state": "未启动监测",
@@ -485,13 +485,13 @@ class RealtimePage(QWidget):
             })
             self.cards_layout.addWidget(card, index // CARDS_PER_ROW, index % CARDS_PER_ROW)
             self.machine_cards.append(card)
-            device_id = str(device["id"])
-            self.cards_by_device_id[device_id] = card
-            status, reason = self.connection_states.get(device_id, ("未启动", ""))
-            self.update_connection_state(device_id, status, reason)
+            machine_id = str(machine["id"])
+            self.cards_by_machine_id[machine_id] = card
+            status, reason = self.connection_states.get(machine_id, ("未启动", ""))
+            self.update_connection_state(machine_id, status, reason)
 
     def start_monitoring(self):
-        """读取设备卡片并启动一次后台监测。
+        """读取机器卡片并启动一次后台监测。
 
         Args:
             无。
@@ -499,15 +499,15 @@ class RealtimePage(QWidget):
         Returns:
             None  # 后台启动，按钮等待监测结束后恢复
         """
-        # 重读设备清单，清除上一轮结果并切换按钮状态。
+        # 重读机器清单，清除上一轮结果并切换按钮状态。
         self.connection_states.clear()
-        self.reload_devices()
+        self.reload_machines()
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        for device_id in self.cards_by_device_id:
-            self.update_connection_state(device_id, "连接中", "正在初始化监测服务")
+        for machine_id in self.cards_by_machine_id:
+            self.update_connection_state(machine_id, "连接中", "正在初始化监测服务")
 
-        # 在线程中连接设备，通过 Qt 信号更新主线程中的卡片。
+        # 在线程中连接相机，通过 Qt 信号更新主线程中的卡片。
         # 创建后台线程，先接好连接进度和线程结束两个信号，再启动线程。
         self.monitoring_service = MonitoringService(self.configuration_path)
         self.monitoring_service.camera_state_changed_signal.connect(self.update_connection_state)
@@ -526,23 +526,23 @@ class RealtimePage(QWidget):
         # 关闭重复停止入口，通知后台主流程退出。
         self.stop_button.setEnabled(False)
         self.monitoring_service.stop_requested.set()
-        for device_id in self.cards_by_device_id:
-            self.update_connection_state(device_id, "停止中", "正在释放相机和后台资源")
+        for machine_id in self.cards_by_machine_id:
+            self.update_connection_state(machine_id, "停止中", "正在释放相机和后台资源")
 
-    def update_connection_state(self, device_id: str, status: str, reason: str):
-        """保存设备连接结果并更新对应卡片。
+    def update_connection_state(self, machine_id: str, status: str, reason: str):
+        """保存机器连接结果并更新对应卡片。
 
         Args:
-            device_id: 数据库设备编号的字符串形式。
+            machine_id: 数据库机器编号的字符串形式。
             status: 相机连接状态。
             reason: 连接失败原因或状态说明。
 
         Returns:
-            None  # 已保存状态；当前页面存在该设备时更新卡片
+            None  # 已保存状态；当前页面存在该机器时更新卡片
         """
-        # 保留状态，并跳过运行期间已从列表移除的设备。
-        self.connection_states[device_id] = (status, reason)
-        card = self.cards_by_device_id.get(device_id)
+        # 保留状态，并跳过运行期间已从列表移除的机器。
+        self.connection_states[machine_id] = (status, reason)
+        card = self.cards_by_machine_id.get(machine_id)
         if card is None:
             return
 
@@ -568,14 +568,14 @@ class RealtimePage(QWidget):
         Returns:
             None  # 卡片与按钮已反映后台退出结果
         """
-        # 更新全部卡片，保留具体设备的连接失败原因。
+        # 更新全部卡片，保留具体机器的连接失败原因。
         failure_message = self.monitoring_service.failure_message
-        for device_id in self.cards_by_device_id:
-            status, reason = self.connection_states.get(device_id, ("未启动", ""))
+        for machine_id in self.cards_by_machine_id:
+            status, reason = self.connection_states.get(machine_id, ("未启动", ""))
             if status != "连接失败":
                 status = "监测失败" if failure_message else "已停止"
                 reason = failure_message or "相机连接已释放"
-            self.update_connection_state(device_id, status, reason)
+            self.update_connection_state(machine_id, status, reason)
 
         # 恢复操作按钮，并展示没有对应卡片的初始化故障。
         self.start_button.setEnabled(True)

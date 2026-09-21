@@ -13,7 +13,7 @@ from configuration import load_configuration
 class MonitoringService(QThread):
     """管理一次监测服务的启动、等待和资源释放。"""
 
-    # 相机连接状态信号，参数依次为设备编号、连接状态和失败原因。
+    # 相机连接状态信号，参数依次为机器编号、连接状态和失败原因。
     camera_state_changed_signal = Signal(str, str, str)
 
     def __init__(self, configuration_path: Path):
@@ -46,7 +46,7 @@ class MonitoringService(QThread):
             self.failure_message = str(error)
 
     async def run_monitoring(self):
-        """读取设备、连接相机、等待停止并统一释放资源。
+        """读取机器、连接相机、等待停止并统一释放资源。
 
         Args:
             无。

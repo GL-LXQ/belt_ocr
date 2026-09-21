@@ -292,7 +292,7 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
             无外部参数。
 
         Returns:
-            None  # 故障已传播，全部设备关闭且没有异常测量入库
+            None  # 故障已传播，全部机器关闭且没有异常测量入库
         """
         # 注入图片编码故障并启动测量。
         app = await self.start_app(capture_window_ms=100)

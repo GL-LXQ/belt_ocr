@@ -37,7 +37,7 @@ def test_load_machine_state_preserves_json_values(tmp_path: Path, configured_sta
     # 保存配置并通过正式入口读取。
     configuration_path = tmp_path / "configuration.json"
     configuration_path.write_text(json.dumps(settings), encoding="utf-8")
-    # 写入本测试所需设备，配置加载不再读取 JSON 设备清单。
+    # 写入本测试所需机器，配置加载不再读取 JSON 机器清单。
     database_path = tmp_path / settings["database_path"]
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(database_path)) as connection, connection:

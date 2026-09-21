@@ -1,4 +1,4 @@
-"""验证设备业务服务转换数据库错误。"""
+"""验证机器业务服务转换数据库错误。"""
 
 import sqlite3
 from contextlib import closing
@@ -67,13 +67,13 @@ def test_create_returns_success_and_duplicate_results(tmp_path, duplicate_field)
 
     Args:
         tmp_path: 临时数据库目录。
-        duplicate_field: 本次重复的设备字段。
+        duplicate_field: 本次重复的机器字段。
 
     Returns:
         返回示例：
             None  # 成功返回编号，重复返回字段且没有新增记录
     """
-    # 初始化真实数据库并创建一条设备记录。
+    # 初始化真实数据库并创建一条机器记录。
     database_path = tmp_path / "machines.sqlite3"
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
@@ -86,7 +86,7 @@ def test_create_returns_success_and_duplicate_results(tmp_path, duplicate_field)
     result = service.create_machine(**values)
     assert result == {
         "success": True,
-        "device_id": 1,
+        "machine_id": 1,
         "field": None,
     }
 
@@ -96,7 +96,7 @@ def test_create_returns_success_and_duplicate_results(tmp_path, duplicate_field)
             values[field] += "新"
     result = service.create_machine(**values)
     assert result["success"] is False
-    assert result["device_id"] is None
+    assert result["machine_id"] is None
     assert result["field"] == duplicate_field
     assert result["message"]
     assert len(service.list_machines()) == 1
@@ -113,7 +113,7 @@ def test_concurrent_duplicate_is_rejected_by_database(tmp_path, monkeypatch):
         返回示例：
             None  # 并发重复提示保存失败且不会新增重复记录
     """
-    # 建表并写入已有设备。
+    # 建表并写入已有机器。
     repository = MachineRepo(tmp_path / "machines.sqlite3")
     with closing(sqlite3.connect(repository.database_path)) as connection, connection:
         MachineRepo.create_table(connection)
@@ -128,8 +128,8 @@ def test_concurrent_duplicate_is_rejected_by_database(tmp_path, monkeypatch):
     assert len(service.list_machines()) == 1
 
 
-def test_update_machine_keeps_own_fields_and_rejects_other_devices(tmp_path):
-    """验证编辑保持自身字段通过，与其他设备重复被拒绝。
+def test_update_machine_keeps_own_fields_and_rejects_other_machines(tmp_path):
+    """验证编辑保持自身字段通过，与其他机器重复被拒绝。
 
     Args:
         tmp_path: 临时数据库目录。
@@ -138,7 +138,7 @@ def test_update_machine_keeps_own_fields_and_rejects_other_devices(tmp_path):
         返回示例：
             None  # 自身字段可保存，他行字段重复返回字段名且记录不变
     """
-    # 建表并写入两台设备。
+    # 建表并写入两台机器。
     database_path = tmp_path / "machines.sqlite3"
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
@@ -148,16 +148,16 @@ def test_update_machine_keeps_own_fields_and_rejects_other_devices(tmp_path):
 
     # 原样保留自身三个字段，只修改启用状态和备注。
     result = service.update_machine(1, "1号皮带机", "CAM001", "FREQ001", False, "一号产线")
-    assert result == {"success": True, "device_id": 1, "field": None}
+    assert result == {"success": True, "machine_id": 1, "field": None}
     record = service.list_machines()[0]
     assert record["machine_name"] == "1号皮带机"
     assert record["enabled"] is False
     assert record["remark"] == "一号产线"
 
-    # 改成第二台设备的相机序列号时返回重复字段且不修改记录。
+    # 改成第二台机器的相机序列号时返回重复字段且不修改记录。
     result = service.update_machine(1, "1号皮带机", "CAM002", "FREQ001")
     assert result["success"] is False
-    assert result["device_id"] == 1
+    assert result["machine_id"] == 1
     assert result["field"] == "camera_serial"
     assert result["message"]
     assert service.list_machines()[0]["camera_serial"] == "CAM001"
@@ -171,9 +171,9 @@ def test_delete_machine_hides_record_and_frees_fields(tmp_path):
 
     Returns:
         返回示例：
-            None  # 记录保留在表中，名称和序列号可被新设备复用
+            None  # 记录保留在表中，名称和序列号可被新机器复用
     """
-    # 建表并写入一台设备。
+    # 建表并写入一台机器。
     database_path = tmp_path / "machines.sqlite3"
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
@@ -188,4 +188,4 @@ def test_delete_machine_hides_record_and_frees_fields(tmp_path):
 
     # 相同名称和序列号可以重新新增。
     result = service.create_machine("1号皮带机", "CAM001", "FREQ001")
-    assert result == {"success": True, "device_id": 2, "field": None}
+    assert result == {"success": True, "machine_id": 2, "field": None}

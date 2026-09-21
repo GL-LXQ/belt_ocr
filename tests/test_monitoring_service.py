@@ -1,4 +1,4 @@
-"""验证数据库设备连接、卡片反馈和窗口退出收尾。"""
+"""验证数据库机器连接、卡片反馈和窗口退出收尾。"""
 
 import json
 import threading
@@ -69,18 +69,18 @@ def wait_for_condition(condition):
     assert condition()
 
 
-def test_connects_enabled_database_devices_and_stops(monitoring_environment):
-    """验证启用设备绑定、刷新状态保留及主动停止。
+def test_connects_enabled_database_machines_and_stops(monitoring_environment):
+    """验证启用机器绑定、刷新状态保留及主动停止。
 
     Args:
         monitoring_environment: 页面、相机替身和提示记录。
 
     Returns:
-        None  # 设备正确绑定，停止后所有相机释放
+        None  # 机器正确绑定，停止后所有相机释放
     """
     page, sdk, warnings = monitoring_environment
     repository = page.machine_service.machine_repo
-    # 建立启用、停用和软删除设备，序列号不依赖卡片序号。
+    # 建立启用、停用和软删除机器，序列号不依赖卡片序号。
     first_id = repository.insert("一号机器", "SERIAL-B", "FREQ-B")
     repository.insert("停用机器", "DISABLED", "FREQ-D", False)
     deleted_id = repository.insert("删除机器", "DELETED", "FREQ-X")
@@ -97,7 +97,7 @@ def test_connects_enabled_database_devices_and_stops(monitoring_environment):
     wait_for_condition(lambda: len(sdk.cameras) == 2 and all(
         card.badge.text() == "相机已连接" for card in page.machine_cards
     ))
-    page.reload_devices()
+    page.reload_machines()
     assert all(card.badge.text() == "相机已连接" for card in page.machine_cards)
     assert all(not camera.grabbing for camera in sdk.cameras.values())
     assert set(sdk.cameras) == {"SERIAL-B", "SERIAL-A"}
@@ -121,7 +121,7 @@ def test_connection_failure_releases_other_cameras(monitoring_environment, monke
         reason: SDK 故障信息。
 
     Returns:
-        None  # 原因展示在对应卡片，其他设备已停止
+        None  # 原因展示在对应卡片，其他机器已停止
     """
     page, sdk, warnings = monitoring_environment
     repository = page.machine_service.machine_repo
@@ -141,15 +141,15 @@ def test_connection_failure_releases_other_cameras(monitoring_environment, monke
     warnings.assert_called_once()
 
 
-def test_empty_devices_do_not_open_sdk(monitoring_environment, monkeypatch):
-    """验证空设备列表提示用户且不加载硬件。
+def test_empty_machines_do_not_open_sdk(monitoring_environment, monkeypatch):
+    """验证空机器列表提示用户且不加载硬件。
 
     Args:
         monitoring_environment: 页面、相机替身和提示记录。
         monkeypatch: 测试替换工具。
 
     Returns:
-        None  # 无启用设备时启动结束且按钮恢复
+        None  # 无启用机器时启动结束且按钮恢复
     """
     page, sdk, warnings = monitoring_environment
     loader = Mock(return_value=sdk)
@@ -157,7 +157,7 @@ def test_empty_devices_do_not_open_sdk(monitoring_environment, monkeypatch):
     page.start_button.click()
     wait_for_condition(lambda: page.monitoring_service is None)
     loader.assert_not_called()
-    assert "没有启用的设备" in warnings.call_args.args[2]
+    assert "没有启用的机器" in warnings.call_args.args[2]
 
 
 def test_close_window_waits_for_connecting_camera(monitoring_environment, window, monkeypatch):

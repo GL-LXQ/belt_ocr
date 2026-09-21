@@ -53,10 +53,10 @@ class MeasurementConfiguration:
         return self.database_path.with_suffix(".recovery.sqlite3")
 
     def validate(self) -> None:
-        """检查设备绑定和运行参数。"""
+        """检查机器绑定和运行参数。"""
         # 检查机器、相机和频率来源的唯一性。
         if not self.machines:
-            raise ValueError("没有启用的设备，请先在设备管理页添加并启用设备。")
+            raise ValueError("没有启用的机器，请先在机器管理页添加并启用机器。")
         for attribute in ("machine_id", "camera_serial", "frequency_meter_serial"):
             identifiers = [getattr(machine, attribute) for machine in self.machines]
             if not all(identifiers) or len(set(identifiers)) != len(identifiers):
@@ -86,7 +86,7 @@ class MeasurementConfiguration:
 
 
 def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
-    """读取公共配置和数据库中的启用设备，构建后台配置。
+    """读取公共配置和数据库中的启用机器，构建后台配置。
 
     Args:
         configuration_path: 公共 JSON 配置文件路径。
@@ -94,7 +94,7 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
     Returns:
         MeasurementConfiguration(
             machines=(MachineConfiguration(
-                machine_id="1",  # 数据库设备编号
+                machine_id="1",  # 数据库机器编号
                 frequency_meter_serial="FREQ001",  # 频率仪序列号
                 camera_serial="CAM001",  # 用于连接的相机序列号
                 simulated_frequencies_hz=(),  # 不生成模拟频率
@@ -130,20 +130,20 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
     with configuration_path.open(encoding="utf-8") as configuration_file:
         settings = json.load(configuration_file)
 
-    # 设备清单统一从业务库读取，配置文件只提供公共参数。
+    # 机器清单统一从业务库读取，配置文件只提供公共参数。
     settings.pop("machines", None)
     database_path = (configuration_directory / settings["database_path"]).resolve()
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
-    devices = MachineRepo(database_path).list_enabled()
-    machines = [
+    enabled_machines = MachineRepo(database_path).list_enabled()
+    machine_configurations = [
         MachineConfiguration(
-            machine_id=str(device["id"]),
-            frequency_meter_serial=device["frequency_meter_serial"],
-            camera_serial=device["camera_serial"],
+            machine_id=str(machine["id"]),
+            frequency_meter_serial=machine["frequency_meter_serial"],
+            camera_serial=machine["camera_serial"],
         )
-        for device in devices
+        for machine in enabled_machines
     ]
 
     # 将配置中的机器初始状态转换为枚举。
@@ -158,6 +158,6 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
         ).resolve()
     if settings.get("mvs_dll_directory"):
         settings["mvs_dll_directory"] = (configuration_directory / settings["mvs_dll_directory"]).resolve()
-    configuration = MeasurementConfiguration(machines=tuple(machines), **settings)
+    configuration = MeasurementConfiguration(machines=tuple(machine_configurations), **settings)
     configuration.validate()
     return configuration

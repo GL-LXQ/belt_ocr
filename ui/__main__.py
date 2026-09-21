@@ -31,14 +31,14 @@ def run_desktop_preview() -> int:
     application.setApplicationName("BeltVision")
     application.setApplicationVersion("1.0.0")
 
-    # 从项目配置读取业务库路径并初始化设备表。
+    # 从项目配置读取业务库路径并初始化机器表。
     configuration_path = Path(__file__).resolve().parents[1] / "config.example.json"
     settings = json.loads(configuration_path.read_text(encoding="utf-8"))
     database_path = configuration_path.parent / settings["database_path"]
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
-    # 创建数据访问对象和设备业务服务。
+    # 创建数据访问对象和机器业务服务。
     machine_repo = MachineRepo(database_path)
     machine_service = MachineService(machine_repo)
 

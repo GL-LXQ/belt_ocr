@@ -11,7 +11,7 @@ from models import MeasurementEvent
 
 
 class SingleCycleTests(unittest.IsolatedAsyncioTestCase):
-    """使用正式业务流程和可控设备验证唯一当前周期。"""
+    """使用正式业务流程和可控机器验证唯一当前周期。"""
 
     asyncSetUp = flow_support.MeasurementFlowTests.asyncSetUp
     asyncTearDown = flow_support.MeasurementFlowTests.asyncTearDown

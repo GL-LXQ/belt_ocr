@@ -6,17 +6,17 @@ from pathlib import Path
 
 
 class MachineRepo:
-    """管理设备表结构和机器信息写入。"""
+    """管理机器表结构和机器信息写入。"""
 
     def __init__(self, database_path: Path):
-        """保存设备信息所在的业务数据库路径。
+        """保存机器信息所在的业务数据库路径。
 
         Args:
             database_path: 业务数据库文件路径。
 
         Returns:
             返回示例：
-                None  # 初始化设备表访问对象
+                None  # 初始化机器表访问对象
         """
         self.database_path = database_path
 
@@ -35,7 +35,7 @@ class MachineRepo:
             camera_serial: 绑定的相机序列号。
             frequency_meter_serial: 绑定的频率仪序列号。
             enabled: 是否启用，默认启用。
-            remark: 设备备注，默认无备注。
+            remark: 机器备注，默认无备注。
 
         Returns:
             返回示例：
@@ -64,7 +64,7 @@ class MachineRepo:
             machine_name: 待保存的机器名称。
             camera_serial: 待绑定的相机序列号。
             frequency_meter_serial: 待绑定的频率仪序列号。
-            exclude_id: 编辑时排除的设备编号，新增时为 None。
+            exclude_id: 编辑时排除的机器编号，新增时为 None。
 
         Returns:
             返回示例：
@@ -73,7 +73,7 @@ class MachineRepo:
                 "frequency_meter_serial"  # 频率仪序列号重复
                 None  # 三个字段均未重复
         """
-        # 一次查询三个字段在未删除记录中是否已有对应记录，并排除正在编辑的设备。
+        # 一次查询三个字段在未删除记录中是否已有对应记录，并排除正在编辑的机器。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
             duplicates = connection.execute(
                 "SELECT "
@@ -95,7 +95,7 @@ class MachineRepo:
         return None
 
     def list_all(self) -> list[dict]:
-        """按编号读取全部未删除设备信息。
+        """按编号读取全部未删除机器信息。
 
         Args:
             无。
@@ -103,7 +103,7 @@ class MachineRepo:
         Returns:
             返回示例：
                 [{
-                    "id": 1,  # 设备编号
+                    "id": 1,  # 机器编号
                     "machine_name": "皮带机",  # 机器名称
                     "camera_serial": "CAM001",  # 相机序列号
                     "frequency_meter_serial": "FREQ001",  # 频率仪序列号
@@ -113,7 +113,7 @@ class MachineRepo:
                     "remark": "",  # 备注，无备注时为空字符串
                 }]
         """
-        # 查询未删除设备字段并关闭读取连接。
+        # 查询未删除机器字段并关闭读取连接。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
@@ -123,16 +123,16 @@ class MachineRepo:
             ).fetchall()
 
         # 将数据库字段转换为页面使用的数据格式。
-        devices = []
+        machines = []
         for row in rows:
-            device = dict(row)
-            device["enabled"] = bool(device["enabled"])
-            device["remark"] = device["remark"] or ""
-            devices.append(device)
-        return devices
+            machine = dict(row)
+            machine["enabled"] = bool(machine["enabled"])
+            machine["remark"] = machine["remark"] or ""
+            machines.append(machine)
+        return machines
 
     def list_enabled(self) -> list[dict]:
-        """按编号读取全部已启用设备信息。
+        """按编号读取全部已启用机器信息。
 
         Args:
             无。
@@ -140,7 +140,7 @@ class MachineRepo:
         Returns:
             返回示例：
                 [{
-                    "id": 1,  # 设备编号
+                    "id": 1,  # 机器编号
                     "machine_name": "皮带机",  # 机器名称
                     "camera_serial": "CAM001",  # 相机序列号
                     "frequency_meter_serial": "FREQ001",  # 频率仪序列号
@@ -150,22 +150,22 @@ class MachineRepo:
                     "remark": "",  # 备注，无备注时为空字符串
                 }]
         """
-        # 复用全部设备查询并过滤出已启用设备。
-        return [device for device in self.list_all() if device["enabled"]]
+        # 复用全部机器查询并过滤出已启用机器。
+        return [machine for machine in self.list_all() if machine["enabled"]]
 
     def update(
         self,
-        device_id: int,
+        machine_id: int,
         machine_name: str,
         camera_serial: str,
         frequency_meter_serial: str,
         enabled: bool,
         remark: str | None,
     ) -> int:
-        """按编号更新设备信息并返回受影响行数。
+        """按编号更新机器信息并返回受影响行数。
 
         Args:
-            device_id: 要修改的设备编号。
+            machine_id: 要修改的机器编号。
             machine_name: 修改后的机器名称。
             camera_serial: 修改后的相机序列号。
             frequency_meter_serial: 修改后的频率仪序列号。
@@ -176,20 +176,20 @@ class MachineRepo:
             返回示例：
                 1  # 受影响行数，0 表示没有对应记录
         """
-        # 更新设备字段并显式刷新修改时间。
+        # 更新机器字段并显式刷新修改时间。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection, connection:
             cursor = connection.execute(
                 "UPDATE machine SET machine_name = ?, camera_serial = ?, frequency_meter_serial = ?, "
                 "enabled = ?, remark = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (machine_name, camera_serial, frequency_meter_serial, enabled, remark, device_id),
+                (machine_name, camera_serial, frequency_meter_serial, enabled, remark, machine_id),
             )
             return cursor.rowcount
 
-    def soft_delete(self, device_id: int) -> int:
-        """按编号标记删除设备并返回受影响行数。
+    def soft_delete(self, machine_id: int) -> int:
+        """按编号标记删除机器并返回受影响行数。
 
         Args:
-            device_id: 要删除的设备编号。
+            machine_id: 要删除的机器编号。
 
         Returns:
             返回示例：
@@ -199,22 +199,22 @@ class MachineRepo:
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection, connection:
             cursor = connection.execute(
                 "UPDATE machine SET is_deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (device_id,),
+                (machine_id,),
             )
             return cursor.rowcount
 
     @staticmethod
     def create_table(connection: sqlite3.Connection) -> None:
-        """创建设备表和只约束未删除记录的唯一索引，保留已有记录。
+        """创建机器表和只约束未删除记录的唯一索引，保留已有记录。
 
         Args:
             connection: 初始化流程提供的数据库连接。
 
         Returns:
             返回示例：
-                None  # 设备表已就绪
+                None  # 机器表已就绪
         """
-        # 在初始化连接中创建设备表。
+        # 在初始化连接中创建机器表。
         connection.execute("""
             CREATE TABLE IF NOT EXISTS machine (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, -- 数据库内部自增主键
@@ -225,7 +225,7 @@ class MachineRepo:
                 is_deleted INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)), -- 是否已删除，1已删除、0正常
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, -- 创建时间，UTC，格式为YYYY-MM-DD HH:MM:SS
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, -- 修改时间，UTC，保存修改时由写入方更新
-                remark TEXT -- 设备备注，可为空
+                remark TEXT -- 机器备注，可为空
             );
         """)
 

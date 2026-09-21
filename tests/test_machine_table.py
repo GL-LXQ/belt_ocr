@@ -1,4 +1,4 @@
-"""验证设备表初始化、字段默认值和数据约束。"""
+"""验证机器表初始化、字段默认值和数据约束。"""
 
 import sqlite3
 from contextlib import closing
@@ -43,7 +43,7 @@ def machine_database(tmp_path):
 
 
 def test_machine_table_defaults_and_reinitialization(machine_database):
-    """验证设备默认值及重复初始化保留已有记录。
+    """验证机器默认值及重复初始化保留已有记录。
 
     Args:
         machine_database: 已初始化的临时数据库管理对象。
@@ -52,7 +52,7 @@ def test_machine_table_defaults_and_reinitialization(machine_database):
         返回示例：
             None  # 默认值、字段结构和数据保留断言通过
     """
-    # 确认建表未插入设备，并写入一条最小设备记录。
+    # 确认建表未插入机器，并写入一条最小机器记录。
     with closing(sqlite3.connect(machine_database.configuration.database_path)) as connection:
         connection.row_factory = sqlite3.Row
         assert connection.execute("SELECT COUNT(*) FROM machine").fetchone()[0] == 0
@@ -80,14 +80,14 @@ def test_machine_table_defaults_and_reinitialization(machine_database):
         created_at = datetime.strptime(record["created_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         assert 0 <= (datetime.now(timezone.utc) - created_at).total_seconds() < 10
 
-        # 确认原有测量表仍存在且设备配置不进入运行库。
+        # 确认原有测量表仍存在且机器配置不进入运行库。
         assert connection.execute("SELECT COUNT(*) FROM measurements").fetchone()[0] == 0
     with closing(sqlite3.connect(machine_database.configuration.recovery_path)) as connection:
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'machine'").fetchone() is None
 
 
 def test_machine_table_constraints(machine_database):
-    """验证设备必填字段、启用值和未删除记录唯一约束。
+    """验证机器必填字段、启用值和未删除记录唯一约束。
 
     Args:
         machine_database: 已初始化的临时数据库管理对象。
@@ -96,7 +96,7 @@ def test_machine_table_constraints(machine_database):
         返回示例：
             None  # 数据库拒绝必填字段空值和重复的未删除记录
     """
-    # 写入一条停用设备并保留备注。
+    # 写入一条停用机器并保留备注。
     statement = (
         "INSERT INTO machine (machine_name, camera_serial, frequency_meter_serial, enabled, remark) "
         "VALUES (?, ?, ?, ?, ?)"

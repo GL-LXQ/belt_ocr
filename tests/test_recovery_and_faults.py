@@ -183,7 +183,7 @@ from fake_mvs import FakeMvsSdk
 application_module.load_mvs_sdk = FakeMvsSdk
 
 async def crash_after_start():
-    # 将子进程的设备写入业务库，再通过正式配置入口读取。
+    # 将子进程的机器写入业务库，再通过正式配置入口读取。
     import json
     import sqlite3
     from contextlib import closing
@@ -296,8 +296,8 @@ asyncio.run(crash_after_start())
         self.assertIn("AMBIGUOUS_MEASUREMENT", record["error_codes"])
         self.assertIn("MEASUREMENT_ID_CONFLICT", self.read_abnormal_event_reasons())
 
-    async def test_device_fault_stops_all_machines(self) -> None:
-        """验证单台设备故障停止全部机器并释放资源。
+    async def test_machine_fault_stops_all_machines(self) -> None:
+        """验证单台机器故障停止全部机器并释放资源。
 
         Args:
             无外部参数。

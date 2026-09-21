@@ -105,24 +105,24 @@ QFrame[tone="running"] QLabel#stateIcon { background: qlineargradient(x1:0, y1:0
 QFrame[tone="waiting"] QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFC267, stop:1 #FF900A); }
 QLabel#machineBadge { border: 1px solid transparent; }
 
-/* 设置设备管理表格、表单和状态标签。 */
-/* 隐藏设备单元格的焦点框，保留整行选中高亮。 */
-QTableWidget#deviceTable { color: @text; border-radius: 8px; font-size: 13px; outline: none; }
-QTableWidget#deviceTable::item { border-bottom: 1px solid #EDF1F6; padding: 0 8px; }
-QTableWidget#deviceTable QHeaderView::section { color: @text; font-weight: bold; padding: 0 8px; }
-QDialog#deviceEditor { background: @white; border: 1px solid @border; border-radius: 8px; }
-QWidget#deviceFields, QDialog#deviceEditor QScrollArea { background: @white; }
+/* 设置机器管理表格、表单和状态标签。 */
+/* 隐藏机器单元格的焦点框，保留整行选中高亮。 */
+QTableWidget#machineTable { color: @text; border-radius: 8px; font-size: 13px; outline: none; }
+QTableWidget#machineTable::item { border-bottom: 1px solid #EDF1F6; padding: 0 8px; }
+QTableWidget#machineTable QHeaderView::section { color: @text; font-weight: bold; padding: 0 8px; }
+QDialog#machineEditor { background: @white; border: 1px solid @border; border-radius: 8px; }
+QWidget#machineFields, QDialog#machineEditor QScrollArea { background: @white; }
 QLabel[fieldLabel="true"] { font-size: 14px; font-weight: bold; }
-QWidget#devices QLineEdit, QWidget#devices QTextEdit {
+QWidget#machines QLineEdit, QWidget#machines QTextEdit {
     background: @white; border: 1px solid #CFDAE8; border-radius: 5px; padding: 0 10px;
 }
-QWidget#devices QTextEdit { padding: 8px 10px; }
-QWidget#devices QLineEdit:focus, QWidget#devices QTextEdit:focus { border-color: @blue; }
-QCheckBox#deviceEnabled { font-size: 14px; color: @text; spacing: 10px; }
-QCheckBox#deviceEnabled::indicator { width: 20px; height: 20px; }
-QLabel#deviceStatus { background: #EEF2F7; color: #60748E; border-radius: 14px; }
-QLabel#deviceStatus[enabledStatus="true"] { background: #DCF8E9; color: #0AAF5B; }
-/* 通过按钮角色共用设备页操作样式。 */
+QWidget#machines QTextEdit { padding: 8px 10px; }
+QWidget#machines QLineEdit:focus, QWidget#machines QTextEdit:focus { border-color: @blue; }
+QCheckBox#machineEnabled { font-size: 14px; color: @text; spacing: 10px; }
+QCheckBox#machineEnabled::indicator { width: 20px; height: 20px; }
+QLabel#machineStatus { background: #EEF2F7; color: #60748E; border-radius: 14px; }
+QLabel#machineStatus[enabledStatus="true"] { background: #DCF8E9; color: #0AAF5B; }
+/* 通过按钮角色共用机器页操作样式。 */
 QPushButton[buttonRole="primary"] {
     background: @blue; color: @white; border: 1px solid @blue; border-radius: 6px;
 }

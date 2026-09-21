@@ -54,7 +54,7 @@ ICON_PATHS = {
         '<circle cx="8" cy="8" r="1.5"/><path d="m3 17 6-6 4 4 3-3 5 5"/>'
     ),
     "settings": '<path d="M4 6h16M4 12h16M4 18h16"/><path d="M8 3v6m8 0v6m-6 0v6"/>',
-    "devices": (
+    "machines": (
         '<rect x="3" y="4" width="18" height="12" rx="2"/>'
         '<path d="M8 20h8m-4-4v4"/><circle cx="12" cy="10" r="3"/>'
     ),

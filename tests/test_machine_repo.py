@@ -1,4 +1,4 @@
-"""设备信息插入与数据库约束测试。"""
+"""机器信息插入与数据库约束测试。"""
 
 import sqlite3
 from contextlib import closing
@@ -19,14 +19,14 @@ def test_insert_persists_machine_fields_and_default_times(tmp_path):
         返回示例：
             None  # 新连接可读取完整机器信息与默认时间
     """
-    # 创建临时设备表并记录插入前的 UTC 时间。
+    # 创建临时机器表并记录插入前的 UTC 时间。
     database_path = tmp_path / "machines.sqlite3"
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
     repository = MachineRepo(database_path)
     before_insert = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # 分别插入默认启用设备和带备注的停用设备。
+    # 分别插入默认启用机器和带备注的停用机器。
     first_id = repository.insert("1# 皮带机", "CAM001", "FREQ001")
     second_id = repository.insert("2# 皮带机", "CAM002", "FREQ002", False, "入口 'A'")
     after_insert = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -55,7 +55,7 @@ def test_insert_failure_keeps_original_record(tmp_path):
         返回示例：
             None  # 启用值约束拒绝非法记录且后续插入正常
     """
-    # 创建临时设备表并插入初始机器。
+    # 创建临时机器表并插入初始机器。
     database_path = tmp_path / "machines.sqlite3"
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)

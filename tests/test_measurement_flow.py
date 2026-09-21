@@ -33,7 +33,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         replacement.start()
         self.addCleanup(replacement.stop)
 
-        # 以测试设备替身提供频率输入，生产适配器保留黑盒接口。
+        # 以测试机器替身提供频率输入，生产适配器保留黑盒接口。
         frequency_replacement = patch("app.FrequencyAdapter", side_effect=FakeFrequency)
         frequency_replacement.start()
         self.addCleanup(frequency_replacement.stop)

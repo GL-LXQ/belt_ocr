@@ -24,7 +24,7 @@ def frequency_context(tmp_path):
 
     Returns:
         (
-            app,  # 未启动设备的应用及独立数据库
+            app,  # 未启动机器的应用及独立数据库
             manager,  # M01 的串行业务处理器
             session,  # 图像已收尾、OCR 已成功的测试周期
         )
@@ -75,7 +75,7 @@ def frequency_context(tmp_path):
 
 
 def create_measurement(session, value):
-    """创建具有明确周期身份和频率值的设备测试测量。
+    """创建具有明确周期身份和频率值的机器测试测量。
 
     Args:
         session: 测量所属周期。
@@ -127,7 +127,7 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
         assert len(session.measurement_frequencies) == 3
         assert session.state != SessionState.WAITING_COMMIT_DB
 
-        # CLOSE 返回时频率已结算，没有等待设备或另发封口事件。
+        # CLOSE 返回时频率已结算，没有等待机器或另发封口事件。
         await manager.handle_machine_close()
         assert manager.frequency_adapter.active_session_id is None
         assert session.frequency_window_sealed

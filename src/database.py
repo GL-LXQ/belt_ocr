@@ -1,4 +1,4 @@
-"""管理本地数据库、设备表、实例锁、异常事件和测量结果写入。"""
+"""管理本地数据库、机器表、实例锁、异常事件和测量结果写入。"""
 
 from enums import EventType
 import asyncio
@@ -185,20 +185,20 @@ class Database:
         self.anchor_connection = sqlite3.connect(runtime_database_path, check_same_thread=False)
 
     def initialize_result_database(self) -> None:
-        """创建业务数据库中的设备表和测量结果表。
+        """创建业务数据库中的机器表和测量结果表。
 
         Args:
             无外部参数。
 
         Returns:
-            None: 设备表和测量结果表已就绪。
+            None: 机器表和测量结果表已就绪。
             返回示例：
                 None  # 无返回数据
         """
         # 创建业务数据库目录并打开连接。
         self.configuration.database_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.configuration.database_path)) as connection, connection:
-            # 创建机器身份、设备绑定和维护信息表。
+            # 创建机器身份、绑定和维护信息表。
             self.machine_repo.create_table(connection)
 
             # 创建测量结果表。

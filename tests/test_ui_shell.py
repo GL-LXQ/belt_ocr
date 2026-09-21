@@ -167,7 +167,7 @@ def test_resize_and_window_controls(window, application):
 
 
 def test_realtime_cards_follow_machine_table(window, application):
-    """验证卡片按设备表重建、空态提示和状态占位。
+    """验证卡片按机器表重建、空态提示和状态占位。
 
     Args:
         window: 测试主窗口。
@@ -175,18 +175,18 @@ def test_realtime_cards_follow_machine_table(window, application):
 
     Returns:
         返回示例：
-            None  # 卡片数量和标题跟随设备表
+            None  # 卡片数量和标题跟随机器表
     """
     # 空库时没有卡片，显示空态提示。
     page = window.page_stack.widget(0)
     assert page.machine_cards == []
-    assert page.empty_hint.text() == "暂无设备，请先在设备管理页添加。"
+    assert page.empty_hint.text() == "暂无机器，请先在机器管理页添加。"
 
-    # 写入两台设备后刷新，卡片按数据库顺序重建。
+    # 写入两台机器后刷新，卡片按数据库顺序重建。
     repository = window.machine_service.machine_repo
     first_id = repository.insert("1号皮带机", "CAM001", "FREQ001")
     repository.insert("2号皮带机", "CAM002", "FREQ002")
-    page.reload_devices()
+    page.reload_machines()
     application.processEvents()
     assert page.empty_hint is None
     assert [card.title.text() for card in page.machine_cards] == ["1号皮带机", "2号皮带机"]
@@ -208,16 +208,16 @@ def test_realtime_cards_follow_machine_table(window, application):
             left_dot = card.steps.dots[index].geometry()
             assert abs(connector.geometry().left() - left_dot.right()) <= 3
 
-    # 软删除一台设备后刷新，卡片数量跟随变化。
+    # 软删除一台机器后刷新，卡片数量跟随变化。
     repository.soft_delete(first_id)
-    page.reload_devices()
+    page.reload_machines()
     application.processEvents()
     assert [card.title.text() for card in page.machine_cards] == ["2号皮带机"]
 
     # 每行固定三台，第四台自动换到下一行。
     for number in (3, 4, 5):
         repository.insert(f"{number}号皮带机", f"CAM00{number}", f"FREQ00{number}")
-    page.reload_devices()
+    page.reload_machines()
     application.processEvents()
     assert len(page.machine_cards) == 4
     position = page.cards_layout.getItemPosition(page.cards_layout.indexOf(page.machine_cards[3]))
@@ -228,7 +228,7 @@ def test_realtime_cards_follow_machine_table(window, application):
 
 
 def test_realtime_hides_disabled_machines(window, application):
-    """验证停用设备不进入实时监测卡片，但仍保留在设备列表数据中。
+    """验证停用机器不进入实时监测卡片，但仍保留在机器列表数据中。
 
     Args:
         window: 测试主窗口。
@@ -236,20 +236,20 @@ def test_realtime_hides_disabled_machines(window, application):
 
     Returns:
         返回示例：
-            None  # 卡片只包含已启用设备
+            None  # 卡片只包含已启用机器
     """
-    # 写入一台启用设备和一台停用设备。
+    # 写入一台启用机器和一台停用机器。
     repository = window.machine_service.machine_repo
     repository.insert("1号皮带机", "CAM001", "FREQ001")
     repository.insert("2号皮带机", "CAM002", "FREQ002", False)
 
-    # 实时监测只展示已启用设备。
+    # 实时监测只展示已启用机器。
     page = window.page_stack.widget(0)
-    page.reload_devices()
+    page.reload_machines()
     application.processEvents()
     assert [card.title.text() for card in page.machine_cards] == ["1号皮带机"]
 
-    # 设备管理页的数据源仍包含停用设备。
+    # 机器管理页的数据源仍包含停用机器。
     assert len(window.machine_service.list_machines()) == 2
 
 
@@ -291,7 +291,7 @@ def test_realtime_log_appending_and_clearing(window, application):
     assert page.log_table.rowCount() == 0
 
 
-def test_device_create_persists_and_reloads(window, application, monkeypatch):
+def test_machine_create_persists_and_reloads(window, application, monkeypatch):
     """验证新增持久化、必填校验、取消和重载。
 
     Args:
@@ -301,13 +301,13 @@ def test_device_create_persists_and_reloads(window, application, monkeypatch):
 
     Returns:
         返回示例：
-            None  # 新增设备在新页面中可读取
+            None  # 新增机器在新页面中可读取
     """
     from PySide6.QtWidgets import QMessageBox, QPushButton
-    from ui.pages.devices_page import DevicesPage
+    from ui.pages.machines_page import MachinesPage
 
     # 在空列表中打开表单并验证必填提示。
-    window.switch_page("devices")
+    window.switch_page("machines")
     page = window.page_stack.currentWidget()
     assert page.table.rowCount() == 0
     warnings = []
@@ -319,7 +319,7 @@ def test_device_create_persists_and_reloads(window, application, monkeypatch):
 
     # 保存输入并验证数据库编号、默认时间和选中行。
     for field, value in (
-        ("machine_name", " 新设备 "),
+        ("machine_name", " 新机器 "),
         ("camera_serial", " CAM001 "),
         ("frequency_meter_serial", " FREQ001 "),
     ):
@@ -328,19 +328,19 @@ def test_device_create_persists_and_reloads(window, application, monkeypatch):
     page.save_button.click()
     assert page.editor.isHidden()
     assert page.table.currentRow() == 0
-    assert page.devices[0]["machine_name"] == "新设备"
-    assert page.devices[0]["enabled"] is False
-    assert page.devices[0]["remark"] == ""
-    assert page.devices[0]["created_at"] == page.devices[0]["updated_at"]
-    assert page.findChild(QPushButton, "editDevice_1").isEnabled()
-    assert page.findChild(QPushButton, "deleteDevice_1").isEnabled()
+    assert page.machines[0]["machine_name"] == "新机器"
+    assert page.machines[0]["enabled"] is False
+    assert page.machines[0]["remark"] == ""
+    assert page.machines[0]["created_at"] == page.machines[0]["updated_at"]
+    assert page.findChild(QPushButton, "editMachine_1").isEnabled()
+    assert page.findChild(QPushButton, "deleteMachine_1").isEnabled()
 
     # 新页面读取同一数据库，并验证取消不新增记录。
-    fresh_page = DevicesPage(MachineService(MachineRepo(page.machine_service.machine_repo.database_path)))
-    assert fresh_page.devices == page.devices
+    fresh_page = MachinesPage(MachineService(MachineRepo(page.machine_service.machine_repo.database_path)))
+    assert fresh_page.machines == page.machines
     fresh_page.deleteLater()
     page.create_button.click()
-    page.field_inputs["machine_name"].setText("未保存设备")
+    page.field_inputs["machine_name"].setText("未保存机器")
     page.cancel_button.click()
     page.create_button.click()
     assert page.field_inputs["machine_name"].text() == ""
@@ -352,10 +352,10 @@ def test_device_create_persists_and_reloads(window, application, monkeypatch):
 
 @pytest.mark.parametrize("duplicate_field, expected_message", [
     ("machine_name", "机器名称已存在，请修改。"),
-    ("camera_serial", "相机序列号已被其他设备使用。"),
-    ("frequency_meter_serial", "频率仪序列号已被其他设备使用。"),
+    ("camera_serial", "相机序列号已被其他机器使用。"),
+    ("frequency_meter_serial", "频率仪序列号已被其他机器使用。"),
 ])
-def test_device_duplicate_keeps_form(window, monkeypatch, duplicate_field, expected_message):
+def test_machine_duplicate_keeps_form(window, monkeypatch, duplicate_field, expected_message):
     """验证三个字段分别拒绝重复且保留表单。
 
     Args:
@@ -370,10 +370,10 @@ def test_device_duplicate_keeps_form(window, monkeypatch, duplicate_field, expec
     """
     from PySide6.QtWidgets import QMessageBox
 
-    # 写入已有设备并准备只重复一个字段的新记录。
+    # 写入已有机器并准备只重复一个字段的新记录。
     page = window.page_stack.widget(4)
     original = {
-        "machine_name": "原设备",
+        "machine_name": "原机器",
         "camera_serial": "CAM001",
         "frequency_meter_serial": "FREQ001",
     }
@@ -394,7 +394,7 @@ def test_device_duplicate_keeps_form(window, monkeypatch, duplicate_field, expec
 
 
 @pytest.mark.parametrize("failed_operation", ["insert", "list_all"])
-def test_device_database_failure_message(window, monkeypatch, failed_operation):
+def test_machine_database_failure_message(window, monkeypatch, failed_operation):
     """验证插入失败和提交后刷新失败使用不同提示。
 
     Args:
@@ -440,12 +440,12 @@ def test_device_database_failure_message(window, monkeypatch, failed_operation):
         assert records == []
         page.editor.reject()
     else:
-        assert "设备已保存" in warnings[-1][2]
+        assert "机器已保存" in warnings[-1][2]
         assert page.editor.isHidden()
         assert len(records) == 1
 
 
-def test_device_layout_keeps_editor_actions_accessible(window, application):
+def test_machine_layout_keeps_editor_actions_accessible(window, application):
     """验证默认和最小窗口下的表单操作区均可访问。
 
     Args:
@@ -454,10 +454,10 @@ def test_device_layout_keeps_editor_actions_accessible(window, application):
 
     Returns:
         返回示例：
-            None  # 设备页面布局断言通过
+            None  # 机器页面布局断言通过
     """
     # 分别检查两种尺寸下的全宽表格和共用弹窗。
-    window.switch_page("devices")
+    window.switch_page("machines")
     page = window.page_stack.currentWidget()
     editor = page.editor
     for width, height in ((1600, 900), (1280, 720)):
@@ -468,7 +468,7 @@ def test_device_layout_keeps_editor_actions_accessible(window, application):
         page.create_button.click()
         application.processEvents()
         assert page.editor is editor
-        assert page.editor.windowTitle() == "新建设备"
+        assert page.editor.windowTitle() == "新建机器"
         assert page.save_button.isVisible()
         assert page.editor.rect().contains(
             page.save_button.mapTo(page.editor, page.save_button.rect().bottomRight())
@@ -478,7 +478,7 @@ def test_device_layout_keeps_editor_actions_accessible(window, application):
         assert page.editor.isHidden()
 
 
-def test_device_edit_updates_record_and_selects_row(window, application):
+def test_machine_edit_updates_record_and_selects_row(window, application):
     """验证编辑回填表单、保存后刷新列表并写回数据库。
 
     Args:
@@ -491,17 +491,17 @@ def test_device_edit_updates_record_and_selects_row(window, application):
     """
     from PySide6.QtWidgets import QPushButton
 
-    # 写入一台设备并刷新列表。
+    # 写入一台机器并刷新列表。
     page = window.page_stack.widget(4)
-    device_id = page.machine_service.machine_repo.insert("1号皮带机", "CAM001", "FREQ001")
-    page.devices = page.machine_service.list_machines()
-    page.populate_devices()
+    machine_id = page.machine_service.machine_repo.insert("1号皮带机", "CAM001", "FREQ001")
+    page.machines = page.machine_service.list_machines()
+    page.populate_machines()
 
     # 点击编辑入口应回填表单并进入编辑状态。
-    QTest.mouseClick(page.findChild(QPushButton, f"editDevice_{device_id}"), Qt.MouseButton.LeftButton)
+    QTest.mouseClick(page.findChild(QPushButton, f"editMachine_{machine_id}"), Qt.MouseButton.LeftButton)
     application.processEvents()
     assert page.editor.isVisible()
-    assert page.editor.windowTitle() == "编辑设备"
+    assert page.editor.windowTitle() == "编辑机器"
     assert page.field_inputs["machine_name"].text() == "1号皮带机"
     assert page.field_inputs["camera_serial"].text() == "CAM001"
     assert page.enabled_checkbox.isChecked()
@@ -516,15 +516,15 @@ def test_device_edit_updates_record_and_selects_row(window, application):
 
     # 核对弹窗、表格和数据库中的修改结果。
     assert page.editor.isHidden()
-    assert page.devices[0]["machine_name"] == "1号皮带机A"
-    assert page.devices[0]["enabled"] is False
-    assert page.devices[0]["remark"] == "换线停用"
+    assert page.machines[0]["machine_name"] == "1号皮带机A"
+    assert page.machines[0]["enabled"] is False
+    assert page.machines[0]["remark"] == "换线停用"
     assert page.table.item(0, 1).text() == "1号皮带机A"
     assert page.table.currentRow() == 0
     assert page.machine_service.machine_repo.list_all()[0]["machine_name"] == "1号皮带机A"
 
 
-def test_device_edit_keeps_own_fields(window, application, monkeypatch):
+def test_machine_edit_keeps_own_fields(window, application, monkeypatch):
     """验证编辑不改动唯一字段时不会被判为重复。
 
     Args:
@@ -538,14 +538,14 @@ def test_device_edit_keeps_own_fields(window, application, monkeypatch):
     """
     from PySide6.QtWidgets import QMessageBox, QPushButton
 
-    # 写入设备并打开编辑弹窗。
+    # 写入机器并打开编辑弹窗。
     page = window.page_stack.widget(4)
-    device_id = page.machine_service.machine_repo.insert("1号皮带机", "CAM001", "FREQ001")
-    page.devices = page.machine_service.list_machines()
-    page.populate_devices()
+    machine_id = page.machine_service.machine_repo.insert("1号皮带机", "CAM001", "FREQ001")
+    page.machines = page.machine_service.list_machines()
+    page.populate_machines()
     warnings = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *arguments: warnings.append(arguments))
-    QTest.mouseClick(page.findChild(QPushButton, f"editDevice_{device_id}"), Qt.MouseButton.LeftButton)
+    QTest.mouseClick(page.findChild(QPushButton, f"editMachine_{machine_id}"), Qt.MouseButton.LeftButton)
 
     # 只修改备注并保存。
     page.remark_input.setPlainText("只改备注")
@@ -556,11 +556,11 @@ def test_device_edit_keeps_own_fields(window, application, monkeypatch):
     assert warnings == []
     assert page.editor.isHidden()
     assert len(page.machine_service.machine_repo.list_all()) == 1
-    assert page.devices[0]["remark"] == "只改备注"
+    assert page.machines[0]["remark"] == "只改备注"
 
 
-def test_device_delete_after_confirmation(window, application, monkeypatch):
-    """验证确认后标记删除设备并刷新列表。
+def test_machine_delete_after_confirmation(window, application, monkeypatch):
+    """验证确认后标记删除机器并刷新列表。
 
     Args:
         window: 测试主窗口。
@@ -569,16 +569,16 @@ def test_device_delete_after_confirmation(window, application, monkeypatch):
 
     Returns:
         返回示例：
-            None  # 列表移除该设备且数据库保留删除标记
+            None  # 列表移除该机器且数据库保留删除标记
     """
     from PySide6.QtWidgets import QMessageBox, QPushButton
 
-    # 写入设备并刷新列表。
+    # 写入机器并刷新列表。
     page = window.page_stack.widget(4)
     repository = page.machine_service.machine_repo
-    device_id = repository.insert("1号皮带机", "CAM001", "FREQ001")
-    page.devices = page.machine_service.list_machines()
-    page.populate_devices()
+    machine_id = repository.insert("1号皮带机", "CAM001", "FREQ001")
+    page.machines = page.machine_service.list_machines()
+    page.populate_machines()
 
     # 让确认框直接返回“删除”按钮，再点击删除入口。
     monkeypatch.setattr(QMessageBox, "exec", lambda box: 0)
@@ -587,19 +587,19 @@ def test_device_delete_after_confirmation(window, application, monkeypatch):
         "clickedButton",
         lambda box: next(button for button in box.buttons() if button.text() == "删除"),
     )
-    QTest.mouseClick(page.findChild(QPushButton, f"deleteDevice_{device_id}"), Qt.MouseButton.LeftButton)
+    QTest.mouseClick(page.findChild(QPushButton, f"deleteMachine_{machine_id}"), Qt.MouseButton.LeftButton)
     application.processEvents()
 
     # 核对列表、内存数据和数据库中的删除标记。
     assert page.table.rowCount() == 0
-    assert page.devices == []
+    assert page.machines == []
     assert repository.list_all() == []
     with closing(sqlite3.connect(repository.database_path)) as connection:
-        assert connection.execute("SELECT is_deleted FROM machine WHERE id = ?", (device_id,)).fetchone() == (1,)
+        assert connection.execute("SELECT is_deleted FROM machine WHERE id = ?", (machine_id,)).fetchone() == (1,)
 
 
-def test_device_delete_cancel_keeps_record(window, application, monkeypatch):
-    """验证取消确认后不修改设备记录。
+def test_machine_delete_cancel_keeps_record(window, application, monkeypatch):
+    """验证取消确认后不修改机器记录。
 
     Args:
         window: 测试主窗口。
@@ -608,16 +608,16 @@ def test_device_delete_cancel_keeps_record(window, application, monkeypatch):
 
     Returns:
         返回示例：
-            None  # 设备仍在列表和数据库中
+            None  # 机器仍在列表和数据库中
     """
     from PySide6.QtWidgets import QMessageBox, QPushButton
 
-    # 写入设备并刷新列表。
+    # 写入机器并刷新列表。
     page = window.page_stack.widget(4)
     repository = page.machine_service.machine_repo
-    device_id = repository.insert("1号皮带机", "CAM001", "FREQ001")
-    page.devices = page.machine_service.list_machines()
-    page.populate_devices()
+    machine_id = repository.insert("1号皮带机", "CAM001", "FREQ001")
+    page.machines = page.machine_service.list_machines()
+    page.populate_machines()
 
     # 让确认框返回“取消”按钮，再点击删除入口。
     monkeypatch.setattr(QMessageBox, "exec", lambda box: 0)
@@ -626,10 +626,10 @@ def test_device_delete_cancel_keeps_record(window, application, monkeypatch):
         "clickedButton",
         lambda box: next(button for button in box.buttons() if button.text() == "取消"),
     )
-    QTest.mouseClick(page.findChild(QPushButton, f"deleteDevice_{device_id}"), Qt.MouseButton.LeftButton)
+    QTest.mouseClick(page.findChild(QPushButton, f"deleteMachine_{machine_id}"), Qt.MouseButton.LeftButton)
     application.processEvents()
 
-    # 核对设备仍在列表和数据库中。
+    # 核对机器仍在列表和数据库中。
     assert page.table.rowCount() == 1
-    assert page.devices[0]["id"] == device_id
+    assert page.machines[0]["id"] == machine_id
     assert len(repository.list_all()) == 1
