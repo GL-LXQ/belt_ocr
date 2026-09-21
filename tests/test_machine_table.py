@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from configuration import MeasurementConfiguration
+from config_util import MeasurementConfiguration
 from database import Database
 
 

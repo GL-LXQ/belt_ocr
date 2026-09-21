@@ -1,0 +1,6 @@
+# 公共初始状态：CLOSED、OPEN 或 UNKNOWN；机器清单从数据库读取。
+initial_machine_state: CLOSED
+
+# 等待 CLOSE 的期限（毫秒）与单机事件队列容量。
+max_cycle_open_ms: 60000
+event_queue_capacity: 128

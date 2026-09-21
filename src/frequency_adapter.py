@@ -5,7 +5,7 @@ import asyncio
 import math
 from itertools import cycle
 
-from configuration import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfiguration, MeasurementConfiguration
 from models import FrequencyMeasurement, MeasurementEvent, PublishEvent
 
 

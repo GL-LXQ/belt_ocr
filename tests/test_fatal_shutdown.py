@@ -10,7 +10,7 @@ import pytest
 
 import main
 from app import App
-from configuration import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfiguration, MeasurementConfiguration
 from fake_mvs import FakeMvsSdk
 from enums import EventType
 from models import MeasurementEvent

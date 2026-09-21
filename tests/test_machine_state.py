@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from configuration import load_configuration
+from config_util import load_configuration, read_configuration_settings
+from configuration_support import write_configuration_files
 from enums import MachineState
 from database import serialize_value
 
@@ -27,23 +28,24 @@ def test_load_machine_state_preserves_json_values(tmp_path: Path, configured_sta
             None  # 无返回数据
     """
     # 使用示例配置准备不同的机器初始状态。
-    example_path = Path(__file__).resolve().parents[1] / "config.example.json"
-    settings = json.loads(example_path.read_text(encoding="utf-8"))
+    example_directory = Path(__file__).resolve().parents[1] / "config"
+    settings = read_configuration_settings(example_directory)
+    settings["database_path"] = "measurements.sqlite3"
     if configured_state is None:
         settings.pop("initial_machine_state")
     else:
         settings["initial_machine_state"] = configured_state
 
     # 保存配置并通过正式入口读取。
-    configuration_path = tmp_path / "configuration.json"
-    configuration_path.write_text(json.dumps(settings), encoding="utf-8")
-    # 写入本测试所需机器，配置加载不再读取 JSON 机器清单。
+    configuration_directory = tmp_path
+    write_configuration_files(configuration_directory, settings)
+    # 写入本测试所需机器，配置加载从数据库读取机器清单。
     database_path = tmp_path / settings["database_path"]
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
     MachineRepo(database_path).insert("测试机器", "CAM001", "FREQ001")
-    configuration = load_configuration(configuration_path)
+    configuration = load_configuration(configuration_directory)
 
     # 检查枚举类型和持久化后的字符串内容。
     expected_state = configured_state or "CLOSED"
@@ -64,12 +66,13 @@ def test_load_configuration_rejects_invalid_machine_state(tmp_path: Path) -> Non
             None  # 无返回数据
     """
     # 创建包含非法状态的配置文件。
-    example_path = Path(__file__).resolve().parents[1] / "config.example.json"
-    settings = json.loads(example_path.read_text(encoding="utf-8"))
+    example_directory = Path(__file__).resolve().parents[1] / "config"
+    settings = read_configuration_settings(example_directory)
+    settings["database_path"] = "measurements.sqlite3"
     settings["initial_machine_state"] = "INVALID"
-    configuration_path = tmp_path / "configuration.json"
-    configuration_path.write_text(json.dumps(settings), encoding="utf-8")
+    configuration_directory = tmp_path
+    write_configuration_files(configuration_directory, settings)
 
     # 确认配置入口拒绝非法状态。
     with pytest.raises(ValueError):
-        load_configuration(configuration_path)
+        load_configuration(configuration_directory)

@@ -5,22 +5,22 @@ import asyncio
 import logging
 from pathlib import Path
 
-from configuration import load_configuration
+from config_util import load_configuration
 from app import App
 
 
-async def run_measurement_demo(configuration_path: Path) -> None:
+async def run_measurement_demo(configuration_directory: Path) -> None:
     """启动测量演示，接收后台故障并统一释放资源。
 
     Args:
-        configuration_path: 测量配置文件路径。
+        configuration_directory: 测量 YAML 配置目录。
 
     Returns:
         None  # 演示正常结束；相机或后台故障时抛出异常
     """
     # 读取配置并准备应用和本次主流程任务。
     try:
-        configuration = load_configuration(configuration_path)
+        configuration = load_configuration(configuration_directory)
         app = App(configuration)
     except Exception:
         logging.exception("测量配置初始化失败")
@@ -103,7 +103,7 @@ def main() -> None:
     )
     argument_parser = argparse.ArgumentParser(description="MVS 相机测量信号演示，频率仪接口待接入")
     argument_parser.add_argument(
-        "--config", type=Path, default=Path(__file__).resolve().parents[1] / "config.example.json",
+        "--config", type=Path, default=Path(__file__).resolve().parents[1] / "config",
     )
     arguments = argument_parser.parse_args()
     try:

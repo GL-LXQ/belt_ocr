@@ -322,7 +322,7 @@ class RealtimePage(QWidget):
         self.closing_requested = False
         self.connection_states = {}
         self.cards_by_machine_id = {}
-        self.configuration_path = Path(__file__).resolve().parents[2] / "config.example.json"
+        self.configuration_directory = Path(__file__).resolve().parents[2] / "config"
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_area = QScrollArea()
@@ -509,7 +509,7 @@ class RealtimePage(QWidget):
 
         # 在线程中连接相机，通过 Qt 信号更新主线程中的卡片。
         # 创建后台线程，先接好连接进度和线程结束两个信号，再启动线程。
-        self.monitoring_service = MonitoringService(self.configuration_path)
+        self.monitoring_service = MonitoringService(self.configuration_directory)
         self.monitoring_service.camera_state_changed_signal.connect(self.update_connection_state)
         self.monitoring_service.finished.connect(self.finish_monitoring)
         self.monitoring_service.start()

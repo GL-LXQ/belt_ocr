@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from async_utils import run_blocking_operation
-from configuration import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfiguration, MeasurementConfiguration
 from enums import EventType
 from models import CaptureResult, MeasurementEvent, PublishEvent
 from mvs_sdk import MvsCamera, MvsError

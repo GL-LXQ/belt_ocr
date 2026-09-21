@@ -1,6 +1,5 @@
 """验证数据库机器连接、卡片反馈和窗口退出收尾。"""
 
-import json
 import threading
 import time
 from unittest.mock import Mock
@@ -8,7 +7,8 @@ from unittest.mock import Mock
 import pytest
 from PySide6.QtTest import QTest
 
-from configuration import load_configuration
+from config_util import load_configuration
+from configuration_support import write_configuration_files
 from fake_mvs import FakeMvsSdk
 from test_ui_shell import application, window
 
@@ -35,8 +35,8 @@ def monitoring_environment(window, tmp_path, monkeypatch):
         "evidence_directory": str(tmp_path / "evidence"),
         "mvs_development_directory": "fake-sdk",
     }
-    page.configuration_path = tmp_path / "configuration.json"
-    page.configuration_path.write_text(json.dumps(settings), encoding="utf-8")
+    page.configuration_directory = tmp_path / "config"
+    write_configuration_files(page.configuration_directory, settings)
 
     # 替换硬件入口和模态提示，保留正式 App 与线程流程。
     sdk = FakeMvsSdk()
@@ -86,7 +86,7 @@ def test_connects_enabled_database_machines_and_stops(monitoring_environment):
     deleted_id = repository.insert("删除机器", "DELETED", "FREQ-X")
     repository.soft_delete(deleted_id)
     second_id = repository.insert("二号机器", "SERIAL-A", "FREQ-A")
-    configuration = load_configuration(page.configuration_path)
+    configuration = load_configuration(page.configuration_directory)
     assert [machine.machine_id for machine in configuration.machines] == [str(first_id), str(second_id)]
     assert [machine.camera_serial for machine in configuration.machines] == ["SERIAL-B", "SERIAL-A"]
     assert [machine.frequency_meter_serial for machine in configuration.machines] == ["FREQ-B", "FREQ-A"]

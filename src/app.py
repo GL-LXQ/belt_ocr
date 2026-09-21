@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from camera import SessionCamera
 from mvs_sdk import load_mvs_sdk
-from configuration import MeasurementConfiguration
+from config_util import MeasurementConfiguration
 from frequency_adapter import FrequencyAdapter
 from machine_manager import MachineManager
 from enums import MachineState, SessionState, EventType

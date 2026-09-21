@@ -15,6 +15,7 @@ from enums import OCRState, FrequencyState, EventType
 from mvs_sdk import CameraFrame
 from models import CapturedFrame, CaptureResult, FrequencyMeasurement, MeasurementEvent
 from database import serialize_value
+from configuration_support import write_configuration_files
 
 
 class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
@@ -372,6 +373,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         configuration_path.write_text(
             json.dumps(serialize_value(configuration)), encoding="utf-8",
         )
+        # 为正式加载入口写入 YAML，JSON 单独保存子进程的机器替身数据。
+        write_configuration_files(configuration_path.with_suffix(""), serialize_value(configuration))
 
         # 子进程在图片批次入队、关闭和封口事件处理完成后直接退出。
         script = """
@@ -381,7 +384,7 @@ import sys
 from pathlib import Path
 # 添加子进程使用的后端模块目录。
 sys.path.insert(0, "src")
-from configuration import load_configuration
+from config_util import load_configuration
 from enums import OCRState
 from app import App
 import app as application_module
@@ -403,7 +406,7 @@ async def crash_after_close():
     repository = MachineRepo(database_path)
     for machine in settings["machines"]:
         repository.insert(machine["machine_id"], machine["camera_serial"], machine["frequency_meter_serial"])
-    configuration = load_configuration(Path(sys.argv[1]))
+    configuration = load_configuration(Path(sys.argv[1]).with_suffix(""))
     # 为崩溃测试显式注入频率替身读数。
     configuration = replace(configuration, machines=tuple(
         replace(machine, simulated_frequencies_hz=tuple(original["simulated_frequencies_hz"]))

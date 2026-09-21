@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from app import App
-from configuration import load_configuration
+from config_util import load_configuration
 
 
 class MonitoringService(QThread):
@@ -16,17 +16,17 @@ class MonitoringService(QThread):
     # 相机连接状态信号，参数依次为机器编号、连接状态和失败原因。
     camera_state_changed_signal = Signal(str, str, str)
 
-    def __init__(self, configuration_path: Path):
+    def __init__(self, configuration_directory: Path):
         """保存配置路径并创建跨线程停止通知。
 
         Args:
-            configuration_path: 公共配置文件路径。
+            configuration_directory: 公共 YAML 配置目录。
 
         Returns:
             None  # 后台线程已准备，尚未启动
         """
         super().__init__()
-        self.configuration_path = configuration_path
+        self.configuration_directory = configuration_directory
         self.stop_requested = threading.Event()
         self.failure_message = ""
 
@@ -55,7 +55,7 @@ class MonitoringService(QThread):
             None  # 监测结束，相机及数据库资源已释放
         """
         # 从业务库构建机器配置并创建后台处理器。
-        configuration = load_configuration(self.configuration_path)
+        configuration = load_configuration(self.configuration_directory)
         application = App(configuration)
         try:
             # 连接相机并等待停止通知，不发送模拟启停信号。

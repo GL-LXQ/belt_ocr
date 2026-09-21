@@ -1,14 +1,14 @@
 """读取 MVS 相机和测量业务配置。"""
 
-import json
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
-from contextlib import closing
 
-from repo.machine_repo import MachineRepo
+import yaml
 
 from enums import MachineState
+from repo.machine_repo import MachineRepo
 
 
 @dataclass(frozen=True)
@@ -48,12 +48,27 @@ class MeasurementConfiguration:
 
     @property
     def recovery_path(self) -> Path:
+        """取得显式配置或按业务库名称生成的运行库路径。
+
+        Args:
+            无。
+
+        Returns:
+            Path("runtime/measurements.recovery.sqlite3")  # 运行库路径
+        """
         if self.recovery_database_path is not None:
             return self.recovery_database_path
         return self.database_path.with_suffix(".recovery.sqlite3")
 
     def validate(self) -> None:
-        """检查机器绑定和运行参数。"""
+        """检查机器绑定和运行参数。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 配置符合运行要求，非法配置抛出 ValueError
+        """
         # 检查机器、相机和频率来源的唯一性。
         if not self.machines:
             raise ValueError("没有启用的机器，请先在机器管理页添加并启用机器。")
@@ -85,11 +100,65 @@ class MeasurementConfiguration:
             raise ValueError("初始机器状态必须是 CLOSED、OPEN 或 UNKNOWN。")
 
 
-def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
+def read_configuration_settings(configuration_directory: Path) -> dict:
+    """读取五个公共配置文件并转换路径和初始机器状态。
+
+    Args:
+        configuration_directory: 包含五个 YAML 文件的配置目录。
+
+    Returns:
+        返回示例（可选参数按 YAML 实际内容返回）：
+            {
+                "database_path": Path("D:/belt_ocr/runtime/measurements.sqlite3"),  # 业务库绝对路径
+                "recovery_database_path": Path("D:/belt_ocr/runtime/measurements.recovery.sqlite3"),  # 运行库绝对路径
+                "evidence_directory": Path("D:/belt_ocr/runtime/evidence"),  # 图片绝对目录
+                "storage_queue_capacity": 32,  # 存储队列容量
+                "shutdown_timeout_ms": 10000,  # 退出期限，毫秒
+                "maintenance_interval_ms": 250,  # 容量检查间隔，毫秒
+                "max_persistent_records": 1000,  # 存储积压上限
+                "minimum_free_disk_bytes": 104857600,  # 最低磁盘空间，字节
+                "configuration_version": "simulation-v1",  # 配置版本
+                "mvs_development_directory": Path("D:/app/HIK/MVS/Development"),  # SDK 目录
+                "mvs_dll_directory": None,  # 使用默认动态库目录
+                "capture_window_ms": 1000,  # 采集窗口，毫秒
+                "camera_timeout_ms": 50,  # 取帧超时，毫秒
+                "ocr_result_timeout_ms": 30000,  # 整轮识别期限，毫秒
+                "frequency_interval_ms": 100,  # 频率读取间隔配置
+                "minimum_frequency_hz": 0.01,  # 最低有效频率
+                "maximum_frequency_hz": 10000.0,  # 最高有效频率
+                "initial_machine_state": MachineState.CLOSED,  # 初始机器状态
+                "max_cycle_open_ms": 60000,  # 周期关闭期限，毫秒
+                "event_queue_capacity": 128,  # 单机事件队列容量
+            }
+    """
+    # 按业务文件读取公共参数，拒绝跨文件重复配置键。
+    configuration_directory = configuration_directory.resolve()
+    settings = {}
+    for filename in ("application.yaml", "camera.yaml", "ocr.yaml", "frequency.yaml", "machine.yaml"):
+        with (configuration_directory / filename).open(encoding="utf-8") as configuration_file:
+            file_settings = yaml.safe_load(configuration_file)
+        duplicate_names = settings.keys() & file_settings.keys()
+        if duplicate_names:
+            raise ValueError(f"{filename} 包含重复配置项：{', '.join(sorted(duplicate_names))}")
+        settings.update(file_settings)
+
+    # 将必填路径转换为相对配置目录的绝对路径。
+    for path_name in ("database_path", "evidence_directory", "mvs_development_directory"):
+        settings[path_name] = (configuration_directory / settings[path_name]).resolve()
+
+    # 转换可选路径与机器初始状态。
+    for path_name in ("recovery_database_path", "mvs_dll_directory"):
+        if settings.get(path_name):
+            settings[path_name] = (configuration_directory / settings[path_name]).resolve()
+    settings["initial_machine_state"] = MachineState(settings.get("initial_machine_state", MachineState.CLOSED))
+    return settings
+
+
+def load_configuration(configuration_directory: Path) -> MeasurementConfiguration:
     """读取公共配置和数据库中的启用机器，构建后台配置。
 
     Args:
-        configuration_path: 公共 JSON 配置文件路径。
+        configuration_directory: 包含五个 YAML 文件的配置目录。
 
     Returns:
         MeasurementConfiguration(
@@ -124,18 +193,16 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
             mvs_dll_directory=None,  # SDK 动态库搜索目录
         )  # 路径转换为绝对路径，公共参数按实际配置返回
     """
-    # 读取 JSON 配置并以配置文件所在目录解析路径。
-    configuration_path = configuration_path.resolve()
-    configuration_directory = configuration_path.parent
-    with configuration_path.open(encoding="utf-8") as configuration_file:
-        settings = json.load(configuration_file)
+    # 读取公共参数并取得业务库路径。
+    settings = read_configuration_settings(configuration_directory)
 
-    # 机器清单统一从业务库读取，配置文件只提供公共参数。
-    settings.pop("machines", None)
-    database_path = (configuration_directory / settings["database_path"]).resolve()
+    # 创建业务库目录并初始化机器表。
+    database_path = settings["database_path"]
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
+
+    # 读取启用机器并整理为逐机配置对象。
     enabled_machines = MachineRepo(database_path).list_enabled()
     machine_configurations = [
         MachineConfiguration(
@@ -146,18 +213,7 @@ def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
         for machine in enabled_machines
     ]
 
-    # 将配置中的机器初始状态转换为枚举。
-    settings["initial_machine_state"] = MachineState(settings.get("initial_machine_state", MachineState.CLOSED))
-
-    # 创建输出路径并校验完整配置。
-    for path_name in ("database_path", "evidence_directory", "mvs_development_directory"):
-        settings[path_name] = (configuration_directory / settings[path_name]).resolve()
-    if settings.get("recovery_database_path"):
-        settings["recovery_database_path"] = (
-            configuration_directory / settings["recovery_database_path"]
-        ).resolve()
-    if settings.get("mvs_dll_directory"):
-        settings["mvs_dll_directory"] = (configuration_directory / settings["mvs_dll_directory"]).resolve()
+    # 组装机器与公共参数并校验完整运行配置。
     configuration = MeasurementConfiguration(machines=tuple(machine_configurations), **settings)
     configuration.validate()
     return configuration

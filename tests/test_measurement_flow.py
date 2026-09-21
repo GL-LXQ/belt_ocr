@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from configuration import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfiguration, MeasurementConfiguration
 from app import App
 from enums import OCRState
 from models import MeasurementEvent, OCRResult

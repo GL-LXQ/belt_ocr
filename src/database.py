@@ -13,7 +13,7 @@ from contextlib import closing
 from pathlib import Path
 
 from async_utils import run_blocking_operation
-from configuration import MeasurementConfiguration
+from config_util import MeasurementConfiguration
 from models import CapturedFrame, MeasurementEvent, PublishEvent
 from repo.machine_repo import MachineRepo
 from repo.measurement_repo import MeasurementRepo

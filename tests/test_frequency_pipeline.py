@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app import App
-from configuration import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfiguration, MeasurementConfiguration
 from enums import OCRState, FrequencyState, SessionState, EventType
 from models import CapturedFrame, BeltSession, FrequencyMeasurement, MeasurementEvent, OCRResult
 

@@ -45,7 +45,7 @@ BeltVision 主窗口默认 1600 × 900、最小 1280 × 720，支持标题栏拖
 后端使用 Python 3.10 及以上，运行时使用标准库和 MVS 官方绑定，pytest 用于测试。后端 Python 文件集中在 `src/`，保持扁平模块结构，采用单进程、每机一个当前周期和串行事件处理、每轮一个相机采集线程、共享串行 OCR 和共享存储队列。
 
 ```powershell
-uv run python -X utf8 src/main.py --config config.example.json
+uv run python -X utf8 src/main.py --config config
 uv run python -X utf8 -m pytest -q
 ```
 
@@ -93,7 +93,7 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 | `src/database.py` | 双库初始化、实例锁、事件整理、图片保存与存储队列调度 |
 | `src/repo/` | 按表封装建表 SQL、异常事件插入及测量记录幂等写入和查询 |
 | `src/models.py` / `src/enums.py` | 事件、帧、结果和周期状态 |
-| `src/configuration.py` / `src/async_utils.py` | 配置解析、取消期间等待阻塞操作结束 |
+| `src/config_util.py` / `src/async_utils.py` | 配置解析、取消期间等待阻塞操作结束 |
 
 #### 1.2.6 关键配置
 
@@ -310,7 +310,7 @@ START 创建周期后，相机先启动取流，再清空 SDK 缓存，随后在
 
 ### GUI：新建机器持久化
 
-GUI 启动入口读取项目根目录 `config.example.json` 的 `database_path`，初始化业务库的机器表，将 `MachineRepo` 经主窗口传给机器页；机器列表直接读取数据库，提交新增表单时校验三个必填字段，再调用 `insert()` 保存，机器名称、相机序列号和频率仪序列号分别受唯一约束限制。重复时提示对应字段并保留输入，其他插入错误提示保存失败；保存成功后关闭弹窗、重新读取列表并选中新机器，刷新失败则明确提示机器已保存。编号和 UTC 时间由数据库生成，空备注读取为空字符串，重启保留机器；编辑和删除按钮暂时禁用，实时监测仍使用演示数据，后端采集仍读取原配置。本次只更新建表定义，不增加旧表迁移。机器页和 Repo 专项 pytest：16 项通过。
+GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML 的 `database_path`，初始化业务库的机器表，将 `MachineRepo` 经主窗口传给机器页；机器列表直接读取数据库，提交新增表单时校验三个必填字段，再调用 `insert()` 保存，机器名称、相机序列号和频率仪序列号分别受唯一约束限制。重复时提示对应字段并保留输入，其他插入错误提示保存失败；保存成功后关闭弹窗、重新读取列表并选中新机器，刷新失败则明确提示机器已保存。编号和 UTC 时间由数据库生成，空备注读取为空字符串，重启保留机器；编辑和删除按钮暂时禁用，实时监测仍使用演示数据，后端采集仍读取原配置。本次只更新建表定义，不增加旧表迁移。机器页和 Repo 专项 pytest：16 项通过。
 
 本次全量 pytest：125 项通过、10 项失败，失败均涉及文档已有的后端历史字段、初始状态和实例锁文案；GUI 启动入口已使用临时数据库完成离屏启动与退出验证。
 
@@ -368,8 +368,17 @@ GUI 启动入口读取项目根目录 `config.example.json` 的 `database_path`�
 
 ### 统一机器命名
 
-皮带机这一业务实体此前存在 `machine` 与 `device` 两种叫法，本次统一为 `machine`／「机器」，改动只涉及命名，配置解析、Repo、Service、界面页面与样式、测试和文档的数据流完全不变：`src/configuration.py` 的校验文案与读取启用机器的局部变量改名；`src/repo/machine_repo.py` 与 `src/service/machine_service.py` 的中文注释、方法参数和 SQL 参数改名，Service 返回字典键由 `device_id` 改为 `machine_id`；界面侧 `ui/pages/devices_page.py` 更名为 `ui/pages/machines_page.py`、类名 `DevicesPage` 改为 `MachinesPage`，页面标识 `devices` 改为 `machines`，表格、表单、启用复选框和状态标签的 objectName 以及 `ui/styles/main_window.qss` 中的选择器同步改为 `machineTable`、`machineEditor`、`machineFields`、`machineEnabled`、`machineStatus`，`ui/main_window.py` 的导入、PAGES 键和导航标题、`ui/theme.py` 的图标名、`ui/pages/realtime_page.py` 的 `cards_by_machine_id` 与 `reload_machines()`、用户可见文案与测试断言一并更新。相机侧的 `device` 保持原义不变：`src/mvs_sdk.py` 的 SDK 设备枚举与 `src/camera.py` 的 `self.device` 仍指打开的相机句柄，`ui/theme.py` 的 devicePixelRatio 仍指显示像素比例。本次改名不涉及数据流动逻辑，数据仍从配置解析读取启用机器，经 Repo 读写 `machine` 表、Service 返回 `machine_id`，再由机器管理页与实时监测页展示，后台监测与采集流程保持原样。
+皮带机这一业务实体此前存在 `machine` 与 `device` 两种叫法，本次统一为 `machine`／「机器」，改动只涉及命名，配置解析、Repo、Service、界面页面与样式、测试和文档的数据流完全不变：`src/config_util.py` 的校验文案与读取启用机器的局部变量改名；`src/repo/machine_repo.py` 与 `src/service/machine_service.py` 的中文注释、方法参数和 SQL 参数改名，Service 返回字典键由 `device_id` 改为 `machine_id`；界面侧 `ui/pages/devices_page.py` 更名为 `ui/pages/machines_page.py`、类名 `DevicesPage` 改为 `MachinesPage`，页面标识 `devices` 改为 `machines`，表格、表单、启用复选框和状态标签的 objectName 以及 `ui/styles/main_window.qss` 中的选择器同步改为 `machineTable`、`machineEditor`、`machineFields`、`machineEnabled`、`machineStatus`，`ui/main_window.py` 的导入、PAGES 键和导航标题、`ui/theme.py` 的图标名、`ui/pages/realtime_page.py` 的 `cards_by_machine_id` 与 `reload_machines()`、用户可见文案与测试断言一并更新。相机侧的 `device` 保持原义不变：`src/mvs_sdk.py` 的 SDK 设备枚举与 `src/camera.py` 的 `self.device` 仍指打开的相机句柄，`ui/theme.py` 的 devicePixelRatio 仍指显示像素比例。本次改名不涉及数据流动逻辑，数据仍从配置解析读取启用机器，经 Repo 读写 `machine` 表、Service 返回 `machine_id`，再由机器管理页与实时监测页展示，后台监测与采集流程保持原样。
 
 ### 统一设备用词
 
 中文「设备」此前同时指皮带机、相机和频率仪，本次按对象拆分：皮带机统一写「机器」，相机硬件与相机句柄、取流、采集、编码流程统一写「相机」，频率仪统一写「频率仪」，`src/mvs_sdk.py` 的 SDK 术语（设备枚举、设备列表、设备时间戳）保留原词。频率监听日志的字段标签由 `device_id` 改为 `frequency_meter_serial`，与库中频率明细字段一致。本次只调整中文注释、文档字符串和日志标签，采集、OCR、频率、存储与数据库写入的数据流保持不变。
+
+
+### 配置按业务拆分为 YAML
+
+公共配置位于 `config/`：`application.yaml` 保存数据库、图片路径、存储和退出参数；`camera.yaml` 保存 SDK 路径及采集参数；`ocr.yaml` 保存识别期限；`frequency.yaml` 保存读取间隔和有效范围；`machine.yaml` 保存公共初始状态、周期期限和事件队列容量。配置键保持原名，可选项省略时使用配置类默认值；暂时不使用某一组可选参数时，文件内容写为 `{}`。相对路径以配置目录为基准，例如 `../runtime/measurements.sqlite3`，不受进程工作目录影响。已移除旧 JSON 配置入口，命令行 `--config` 接收配置目录，默认使用项目根目录下的 `config/`；运行命令为 `uv run python -X utf8 src/main.py --config config`。YAML 解析使用 PyYAML。
+
+数据流：GUI 和后端通过 `src/config_util.py` 的 `read_configuration_settings()` 读取五个 YAML、合并公共参数并转换路径和初始状态；GUI 使用业务库路径初始化设备表，允许空设备列表；后端通过 `load_configuration()` 查询数据库中的启用机器，组装并校验原有配置对象，再交给 App 连接相机和组织测量。START 创建周期并采集图片与频率，OCR 完成编码、筛帧、识别及终选，CLOSE 选取最后有效频率，完整成功后由存储队列先保存图片、再写 SQLite，结束时释放资源。机器清单仍由数据库管理，曝光、增益和像素格式仍保留相机自身设置。
+
+本次配置、机器状态与监测服务专项 pytest：13 项通过；全量 pytest：147 项通过、10 项既有失败，失败名单与修改前的 144 项通过、10 项失败一致。新增验证覆盖配置目录路径解析、默认参数、跨文件重复键和无机器时桌面启动。

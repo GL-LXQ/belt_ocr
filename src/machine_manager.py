@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from camera import SessionCamera
-from configuration import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfiguration, MeasurementConfiguration
 from frequency_adapter import FrequencyAdapter
 from enums import OCRState, FrequencyState, MachineState, SessionState, EventType
 from mvs_sdk import CameraFrame

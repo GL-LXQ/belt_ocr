@@ -1,6 +1,5 @@
 """通过 python -m ui 启动桌面预览。"""
 
-import json
 import sqlite3
 import sys
 from contextlib import closing
@@ -10,6 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PySide6.QtWidgets import QApplication
+
+from config_util import read_configuration_settings
 
 from src.service.machine_service import MachineService
 from src.repo.machine_repo import MachineRepo
@@ -32,9 +33,9 @@ def run_desktop_preview() -> int:
     application.setApplicationVersion("1.0.0")
 
     # 从项目配置读取业务库路径并初始化机器表。
-    configuration_path = Path(__file__).resolve().parents[1] / "config.example.json"
-    settings = json.loads(configuration_path.read_text(encoding="utf-8"))
-    database_path = configuration_path.parent / settings["database_path"]
+    configuration_directory = Path(__file__).resolve().parents[1] / "config"
+    settings = read_configuration_settings(configuration_directory)
+    database_path = settings["database_path"]
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
