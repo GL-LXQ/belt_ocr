@@ -458,3 +458,11 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 合并 handle_event 里的提交与超时分支
 
 `Machine.handle_event()` 里原本一个只含 `COMMIT_SUCCEEDED | COMMIT_FAILED` 的 `match` 紧跟一个只判断 `CYCLE_TIMEOUT` 的 `if`，这次合成一个 `match`（注释为「处理数据库提交回调与周期超时。」，超时分支内注明「周期未关闭时记为超时并进入机器复位流程。」），行为完全不变：两类的先后顺序、判断条件与提前 `return` 都与原来一致。之所以必须留在「迟到结果」守卫之前，是因为提交结果到达时周期状态已是 `WAITING_COMMIT_DB`、而周期超时可能在周期已失败但始终未关闭时到达，两者都不能被那条守卫丢掉。分派函数因此从 124 行降到 119 行，四段边界（机器级事件、身份守卫、提交与超时、周期内结果）各自带一句注释。数据流不变：`load_config()` 读 YAML 公共参数 → `App(config)` 只组装共享依赖 → `start()` 建图片目录与双库、读启用机器并逐台建立 `Machine` 与 `Camera`、打开相机并启动各后台任务 → START 采集图片与频率 → 事件按机器编号进入 FIFO 队列由 `listen_events` 串行处理 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 提交结果回到原周期 → 退出时关闭相机并释放实例锁。全量 pytest：5 项通过。
+
+### 关闭事件的周期身份判断移入 handle_machine_close
+
+`Machine.handle_event()` 的 `MACHINE_CLOSED` 分支原本先判断「事件报的周期是不是当前周期」，不匹配就写 `CLOSE_SESSION_MISMATCH` 审计并丢弃，匹配才调用 `handle_machine_close`；本次把这段判断移进 `handle_machine_close` 开头，由新增参数 `close_event: MeasurementEvent | None = None` 带入触发关闭的事件（省略表示关闭没有事件来源），判断条件、审计内容与丢弃行为都不变。dispatcher 里该分支因此从 11 行降到 3 行，四个关闭入口（CLOSE、SHUTDOWN、现场状态同步、周期超时）的「这次关闭该不该受理」集中在一处判断：`handle_machine_close` 依次是「旧周期的关闭事件只写审计」「空闲关闭清除等待复位」「已关闭周期继续等待结果」「正常关闭结算」。另外三个调用点不传 `close_event`，行为与改动前完全一致。数据流：`load_config()` 读 YAML 公共参数 → `App(config)` 只组装共享依赖 → `start()` 建图片目录与双库、读启用机器并逐台建立 `Machine` 与 `Camera`、打开相机并启动各后台任务 → START 采集图片与频率 → 事件按机器编号进入 FIFO 队列由 `listen_events` 串行处理（CLOSE 先核对周期身份再结算）→ OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 提交结果回到原周期 → 退出时关闭相机并释放实例锁。全量 pytest：5 项通过。
+
+### 未知事件类型写审计后不再继续结算
+
+`Machine.handle_event()` 末尾的 `case _`（未知事件类型）原本只写一条 `UNKNOWN_EVENT_TYPE` 审计，然后继续执行到函数末尾的 `try_finalize(session)`，等于「记录一条不认识的事件，又顺手检查本轮能不能结算」；本次在写审计之后加 `return`，这条分支只做记录就结束。当前枚举的 12 种事件类型在这条分支之前都已有归属，所以运行期走不到它，加 `return` 不改变现有行为，只把「将来新增事件类型却忘了处理」时的语义改成记录后丢弃。数据流不变：`load_config()` 读 YAML 公共参数 → `App(config)` 只组装共享依赖 → `start()` 建图片目录与双库、读启用机器并逐台建立 `Machine` 与 `Camera`、打开相机并启动各后台任务 → START 采集图片与频率 → 事件按机器编号进入 FIFO 队列由 `listen_events` 串行处理（机器级事件、周期身份、提交与超时、周期内结果逐段判断）→ OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 提交结果回到原周期 → 退出时关闭相机并释放实例锁。全量 pytest：5 项通过。

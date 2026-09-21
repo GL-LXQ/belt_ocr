@@ -176,16 +176,34 @@ class Machine:
         # 登记本轮 OCR 等待期限，此处只安排超时事件。
         self.schedule_timeout(session, EventType.OCR_TIMEOUT, self.config.ocr_result_timeout_ms)
 
-    async def handle_machine_close(self, interrupted: bool = False, capture_stop_time: float | None = None) -> None:
+    async def handle_machine_close(
+        self,
+        interrupted: bool = False,
+        capture_stop_time: float | None = None,
+        close_event: MeasurementEvent | None = None,
+    ) -> None:
         """结束本轮采集，结算频率并检查完成条件。
 
         Args:
             interrupted: False 表示正常 CLOSE；True 表示故障、超时或退出中断。
             capture_stop_time: 关闭信号接收时的单调时间，省略时取当前时间。
+            close_event: 触发本次关闭的事件，省略时表示关闭没有事件来源。
 
         Returns:
             None  # 本轮现场采集和频率接收已结束，OCR 与存储按各自状态继续处理
         """
+        # 旧周期的关闭事件只写审计，不操作当前周期。
+        if (
+            close_event is not None
+            and close_event.session_id is not None
+            and self.current_session is not None
+            and close_event.session_id != self.current_session.session_id
+        ):
+            await run_blocking_operation(
+                self.database.save_abnormal_event, "CLOSE_SESSION_MISMATCH", close_event,
+            )
+            return
+
         # 空闲时的关闭用于清除等待复位状态。
         session = self.current_session
         if session is None:
@@ -262,17 +280,9 @@ class Machine:
                 await self.handle_machine_start()
                 return
             case EventType.MACHINE_CLOSED:
-                # 旧周期关闭事件不能操作当前周期。
-                if (
-                    self.current_session is not None
-                    and event.session_id is not None
-                    and event.session_id != self.current_session.session_id
-                ):
-                    await run_blocking_operation(
-                        self.database.save_abnormal_event, "CLOSE_SESSION_MISMATCH", event,
-                    )
-                    return
-                await self.handle_machine_close(capture_stop_time=event.received_monotonic)
+                await self.handle_machine_close(
+                    capture_stop_time=event.received_monotonic, close_event=event,
+                )
                 return
             case EventType.SHUTDOWN:
                 await self.handle_machine_close(interrupted=True)
@@ -361,6 +371,7 @@ class Machine:
                 await run_blocking_operation(
                     self.database.save_abnormal_event, "UNKNOWN_EVENT_TYPE", event,
                 )
+                return
 
         # 统一处理本轮失败或满足条件后的提交。
         await self.try_finalize(session)
