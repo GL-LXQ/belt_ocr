@@ -84,7 +84,7 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 | 文件 | 职责 |
 |---|---|
 | `src/main.py` | 演示启停、故障等待和退出码 |
-| `src/app.py` | 读取启用机器、初始化、信号路由、容量维护、全局故障与资源释放 |
+| `src/app.py` | 读取启用机器、初始化、信号路由、全局故障与资源释放 |
 | `src/machine.py` | 每机周期状态、启停、频率、整轮 OCR 调度及提交条件 |
 | `src/camera.py` | 创建采集任务、启动单线程收集整轮帧、停止采集并一次性交付结果 |
 | `src/mvs_sdk.py` | SDK 加载、相机打开、取帧、内存 BMP 编码和关闭 |
@@ -434,3 +434,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 采集适配器改名为 Camera
 
 `src/camera.py` 的类 `SessionCamera` 改名为 `Camera`：`Session` 在本项目专指测量周期（`BeltSession`、`SessionState`、`session_id`、`current_session`），而这个对象是启动时按机器创建、跨所有周期长期存在的采集适配器，前缀把生命周期说反了；改名后它与 SDK 原始句柄的关系和 `Machine` 与 `MachineConfig` 一致。调用点不用动：`machine.camera.*`（`src/machine.py` 16 处、`src/app.py` 2 处、测试 3 处）本来就按属性名访问，只改了类定义、`src/app.py` 与 `src/machine.py` 的导入、`App.initialize_machines()` 中的构造和 `Machine.__init__` 的类型标注，文件名 `src/camera.py` 保持不变。同一文件内 `CaptureTask` 持有的 SDK 相机对象字段 `camera` 与 `Camera` 适配器同名易混，连同适配器上的同名属性一起改名为 `sdk_camera`：字段名显式标出这是厂商那一层的对象，避免与 `Camera` 适配器、`MvsCamera.handle`（真正的连接句柄）混淆，也没有采用会重复类型名的 `mvs_camera`。改名涉及 `CaptureTask` 的字段定义、`run_capture()` 内 9 处 `self.sdk_camera`、`start_capture()` 的局部变量与构造参数、结果交付处的 3 处引用，以及 `Camera.__init__` 的属性定义、`available` 与 `is_capturing` 属性、`src/app.py` 的赋值、`src/machine.py` 的 2 处和测试的 3 处断言；`camera_timeout_ms` 配置参数名未动。数据流不变：`load_config()` 读 YAML 公共参数 → `App(config)` 只组装共享依赖 → `start()` 同步建图片目录与双库、`initialize_machines()` 读业务库机器表并逐台建立 `Machine`、同步加载 SDK 并逐台把 `MvsCamera` 交给 `Camera.sdk_camera` → START 由 `Camera.start_capture()` 建采集任务并在线程中收集整轮帧 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 退出时先 `Camera.stop()` 停流，再由 `camera_sdk.close()` 关闭全部相机。全量 pytest：5 项通过。
+
+### 机器清单读取不再重复建业务库
+
+`App.initialize_machines()` 删除建库建表四行：局部变量 `database_path`、`database_path.parent.mkdir(parents=True, exist_ok=True)`、`with closing(sqlite3.connect(database_path)) as connection, connection:` 与 `MachineRepo.create_table(connection)`，只保留 `MachineRepo(self.config.database_path).list_enabled()` 读取启用机器和「没有启用的机器，请先在机器管理页添加并启用机器。」的业务异常，方法描述改为「在双库初始化之后读取启用机器，并逐台建立相机、频率适配器和机器运行对象」。原因是这几行与 `Database.initialize_result_database()` 重复（后者建业务库目录、建 `machine` 表与测量结果表），而 `start()` 中 `self.database.initialize()` 就在 `initialize_machines()` 上一行，真实启动路径上原代码会第二次建目录、第二次执行 `CREATE TABLE IF NOT EXISTS`；建库建表因此统一归 `Database` 一处，`App` 只负责读取机器与组装运行对象。连带删除只有这一处在用的 `import sqlite3` 与 `from contextlib import closing`。新约束是 `initialize_machines()` 必须在双库初始化之后调用：生产调用点只有 `start()`，测试的 `create_machine_database()` 与 GUI 的 `ui/__main__.py` 本来就各自先建好目录与机器表，因此没有调用方受影响。数据流：`load_config()` 读 YAML 公共参数 → `App(config)` 只组装共享依赖 → `start()` 同步建图片目录、`database.initialize()` 建双库与表、`initialize_machines()` 读业务库启用机器并逐台建立 `Machine`、同步加载 SDK 并逐台把 `MvsCamera` 交给 `Camera.sdk_camera` → START 采集图片与频率 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 退出时关闭相机并释放实例锁。全量 pytest：5 项通过。

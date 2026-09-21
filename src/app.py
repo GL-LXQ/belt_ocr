@@ -2,10 +2,8 @@
 
 import asyncio
 import logging
-import sqlite3
 import time
 from collections.abc import Callable
-from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -53,7 +51,7 @@ class App:
         self.shutdown_task: asyncio.Task[None] | None = None
 
     def initialize_machines(self) -> None:
-        """建好业务库机器表，读取启用机器并逐台建立相机、频率适配器和机器运行对象。
+        """在双库初始化之后读取启用机器，并逐台建立相机、频率适配器和机器运行对象。
 
         Args:
             无外部参数。
@@ -62,12 +60,8 @@ class App:
             返回示例：
                 None  # 每台启用机器已按机器编号登记运行对象，没有启用机器时抛出 ValueError
         """
-        # 确保业务库目录和机器表存在，再读取启用机器。
-        database_path = self.config.database_path
-        database_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(database_path)) as connection, connection:
-            MachineRepo.create_table(connection)
-        enabled_machines = MachineRepo(database_path).list_enabled()
+        # 读取业务库中启用的机器。
+        enabled_machines = MachineRepo(self.config.database_path).list_enabled()
         if not enabled_machines:
             raise ValueError("没有启用的机器，请先在机器管理页添加并启用机器。")
 
