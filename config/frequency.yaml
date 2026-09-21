@@ -1,6 +1,0 @@
-# 频率读取间隔配置值，沿用当前适配器的换算方式。
-frequency_interval_ms: 100
-
-# 有效频率下限和上限，单位为 Hz。
-minimum_frequency_hz: 0.01
-maximum_frequency_hz: 10000.0

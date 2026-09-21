@@ -377,11 +377,11 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 
 ### 配置按业务拆分为 YAML
 
-公共配置位于 `config/`：`application.yaml` 保存数据库、图片路径、存储和退出参数；`camera.yaml` 保存 SDK 路径及采集参数；`ocr.yaml` 保存识别期限；`frequency.yaml` 保存读取间隔和有效范围；`machine.yaml` 保存公共初始状态、周期期限和事件队列容量。配置键保持原名，可选项省略时使用配置类默认值；暂时不使用某一组可选参数时，文件内容写为 `{}`。相对路径以配置目录为基准，例如 `../runtime/measurements.sqlite3`，不受进程工作目录影响。已移除旧 JSON 配置入口，命令行 `--config` 接收配置目录，默认使用项目根目录下的 `config/`；运行命令为 `uv run python -X utf8 src/main.py --config config`。YAML 解析使用 PyYAML。
+公共配置集中于单一文件 `config/config.yaml`，按业务分为五个顶层段落：`application` 段保存数据库、图片路径、存储和退出参数；`camera` 段保存 SDK 路径及采集参数；`ocr` 段保存识别期限；`frequency` 段保存读取间隔和有效范围；`machine` 段保存公共初始状态、周期期限和事件队列容量。配置键保持原名，可选项省略时使用配置类默认值；暂时不使用某一组可选参数时，段落内容写为 `{}` 或整段省略。相对路径以 `config.yaml` 所在目录为基准，例如 `../runtime/measurements.sqlite3`，不受进程工作目录影响。已移除旧 JSON 配置入口和五个分文件格式，命令行 `--config` 仍接收配置目录，默认使用项目根目录下的 `config/`；运行命令为 `uv run python -X utf8 src/main.py --config config`。YAML 解析使用 PyYAML。
 
-五个 YAML 只做人工分组，读取时全部合并成一份 `AppConfig`，因此代码里统一写 `config.xxx`，从属性名看不出属于哪个文件。每个配置键在五个文件之间全局唯一（`read_configuration_settings()` 遇到跨文件重名会直接报错，并由测试用例守住），所以查一个配置项从哪来、谁在用，直接按键名搜索即可：`grep -rn capture_window_ms config/ src/` 会依次给出 YAML 定义、`AppConfig` 字段和全部使用点。另外用 `fields(AppConfig)` 与配置键集合的一致性测试，保证新增或改名键时不会漏改配置类。
+五个段落目前只做人工分组，读取时 `read_configuration_settings()` 按固定段落顺序把各段合并成同一份扁平参数，再构造一份 `AppConfig`，因此代码里仍统一写 `config.xxx`，段落归属靠键名搜索回溯。每个配置键在五个段落之间全局唯一（`read_configuration_settings()` 遇到跨段重名会直接报错并报出两个来源段，并由测试用例守住），所以查一个配置项从哪来、谁在用，直接按键名搜索即可：`grep -rn capture_window_ms config/ src/` 会依次给出 YAML 定义、`AppConfig` 字段和全部使用点。另外用 `fields(AppConfig)` 与配置键集合的一致性测试，保证新增或改名键时不会漏改配置类。
 
-数据流：GUI 和后端通过 `src/config_util.py` 的 `read_configuration_settings()` 读取五个 YAML、合并公共参数并转换路径和初始状态；GUI 使用业务库路径初始化设备表，允许空设备列表；后端通过 `load_configuration()` 查询数据库中的启用机器，组装并校验原有配置对象，再交给 App 连接相机和组织测量。START 创建周期并采集图片与频率，OCR 完成编码、筛帧、识别及终选，CLOSE 选取最后有效频率，完整成功后由存储队列先保存图片、再写 SQLite，结束时释放资源。机器清单仍由数据库管理，曝光、增益和像素格式仍保留相机自身设置。
+数据流：GUI 和后端通过 `src/config_util.py` 的 `read_configuration_settings()` 读取 `config/config.yaml` 的五个段落、合并公共参数并转换路径和初始状态；GUI 使用业务库路径初始化设备表，允许空设备列表；后端通过 `load_configuration()` 查询数据库中的启用机器，组装并校验原有配置对象，再交给 App 连接相机和组织测量。START 创建周期并采集图片与频率，OCR 完成编码、筛帧、识别及终选，CLOSE 选取最后有效频率，完整成功后由存储队列先保存图片、再写 SQLite，结束时释放资源。机器清单仍由数据库管理，曝光、增益和像素格式仍保留相机自身设置。
 
 本次配置、机器状态与监测服务专项 pytest：13 项通过；全量 pytest：147 项通过、10 项既有失败，失败名单与修改前的 144 项通过、10 项失败一致。新增验证覆盖配置目录路径解析、默认参数、跨文件重复键和无机器时桌面启动。
 
@@ -404,3 +404,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 相机适配器只接收用到的参数
 
 `SessionCamera.__init__` 不再接收整份配置：机器绑定改为 `machine_id: str`，采集参数改为 `capture_window_ms: int` 与 `camera_timeout_ms: int`，属性同步改为 `self.machine_id`、`self.capture_window_ms`、`self.camera_timeout_ms`，`src/camera.py` 不再导入 `MachineConfig` 和 `AppConfig`。采集失败日志、CAPTURE_COMPLETED 事件的机器归属直接读取机器编号，采集任务的两个参数直接读取毫秒数；构造由 `src/app.py` 传入 `machine.machine_id` 与 `config.capture_window_ms`、`config.camera_timeout_ms`，测试替身 `tests/test_mvs_capture.py` 两处构造直接传字符串与毫秒数。采集流程不变：START 后由唯一采集线程收集整轮帧并一次性交付结果，CLOSE 等待交付结束，OCR 与频率成功后由存储队列先保存图片再写 SQLite。全量 pytest：147 项通过、10 项既有失败，与改动前一致，失败名单未变。
+
+### 配置合并为单一 YAML（配置改造阶段 1）
+
+`config/` 下原 `application.yaml`、`camera.yaml`、`ocr.yaml`、`frequency.yaml`、`machine.yaml` 五个文件合并为单一 `config.yaml`，按业务分为 `application`、`camera`、`ocr`、`frequency`、`machine` 五个顶层段落，键名和取值不变；`read_configuration_settings()` 改为读取该文件并按固定段落顺序把各段合并成与之前完全相同的扁平参数，相对路径仍以文件所在目录为基准，跨段出现同名键时直接报错并报出两个来源段，`AppConfig`、全部 `config.xxx` 调用点、GUI 启动入口和命令行 `--config` 接收配置目录的契约均保持不变。测试支撑 `write_configuration_files()` 改为按项目示例的段落结构拆分参数写单文件，重复键用例改为跨段落重复验证。本阶段只合并文件与调整加载器，代码侧的嵌套子 dataclass 与 `config.camera.capture_window_ms` 式带组访问留待配置改造阶段 2。全量 pytest：148 项通过、10 项既有失败，失败名单与改动前实测基线（同为 148 项通过）完全一致；此前文档记录的"147 项通过"为过期数字，改动前实测即为 148 项通过。

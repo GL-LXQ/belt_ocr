@@ -1,0 +1,42 @@
+# 公共运行配置。相对路径以本文件所在目录为基准解析。
+# 五个顶层段落对应原 application/camera/ocr/frequency/machine 五个文件的业务分组，配置键保持原名。
+
+# 数据库与图片保存路径，相对本配置目录解析。
+application:
+  database_path: ../runtime/measurements.sqlite3
+  recovery_database_path: ../runtime/measurements.recovery.sqlite3
+  evidence_directory: ../runtime/evidence
+
+  # 存储队列容量与退出期限（毫秒）。
+  storage_queue_capacity: 32
+  shutdown_timeout_ms: 10000
+
+  # 容量检查间隔（毫秒）、积压上限与磁盘保留空间（字节）。
+  maintenance_interval_ms: 250
+  max_persistent_records: 1000
+  minimum_free_disk_bytes: 104857600
+
+# SDK 开发目录、可选动态库目录，以及采集窗口和单次取帧超时（毫秒）。
+camera:
+  mvs_development_directory: D:/app/HIK/MVS/Development
+  mvs_dll_directory: null
+
+  capture_window_ms: 1000
+  camera_timeout_ms: 50
+
+# 从 START 起计算的整轮识别期限，包含采集、排队与处理，单位为毫秒。
+ocr:
+  ocr_result_timeout_ms: 30000
+
+# 频率读取间隔配置值，沿用当前适配器的换算方式；有效频率下限和上限，单位为 Hz。
+frequency:
+  frequency_interval_ms: 100
+  minimum_frequency_hz: 0.01
+  maximum_frequency_hz: 10000.0
+
+# 公共初始状态：CLOSED、OPEN 或 UNKNOWN；机器清单从数据库读取。
+# 等待 CLOSE 的期限（毫秒）与单机事件队列容量。
+machine:
+  initial_machine_state: CLOSED
+  max_cycle_open_ms: 60000
+  event_queue_capacity: 128

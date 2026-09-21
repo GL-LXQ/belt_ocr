@@ -4,6 +4,7 @@ from dataclasses import fields
 from pathlib import Path
 
 import pytest
+import yaml
 
 from config_util import AppConfig, load_configuration, read_configuration_settings
 from configuration_support import write_configuration_files
@@ -76,21 +77,26 @@ def test_configuration_keys_match_config_fields() -> None:
 
 
 def test_duplicate_configuration_names(tmp_path: Path) -> None:
-    """验证不同文件的同名参数不能静默覆盖。
+    """验证不同配置段的同名参数不能静默覆盖。
 
     Args:
         tmp_path: 临时配置目录。
 
     Returns:
-        None  # 重复配置错误包含文件名及参数名
+        None  # 重复配置错误包含两段段名及参数名
     """
-    # 准备配置文件，在另一业务文件中重复设置采集窗口。
+    # 准备配置文件，把采集窗口在 ocr 段重复设置一次。
     write_configuration_files(tmp_path, {"capture_window_ms": 1000})
-    (tmp_path / "ocr.yaml").write_text("capture_window_ms: 2000\n", encoding="utf-8")
+    configuration_path = tmp_path / "config.yaml"
+    sections = yaml.safe_load(configuration_path.read_text(encoding="utf-8"))
+    sections["ocr"] = {"capture_window_ms": 2000}
+    configuration_path.write_text(yaml.safe_dump(sections, allow_unicode=True), encoding="utf-8")
 
-    # 检查配置读取拒绝同名参数覆盖。
-    with pytest.raises(ValueError, match="ocr.yaml.*capture_window_ms"):
+    # 检查配置读取拒绝同名参数覆盖，并报出先后两个来源段。
+    with pytest.raises(ValueError, match="capture_window_ms") as error_info:
         read_configuration_settings(tmp_path)
+    assert "camera" in str(error_info.value)
+    assert "ocr" in str(error_info.value)
 
 
 def test_desktop_starts_without_machines(tmp_path: Path, monkeypatch, application) -> None:

@@ -100,10 +100,10 @@ class AppConfig:
 
 
 def read_configuration_settings(configuration_directory: Path) -> dict:
-    """读取五个公共配置文件并转换路径和初始机器状态。
+    """读取单一配置文件的五个业务段落并转换路径和初始机器状态。
 
     Args:
-        configuration_directory: 包含五个 YAML 文件的配置目录。
+        configuration_directory: 包含 config.yaml 的配置目录。
 
     Returns:
         返回示例（可选参数按 YAML 实际内容返回）：
@@ -129,16 +129,18 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
                 "event_queue_capacity": 128,  # 单机事件队列容量
             }
     """
-    # 按业务文件读取公共参数，拒绝跨文件重复配置键。
+    # 读取单一配置 YAML，按固定段落顺序合并公共参数，拒绝跨段落重复配置键。
     configuration_directory = configuration_directory.resolve()
+    with (configuration_directory / "config.yaml").open(encoding="utf-8") as config_file:
+        section_settings = yaml.safe_load(config_file)
     settings = {}
-    for filename in ("application.yaml", "camera.yaml", "ocr.yaml", "frequency.yaml", "machine.yaml"):
-        with (configuration_directory / filename).open(encoding="utf-8") as config_file:
-            file_settings = yaml.safe_load(config_file)
-        duplicate_names = settings.keys() & file_settings.keys()
-        if duplicate_names:
-            raise ValueError(f"{filename} 包含重复配置项：{', '.join(sorted(duplicate_names))}")
-        settings.update(file_settings)
+    source_sections: dict[str, str] = {}
+    for section_name in ("application", "camera", "ocr", "frequency", "machine"):
+        for name, value in (section_settings.get(section_name) or {}).items():
+            if name in source_sections:
+                raise ValueError(f"配置项 {name} 同时出现在配置段 {source_sections[name]} 和 {section_name}。")
+            source_sections[name] = section_name
+            settings[name] = value
 
     # 将必填路径转换为相对配置目录的绝对路径。
     for path_name in ("database_path", "evidence_directory", "mvs_development_directory"):
@@ -156,7 +158,7 @@ def load_configuration(configuration_directory: Path) -> AppConfig:
     """读取公共配置和数据库中的启用机器，构建后台配置。
 
     Args:
-        configuration_directory: 包含五个 YAML 文件的配置目录。
+        configuration_directory: 包含 config.yaml 的配置目录。
 
     Returns:
         AppConfig(

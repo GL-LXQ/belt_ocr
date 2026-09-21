@@ -1,7 +1,0 @@
-# SDK 开发目录与可选动态库目录。
-mvs_development_directory: D:/app/HIK/MVS/Development
-mvs_dll_directory: null
-
-# 采集窗口和单次取帧超时，单位为毫秒。
-capture_window_ms: 1000
-camera_timeout_ms: 50

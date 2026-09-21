@@ -9,29 +9,28 @@ import yaml
 
 
 def write_configuration_files(configuration_directory: Path, settings: dict) -> None:
-    """按项目示例的字段分组，将给定参数写入五个测试配置文件。
+    """按项目示例的字段分组，将给定参数拆段写入单一测试配置文件。
 
     Args:
         configuration_directory: 测试配置输出目录。
         settings: 待写入的公共参数；机器测试数据由调用方单独保存。
 
     Returns:
-        None  # 五个 YAML 配置文件已写入指定目录
+        None  # config.yaml 已写入指定目录
     """
     # 将路径和枚举转换为 YAML 可直接写入的基础值。
     settings = json.loads(json.dumps(serialize_value(settings)))
 
-    # 创建测试配置目录，读取项目示例中的字段分组。
+    # 创建测试配置目录，读取项目示例中的段落结构。
     configuration_directory.mkdir(parents=True, exist_ok=True)
-    example_directory = Path(__file__).resolve().parents[1] / "config"
-    for example_path in example_directory.glob("*.yaml"):
-        example_settings = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+    example_path = Path(__file__).resolve().parents[1] / "config" / "config.yaml"
+    example_sections = yaml.safe_load(example_path.read_text(encoding="utf-8"))
 
-        # 仅写入本次测试提供的参数，省略项使用运行配置默认值。
-        file_settings = {
-            name: settings[name]
-            for name in example_settings
-            if name in settings
-        }
-        output_path = configuration_directory / example_path.name
-        output_path.write_text(yaml.safe_dump(file_settings, allow_unicode=True), encoding="utf-8")
+    # 仅写入本次测试提供的参数，省略项使用运行配置默认值。
+    output_sections = {
+        section_name: {name: settings[name] for name in section if name in settings}
+        for section_name, section in example_sections.items()
+    }
+    output_sections = {name: section for name, section in output_sections.items() if section}
+    output_path = configuration_directory / "config.yaml"
+    output_path.write_text(yaml.safe_dump(output_sections, allow_unicode=True), encoding="utf-8")
