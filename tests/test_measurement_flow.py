@@ -49,8 +49,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         machines = tuple(
             MachineConfiguration(
                 machine_id=f"M{machine_number:02}",
-                camera_id=f"CAM{machine_number:02}",
-                frequency_source_id=f"FREQ{machine_number:02}",
+                frequency_meter_serial=f"FREQ{machine_number:02}",
                 camera_serial=f"SERIAL{machine_number:02}",
                 simulated_frequencies_hz=(40.0, 40.0, 43.0),
             )

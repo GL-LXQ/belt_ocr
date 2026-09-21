@@ -154,8 +154,8 @@ class MachineManager:
         session = BeltSession(
             session_id=uuid4().hex,
             machine_id=self.machine.machine_id,
-            camera_id=self.machine.camera_id,
-            frequency_source_id=self.machine.frequency_source_id,
+            camera_serial=self.machine.camera_serial,
+            frequency_meter_serial=self.machine.frequency_meter_serial,
             capture_id=uuid4().hex,
             start_time=datetime.now(timezone.utc).isoformat(),
             capture_start_time=asyncio.get_running_loop().time(),
@@ -505,7 +505,7 @@ class MachineManager:
                     self.text_recognizer.process_session_frames,
                     session.session_id,
                     session.capture_id,
-                    session.camera_id,
+                    session.camera_serial,
                     frames,
                     self.camera.device.encode_image,
                 )

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -55,11 +56,11 @@ class App:
                 self.state_changed,
             )
 
-    async def start(self) -> None:
+    async def start(self, notify_camera_state: Callable[[str, str, str], None] | None = None) -> None:
         """初始化本次运行的机器状态和存储，启动监听与处理任务。
 
         Args:
-            无外部参数。
+            notify_camera_state: 可选连接通知函数，接收机器编号、连接状态和失败原因；GUI 由 MonitoringService 的信号提供，无界面时传 None。
 
         Returns:
             None: 完成启动并开放信号入口，无返回数据。
@@ -84,15 +85,24 @@ class App:
             )
             for manager in self.machine_managers.values():
                 machine = manager.machine
-                if not machine.camera_serial:
-                    raise RuntimeError(f"未配置相机序列号 machine_id={machine.machine_id} camera_id={machine.camera_id}")
-                manager.camera.device = await run_blocking_operation(
-                    self.camera_sdk.open_camera,
-                    machine.camera_serial,
-                    pixel_format=machine.camera_pixel_format,
-                    exposure_time_us=machine.camera_exposure_time_us,
-                    gain=machine.camera_gain,
-                )
+                # 通知界面连接状态，并将相机绑定到本机处理器。
+                if notify_camera_state is not None:
+                    notify_camera_state(machine.machine_id, "连接中", "")
+                try:
+                    manager.camera.device = await run_blocking_operation(
+                        self.camera_sdk.open_camera,
+                        machine.camera_serial,
+                        pixel_format=machine.camera_pixel_format,
+                        exposure_time_us=machine.camera_exposure_time_us,
+                        gain=machine.camera_gain,
+                    )
+                except Exception as error:
+                    if notify_camera_state is not None:
+                        notify_camera_state(machine.machine_id, "连接失败", str(error))
+                    raise
+                if notify_camera_state is not None:
+                    notify_camera_state(machine.machine_id, "相机已连接", "IO、频率仪尚未接入")
+
 
             # 设置容量和现场初始状态，运行中或未知时等待真实关闭。
             capacity_available = await self.check_disk_capacity()
@@ -108,7 +118,7 @@ class App:
                     f"机器处理 machine_id={machine.machine_id}", manager.listen_events,
                 )))
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
-                    f"频率监听 machine_id={machine.machine_id} device_id={machine.frequency_source_id}",
+                    f"频率监听 machine_id={machine.machine_id} device_id={machine.frequency_meter_serial}",
                     manager.frequency_adapter.run,
                 )))
 

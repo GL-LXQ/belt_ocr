@@ -1,6 +1,7 @@
 """实时监测页面、设备卡片和步骤进度组件。"""
 
 from html import escape
+from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QPixmap
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.service.machine_service import MachineService, MachineServiceError
+from src.service.monitoring_service import MonitoringService
 from ui.demo_data import LOG_ROWS
 from ui.theme import create_icon
 
@@ -284,6 +286,8 @@ class MachineCard(QFrame):
 
         # 更新步骤和最近事件。
         self.steps.update_steps(data["completed_steps"], data["tone"])
+        for label in self.event_labels:
+            label.clear()
         for index, (label, (timestamp, message)) in enumerate(zip(self.event_labels, data["events"])):
             time_color = "#2F7CF6" if index % 2 == 0 else "#18AE59"
             event_color = "#FF9818" if data["tone"] == "waiting" and index % 2 == 0 else "#2F7CF6"
@@ -314,6 +318,11 @@ class RealtimePage(QWidget):
         super().__init__()
         self.setObjectName("realtime")
         self.machine_service = machine_service
+        self.monitoring_service = None
+        self.closing_requested = False
+        self.connection_states = {}
+        self.cards_by_device_id = {}
+        self.configuration_path = Path(__file__).resolve().parents[2] / "config.example.json"
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_area = QScrollArea()
@@ -342,8 +351,8 @@ class RealtimePage(QWidget):
         titles.addWidget(subtitle)
         header.addLayout(titles)
         header.addStretch()
-        self.start_button = QPushButton("▶  启动全部")
-        self.stop_button = QPushButton("■  停止全部")
+        self.start_button = QPushButton("▶  启动监测")
+        self.stop_button = QPushButton("■  停止监测")
         self.refresh_button = QPushButton("⟳  刷新")
         for button, name in (
             (self.start_button, "startAll"),
@@ -355,9 +364,7 @@ class RealtimePage(QWidget):
             button.setMinimumWidth(96)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             header.addWidget(button)
-        for button in (self.start_button, self.stop_button):
-            button.setEnabled(False)
-            button.setToolTip("暂未接入")
+        self.stop_button.setEnabled(False)
         layout.addLayout(header)
 
         # 创建卡片网格，每行固定放置几台设备。
@@ -408,6 +415,8 @@ class RealtimePage(QWidget):
         layout.addWidget(log_panel)
 
         # 绑定本地交互，填入演示日志并读取设备表。
+        self.start_button.clicked.connect(self.start_monitoring)
+        self.stop_button.clicked.connect(self.stop_monitoring)
         self.refresh_button.clicked.connect(self.reload_devices)
         self.clear_button.clicked.connect(lambda: self.log_table.setRowCount(0))
         self.auto_scroll.toggled.connect(lambda checked: self.log_table.scrollToBottom() if checked else None)
@@ -451,6 +460,7 @@ class RealtimePage(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self.machine_cards = []
+        self.cards_by_device_id = {}
         self.empty_hint = None
 
         # 没有设备时显示横跨整行的空态提示。
@@ -462,19 +472,118 @@ class RealtimePage(QWidget):
             self.cards_layout.addWidget(hint, 0, 0, 1, CARDS_PER_ROW)
             return
 
-        # 逐台设备创建卡片，每行固定几台，实时状态字段暂时显示占位内容。
+        # 按设备编号创建卡片，并恢复最近一次连接结果。
         for index, device in enumerate(self.devices):
             card = MachineCard({
                 "title": device["machine_name"],
                 "tone": "idle",
-                "status": "未接入",
-                "state": "空闲",
+                "status": "未启动",
+                "state": "未启动监测",
                 "frequency": "--",
                 "completed_steps": 0,
                 "events": (),
             })
             self.cards_layout.addWidget(card, index // CARDS_PER_ROW, index % CARDS_PER_ROW)
             self.machine_cards.append(card)
+            device_id = str(device["id"])
+            self.cards_by_device_id[device_id] = card
+            status, reason = self.connection_states.get(device_id, ("未启动", ""))
+            self.update_connection_state(device_id, status, reason)
+
+    def start_monitoring(self):
+        """读取设备卡片并启动一次后台监测。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 后台启动，按钮等待监测结束后恢复
+        """
+        # 重读设备清单，清除上一轮结果并切换按钮状态。
+        self.connection_states.clear()
+        self.reload_devices()
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        for device_id in self.cards_by_device_id:
+            self.update_connection_state(device_id, "连接中", "正在初始化监测服务")
+
+        # 在线程中连接设备，通过 Qt 信号更新主线程中的卡片。
+        # 创建后台线程，先接好连接进度和线程结束两个信号，再启动线程。
+        self.monitoring_service = MonitoringService(self.configuration_path)
+        self.monitoring_service.camera_state_changed_signal.connect(self.update_connection_state)
+        self.monitoring_service.finished.connect(self.finish_monitoring)
+        self.monitoring_service.start()
+
+    def stop_monitoring(self):
+        """通知后台停止并等待后台自行完成资源释放。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 停止通知已发送，界面继续处理事件
+        """
+        # 关闭重复停止入口，通知后台主流程退出。
+        self.stop_button.setEnabled(False)
+        self.monitoring_service.stop_requested.set()
+        for device_id in self.cards_by_device_id:
+            self.update_connection_state(device_id, "停止中", "正在释放相机和后台资源")
+
+    def update_connection_state(self, device_id: str, status: str, reason: str):
+        """保存设备连接结果并更新对应卡片。
+
+        Args:
+            device_id: 数据库设备编号的字符串形式。
+            status: 相机连接状态。
+            reason: 连接失败原因或状态说明。
+
+        Returns:
+            None  # 已保存状态；当前页面存在该设备时更新卡片
+        """
+        # 保留状态，并跳过运行期间已从列表移除的设备。
+        self.connection_states[device_id] = (status, reason)
+        card = self.cards_by_device_id.get(device_id)
+        if card is None:
+            return
+
+        # 将连接结果转换为卡片文字和颜色，频率及测量进度保持未接入。
+        tone = "waiting" if status in ("连接中", "停止中", "连接失败", "监测失败") else "idle"
+        card.update_data({
+            "title": card.title.text(),
+            "tone": tone,
+            "status": status,
+            "state": "等待启停信号接入" if status == "相机已连接" else status,
+            "frequency": "--",
+            "completed_steps": 0,
+            "events": (("连接", reason),) if reason else (),
+        })
+        card.setToolTip(reason)
+
+    def finish_monitoring(self):
+        """显示最终停止结果并恢复启动入口。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 卡片与按钮已反映后台退出结果
+        """
+        # 更新全部卡片，保留具体设备的连接失败原因。
+        failure_message = self.monitoring_service.failure_message
+        for device_id in self.cards_by_device_id:
+            status, reason = self.connection_states.get(device_id, ("未启动", ""))
+            if status != "连接失败":
+                status = "监测失败" if failure_message else "已停止"
+                reason = failure_message or "相机连接已释放"
+            self.update_connection_state(device_id, status, reason)
+
+        # 恢复操作按钮，并展示没有对应卡片的初始化故障。
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        if failure_message and not self.closing_requested:
+            QMessageBox.warning(self, "监测已停止", failure_message)
+        self.monitoring_service.deleteLater()
+        self.monitoring_service = None
 
     def fill_demo_logs(self):
         """清空日志表格并按时间顺序填入固定演示日志。

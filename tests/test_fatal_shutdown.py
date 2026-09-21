@@ -31,8 +31,7 @@ def device_environment(tmp_path, monkeypatch):
     machines = tuple(
         MachineConfiguration(
             machine_id=f"M{number}",
-            camera_id=f"CAM{number}",
-            frequency_source_id=f"FREQ{number}",
+            frequency_meter_serial=f"FREQ{number}",
             camera_serial=f"SERIAL{number}",
         )
         for number in (1, 2)
@@ -72,6 +71,11 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
     elif failure_stage == "serial":
         machines = (configuration.machines[0], replace(configuration.machines[1], camera_serial=""))
         configuration = replace(configuration, machines=machines)
+        # 缺失序列号在配置边界拒绝，尚未加载或打开设备。
+        with pytest.raises(ValueError, match="camera_serial"):
+            App(configuration)
+        assert not sdk.cameras
+        return
     else:
         open_camera = sdk.open_camera
         monkeypatch.setattr(sdk, "open_camera", Mock(side_effect=[open_camera("SERIAL1"), OSError("连接失败")]))
@@ -261,7 +265,7 @@ def test_camera_fault_interrupts_main_workflow(device_environment, monkeypatch, 
         asyncio.run(asyncio.wait_for(main.run_measurement_demo(Path("unused")), 3))
     assert sdk.closed
     assert all(camera.closed for camera in sdk.cameras.values())
-    assert ("camera_id=CAM1" if operation == "encode" else "serial=SERIAL1") in caplog.text
+    assert ("camera_serial=SERIAL1" if operation == "encode" else "serial=SERIAL1") in caplog.text
     # 同一设备故障只在发生位置记录一次异常堆栈。
     failure_logs = [
         record for record in caplog.records

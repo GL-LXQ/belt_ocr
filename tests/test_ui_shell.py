@@ -193,8 +193,8 @@ def test_realtime_cards_follow_machine_table(window, application):
 
     # 没有实时数据源的字段显示占位内容，画面为灰色占位块。
     card = page.machine_cards[0]
-    assert card.badge.text() == "未接入"
-    assert card.state_label.text() == "空闲"
+    assert card.badge.text() == "未启动"
+    assert card.state_label.text() == "未启动"
     assert card.frequency_label.text() == "--"
     assert card.preview.pixmap().isNull()
 

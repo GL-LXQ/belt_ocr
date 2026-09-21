@@ -183,9 +183,28 @@ from fake_mvs import FakeMvsSdk
 application_module.load_mvs_sdk = FakeMvsSdk
 
 async def crash_after_start():
-    app = App(load_configuration(Path(sys.argv[1])))
+    # 将子进程的设备写入业务库，再通过正式配置入口读取。
+    import json
+    import sqlite3
+    from contextlib import closing
+    from dataclasses import replace
+    from repo.machine_repo import MachineRepo
+    settings = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    database_path = Path(settings["database_path"])
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        MachineRepo.create_table(connection)
+    repository = MachineRepo(database_path)
+    for machine in settings["machines"]:
+        repository.insert(machine["machine_id"], machine["camera_serial"], machine["frequency_meter_serial"])
+    configuration = load_configuration(Path(sys.argv[1]))
+    # 为崩溃测试显式注入频率替身读数。
+    configuration = replace(configuration, machines=tuple(
+        replace(machine, simulated_frequencies_hz=tuple(original["simulated_frequencies_hz"]))
+        for machine, original in zip(configuration.machines, settings["machines"])
+    ))
+    app = App(configuration)
     await app.start()
-    await app.handle_start('M01')
+    await app.handle_start('1')
     os._exit(23)
 
 asyncio.run(crash_after_start())

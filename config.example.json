@@ -6,39 +6,6 @@
   "minimum_free_disk_bytes": 104857600,
   "capture_window_ms": 1000,
   "frequency_interval_ms": 100,
-  "machines": [
-    {
-      "machine_id": "M01",
-      "camera_id": "CAM01",
-      "frequency_source_id": "FREQ01",
-      "simulated_frequencies_hz": [
-        42.0,
-        42.0,
-        43.5
-      ],
-      "camera_serial": ""
-    },
-    {
-      "machine_id": "M02",
-      "camera_id": "CAM02",
-      "frequency_source_id": "FREQ02",
-      "simulated_frequencies_hz": [
-        51.0,
-        52.0
-      ],
-      "camera_serial": ""
-    },
-    {
-      "machine_id": "M03",
-      "camera_id": "CAM03",
-      "frequency_source_id": "FREQ03",
-      "simulated_frequencies_hz": [
-        63.0,
-        63.0
-      ],
-      "camera_serial": ""
-    }
-  ],
   "mvs_development_directory": "D:\\app\\HIK\\MVS\\Development",
   "camera_timeout_ms": 50
 }

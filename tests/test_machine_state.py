@@ -1,6 +1,9 @@
 """验证机器状态配置的枚举转换和字符串序列化。"""
 
 import json
+import sqlite3
+from contextlib import closing
+from repo.machine_repo import MachineRepo
 from pathlib import Path
 
 import pytest
@@ -34,6 +37,12 @@ def test_load_machine_state_preserves_json_values(tmp_path: Path, configured_sta
     # 保存配置并通过正式入口读取。
     configuration_path = tmp_path / "configuration.json"
     configuration_path.write_text(json.dumps(settings), encoding="utf-8")
+    # 写入本测试所需设备，配置加载不再读取 JSON 设备清单。
+    database_path = tmp_path / settings["database_path"]
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        MachineRepo.create_table(connection)
+    MachineRepo(database_path).insert("测试机器", "CAM001", "FREQ001")
     configuration = load_configuration(configuration_path)
 
     # 检查枚举类型和持久化后的字符串内容。

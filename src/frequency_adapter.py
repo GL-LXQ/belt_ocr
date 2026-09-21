@@ -77,7 +77,7 @@ class FrequencyAdapter:
                 continue
             measurement = FrequencyMeasurement(
                 session_id=session_id,
-                frequency_source_id=self.machine.frequency_source_id,
+                frequency_meter_serial=self.machine.frequency_meter_serial,
                 value_hz=value_hz,
             )
 

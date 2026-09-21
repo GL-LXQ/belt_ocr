@@ -109,7 +109,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
             expected_pixels = (bytes([pixel_value]) * 6 + b"\0\0") * 2
             for frame in frames:
                 self.assertEqual(frame.session_id, session.session_id)
-                self.assertEqual(frame.camera_id, session.camera_id)
+                self.assertEqual(frame.camera_serial, session.camera_serial)
                 self.assertEqual(frame.capture_id, session.capture_id)
                 pixel_offset = int.from_bytes(frame.image_data[10:14], "little")
                 self.assertEqual(frame.image_data[pixel_offset:], expected_pixels)

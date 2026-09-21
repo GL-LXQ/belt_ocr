@@ -215,6 +215,27 @@ class MainWindow(QMainWindow):
         # 为无边框窗口安装边缘缩放事件处理。
         QApplication.instance().installEventFilter(self)
 
+    def closeEvent(self, event):
+        """等待监测后台释放资源后关闭窗口。
+
+        Args:
+            event: Qt 窗口关闭事件。
+
+        Returns:
+            None  # 后台运行时延迟关闭，否则接受关闭事件
+        """
+        # 后台运行期间保留窗口，等待线程结束后再次关闭。
+        page = self.page_stack.widget(0)
+        service = page.monitoring_service
+        if service is not None and service.isRunning():
+            event.ignore()
+            if not page.closing_requested:
+                page.closing_requested = True
+                service.finished.connect(self.close)
+                page.stop_monitoring()
+            return
+        super().closeEvent(event)
+
     def setup_window(self):
         """配置窗口大小、字体、图标和居中位置。
 

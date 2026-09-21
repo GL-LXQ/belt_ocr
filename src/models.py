@@ -36,7 +36,7 @@ PublishEvent = Callable[[MeasurementEvent], Awaitable[None]]
 class CapturedFrame:
     session_id: str
     capture_id: str
-    camera_id: str
+    camera_serial: str
     frame_id: str
     captured_at: str
     captured_monotonic: float
@@ -46,7 +46,7 @@ class CapturedFrame:
 @dataclass(frozen=True)
 class FrequencyMeasurement:
     session_id: str
-    frequency_source_id: str
+    frequency_meter_serial: str
     value_hz: float
 
 
@@ -69,8 +69,8 @@ class CaptureResult:
 class BeltSession:
     session_id: str
     machine_id: str
-    camera_id: str
-    frequency_source_id: str
+    camera_serial: str
+    frequency_meter_serial: str
     capture_id: str
     start_time: str
     capture_start_time: float  # 本轮相机采集图片的起始时间，受理 START 时记录，单调时钟秒数

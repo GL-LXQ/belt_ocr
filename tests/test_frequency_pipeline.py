@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app import App
-from configuration import load_configuration
+from configuration import MachineConfiguration, MeasurementConfiguration
 from enums import OCRState, FrequencyState, SessionState, EventType
 from models import CapturedFrame, BeltSession, FrequencyMeasurement, MeasurementEvent, OCRResult
 
@@ -30,9 +30,9 @@ def frequency_context(tmp_path):
         )
     """
     # 创建独立存储配置，启用较短的频率收尾期限。
-    configuration = load_configuration(Path(__file__).resolve().parents[1] / "config.example.json")
-    configuration = replace(
-        configuration,
+    configuration = MeasurementConfiguration(
+        machines=(MachineConfiguration("M01", "CAM01", "FREQ01"),),
+        mvs_development_directory=Path("fake-sdk"),
         database_path=tmp_path / "measurements.sqlite3",
         recovery_database_path=tmp_path / "recovery.sqlite3",
         evidence_directory=tmp_path / "evidence",
@@ -45,8 +45,8 @@ def frequency_context(tmp_path):
     session = BeltSession(
         session_id="frequency-session",
         machine_id="M01",
-        camera_id="CAM01",
-        frequency_source_id="FREQ01",
+        camera_serial="CAM01",
+        frequency_meter_serial="FREQ01",
         capture_id="capture-frequency",
         start_time="2026-09-18T00:00:10+00:00",
         capture_start_time=10,
@@ -56,7 +56,7 @@ def frequency_context(tmp_path):
             selected_frames=(CapturedFrame(
                 session_id="frequency-session",
                 capture_id="capture-frequency",
-                camera_id="CAM01",
+                camera_serial="CAM01",
                 frame_id="frame-1",
                 captured_at="2026-09-18T00:00:10+00:00",
                 captured_monotonic=10,
@@ -84,13 +84,13 @@ def create_measurement(session, value):
     Returns:
         FrequencyMeasurement(
             session_id="frequency-session",  # 所属周期
-            frequency_source_id="FREQ01",  # 仪器来源
+            frequency_meter_serial="FREQ01",  # 仪器来源
             value_hz=42.0,  # 频率值
         )
     """
     return FrequencyMeasurement(
         session_id=session.session_id,
-        frequency_source_id=session.frequency_source_id,
+        frequency_meter_serial=session.frequency_meter_serial,
         value_hz=value,
     )
 
@@ -150,7 +150,7 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
     assert [measurement["value_hz"] for measurement in frequencies] == [42.0, 42.0, 43.0]
     assert rows[0][1] == frequencies[-1]["value_hz"] == 43.0
     assert all(
-        set(measurement) == {"session_id", "frequency_source_id", "value_hz"}
+        set(measurement) == {"session_id", "frequency_meter_serial", "value_hz"}
         for measurement in frequencies
     )
 
@@ -346,7 +346,7 @@ def test_placeholder_listener_delivers_only_active_session(frequency_context):
             following = await asyncio.wait_for(events.get(), 1)
             assert following.session_id == "next-session"
             assert following.payload.session_id == "next-session"
-            assert following.payload.frequency_source_id == session.frequency_source_id
+            assert following.payload.frequency_meter_serial == session.frequency_meter_serial
         finally:
             listener.cancel()
             await asyncio.gather(listener, return_exceptions=True)

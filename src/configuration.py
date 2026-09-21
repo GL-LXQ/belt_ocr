@@ -3,6 +3,10 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
+import sqlite3
+from contextlib import closing
+
+from repo.machine_repo import MachineRepo
 
 from enums import MachineState
 
@@ -10,10 +14,9 @@ from enums import MachineState
 @dataclass(frozen=True)
 class MachineConfiguration:
     machine_id: str
-    camera_id: str
-    frequency_source_id: str
+    camera_serial: str
+    frequency_meter_serial: str
     simulated_frequencies_hz: tuple[float, ...] = ()
-    camera_serial: str = ""
     camera_pixel_format: str | None = None
     camera_exposure_time_us: float | None = None
     camera_gain: float | None = None
@@ -53,16 +56,11 @@ class MeasurementConfiguration:
         """检查设备绑定和运行参数。"""
         # 检查机器、相机和频率来源的唯一性。
         if not self.machines:
-            raise ValueError("至少配置一台机器。")
-        for attribute in ("machine_id", "camera_id", "frequency_source_id"):
+            raise ValueError("没有启用的设备，请先在设备管理页添加并启用设备。")
+        for attribute in ("machine_id", "camera_serial", "frequency_meter_serial"):
             identifiers = [getattr(machine, attribute) for machine in self.machines]
             if not all(identifiers) or len(set(identifiers)) != len(identifiers):
                 raise ValueError(f"{attribute} 必须非空且不能重复。")
-
-        # 检查已填写的真实相机序列号是否重复。
-        serials = [machine.camera_serial for machine in self.machines if machine.camera_serial]
-        if len(serials) != len(set(serials)):
-            raise ValueError("已配置的 camera_serial 不能重复。")
 
         # 检查等待期限、采集间隔和队列容量。
         positive_parameters = (
@@ -88,20 +86,65 @@ class MeasurementConfiguration:
 
 
 def load_configuration(configuration_path: Path) -> MeasurementConfiguration:
-    """读取配置文件并解析相对路径。"""
+    """读取公共配置和数据库中的启用设备，构建后台配置。
+
+    Args:
+        configuration_path: 公共 JSON 配置文件路径。
+
+    Returns:
+        MeasurementConfiguration(
+            machines=(MachineConfiguration(
+                machine_id="1",  # 数据库设备编号
+                frequency_meter_serial="FREQ001",  # 频率仪序列号
+                camera_serial="CAM001",  # 用于连接的相机序列号
+                simulated_frequencies_hz=(),  # 不生成模拟频率
+                camera_pixel_format=None,  # 保留相机像素格式
+                camera_exposure_time_us=None,  # 保留相机曝光
+                camera_gain=None,  # 保留相机增益
+            ),),
+            database_path=Path("runtime/measurements.sqlite3"),  # 业务库绝对路径
+            evidence_directory=Path("runtime/evidence"),  # 图片目录绝对路径
+            mvs_development_directory=Path("D:/app/HIK/MVS/Development"),  # SDK 路径
+            capture_window_ms=1000,  # 采集窗口
+            camera_timeout_ms=50,  # 单次取帧超时
+            frequency_interval_ms=100,  # 频率读取间隔配置
+            minimum_frequency_hz=0.01,  # 最低有效频率
+            maximum_frequency_hz=10000.0,  # 最高有效频率
+            ocr_result_timeout_ms=30000,  # 整轮识别期限
+            max_cycle_open_ms=60000,  # 周期关闭期限
+            event_queue_capacity=128,  # 单机事件队列容量
+            storage_queue_capacity=32,  # 存储队列容量
+            shutdown_timeout_ms=10000,  # 退出收尾期限
+            configuration_version="simulation-v1",  # 配置版本
+            recovery_database_path=None,  # 运行库路径覆盖值
+            maintenance_interval_ms=250,  # 容量检查间隔
+            max_persistent_records=1000,  # 存储积压上限
+            minimum_free_disk_bytes=104857600,  # 最低剩余空间
+            initial_machine_state=MachineState.CLOSED,  # 初始现场状态配置
+            mvs_dll_directory=None,  # SDK 动态库搜索目录
+        )  # 路径转换为绝对路径，公共参数按实际配置返回
+    """
     # 读取 JSON 配置并以配置文件所在目录解析路径。
     configuration_path = configuration_path.resolve()
     configuration_directory = configuration_path.parent
     with configuration_path.open(encoding="utf-8") as configuration_file:
         settings = json.load(configuration_file)
 
-    # 创建各机器的相机绑定及 OCR、频率配置。
-    machines = []
-    for machine_settings in settings.pop("machines"):
-        machine_settings["simulated_frequencies_hz"] = tuple(
-            machine_settings.get("simulated_frequencies_hz", ())
+    # 设备清单统一从业务库读取，配置文件只提供公共参数。
+    settings.pop("machines", None)
+    database_path = (configuration_directory / settings["database_path"]).resolve()
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        MachineRepo.create_table(connection)
+    devices = MachineRepo(database_path).list_enabled()
+    machines = [
+        MachineConfiguration(
+            machine_id=str(device["id"]),
+            frequency_meter_serial=device["frequency_meter_serial"],
+            camera_serial=device["camera_serial"],
         )
-        machines.append(MachineConfiguration(**machine_settings))
+        for device in devices
+    ]
 
     # 将配置中的机器初始状态转换为枚举。
     settings["initial_machine_state"] = MachineState(settings.get("initial_machine_state", MachineState.CLOSED))

@@ -35,7 +35,7 @@ class TextRecognizer:
         self,
         session_id: str,
         capture_id: str,
-        camera_id: str,
+        camera_serial: str,
         frames: tuple[CameraFrame, ...],
         encode_image: Callable[[CameraFrame], bytes],
     ) -> OCRResult:
@@ -44,7 +44,7 @@ class TextRecognizer:
         Args:
             session_id: 测量周期编号。
             capture_id: 采集编号。
-            camera_id: 相机业务编号。
+            camera_serial: 相机序列号。
             frames: 本轮全部原始帧，按接收顺序排列。
             encode_image: 将原始帧编码为内存 BMP 的设备接口。
 
@@ -55,7 +55,7 @@ class TextRecognizer:
                     CapturedFrame(
                         session_id="session",  # 测量周期编号
                         capture_id="capture",  # 采集编号
-                        camera_id="CAM01",  # 相机编号
+                        camera_serial="CAM01",  # 相机序列号
                         frame_id="capture-1",  # 图片编号
                         captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
                         captured_monotonic=1.0,  # 单调接收时间
@@ -75,14 +75,14 @@ class TextRecognizer:
             except Exception as error:
                 # 记录编码设备异常及所属周期，再终止本轮识别。
                 logger.exception(
-                    "相机编码失败 camera_id=%s session_id=%s", camera_id, session_id,
+                    "相机编码失败 camera_serial=%s session_id=%s", camera_serial, session_id,
                 )
                 raise ImageEncodingError("相机图片编码失败") from error
             captured_at = datetime.now(timezone.utc) - timedelta(seconds=time.monotonic() - frame.received_monotonic)
             captured_frames.append(CapturedFrame(
                 session_id=session_id,
                 capture_id=capture_id,
-                camera_id=camera_id,
+                camera_serial=camera_serial,
                 frame_id=f"{capture_id}-{frame.frame_number}",
                 captured_at=captured_at.isoformat(),
                 captured_monotonic=frame.received_monotonic,
@@ -123,7 +123,7 @@ class TextRecognizer:
                 CapturedFrame(
                     session_id="session",  # 测量周期编号
                     capture_id="capture",  # 采集编号
-                    camera_id="CAM01",  # 相机编号
+                    camera_serial="CAM01",  # 相机序列号
                     frame_id="capture-1",  # 唯一图片编号
                     captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
                     captured_monotonic=1.0,  # 单调接收时间
@@ -163,7 +163,7 @@ class TextRecognizer:
                     CapturedFrame(
                         session_id="session",  # 测量周期编号
                         capture_id="capture",  # 采集编号
-                        camera_id="CAM01",  # 相机编号
+                        camera_serial="CAM01",  # 相机序列号
                         frame_id="capture-1",  # 图片编号
                         captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
                         captured_monotonic=1.0,  # 单调接收时间

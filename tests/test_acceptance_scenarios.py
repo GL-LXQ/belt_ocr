@@ -94,7 +94,7 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         boundary = asyncio.get_running_loop().time()
         frame = CameraFrame("serial", 1, 0, 0, boundary, 2, 2, 17301505, 0, b"1234")
         measurement = FrequencyMeasurement(
-            session.session_id, session.frequency_source_id, value_hz,
+            session.session_id, session.frequency_meter_serial, value_hz,
         )
 
         # 依次确认图像与频率已被业务层接收。
@@ -126,15 +126,15 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         # 检查配置绑定，并向同一机器注入错误频率通道。
         for session in sessions:
             machine_number = int(session.machine_id[1:])
-            self.assertEqual(session.camera_id, f"CAM{machine_number:02}")
-            self.assertEqual(session.frequency_source_id, f"FREQ{machine_number:02}")
+            self.assertEqual(session.camera_serial, f"SERIAL{machine_number:02}")
+            self.assertEqual(session.frequency_meter_serial, f"FREQ{machine_number:02}")
             frame, measurement = await self.supply_valid_inputs(session)
             await self.publish_and_wait(MeasurementEvent(
                 EventType.FREQUENCY_MEASURED, session.machine_id, session.session_id,
-                replace(measurement, frequency_source_id="wrong-frequency"),
+                replace(measurement, frequency_meter_serial="wrong-frequency"),
             ))
             await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
-            self.assertEqual(session.ocr_result.selected_frames[0].camera_id, session.camera_id)
+            self.assertEqual(session.ocr_result.selected_frames[0].camera_serial, session.camera_serial)
             self.assertIn(measurement, session.frequency_candidates.values())
 
         # 三台机器分别关闭后只保存各自证据和通道。
@@ -147,8 +147,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(record["outcome"], "COMPLETE")
             self.assertNotIn("selected_frames", record)
             self.assertEqual(
-                record["frequency_candidates"][0]["frequency_source_id"],
-                record["frequency_source_id"],
+                record["frequency_candidates"][0]["frequency_meter_serial"],
+                record["frequency_meter_serial"],
             )
         self.assertIn("AMBIGUOUS_MEASUREMENT", self.read_abnormal_event_reasons())
 
@@ -390,17 +390,36 @@ from fake_mvs import FakeMvsSdk
 application_module.load_mvs_sdk = FakeMvsSdk
 
 async def crash_after_close():
-    app = App(load_configuration(Path(sys.argv[1])))
+    # 将子进程的设备写入业务库，再通过正式配置入口读取。
+    import json
+    import sqlite3
+    from contextlib import closing
+    from dataclasses import replace
+    from repo.machine_repo import MachineRepo
+    settings = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    database_path = Path(settings["database_path"])
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        MachineRepo.create_table(connection)
+    repository = MachineRepo(database_path)
+    for machine in settings["machines"]:
+        repository.insert(machine["machine_id"], machine["camera_serial"], machine["frequency_meter_serial"])
+    configuration = load_configuration(Path(sys.argv[1]))
+    # 为崩溃测试显式注入频率替身读数。
+    configuration = replace(configuration, machines=tuple(
+        replace(machine, simulated_frequencies_hz=tuple(original["simulated_frequencies_hz"]))
+        for machine, original in zip(configuration.machines, settings["machines"])
+    ))
+    app = App(configuration)
     await app.start()
     await app.text_recognizer.processing_lock.acquire()
-    await app.handle_start("M01")
-    machine_manager = app.machine_managers["M01"]
+    await app.handle_start("1")
+    machine_manager = app.machine_managers["1"]
     session = machine_manager.current_session
     while session.ocr_state != OCRState.RUNNING:
         app.state_changed.clear()
         await app.state_changed.wait()
     assert machine_manager.recognition_task
-    await app.handle_close("M01")
+    await app.handle_close("1")
     while not session.frequency_window_sealed:
         app.state_changed.clear()
         await app.state_changed.wait()
