@@ -68,13 +68,12 @@ class AppConfig:
         Returns:
             None  # 配置符合运行要求，非法配置抛出 ValueError
         """
-        # 检查机器、相机和频率来源的唯一性。
+        # 检查至少有一台启用机器，并检查相机和频率仪序列号非空。
         if not self.machines:
             raise ValueError("没有启用的机器，请先在机器管理页添加并启用机器。")
-        for attribute in ("machine_id", "camera_serial", "frequency_meter_serial"):
-            identifiers = [getattr(machine, attribute) for machine in self.machines]
-            if not all(identifiers) or len(set(identifiers)) != len(identifiers):
-                raise ValueError(f"{attribute} 必须非空且不能重复。")
+        for attribute in ("camera_serial", "frequency_meter_serial"):
+            if not all(getattr(machine, attribute) for machine in self.machines):
+                raise ValueError(f"{attribute} 必须非空。")
 
         # 检查等待期限、采集间隔和队列容量。
         positive_parameters = (
@@ -95,8 +94,6 @@ class AppConfig:
             raise ValueError("磁盘保留空间不能为负数。")
         if self.recovery_path.resolve() == self.database_path.resolve():
             raise ValueError("恢复库与最终结果库必须使用不同文件。")
-        if self.initial_machine_state not in set(MachineState):
-            raise ValueError("初始机器状态必须是 CLOSED、OPEN 或 UNKNOWN。")
 
 
 def read_configuration_settings(configuration_directory: Path) -> dict:

@@ -360,7 +360,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 
 ### 统一相机与频率仪序列号字段
 
-后台从机器表读取启用机器后，以数据库 `id` 作为 `machine_id`，相机配置、测量周期、OCR 图片及日志统一使用 `camera_serial`，删除独立的 `camera_id`；频率配置、监听事件、周期明细和新入库的频率 JSON 统一使用 `frequency_meter_serial`，不再使用 `frequency_source_id`。START 建立周期并绑定机器序列号，采集图片与频率读数交给对应周期，OCR 和频率成功后仍先保存图片再写入测量记录。序列号非空及唯一性统一在配置校验中处理，删除相机序列号重复校验及启动时的重复空值检查；数据库表结构不变，已有频率 JSON 历史记录不改写。
+后台从机器表读取启用机器后，以数据库 `id` 作为 `machine_id`，相机配置、测量周期、OCR 图片及日志统一使用 `camera_serial`，删除独立的 `camera_id`；频率配置、监听事件、周期明细和新入库的频率 JSON 统一使用 `frequency_meter_serial`，不再使用 `frequency_source_id`。START 建立周期并绑定机器序列号，采集图片与频率读数交给对应周期，OCR 和频率成功后仍先保存图片再写入测量记录。序列号非空及唯一性统一在配置校验中处理，删除相机序列号重复校验及启动时的重复空值检查（后续精简中唯一性改由数据库未删除记录的部分唯一索引保证，配置校验只保留非空检查，见后文“配置校验精简”）；数据库表结构不变，已有频率 JSON 历史记录不改写。
 
 ### 相机状态通知命名调整
 
@@ -408,3 +408,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 配置合并为单一 YAML（配置改造阶段 1）
 
 `config/` 下原 `application.yaml`、`camera.yaml`、`ocr.yaml`、`frequency.yaml`、`machine.yaml` 五个文件合并为单一 `config.yaml`，按业务分为 `application`、`camera`、`ocr`、`frequency`、`machine` 五个顶层段落，键名和取值不变；`read_configuration_settings()` 改为读取该文件并按固定段落顺序把各段合并成与之前完全相同的扁平参数，相对路径仍以文件所在目录为基准，跨段出现同名键时直接报错并报出两个来源段，`AppConfig`、全部 `config.xxx` 调用点、GUI 启动入口和命令行 `--config` 接收配置目录的契约均保持不变。测试支撑 `write_configuration_files()` 改为按项目示例的段落结构拆分参数写单文件，重复键用例改为跨段落重复验证。本阶段只合并文件与调整加载器，代码侧的嵌套子 dataclass 与 `config.camera.capture_window_ms` 式带组访问留待配置改造阶段 2。全量 pytest：148 项通过、10 项既有失败，失败名单与改动前实测基线（同为 148 项通过）完全一致；此前文档记录的"147 项通过"为过期数字，改动前实测即为 148 项通过。
+
+### 配置校验精简
+
+`AppConfig.validate()` 删除两处重复检查：机器绑定不再逐字段比较唯一性，只保留 `camera_serial` 与 `frequency_meter_serial` 非空检查（`machine_id` 由数据库主键保证唯一，两个序列号由 `machine` 表未删除记录的部分唯一索引保证，机器清单经 `MachineRepo.list_enabled()` 读取，重复不可能出现）；删除 `initial_machine_state` 成员检查，非法状态仍由 `read_configuration_settings()` 中的 `MachineState(...)` 转换直接抛出 `ValueError`，`tests/test_machine_state.py` 的非法状态用例继续通过。启动期其余校验保持不变：至少一台启用机器、期限与容量为正数、频率范围递增、磁盘保留空间非负、恢复库与结果库不同文件。数据流不变：`read_configuration_settings()` 读取 `config/config.yaml` 五个段落并转换路径与初始状态，`load_configuration()` 从数据库读取启用机器、组装并校验 `AppConfig`，`App` 按配置逐台创建相机与频率适配器，采集、OCR、频率、存储与 SQLite 写入流程不受影响。全量 pytest：148 项通过、10 项既有失败，与本次改动前实测完全一致，失败名单未变。
