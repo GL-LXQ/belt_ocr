@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
-from src.machine_service import MachineService
+from src.service.machine_service import MachineService
 from src.repo.machine_repo import MachineRepo
 from ui.main_window import MainWindow, PAGES
 from ui.demo_data import LOG_ROWS

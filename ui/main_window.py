@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.machine_service import MachineService
+from src.service.machine_service import MachineService
 from ui.theme import COLORS, create_icon
 from ui.pages.realtime_page import RealtimePage
 from ui.pages.devices_page import DevicesPage

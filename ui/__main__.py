@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from src.machine_service import MachineService
+from src.service.machine_service import MachineService
 from src.repo.machine_repo import MachineRepo
 from ui.main_window import MainWindow
 

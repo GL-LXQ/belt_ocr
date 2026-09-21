@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.machine_service import MachineService, MachineServiceError
+from src.service.machine_service import MachineService, MachineServiceError
 from ui.demo_data import LOG_ROWS
 from ui.theme import create_icon
 

@@ -5,7 +5,7 @@ from contextlib import closing
 
 import pytest
 
-from src.machine_service import MachineService, MachineServiceError
+from src.service.machine_service import MachineService, MachineServiceError
 from src.repo.machine_repo import MachineRepo
 
 
