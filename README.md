@@ -470,3 +470,11 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 精简 try_finalize 的兜底循环与重复条件
 
 `Machine.try_finalize()` 三处精简。一是删除提交前「撤销剩余期限任务」的两行（`for task in self.deadline_tasks.values(): task.cancel()` 与 `self.deadline_tasks.clear()`）：能走到提交条件时，OCR 成功已在 `handle_event` 里把 `OCR_TIMEOUT` 取出并取消，周期关闭已在 `handle_machine_close` 里把 `CYCLE_TIMEOUT` 取出并取消，这张表本来就是空的，另外 `release_finished_session()` 里还有同样的兜底。二是把 `database.submit()` 的 `try/except` 换成一句 `if await self.database.submit(request): return`，队列满时照旧登记 `DATABASE_QUEUE_FULL`：`submit` 只有「入队成功返回 True」与「队列已满返回 False」两种出口（`QueueFull` 在它内部接住），错误码 `DATABASE_SUBMIT_FAILED` 随之不再使用。三是提交条件里删掉 `not session.frequency_window_sealed`，它与 `session.capture_stop_time is None` 恒等——能走到这里说明本轮仍在 `RUNNING` 且 OCR、频率都没失败，而窗口封闭只发生在周期关闭（同路径也设了停止时间）与失败清理（同时置 `FAILED`，被前一道守卫排除）两处；`frequency_window_sealed` 字段保留，`handle_frequency_measured` 仍靠它判断迟到频率要不要写审计。行为差异只有一处：若 `submit` 出现预料之外的异常，现在会沿后台任务向上传播并触发应用退出，而不是记为本轮提交失败。数据流：`load_config()` 读 YAML 公共参数 → `App(config)` 只组装共享依赖 → `start()` 建图片目录与双库、读启用机器并逐台建立 `Machine` 与 `Camera`、打开相机并启动各后台任务 → START 采集图片与频率 → 事件按机器编号进入 FIFO 队列由 `listen_events` 串行处理 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 周期关闭且识别、频率均成功后 `try_finalize()` 冻结结果并提交存储队列 → 队列逐条先保存图片再写 SQLite → 提交结果回到原周期 → 退出时关闭相机并释放实例锁。全量 pytest：5 项通过。
+
+### 独立 OCR 终选测试版
+
+`tests/test_code_do_not_delete.py` 单独验证终选逻辑：读取 `statistics/results` 的 OCR JSON，并将同名 `statistics/imgs` JPG 转为内存 BMP 帧；所有 block 的 line 去空格后按20、8、3、2位分桶，20/3/2位桶取置信度前20%（向上取整）后按重复次数投票，同票比较平均置信度，并返回获胜文字中最高置信度的原文；8位桶先筛选7位数字加1位字母，再取最高置信度的5条，选择有同字母相邻编号支持的最高分文字，无连号则记录日志并采用最高分候选。最终文字低于0.8只记录复核日志，缺失类别不补齐；输出保留每条文字的来源帧，同一图片去重。正式系统仍按公共配置与机器表初始化、START采集与OCR、CLOSE确定频率、先保存图片再写SQLite的流程运行，本测试版尚未接入正式OCR流程。
+
+### 虚拟 OCR 边界测试
+
+`tests/test_ocr_virtual_cases.py` 集中生成29类、每类10组共290组虚拟候选（不包含全角字符），组装为单帧、多帧及多block的OCR结果后调用独立终选函数，核对前20%投票、块2前5条连号、0.8日志边界、原文和来源图片去重，并验证无同分歧义时乱序输入不改变结果；同分先到先选、重复框累计票数、低分邻居支持和高分错误等用例仅固定当前行为，不代表文字识别正确。测试数据不进入正式业务；正式系统仍从配置与机器表启动，采集与OCR结果、关闭时的频率结果汇合后先保存图片再写SQLite，退出时释放资源。
