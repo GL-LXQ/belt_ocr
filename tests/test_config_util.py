@@ -1,10 +1,11 @@
 """验证分组配置的路径解析、默认参数和桌面启动。"""
 
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
-from config_util import load_configuration, read_configuration_settings
+from config_util import AppConfig, load_configuration, read_configuration_settings
 from configuration_support import write_configuration_files
 from repo.machine_repo import MachineRepo
 from test_ui_shell import application
@@ -54,6 +55,24 @@ def test_configuration_paths_and_defaults(tmp_path: Path, monkeypatch) -> None:
     assert config.machines[0].camera_exposure_time_us is None
     assert config.machines[0].camera_gain is None
     assert config.machines[0].camera_pixel_format is None
+
+
+def test_configuration_keys_match_config_fields() -> None:
+    """验证每个配置键都对应配置类字段，且键只在一个文件里定义。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        None  # 配置键与字段一一对应，没有多余键或多余字段
+    """
+    # 读取项目配置目录，取得全部配置键。
+    configuration_directory = Path(__file__).resolve().parents[1] / "config"
+    settings = read_configuration_settings(configuration_directory)
+
+    # 逐项比对配置类字段，机器清单由数据库提供、不来自 YAML。
+    field_names = {field.name for field in fields(AppConfig)} - {"machines"}
+    assert set(settings) == field_names
 
 
 def test_duplicate_configuration_names(tmp_path: Path) -> None:

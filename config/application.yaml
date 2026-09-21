@@ -11,4 +11,3 @@ shutdown_timeout_ms: 10000
 maintenance_interval_ms: 250
 max_persistent_records: 1000
 minimum_free_disk_bytes: 104857600
-configuration_version: simulation-v1

@@ -38,7 +38,6 @@ class AppConfig:
     event_queue_capacity: int = 128
     storage_queue_capacity: int = 32
     shutdown_timeout_ms: int = 10000
-    configuration_version: str = "simulation-v1"
     recovery_database_path: Path | None = None
     maintenance_interval_ms: int = 250
     max_persistent_records: int = 1000
@@ -117,7 +116,6 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
                 "maintenance_interval_ms": 250,  # 容量检查间隔，毫秒
                 "max_persistent_records": 1000,  # 存储积压上限
                 "minimum_free_disk_bytes": 104857600,  # 最低磁盘空间，字节
-                "configuration_version": "simulation-v1",  # 配置版本
                 "mvs_development_directory": Path("D:/app/HIK/MVS/Development"),  # SDK 目录
                 "mvs_dll_directory": None,  # 使用默认动态库目录
                 "capture_window_ms": 1000,  # 采集窗口，毫秒
@@ -184,7 +182,6 @@ def load_configuration(configuration_directory: Path) -> AppConfig:
             event_queue_capacity=128,  # 单机事件队列容量
             storage_queue_capacity=32,  # 存储队列容量
             shutdown_timeout_ms=10000,  # 退出收尾期限
-            configuration_version="simulation-v1",  # 配置版本
             recovery_database_path=None,  # 运行库路径覆盖值
             maintenance_interval_ms=250,  # 容量检查间隔
             max_persistent_records=1000,  # 存储积压上限
