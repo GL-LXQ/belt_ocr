@@ -148,7 +148,7 @@ def test_persistence_failure_cleanup_and_idempotency(frequency_context, monkeypa
     if failure in {"save", "sync", "replace"}:
         assert not write_calls
     if failure != "unknown":
-        with sqlite3.connect(app.configuration.database_path) as connection:
+        with sqlite3.connect(app.config.database_path) as connection:
             count = connection.execute("SELECT count(*) FROM measurements").fetchone()[0]
         assert count == (1 if failure in {"none", "acknowledgement"} else 0)
     app.database.queue.task_done()

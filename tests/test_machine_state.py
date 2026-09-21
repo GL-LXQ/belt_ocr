@@ -45,12 +45,12 @@ def test_load_machine_state_preserves_json_values(tmp_path: Path, configured_sta
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
     MachineRepo(database_path).insert("测试机器", "CAM001", "FREQ001")
-    configuration = load_configuration(configuration_directory)
+    config = load_configuration(configuration_directory)
 
     # 检查枚举类型和持久化后的字符串内容。
     expected_state = configured_state or "CLOSED"
-    assert configuration.initial_machine_state is MachineState(expected_state)
-    payload = json.loads(json.dumps(serialize_value(configuration)))
+    assert config.initial_machine_state is MachineState(expected_state)
+    payload = json.loads(json.dumps(serialize_value(config)))
     assert payload["initial_machine_state"] == expected_state
 
 

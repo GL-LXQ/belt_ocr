@@ -12,7 +12,7 @@ from repo.machine_repo import MachineRepo
 
 
 @dataclass(frozen=True)
-class MachineConfiguration:
+class MachineConfig:
     machine_id: str
     camera_serial: str
     frequency_meter_serial: str
@@ -23,8 +23,8 @@ class MachineConfiguration:
 
 
 @dataclass(frozen=True)
-class MeasurementConfiguration:
-    machines: tuple[MachineConfiguration, ...]
+class AppConfig:
+    machines: tuple[MachineConfig, ...]
     database_path: Path
     evidence_directory: Path
     mvs_development_directory: Path
@@ -135,8 +135,8 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
     configuration_directory = configuration_directory.resolve()
     settings = {}
     for filename in ("application.yaml", "camera.yaml", "ocr.yaml", "frequency.yaml", "machine.yaml"):
-        with (configuration_directory / filename).open(encoding="utf-8") as configuration_file:
-            file_settings = yaml.safe_load(configuration_file)
+        with (configuration_directory / filename).open(encoding="utf-8") as config_file:
+            file_settings = yaml.safe_load(config_file)
         duplicate_names = settings.keys() & file_settings.keys()
         if duplicate_names:
             raise ValueError(f"{filename} 包含重复配置项：{', '.join(sorted(duplicate_names))}")
@@ -154,15 +154,15 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
     return settings
 
 
-def load_configuration(configuration_directory: Path) -> MeasurementConfiguration:
+def load_configuration(configuration_directory: Path) -> AppConfig:
     """读取公共配置和数据库中的启用机器，构建后台配置。
 
     Args:
         configuration_directory: 包含五个 YAML 文件的配置目录。
 
     Returns:
-        MeasurementConfiguration(
-            machines=(MachineConfiguration(
+        AppConfig(
+            machines=(MachineConfig(
                 machine_id="1",  # 数据库机器编号
                 frequency_meter_serial="FREQ001",  # 频率仪序列号
                 camera_serial="CAM001",  # 用于连接的相机序列号
@@ -204,8 +204,8 @@ def load_configuration(configuration_directory: Path) -> MeasurementConfiguratio
 
     # 读取启用机器并整理为逐机配置对象。
     enabled_machines = MachineRepo(database_path).list_enabled()
-    machine_configurations = [
-        MachineConfiguration(
+    machine_configs = [
+        MachineConfig(
             machine_id=str(machine["id"]),
             frequency_meter_serial=machine["frequency_meter_serial"],
             camera_serial=machine["camera_serial"],
@@ -214,6 +214,6 @@ def load_configuration(configuration_directory: Path) -> MeasurementConfiguratio
     ]
 
     # 组装机器与公共参数并校验完整运行配置。
-    configuration = MeasurementConfiguration(machines=tuple(machine_configurations), **settings)
-    configuration.validate()
-    return configuration
+    config = AppConfig(machines=tuple(machine_configs), **settings)
+    config.validate()
+    return config

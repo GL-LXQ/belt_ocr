@@ -13,7 +13,7 @@ from contextlib import closing
 from pathlib import Path
 
 from async_utils import run_blocking_operation
-from config_util import MeasurementConfiguration
+from config_util import AppConfig
 from models import CapturedFrame, MeasurementEvent, PublishEvent
 from repo.machine_repo import MachineRepo
 from repo.measurement_repo import MeasurementRepo
@@ -94,11 +94,11 @@ class DatabaseRequest:
 
 
 class Database:
-    def __init__(self, configuration: MeasurementConfiguration, publish_event: PublishEvent) -> None:
+    def __init__(self, config: AppConfig, publish_event: PublishEvent) -> None:
         """初始化各表访问对象、存储队列和连接状态。
 
         Args:
-            configuration: 数据库路径和存储队列配置。
+            config: 数据库路径和存储队列配置。
             publish_event: 提交结果的异步事件发布函数。
 
         Returns:
@@ -106,15 +106,15 @@ class Database:
                 None  # 数据库管理对象已初始化，尚未打开数据库
         """
         # 保存存储配置和结果事件发布入口。
-        self.configuration = configuration
+        self.config = config
         self.publish_event = publish_event
         # 创建各表的数据库访问对象。
-        self.machine_repo = MachineRepo(configuration.database_path)
-        self.measurement_repo = MeasurementRepo(configuration.database_path)
-        self.abnormal_event_repo = AbnormalEventRepo(configuration.recovery_path)
+        self.machine_repo = MachineRepo(config.database_path)
+        self.measurement_repo = MeasurementRepo(config.database_path)
+        self.abnormal_event_repo = AbnormalEventRepo(config.recovery_path)
 
         # 创建存储队列并初始化连接与实例锁状态。
-        self.queue: asyncio.Queue[DatabaseRequest] = asyncio.Queue(configuration.storage_queue_capacity)
+        self.queue: asyncio.Queue[DatabaseRequest] = asyncio.Queue(config.storage_queue_capacity)
         self.runtime_available = True
         self.queued_records: set[str] = set()
         self.initialized = False
@@ -151,7 +151,7 @@ class Database:
                 None  # 无返回数据
         """
         # 创建运行库目录和实例锁文件。
-        runtime_database_path = self.configuration.recovery_path
+        runtime_database_path = self.config.recovery_path
         runtime_database_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = runtime_database_path.with_suffix(".lock")
         self.lock_file = lock_path.open("a+b")
@@ -196,8 +196,8 @@ class Database:
                 None  # 无返回数据
         """
         # 创建业务数据库目录并打开连接。
-        self.configuration.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(self.configuration.database_path)) as connection, connection:
+        self.config.database_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.config.database_path)) as connection, connection:
             # 创建机器身份、绑定和维护信息表。
             self.machine_repo.create_table(connection)
 

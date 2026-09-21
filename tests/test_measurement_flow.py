@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from config_util import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfig, AppConfig
 from app import App
 from enums import OCRState
 from models import MeasurementEvent, OCRResult
@@ -47,7 +47,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
     async def start_app(self, **overrides: object) -> App:
         """创建三台机器的测试配置并启动应用实例。"""
         machines = tuple(
-            MachineConfiguration(
+            MachineConfig(
                 machine_id=f"M{machine_number:02}",
                 frequency_meter_serial=f"FREQ{machine_number:02}",
                 camera_serial=f"SERIAL{machine_number:02}",
@@ -55,7 +55,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             )
             for machine_number in range(1, 4)
         )
-        configuration = MeasurementConfiguration(
+        config = AppConfig(
             machines=machines,
             database_path=self.output_directory / "measurements.sqlite3",
             evidence_directory=self.output_directory / "evidence",
@@ -66,7 +66,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             ocr_result_timeout_ms=20000,
             shutdown_timeout_ms=2000,
         )
-        self.app = App(replace(configuration, **overrides))
+        self.app = App(replace(config, **overrides))
         # 仅在测试中提供确定性识别和终选，生产黑盒继续保持未实现。
         self.app.text_recognizer.recognize_images = lambda images: [{"blocks": []} for image in images]
         self.app.text_recognizer.generate_final_text_and_images = lambda results, frames: OCRResult(
@@ -126,7 +126,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
                 }]
         """
         # 按列名读取测量记录。
-        connection = sqlite3.connect(self.app.configuration.database_path)
+        connection = sqlite3.connect(self.app.config.database_path)
         connection.row_factory = sqlite3.Row
         with closing(connection):
             records = connection.execute(

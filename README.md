@@ -382,3 +382,17 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 数据流：GUI 和后端通过 `src/config_util.py` 的 `read_configuration_settings()` 读取五个 YAML、合并公共参数并转换路径和初始状态；GUI 使用业务库路径初始化设备表，允许空设备列表；后端通过 `load_configuration()` 查询数据库中的启用机器，组装并校验原有配置对象，再交给 App 连接相机和组织测量。START 创建周期并采集图片与频率，OCR 完成编码、筛帧、识别及终选，CLOSE 选取最后有效频率，完整成功后由存储队列先保存图片、再写 SQLite，结束时释放资源。机器清单仍由数据库管理，曝光、增益和像素格式仍保留相机自身设置。
 
 本次配置、机器状态与监测服务专项 pytest：13 项通过；全量 pytest：147 项通过、10 项既有失败，失败名单与修改前的 144 项通过、10 项失败一致。新增验证覆盖配置目录路径解析、默认参数、跨文件重复键和无机器时桌面启动。
+
+### 配置类型命名调整
+
+配置类型 `MeasurementConfiguration` 更名为 `AppConfig`，定义仍在 `src/config_util.py`；配置对象作为实例属性时统一改名为 `self.config`，涉及 `src/app.py`、`src/database.py`、`src/machine_manager.py`、`src/camera.py`、`src/frequency_adapter.py`、`src/main.py` 的 `app.config`，以及测试中的 `app.config`、`self.app.config`、`machine_database.config`、`adapter.config`。构造函数形参当时保持 `configuration` 不变，与 `configuration_directory`、`load_configuration()`、`read_configuration_settings()` 同组命名，`load_configuration()` 和测试中的局部变量 `configuration` 也不改名，该命名约定已由下一节 `配置变量命名统一` 取代；`App.__init__` 按项目现有格式补齐 docstring（一句话总结、Args、Returns 返回示例）。本次只做改名和补文档，无行为变化：YAML 配置键、数据库表结构、函数名和文件名均未改动，GUI 展示与后端从配置解析、采集、OCR、频率、存储到 SQLite 写入的数据流保持原样。
+
+全量 pytest：147 项通过、10 项既有失败，与本次改动前的 147 项通过、10 项失败完全一致，失败名单未变（`tests/test_acceptance_scenarios.py` 6 项旧频率字段、旧结果字段与历史频率冲突规则断言，`tests/test_recovery_and_faults.py` 4 项旧频率字段、未等待读数即期望入库、UNKNOWN 状态期望与实例锁异常文案）。自查确认全仓库已无 `MeasurementConfiguration` 与 `self.configuration` 残留，`configuration_directory` 保持原样。
+
+### 配置变量命名统一
+
+子配置类型 `MachineConfiguration` 更名为 `MachineConfig`，与公共配置类型 `AppConfig` 配对，定义仍在 `src/config_util.py`；`AppConfig.machines` 的字段标注、`load_configuration()` 返回示例中的逐机构造、`load_configuration()` 组装机器配置的调用，以及 `src/camera.py`、`src/frequency_adapter.py`、`src/machine_manager.py` 的形参标注和测试中的构造调用同步改名。
+
+表示配置内容的形参、局部变量和测试固件统一改名为 `config`：`App.__init__`、`Database.__init__`、`SessionCamera.__init__`、`FrequencyAdapter.__init__`、`MachineManager.__init__` 的形参及其内部的 `self.config = config`，`load_configuration()` 末尾的局部变量与 `machine_configurations`（改为 `machine_configs`）、打开 YAML 的文件句柄（`configuration_file` 改为 `config_file`），`src/main.py`、`src/service/monitoring_service.py` 的局部变量，以及 `tests/test_fatal_shutdown.py` 等测试固件和局部变量都改为 `config`。表示配置目录或配置路径的 `configuration_directory`、`configuration_path` 保持不变，`load_configuration()`、`read_configuration_settings()`、`write_configuration_files()` 等函数名、相关测试函数名和 YAML 键 `configuration_version` 也不改名，命名按「内容 vs 目录」区分：装配置对象的叫 `config`，装目录或路径的保留 `configuration_` 前缀。
+
+本次只做改名，无行为变化：YAML 配置键、`config/` 目录、命令行 `--config`、数据库表结构、`self.config` 语义和文件名均未改动；数据流动逻辑也不变，`config/` 下五个 YAML 仍由 `read_configuration_settings()` 与 `load_configuration()` 组装成 `AppConfig`，`App` 按其中的启用机器逐台创建相机与频率适配器，START 建立周期并采集图片与频率，OCR 完成编码、筛帧、识别和终选，CLOSE 选取最后有效频率，成功后由存储队列先保存图片再写 SQLite；GUI 展示与后端数据流保持原样。全量 pytest：147 项通过、10 项既有失败，与本次改动前的 147 项通过、10 项失败完全一致，失败名单未变（`tests/test_acceptance_scenarios.py` 6 项旧频率字段、旧结果字段与历史频率冲突规则断言，`tests/test_recovery_and_faults.py` 4 项旧频率字段、未等待读数即期望入库、UNKNOWN 状态期望与实例锁异常文案）。自查确认全仓库已无 `MachineConfiguration` 残留，`configuration` 只剩 `configuration_directory`、`configuration_path`、上述函数名与测试名和 `configuration_version`。

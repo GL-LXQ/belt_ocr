@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from camera import SessionCamera
-from config_util import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
 from enums import OCRState, FrequencyState, MachineState, SessionState, EventType
 from mvs_sdk import CameraFrame
@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 class MachineManager:
     def __init__(
         self,
-        machine: MachineConfiguration,
-        configuration: MeasurementConfiguration,
+        machine: MachineConfig,
+        config: AppConfig,
         camera: SessionCamera,
         frequency_adapter: FrequencyAdapter,
         text_recognizer: TextRecognizer,
@@ -36,7 +36,7 @@ class MachineManager:
 
         Args:
             machine: 机器身份配置。
-            configuration: 采集、期限和存储配置。
+            config: 采集、期限和存储配置。
             camera: 当前机器的相机适配器。
             frequency_adapter: 当前机器的频率接收适配器。
             text_recognizer: 三台机器共享的 OCR 处理器。
@@ -49,7 +49,7 @@ class MachineManager:
         """
         # 登记业务依赖和本机串行事件队列。
         self.machine = machine
-        self.configuration = configuration
+        self.config = config
         self.camera = camera
         self.frequency_adapter = frequency_adapter
         self.text_recognizer = text_recognizer
@@ -57,7 +57,7 @@ class MachineManager:
         self.publish_event = publish_event
         self.state_changed = state_changed
         self.queue: asyncio.Queue[MeasurementEvent] = asyncio.Queue(
-            configuration.event_queue_capacity
+            config.event_queue_capacity
         )
         # 初始化唯一周期、机器复位状态和后台任务引用。
         self.current_session: BeltSession | None = None
@@ -174,9 +174,9 @@ class MachineManager:
         self.frequency_adapter.active_session_id = session.session_id
 
         # 安排本轮运行超时和 OCR 超时事件。
-        self.schedule_timeout(session, EventType.CYCLE_TIMEOUT, self.configuration.max_cycle_open_ms)
+        self.schedule_timeout(session, EventType.CYCLE_TIMEOUT, self.config.max_cycle_open_ms)
         # 登记本轮 OCR 等待期限，此处只安排超时事件。
-        self.schedule_timeout(session, EventType.OCR_TIMEOUT, self.configuration.ocr_result_timeout_ms)
+        self.schedule_timeout(session, EventType.OCR_TIMEOUT, self.config.ocr_result_timeout_ms)
 
     async def handle_machine_close(self, interrupted: bool = False, capture_stop_time: float | None = None) -> None:
         """结束本轮采集，结算频率并检查完成条件。
@@ -587,7 +587,7 @@ class MachineManager:
         ocr_result = session.ocr_result
         # 按机器、周期和帧编号生成最终图片路径。
         evidence_directory = (
-            self.configuration.evidence_directory / session.machine_id / session.session_id
+            self.config.evidence_directory / session.machine_id / session.session_id
         )
         evidence_refs = tuple(
             str(evidence_directory / f"{frame.frame_id}.bmp")

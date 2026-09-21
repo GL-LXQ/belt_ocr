@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from camera import SessionCamera
 from mvs_sdk import load_mvs_sdk
-from config_util import MeasurementConfiguration
+from config_util import AppConfig
 from frequency_adapter import FrequencyAdapter
 from machine_manager import MachineManager
 from enums import MachineState, SessionState, EventType
@@ -24,11 +24,20 @@ logger = logging.getLogger(__name__)
 
 
 class App:
-    def __init__(self, configuration: MeasurementConfiguration) -> None:
-        configuration.validate()
-        self.configuration = configuration
+    def __init__(self, config: AppConfig) -> None:
+        """初始化共享存储、逐机处理器与运行状态。
+
+        Args:
+            config: 数据库路径、各机设备绑定、采集期限和退出参数。
+
+        Returns:
+            返回示例：
+                None  # 共享依赖已登记，尚未连接相机和数据库
+        """
+        config.validate()
+        self.config = config
         self.state_changed = asyncio.Event()
-        self.database = Database(configuration, self.publish_event)
+        self.database = Database(config, self.publish_event)
         self.text_recognizer = TextRecognizer()
         self.machine_managers: dict[str, MachineManager] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
@@ -42,12 +51,12 @@ class App:
         self.shutdown_task: asyncio.Task[None] | None = None
 
         # 为每台机器建立独立的采集器和业务处理器。
-        for machine in configuration.machines:
-            camera = SessionCamera(machine, configuration, self.publish_event, self.report_failure)
-            frequency_adapter = FrequencyAdapter(machine, configuration, self.publish_event)
+        for machine in config.machines:
+            camera = SessionCamera(machine, config, self.publish_event, self.report_failure)
+            frequency_adapter = FrequencyAdapter(machine, config, self.publish_event)
             self.machine_managers[machine.machine_id] = MachineManager(
                 machine,
-                configuration,
+                config,
                 camera,
                 frequency_adapter,
                 self.text_recognizer,
@@ -73,15 +82,15 @@ class App:
         try:
             # 初始化图片目录、本地运行库和最终结果库。
             await run_blocking_operation(
-                self.configuration.evidence_directory.mkdir, parents=True, exist_ok=True,
+                self.config.evidence_directory.mkdir, parents=True, exist_ok=True,
             )
             await run_blocking_operation(self.database.initialize)
 
             # 加载相机驱动，按配置逐台打开相机。
             self.camera_sdk = await run_blocking_operation(
                 load_mvs_sdk,
-                self.configuration.mvs_development_directory,
-                self.configuration.mvs_dll_directory,
+                self.config.mvs_development_directory,
+                self.config.mvs_dll_directory,
             )
             for manager in self.machine_managers.values():
                 machine = manager.machine
@@ -108,7 +117,7 @@ class App:
             capacity_available = await self.check_disk_capacity()
             for manager in self.machine_managers.values():
                 manager.capacity_available = capacity_available
-                manager.waiting_cycle_reset = self.configuration.initial_machine_state != MachineState.CLOSED
+                manager.waiting_cycle_reset = self.config.initial_machine_state != MachineState.CLOSED
                 manager.initialized = True
 
             # 启动独立机器处理和频率监听，任一任务异常都停止应用。
@@ -271,7 +280,7 @@ class App:
                 pending_count = len(self.database.queued_records)
                 capacity_available = (
                     disk_capacity_available
-                    and pending_count < self.configuration.max_persistent_records
+                    and pending_count < self.config.max_persistent_records
                 )
 
                 # 向容量状态发生变化的机器管理员发送更新事件。
@@ -293,7 +302,7 @@ class App:
                 raise
 
             # 等待配置的维护间隔，再开始下一轮处理。
-            await asyncio.sleep(self.configuration.maintenance_interval_ms / 1000)
+            await asyncio.sleep(self.config.maintenance_interval_ms / 1000)
 
     async def check_disk_capacity(self) -> bool:
         """检查本地运行库和证据目录所在磁盘的剩余空间。
@@ -309,8 +318,8 @@ class App:
         """
         # 收集本地运行库和证据目录的路径。
         output_paths = {
-            self.configuration.recovery_path.parent,
-            self.configuration.evidence_directory,
+            self.config.recovery_path.parent,
+            self.config.evidence_directory,
         }
         # 在线程中读取各目录所在磁盘的容量信息。
         disk_states = await asyncio.gather(*(
@@ -318,7 +327,7 @@ class App:
         ))
         # 检查所有磁盘的剩余空间是否达到配置下限。
         return all(
-            disk_state.free >= self.configuration.minimum_free_disk_bytes
+            disk_state.free >= self.config.minimum_free_disk_bytes
             for disk_state in disk_states
         )
 
@@ -448,7 +457,7 @@ class App:
                 await acknowledgement
 
             # 等待记录提交和已经入队的业务事件。
-            await self.wait_until_idle(self.configuration.shutdown_timeout_ms / 1000)
+            await self.wait_until_idle(self.config.shutdown_timeout_ms / 1000)
             await self.database.queue.join()
             for machine_manager in self.machine_managers.values():
                 await machine_manager.queue.join()
@@ -457,7 +466,7 @@ class App:
         try:
             if self.failure is None and self.worker_tasks:
                 await asyncio.wait_for(
-                    drain_measurements(), self.configuration.shutdown_timeout_ms / 1000,
+                    drain_measurements(), self.config.shutdown_timeout_ms / 1000,
                 )
         except asyncio.TimeoutError:
             logger.warning("退出等待到期，未完成测量将标记失败并释放资源。")

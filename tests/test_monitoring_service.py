@@ -86,11 +86,11 @@ def test_connects_enabled_database_machines_and_stops(monitoring_environment):
     deleted_id = repository.insert("删除机器", "DELETED", "FREQ-X")
     repository.soft_delete(deleted_id)
     second_id = repository.insert("二号机器", "SERIAL-A", "FREQ-A")
-    configuration = load_configuration(page.configuration_directory)
-    assert [machine.machine_id for machine in configuration.machines] == [str(first_id), str(second_id)]
-    assert [machine.camera_serial for machine in configuration.machines] == ["SERIAL-B", "SERIAL-A"]
-    assert [machine.frequency_meter_serial for machine in configuration.machines] == ["FREQ-B", "FREQ-A"]
-    assert all(not machine.simulated_frequencies_hz for machine in configuration.machines)
+    config = load_configuration(page.configuration_directory)
+    assert [machine.machine_id for machine in config.machines] == [str(first_id), str(second_id)]
+    assert [machine.camera_serial for machine in config.machines] == ["SERIAL-B", "SERIAL-A"]
+    assert [machine.frequency_meter_serial for machine in config.machines] == ["FREQ-B", "FREQ-A"]
+    assert all(not machine.simulated_frequencies_hz for machine in config.machines)
 
     # 点击后连接，刷新仍显示实际连接状态且尚未取流。
     page.start_button.click()

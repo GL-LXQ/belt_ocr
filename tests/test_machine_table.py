@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from config_util import MeasurementConfiguration
+from config_util import AppConfig
 from database import Database
 
 
@@ -26,13 +26,13 @@ def machine_database(tmp_path):
             None  # 测试结束后关闭数据库并释放实例锁
     """
     # 准备不连接硬件的临时数据库配置。
-    configuration = MeasurementConfiguration(
+    config = AppConfig(
         machines=(),
         database_path=tmp_path / "business" / "measurements.sqlite3",
         evidence_directory=tmp_path / "evidence",
         mvs_development_directory=tmp_path / "sdk",
     )
-    database = Database(configuration, AsyncMock())
+    database = Database(config, AsyncMock())
 
     # 初始化双库，并在测试结束或异常时释放资源。
     try:
@@ -53,7 +53,7 @@ def test_machine_table_defaults_and_reinitialization(machine_database):
             None  # 默认值、字段结构和数据保留断言通过
     """
     # 确认建表未插入机器，并写入一条最小机器记录。
-    with closing(sqlite3.connect(machine_database.configuration.database_path)) as connection:
+    with closing(sqlite3.connect(machine_database.config.database_path)) as connection:
         connection.row_factory = sqlite3.Row
         assert connection.execute("SELECT COUNT(*) FROM machine").fetchone()[0] == 0
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'machines'").fetchone() is None
@@ -82,7 +82,7 @@ def test_machine_table_defaults_and_reinitialization(machine_database):
 
         # 确认原有测量表仍存在且机器配置不进入运行库。
         assert connection.execute("SELECT COUNT(*) FROM measurements").fetchone()[0] == 0
-    with closing(sqlite3.connect(machine_database.configuration.recovery_path)) as connection:
+    with closing(sqlite3.connect(machine_database.config.recovery_path)) as connection:
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'machine'").fetchone() is None
 
 
@@ -101,7 +101,7 @@ def test_machine_table_constraints(machine_database):
         "INSERT INTO machine (machine_name, camera_serial, frequency_meter_serial, enabled, remark) "
         "VALUES (?, ?, ?, ?, ?)"
     )
-    with closing(sqlite3.connect(machine_database.configuration.database_path)) as connection, connection:
+    with closing(sqlite3.connect(machine_database.config.database_path)) as connection, connection:
         connection.execute(statement, ("1# 皮带机", "CAM001", "METER001", 0, "一号产线"))
 
         # 分别验证必填字段空值和非法启用值。

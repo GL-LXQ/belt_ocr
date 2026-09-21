@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from async_utils import run_blocking_operation
-from config_util import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfig, AppConfig
 from enums import EventType
 from models import CaptureResult, MeasurementEvent, PublishEvent
 from mvs_sdk import MvsCamera, MvsError
@@ -92,8 +92,8 @@ class SessionCamera:
 
     def __init__(
         self,
-        machine: MachineConfiguration,
-        configuration: MeasurementConfiguration,
+        machine: MachineConfig,
+        config: AppConfig,
         publish_event: PublishEvent,
         report_failure: Callable[[Exception], None],
     ) -> None:
@@ -101,7 +101,7 @@ class SessionCamera:
 
         Args:
             machine: 机器身份。
-            configuration: 采集窗口和单帧超时配置。
+            config: 采集窗口和单帧超时配置。
             publish_event: 整轮结果交付入口。
             report_failure: 应用故障入口。
 
@@ -110,7 +110,7 @@ class SessionCamera:
         """
         # 保存外部依赖和相机句柄。
         self.machine = machine
-        self.configuration = configuration
+        self.config = config
         self.publish_event = publish_event
         self.report_failure = report_failure
         self.device: MvsCamera | None = None
@@ -164,8 +164,8 @@ class SessionCamera:
             capture_task = CaptureTask(
                 camera=camera,
                 capture_start_time=capture_start_time,
-                duration_seconds=self.configuration.capture_window_ms / 1000,
-                timeout_ms=self.configuration.camera_timeout_ms,
+                duration_seconds=self.config.capture_window_ms / 1000,
+                timeout_ms=self.config.camera_timeout_ms,
             )
 
         except Exception:

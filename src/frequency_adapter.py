@@ -5,7 +5,7 @@ import asyncio
 import math
 from itertools import cycle
 
-from config_util import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfig, AppConfig
 from models import FrequencyMeasurement, MeasurementEvent, PublishEvent
 
 
@@ -14,15 +14,15 @@ class FrequencyAdapter:
 
     def __init__(
         self,
-        machine: MachineConfiguration,
-        configuration: MeasurementConfiguration,
+        machine: MachineConfig,
+        config: AppConfig,
         publish_event: PublishEvent,
     ) -> None:
         """登记频率仪配置、测量事件入口和当前周期编号。
 
         Args:
             machine: 当前机器与频率来源绑定。
-            configuration: 频率仪参数及有效频率范围。
+            config: 频率仪参数及有效频率范围。
             publish_event: 与 START/CLOSE 共用机器 FIFO 队列的事件入口。
 
         Returns:
@@ -30,7 +30,7 @@ class FrequencyAdapter:
         """
         # 保存频率仪绑定、参数和事件发布入口。
         self.machine = machine
-        self.configuration = configuration
+        self.config = config
         self.publish_event = publish_event
 
         # 由机器业务处理器在 START/CLOSE 时设置或清空当前周期。
@@ -62,13 +62,13 @@ class FrequencyAdapter:
         # 按配置准备联调读数。
         frequency_values = cycle(self.machine.simulated_frequencies_hz)
         while True:
-            await asyncio.sleep(self.configuration.frequency_interval_ms / 10000)
+            await asyncio.sleep(self.config.frequency_interval_ms / 10000)
             value_hz = next(frequency_values, None)
 
             # 在频率仪边界过滤无读数、非有限值和超出范围的读数。
             if value_hz is None or not math.isfinite(value_hz):
                 continue
-            if not self.configuration.minimum_frequency_hz <= value_hz <= self.configuration.maximum_frequency_hz:
+            if not self.config.minimum_frequency_hz <= value_hz <= self.config.maximum_frequency_hz:
                 continue
 
             # 接收时固定所属周期，无活动周期时不交付数据。

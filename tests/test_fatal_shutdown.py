@@ -10,7 +10,7 @@ import pytest
 
 import main
 from app import App
-from config_util import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfig, AppConfig
 from fake_mvs import FakeMvsSdk
 from enums import EventType
 from models import MeasurementEvent
@@ -25,18 +25,18 @@ def device_environment(tmp_path, monkeypatch):
         monkeypatch: 测试依赖替换工具。
 
     Returns:
-        (configuration, sdk)  # 测量配置和可检查释放状态的相机驱动
+        (config, sdk)  # 测量配置和可检查释放状态的相机驱动
     """
     # 建立两台机器和独立存储路径，频率默认无读数。
     machines = tuple(
-        MachineConfiguration(
+        MachineConfig(
             machine_id=f"M{number}",
             frequency_meter_serial=f"FREQ{number}",
             camera_serial=f"SERIAL{number}",
         )
         for number in (1, 2)
     )
-    configuration = MeasurementConfiguration(
+    config = AppConfig(
         machines=machines,
         database_path=tmp_path / "results.sqlite3",
         evidence_directory=tmp_path / "evidence",
@@ -48,7 +48,7 @@ def device_environment(tmp_path, monkeypatch):
     # 使用正式相机封装与假 SDK 连接应用。
     sdk = FakeMvsSdk()
     monkeypatch.setattr("app.load_mvs_sdk", lambda *arguments: sdk)
-    return configuration, sdk
+    return config, sdk
 
 
 @pytest.mark.parametrize("failure_stage", ["driver", "serial", "second_camera"])
@@ -65,15 +65,15 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
         None  # 启动失败，已打开的相机和实例锁均已释放
     """
     # 按阶段注入启动故障。
-    configuration, sdk = device_environment
+    config, sdk = device_environment
     if failure_stage == "driver":
         monkeypatch.setattr("app.load_mvs_sdk", Mock(side_effect=OSError("驱动加载失败")))
     elif failure_stage == "serial":
-        machines = (configuration.machines[0], replace(configuration.machines[1], camera_serial=""))
-        configuration = replace(configuration, machines=machines)
+        machines = (config.machines[0], replace(config.machines[1], camera_serial=""))
+        config = replace(config, machines=machines)
         # 缺失序列号在配置边界拒绝，尚未加载或打开相机。
         with pytest.raises(ValueError, match="camera_serial"):
-            App(configuration)
+            App(config)
         assert not sdk.cameras
         return
     else:
@@ -81,7 +81,7 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
         monkeypatch.setattr(sdk, "open_camera", Mock(side_effect=[open_camera("SERIAL1"), OSError("连接失败")]))
 
     # 启动并检查失败后的相机与记录库状态。
-    application = App(configuration)
+    application = App(config)
     with pytest.raises((OSError, RuntimeError)):
         asyncio.run(application.start())
     assert not application.accepting_signals
@@ -102,7 +102,7 @@ def test_cancelled_startup_failure_preserves_error_and_cleanup(device_environmen
     Returns:
         None  # 原始异常已传播一次，数据库实例锁已释放
     """
-    configuration, sdk = device_environment
+    config, sdk = device_environment
     loading_started = threading.Event()
     release_loading = threading.Event()
     loading_failure = OSError("取消期间驱动加载失败")
@@ -129,7 +129,7 @@ def test_cancelled_startup_failure_preserves_error_and_cleanup(device_environmen
         Returns:
             None  # 启动失败，清理任务正常结束且没有实例锁遗留
         """
-        application = App(configuration)
+        application = App(config)
         startup_task = asyncio.create_task(application.start())
         try:
             # 驱动加载期间取消启动，并释放工作线程让其报错。
@@ -168,7 +168,7 @@ def test_background_failure_stops_all_devices(device_environment, caplog, worker
     Returns:
         None  # 故障已传播、记录日志并完成全局清理
     """
-    configuration, sdk = device_environment
+    config, sdk = device_environment
 
     async def run_failure():
         """注入后台故障并等待应用自动清理。
@@ -180,7 +180,7 @@ def test_background_failure_stops_all_devices(device_environment, caplog, worker
             None  # 首次故障已抛出且资源已关闭
         """
         # 替换目标后台任务，准备启动异常。
-        application = App(configuration)
+        application = App(config)
         if worker_kind == "frequency":
             operation = AsyncMock(side_effect=OSError("频率连接断开"))
             application.machine_managers["M1"].frequency_adapter.listen_measurements = operation
@@ -227,9 +227,9 @@ def test_camera_fault_interrupts_main_workflow(device_environment, monkeypatch, 
         None  # 主流程抛出相机异常，全部相机已关闭
     """
     # 打开相机时替换指定相机操作，停止故障在短采集窗口触发。
-    configuration, sdk = device_environment
+    config, sdk = device_environment
     if operation in {"stop", "encode"}:
-        configuration = replace(configuration, capture_window_ms=50)
+        config = replace(config, capture_window_ms=50)
     original_open = sdk.open_camera
     method_names = {
         "start": "start_grabbing",
@@ -260,7 +260,7 @@ def test_camera_fault_interrupts_main_workflow(device_environment, monkeypatch, 
 
     # 主流程的长时间等待必须被故障立即打断。
     monkeypatch.setattr(sdk, "open_camera", open_faulty_camera)
-    monkeypatch.setattr(main, "load_configuration", lambda path: configuration)
+    monkeypatch.setattr(main, "load_configuration", lambda path: config)
     with pytest.raises(OSError, match="相机连接断开"):
         asyncio.run(asyncio.wait_for(main.run_measurement_demo(Path("unused")), 3))
     assert sdk.closed
@@ -283,7 +283,7 @@ def test_no_data_and_normal_shutdown_are_not_faults(device_environment):
     Returns:
         None  # 应用正常运行并退出，无故障记录
     """
-    configuration, sdk = device_environment
+    config, sdk = device_environment
 
     async def run_without_data():
         """执行无读数测量并正常退出。
@@ -294,7 +294,7 @@ def test_no_data_and_normal_shutdown_are_not_faults(device_environment):
         Returns:
             None  # 正常等待未触发故障
         """
-        application = App(configuration)
+        application = App(config)
         await application.start()
         application.machine_managers["M1"].camera.device.read_frame = Mock(return_value=None)
         await application.handle_start("M1")
@@ -337,7 +337,7 @@ def test_failure_releases_publishers_waiting_for_queue(device_environment):
     Returns:
         None  # 阻塞交付已结束，队列已排空
     """
-    configuration, sdk = device_environment
+    config, sdk = device_environment
 
     async def run_blocked_publishers():
         """填满事件队列并触发故障退出。
@@ -349,7 +349,7 @@ def test_failure_releases_publishers_waiting_for_queue(device_environment):
             None  # 所有交付任务已退出
         """
         # 不启动消费者，创建多个等待容量的事件交付任务。
-        application = App(replace(configuration, event_queue_capacity=1))
+        application = App(replace(config, event_queue_capacity=1))
         manager = application.machine_managers["M1"]
         event = MeasurementEvent(EventType.CAPACITY_CHANGED, "M1", payload=True)
         await manager.queue.put(event)

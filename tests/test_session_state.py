@@ -71,7 +71,7 @@ def test_success_waits_for_close_results_and_database(frequency_context, close_f
         assert manager.current_session is None
 
     asyncio.run(process_measurement())
-    with sqlite3.connect(app.configuration.database_path) as connection:
+    with sqlite3.connect(app.config.database_path) as connection:
         records = connection.execute("SELECT session_id FROM measurements").fetchall()
         assert records == [(session.session_id,)]
         # 测量表只保存业务列，不保存整包内容、哈希或文字图片对应关系。
@@ -215,7 +215,7 @@ def test_database_failure_is_terminal_without_retry(frequency_context, failure_m
         assert app.database.queue.empty()
 
     asyncio.run(submit_and_fail())
-    with sqlite3.connect(app.configuration.database_path) as connection:
+    with sqlite3.connect(app.config.database_path) as connection:
         records = connection.execute("SELECT COUNT(*) FROM measurements").fetchone()
         assert records == (0,)
 

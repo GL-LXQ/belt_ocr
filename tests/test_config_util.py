@@ -44,16 +44,16 @@ def test_configuration_paths_and_defaults(tmp_path: Path, monkeypatch) -> None:
     with pytest.raises(ValueError, match="没有启用的机器"):
         load_configuration(configuration_directory)
     machine_identifier = MachineRepo(database_path).insert("测试机器", "CAM001", "FREQ001")
-    configuration = load_configuration(configuration_directory)
+    config = load_configuration(configuration_directory)
 
     # 检查默认运行参数与数据库机器绑定，不覆盖相机自身参数。
-    assert configuration.capture_window_ms == 1000
-    assert configuration.ocr_result_timeout_ms == 30000
-    assert configuration.recovery_path == database_path.with_suffix(".recovery.sqlite3")
-    assert configuration.machines[0].machine_id == str(machine_identifier)
-    assert configuration.machines[0].camera_exposure_time_us is None
-    assert configuration.machines[0].camera_gain is None
-    assert configuration.machines[0].camera_pixel_format is None
+    assert config.capture_window_ms == 1000
+    assert config.ocr_result_timeout_ms == 30000
+    assert config.recovery_path == database_path.with_suffix(".recovery.sqlite3")
+    assert config.machines[0].machine_id == str(machine_identifier)
+    assert config.machines[0].camera_exposure_time_us is None
+    assert config.machines[0].camera_gain is None
+    assert config.machines[0].camera_pixel_format is None
 
 
 def test_duplicate_configuration_names(tmp_path: Path) -> None:

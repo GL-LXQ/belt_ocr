@@ -20,8 +20,8 @@ async def run_measurement_demo(configuration_directory: Path) -> None:
     """
     # 读取配置并准备应用和本次主流程任务。
     try:
-        configuration = load_configuration(configuration_directory)
-        app = App(configuration)
+        config = load_configuration(configuration_directory)
+        app = App(config)
     except Exception:
         logging.exception("测量配置初始化失败")
         raise
@@ -75,18 +75,18 @@ async def run_measurement_cycles(app: App) -> None:
 
     # 同时启动全部机器的第一轮测量，再发送正常关闭。
     await asyncio.gather(*(app.handle_start(machine_id) for machine_id in machine_ids))
-    await asyncio.sleep(app.configuration.capture_window_ms / 1000 + 0.1)
+    await asyncio.sleep(app.config.capture_window_ms / 1000 + 0.1)
     await asyncio.gather(*(app.handle_close(machine_id) for machine_id in machine_ids))
 
     # 等待第一轮全部保存或清理完成，再启动下一轮。
     await app.wait_until_idle()
     await app.handle_start(machine_ids[0])
-    await asyncio.sleep(app.configuration.capture_window_ms / 1000 + 0.1)
+    await asyncio.sleep(app.config.capture_window_ms / 1000 + 0.1)
     await app.handle_close(machine_ids[0])
 
     # 等待全部测量结算，输出正常结果的数据库位置。
     await app.wait_until_idle()
-    logging.info("演示结束，正常结果数据库：%s；失败原因见日志。", app.configuration.database_path)
+    logging.info("演示结束，正常结果数据库：%s；失败原因见日志。", app.config.database_path)
 
 
 def main() -> None:

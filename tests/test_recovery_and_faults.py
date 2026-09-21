@@ -27,16 +27,16 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
 
     def read_abnormal_event_reasons(self) -> list[str]:
         """读取本地运行库中的异常事件原因。"""
-        connection = sqlite3.connect(self.app.configuration.recovery_path)
+        connection = sqlite3.connect(self.app.config.recovery_path)
         with closing(connection):
             rows = connection.execute("SELECT reason FROM abnormal_events").fetchall()
         return [row[0] for row in rows]
 
     async def restart_app(self, **overrides) -> App:
         """使用同一数据库和证据目录重启系统。"""
-        configuration = replace(self.app.configuration, **overrides)
+        config = replace(self.app.config, **overrides)
         await self.app.stop()
-        self.app = App(configuration)
+        self.app = App(config)
         await self.app.start()
         return self.app
 
@@ -61,7 +61,7 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session_id, machine_manager.current_session.session_id)
 
         # 确认运行期间不创建事件去重表。
-        with closing(sqlite3.connect(app.configuration.recovery_path)) as connection:
+        with closing(sqlite3.connect(app.config.recovery_path)) as connection:
             receipt_table = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'event_receipts'"
             ).fetchone()
@@ -161,14 +161,14 @@ class RecoveryAndFaultTests(unittest.IsolatedAsyncioTestCase):
         """
         # 保存子进程使用的测量配置。
         app = await self.start_app()
-        configuration = app.configuration
+        config = app.config
         await app.stop()
         configuration_path = self.output_directory / "crash-configuration.json"
         configuration_path.write_text(
-            json.dumps(serialize_value(configuration)), encoding="utf-8",
+            json.dumps(serialize_value(config)), encoding="utf-8",
         )
         # 为正式加载入口写入 YAML，JSON 单独保存子进程的机器替身数据。
-        write_configuration_files(configuration_path.with_suffix(""), serialize_value(configuration))
+        write_configuration_files(configuration_path.with_suffix(""), serialize_value(config))
 
         # 子进程确认启动事件处理完成后直接异常退出。
         script = """
@@ -199,13 +199,13 @@ async def crash_after_start():
     repository = MachineRepo(database_path)
     for machine in settings["machines"]:
         repository.insert(machine["machine_id"], machine["camera_serial"], machine["frequency_meter_serial"])
-    configuration = load_configuration(Path(sys.argv[1]).with_suffix(""))
+    config = load_configuration(Path(sys.argv[1]).with_suffix(""))
     # 为崩溃测试显式注入频率替身读数。
-    configuration = replace(configuration, machines=tuple(
+    config = replace(config, machines=tuple(
         replace(machine, simulated_frequencies_hz=tuple(original["simulated_frequencies_hz"]))
-        for machine, original in zip(configuration.machines, settings["machines"])
+        for machine, original in zip(config.machines, settings["machines"])
     ))
-    app = App(configuration)
+    app = App(config)
     await app.start()
     await app.handle_start('1')
     os._exit(23)
@@ -336,8 +336,8 @@ asyncio.run(crash_after_start())
         self.assertIsNone(machine_manager.current_session)
 
         # 容量恢复后仍须确认被拒收周期已经关闭。
-        app.configuration = replace(
-            app.configuration, minimum_free_disk_bytes=0,
+        app.config = replace(
+            app.config, minimum_free_disk_bytes=0,
         )
         await self.wait_for_state(lambda: machine_manager.capacity_available)
         self.assertTrue(machine_manager.waiting_cycle_reset)
@@ -347,7 +347,7 @@ asyncio.run(crash_after_start())
 
     async def test_second_process_instance_cannot_share_runtime_database(self) -> None:
         app = await self.start_app()
-        second_app = App(app.configuration)
+        second_app = App(app.config)
         with self.assertLogs(level="ERROR"):
             with self.assertRaisesRegex(RuntimeError, "初始化失败"):
                 await second_app.start()

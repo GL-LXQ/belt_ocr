@@ -365,16 +365,16 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         """
         # 为崩溃子进程准备独立的持久化配置。
         app = await self.start_app()
-        configuration = replace(
-            app.configuration, capture_window_ms=120, frequency_interval_ms=20,
+        config = replace(
+            app.config, capture_window_ms=120, frequency_interval_ms=20,
         )
         await app.stop()
         configuration_path = self.output_directory / "closed-crash-configuration.json"
         configuration_path.write_text(
-            json.dumps(serialize_value(configuration)), encoding="utf-8",
+            json.dumps(serialize_value(config)), encoding="utf-8",
         )
         # 为正式加载入口写入 YAML，JSON 单独保存子进程的机器替身数据。
-        write_configuration_files(configuration_path.with_suffix(""), serialize_value(configuration))
+        write_configuration_files(configuration_path.with_suffix(""), serialize_value(config))
 
         # 子进程在图片批次入队、关闭和封口事件处理完成后直接退出。
         script = """
@@ -406,13 +406,13 @@ async def crash_after_close():
     repository = MachineRepo(database_path)
     for machine in settings["machines"]:
         repository.insert(machine["machine_id"], machine["camera_serial"], machine["frequency_meter_serial"])
-    configuration = load_configuration(Path(sys.argv[1]).with_suffix(""))
+    config = load_configuration(Path(sys.argv[1]).with_suffix(""))
     # 为崩溃测试显式注入频率替身读数。
-    configuration = replace(configuration, machines=tuple(
+    config = replace(config, machines=tuple(
         replace(machine, simulated_frequencies_hz=tuple(original["simulated_frequencies_hz"]))
-        for machine, original in zip(configuration.machines, settings["machines"])
+        for machine, original in zip(config.machines, settings["machines"])
     ))
-    app = App(configuration)
+    app = App(config)
     await app.start()
     await app.text_recognizer.processing_lock.acquire()
     await app.handle_start("1")

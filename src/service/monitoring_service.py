@@ -55,8 +55,8 @@ class MonitoringService(QThread):
             None  # 监测结束，相机及数据库资源已释放
         """
         # 从业务库构建机器配置并创建后台处理器。
-        configuration = load_configuration(self.configuration_directory)
-        application = App(configuration)
+        config = load_configuration(self.configuration_directory)
+        application = App(config)
         try:
             # 连接相机并等待停止通知，不发送模拟启停信号。
             await application.start(self.camera_state_changed_signal.emit)

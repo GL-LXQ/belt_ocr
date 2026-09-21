@@ -24,13 +24,13 @@ class FakeFrequency(FrequencyAdapter):
         # 初始化测试数值来源。
         frequency_values = cycle(self.machine.simulated_frequencies_hz)
         while True:
-            await asyncio.sleep(self.configuration.frequency_interval_ms / 1000)
+            await asyncio.sleep(self.config.frequency_interval_ms / 1000)
             value_hz = next(frequency_values, None)
 
             # 在频率仪边界过滤无读数、非有限值和超出范围的读数。
             if value_hz is None or not math.isfinite(value_hz):
                 continue
-            if not self.configuration.minimum_frequency_hz <= value_hz <= self.configuration.maximum_frequency_hz:
+            if not self.config.minimum_frequency_hz <= value_hz <= self.config.maximum_frequency_hz:
                 continue
 
             # 接收时固定所属周期，无活动周期时不交付数据。

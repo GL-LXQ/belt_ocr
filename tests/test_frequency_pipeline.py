@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app import App
-from config_util import MachineConfiguration, MeasurementConfiguration
+from config_util import MachineConfig, AppConfig
 from enums import OCRState, FrequencyState, SessionState, EventType
 from models import CapturedFrame, BeltSession, FrequencyMeasurement, MeasurementEvent, OCRResult
 
@@ -30,14 +30,14 @@ def frequency_context(tmp_path):
         )
     """
     # 创建独立存储配置，启用较短的频率收尾期限。
-    configuration = MeasurementConfiguration(
-        machines=(MachineConfiguration("M01", "CAM01", "FREQ01"),),
+    config = AppConfig(
+        machines=(MachineConfig("M01", "CAM01", "FREQ01"),),
         mvs_development_directory=Path("fake-sdk"),
         database_path=tmp_path / "measurements.sqlite3",
         recovery_database_path=tmp_path / "recovery.sqlite3",
         evidence_directory=tmp_path / "evidence",
     )
-    app = App(configuration)
+    app = App(config)
     app.database.initialize()
     manager = app.machine_managers["M01"]
 
@@ -141,7 +141,7 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
     app.database.measurement_repo.write_record(request)
     app.database.measurement_repo.write_record(request)
     app.database.queue.task_done()
-    with sqlite3.connect(app.configuration.database_path) as connection:
+    with sqlite3.connect(app.config.database_path) as connection:
         rows = connection.execute(
             "SELECT measurement_frequencies, final_frequency_hz FROM measurements"
         ).fetchall()
@@ -313,7 +313,7 @@ def test_placeholder_listener_delivers_only_active_session(frequency_context):
     """
     app, manager, session = frequency_context
     adapter = manager.frequency_adapter
-    adapter.configuration = replace(app.configuration, frequency_interval_ms=5)
+    adapter.config = replace(app.config, frequency_interval_ms=5)
     adapter.machine = replace(adapter.machine, simulated_frequencies_hz=(-1, float("nan"), 42, 42))
 
     async def receive_events():
