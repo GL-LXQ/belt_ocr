@@ -250,7 +250,7 @@ class SessionCamera:
             capture_task.camera.capture_lock.release()
             capture_task.capture_finished.set()
             self.current_capture = None
-        # 将成功采集的整轮结果交给机器管理器。
+        # 将成功采集的整轮结果交回所属机器。
         try:
             await self.publish_event(MeasurementEvent(
                 EventType.CAPTURE_COMPLETED, self.machine_id, session_id, result,

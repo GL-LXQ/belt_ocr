@@ -66,8 +66,8 @@ async def run_measurement_cycles(app: App) -> None:
     """
     # 选择现场状态已就绪的机器。
     machine_ids = [
-        identifier for identifier, manager in app.machine_managers.items()
-        if manager.acceptance_state == "READY"
+        identifier for identifier, machine in app.machines.items()
+        if machine.acceptance_state == "READY"
     ]
     if not machine_ids:
         logging.warning("没有已就绪的机器，请确认现场已关闭。")

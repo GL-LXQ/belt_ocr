@@ -18,19 +18,19 @@ def test_construction_does_not_touch_database(tmp_path: Path) -> None:
         tmp_path: 测试临时目录。
 
     Returns:
-        None  # 业务库文件未创建，逐机处理器为空
+        None  # 业务库文件未创建，机器运行对象为空
     """
     config = build_config(tmp_path)
 
-    # 构造应用后检查业务库目录和逐机处理器。
+    # 构造应用后检查业务库目录和机器运行对象。
     application = App(config)
-    assert application.machine_managers == {}
+    assert application.machines == {}
     assert not config.database_path.exists()
     assert not config.database_path.parent.exists()
 
 
-def test_create_machine_managers_binds_enabled_machines(tmp_path: Path) -> None:
-    """验证建立逐机处理器时只登记启用机器并绑定来源序列号。
+def test_initialize_machines_binds_enabled_machines(tmp_path: Path) -> None:
+    """验证建立机器运行对象时只登记启用机器并绑定来源序列号。
 
     Args:
         tmp_path: 测试临时目录。
@@ -58,11 +58,11 @@ def test_create_machine_managers_binds_enabled_machines(tmp_path: Path) -> None:
         },
     ])
 
-    # 建立逐机处理器后检查登记范围与机器身份。
+    # 建立机器运行对象后检查登记范围与机器身份。
     application = App(config)
-    application.create_machine_managers()
-    assert list(application.machine_managers) == [str(first_id), str(second_id)]
-    second_machine = application.machine_managers[str(second_id)].machine
+    application.initialize_machines()
+    assert list(application.machines) == [str(first_id), str(second_id)]
+    second_machine = application.machines[str(second_id)].machine_config
     assert second_machine.camera_serial == "CAM-B"
     assert second_machine.frequency_meter_serial == "FREQ-B"
 
@@ -131,8 +131,8 @@ def test_start_reads_machines_added_after_construction(tmp_path: Path, monkeypat
     asyncio.run(run_start_and_stop())
 
     # 检查机器登记、相机绑定和退出后的资源状态。
-    assert list(application.machine_managers) == [str(machine_id)]
-    assert application.machine_managers[str(machine_id)].camera.device.serial == "CAM-A"
+    assert list(application.machines) == [str(machine_id)]
+    assert application.machines[str(machine_id)].camera.device.serial == "CAM-A"
     assert sdk.closed
     assert sdk.cameras["CAM-A"].closed
     assert not application.database.lock_acquired

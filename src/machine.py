@@ -20,10 +20,10 @@ from database import Database, DatabaseRequest
 logger = logging.getLogger(__name__)
 
 
-class MachineManager:
+class Machine:
     def __init__(
         self,
-        machine: MachineConfig,
+        machine_config: MachineConfig,
         config: AppConfig,
         camera: SessionCamera,
         frequency_adapter: FrequencyAdapter,
@@ -35,7 +35,7 @@ class MachineManager:
         """组装一台机器的唯一当前周期及其处理依赖。
 
         Args:
-            machine: 机器身份配置。
+            machine_config: 机器身份配置。
             config: 采集、期限和存储配置。
             camera: 当前机器的相机适配器。
             frequency_adapter: 当前机器的频率接收适配器。
@@ -48,7 +48,7 @@ class MachineManager:
             None  # 本机事件队列、唯一周期空位和任务引用已初始化
         """
         # 登记业务依赖和本机串行事件队列。
-        self.machine = machine
+        self.machine_config = machine_config
         self.config = config
         self.camera = camera
         self.frequency_adapter = frequency_adapter
@@ -132,7 +132,7 @@ class MachineManager:
         """
         # 忽略活动周期内的重复启动和未同步的启动。
         if self.current_session is not None:
-            logger.warning("上一轮尚未结束，跳过 START machine_id=%s", self.machine.machine_id)
+            logger.warning("上一轮尚未结束，跳过 START machine_id=%s", self.machine_config.machine_id)
             return
         if self.waiting_cycle_reset:
             return
@@ -141,15 +141,15 @@ class MachineManager:
         if not self.camera.available or self.camera.is_capturing:
             # 标记等待周期复位并打印本轮未受理日志。
             self.waiting_cycle_reset = True
-            logger.error("本轮未受理 machine_id=%s", self.machine.machine_id)
+            logger.error("本轮未受理 machine_id=%s", self.machine_config.machine_id)
             return
 
         # 创建本轮档案，记录机器绑定、开始时间和配置。
         session = BeltSession(
             session_id=uuid4().hex,
-            machine_id=self.machine.machine_id,
-            camera_serial=self.machine.camera_serial,
-            frequency_meter_serial=self.machine.frequency_meter_serial,
+            machine_id=self.machine_config.machine_id,
+            camera_serial=self.machine_config.camera_serial,
+            frequency_meter_serial=self.machine_config.frequency_meter_serial,
             capture_id=uuid4().hex,
             start_time=datetime.now(timezone.utc).isoformat(),
             capture_start_time=asyncio.get_running_loop().time(),

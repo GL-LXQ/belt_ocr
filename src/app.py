@@ -14,7 +14,7 @@ from mvs_sdk import load_mvs_sdk
 from config_util import AppConfig, MachineConfig
 from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
-from machine_manager import MachineManager
+from machine import Machine
 from enums import MachineState, SessionState, EventType
 from models import MeasurementEvent
 from async_utils import run_blocking_operation
@@ -41,7 +41,7 @@ class App:
         self.state_changed = asyncio.Event()
         self.database = Database(config, self.publish_event)
         self.text_recognizer = TextRecognizer()
-        self.machine_managers: dict[str, MachineManager] = {}
+        self.machines: dict[str, Machine] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
         self.accepting_signals = False
         self.has_started = False
@@ -52,15 +52,15 @@ class App:
         self.failure_event = asyncio.Event()
         self.shutdown_task: asyncio.Task[None] | None = None
 
-    def create_machine_managers(self) -> None:
-        """建好业务库机器表，读取启用机器并逐台建立相机、频率适配器和业务处理器。
+    def initialize_machines(self) -> None:
+        """建好业务库机器表，读取启用机器并逐台建立相机、频率适配器和机器运行对象。
 
         Args:
             无外部参数。
 
         Returns:
             返回示例：
-                None  # 每台启用机器已按机器编号登记处理器，没有启用机器时抛出 ValueError
+                None  # 每台启用机器已按机器编号登记运行对象，没有启用机器时抛出 ValueError
         """
         # 确保业务库目录和机器表存在，再读取启用机器。
         database_path = self.config.database_path
@@ -71,23 +71,23 @@ class App:
         if not enabled_machines:
             raise ValueError("没有启用的机器，请先在机器管理页添加并启用机器。")
 
-        # 为每台机器建立独立的采集器和业务处理器。
+        # 为每台机器建立独立的采集器、频率适配器和机器运行对象。
         for machine_row in enabled_machines:
-            machine = MachineConfig(
+            machine_config = MachineConfig(
                 machine_id=str(machine_row["id"]),
                 camera_serial=machine_row["camera_serial"],
                 frequency_meter_serial=machine_row["frequency_meter_serial"],
             )
             camera = SessionCamera(
-                machine.machine_id,
+                machine_config.machine_id,
                 self.config.capture_window_ms,
                 self.config.camera_timeout_ms,
                 self.publish_event,
                 self.report_failure,
             )
-            frequency_adapter = FrequencyAdapter(machine, self.config, self.publish_event)
-            self.machine_managers[machine.machine_id] = MachineManager(
-                machine,
+            frequency_adapter = FrequencyAdapter(machine_config, self.config, self.publish_event)
+            self.machines[machine_config.machine_id] = Machine(
+                machine_config,
                 self.config,
                 camera,
                 frequency_adapter,
@@ -116,48 +116,48 @@ class App:
             self.config.evidence_directory.mkdir(parents=True, exist_ok=True)
             self.database.initialize()
 
-            # 读取启用机器并建立逐机处理器，没有启用机器时拒绝启动。
-            self.create_machine_managers()
+            # 读取启用机器并逐台建立机器运行对象，没有启用机器时拒绝启动。
+            self.initialize_machines()
 
             # 加载相机驱动，按配置逐台打开相机，此处按同步方式执行。
             self.camera_sdk = load_mvs_sdk(
                 self.config.mvs_development_directory,
                 self.config.mvs_dll_directory,
             )
-            for manager in self.machine_managers.values():
-                machine = manager.machine
-                # 通知界面连接状态，并将相机绑定到本机处理器。
+            for machine in self.machines.values():
+                machine_config = machine.machine_config
+                # 通知界面连接状态，并将相机绑定到本机器。
                 if notify_camera_state is not None:
-                    notify_camera_state(machine.machine_id, "连接中", "")
+                    notify_camera_state(machine_config.machine_id, "连接中", "")
                 try:
-                    manager.camera.device = self.camera_sdk.open_camera(
-                        machine.camera_serial,
-                        pixel_format=machine.camera_pixel_format,
-                        exposure_time_us=machine.camera_exposure_time_us,
-                        gain=machine.camera_gain,
+                    machine.camera.device = self.camera_sdk.open_camera(
+                        machine_config.camera_serial,
+                        pixel_format=machine_config.camera_pixel_format,
+                        exposure_time_us=machine_config.camera_exposure_time_us,
+                        gain=machine_config.camera_gain,
                     )
                 except Exception as error:
                     if notify_camera_state is not None:
-                        notify_camera_state(machine.machine_id, "连接失败", str(error))
+                        notify_camera_state(machine_config.machine_id, "连接失败", str(error))
                     raise
                 if notify_camera_state is not None:
-                    notify_camera_state(machine.machine_id, "相机已连接", "IO、频率仪尚未接入")
-
+                    notify_camera_state(machine_config.machine_id, "相机已连接", "IO、频率仪尚未接入")
 
             # 设置现场初始状态，运行中或未知时等待真实关闭。
-            for manager in self.machine_managers.values():
-                manager.waiting_cycle_reset = self.config.initial_machine_state != MachineState.CLOSED
-                manager.initialized = True
+            for machine in self.machines.values():
+                machine.waiting_cycle_reset = self.config.initial_machine_state != MachineState.CLOSED
+                machine.initialized = True
 
             # 启动独立机器处理和频率监听，任一任务异常都停止应用。
-            for manager in self.machine_managers.values():
-                machine = manager.machine
+            for machine in self.machines.values():
+                machine_config = machine.machine_config
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
-                    f"机器处理 machine_id={machine.machine_id}", manager.listen_events,
+                    f"机器处理 machine_id={machine_config.machine_id}", machine.listen_events,
                 )))
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
-                    f"频率监听 machine_id={machine.machine_id} frequency_meter_serial={machine.frequency_meter_serial}",
-                    manager.frequency_adapter.run,
+                    f"频率监听 machine_id={machine_config.machine_id} "
+                    f"frequency_meter_serial={machine_config.frequency_meter_serial}",
+                    machine.frequency_adapter.run,
                 )))
 
             # 启动共享存储，不执行自动重启。
@@ -203,7 +203,7 @@ class App:
         # 检查信号入口是否开放，以及机器是否已配置。
         if not self.accepting_signals:
             raise RuntimeError("测量系统当前未接收信号。")
-        if machine_id not in self.machine_managers:
+        if machine_id not in self.machines:
             raise ValueError(f"未配置机器：{machine_id}")
 
         # 创建本次事件的处理回执。
@@ -215,16 +215,16 @@ class App:
                 event_type,
                 machine_id,
                 session_id=(
-                    self.machine_managers[machine_id].current_session.session_id
+                    self.machines[machine_id].current_session.session_id
                     if event_type == EventType.MACHINE_CLOSED
-                    and self.machine_managers[machine_id].current_session is not None else None
+                    and self.machines[machine_id].current_session is not None else None
                 ),
                 payload=payload,
                 acknowledgement=acknowledgement,
             )
         )
 
-        # 等待机器管理员确认本次事件处理完成。
+        # 等待对应机器确认本次事件处理完成。
         await acknowledgement
 
     async def publish_event(self, event: MeasurementEvent) -> None:
@@ -234,7 +234,7 @@ class App:
             event: 待分发的测量事件，包含事件类型、机器编号及相关业务数据。
 
         Returns:
-            None: 事件入队或提前结束分发，无返回数据，不等待机器管理员处理。
+            None: 事件入队或提前结束分发，无返回数据，不等待对应机器处理。
             返回示例：
                 None  # 无返回数据
         """
@@ -244,9 +244,9 @@ class App:
                 event.acknowledgement.cancel()
             return
 
-        # 查找对应机器管理员，登记并隔离未知机器的事件。
-        machine_manager = self.machine_managers.get(event.machine_id)
-        if machine_manager is None:
+        # 查找对应机器，登记并隔离未知机器的事件。
+        machine = self.machines.get(event.machine_id)
+        if machine is None:
             await run_blocking_operation(self.database.save_abnormal_event, "UNKNOWN_MACHINE", event)
             logger.warning("隔离未知机器事件 machine_id=%s", event.machine_id)
             return
@@ -259,14 +259,14 @@ class App:
         )
 
         # 将事件放入对应机器队列，队列满时等待空位。
-        await machine_manager.queue.put(event)
+        await machine.queue.put(event)
         # 退出期间释放此前阻塞入队的事件和回执。
         if self.releasing_resources:
-            while not machine_manager.queue.empty():
-                pending_event = machine_manager.queue.get_nowait()
+            while not machine.queue.empty():
+                pending_event = machine.queue.get_nowait()
                 if pending_event.acknowledgement is not None and not pending_event.acknowledgement.done():
                     pending_event.acknowledgement.cancel()
-                machine_manager.queue.task_done()
+                machine.queue.task_done()
 
     async def synchronize_machine(self, machine_id: str, observed_state: MachineState | str) -> None:
         """将现场状态转换为枚举并发送机器同步事件。
@@ -276,7 +276,7 @@ class App:
             observed_state: 已确认的现场状态，支持 MachineState 或对应字符串。
 
         Returns:
-            None: 等待机器管理员处理同步事件，无返回数据。
+            None: 等待对应机器处理同步事件，无返回数据。
             返回示例：
                 None  # 无返回数据
         """
@@ -362,7 +362,7 @@ class App:
             self.state_changed.clear()
             if self.failure is not None:
                 raise self.failure
-            if not any(manager.current_session is not None for manager in self.machine_managers.values()):
+            if not any(machine.current_session is not None for machine in self.machines.values()):
                 return
             remaining_seconds = deadline - asyncio.get_running_loop().time()
             if remaining_seconds <= 0:
@@ -405,10 +405,10 @@ class App:
                 None  # 现有测量和队列已结算
             """
             # 将尚未关闭的现场周期标记为中断。
-            for machine_manager in self.machine_managers.values():
+            for machine in self.machines.values():
                 acknowledgement = asyncio.get_running_loop().create_future()
                 await self.publish_event(MeasurementEvent(
-                    EventType.SHUTDOWN, machine_manager.machine.machine_id,
+                    EventType.SHUTDOWN, machine.machine_config.machine_id,
                     acknowledgement=acknowledgement,
                 ))
                 await acknowledgement
@@ -416,8 +416,8 @@ class App:
             # 等待记录提交和已经入队的业务事件。
             await self.wait_until_idle(self.config.shutdown_timeout_ms / 1000)
             await self.database.queue.join()
-            for machine_manager in self.machine_managers.values():
-                await machine_manager.queue.join()
+            for machine in self.machines.values():
+                await machine.queue.join()
 
         # 在统一退出期限内完成后台收尾。
         try:
@@ -435,16 +435,16 @@ class App:
         # 停止事件交付并取消业务任务，禁止退出期间启动新的采集。
         self.releasing_resources = True
         # 排空退出时的事件队列，释放阻塞入队的相机交付任务。
-        for manager in self.machine_managers.values():
-            while not manager.queue.empty():
-                event = manager.queue.get_nowait()
+        for machine in self.machines.values():
+            while not machine.queue.empty():
+                event = machine.queue.get_nowait()
                 if event.acknowledgement is not None and not event.acknowledgement.done():
                     event.acknowledgement.cancel()
-                manager.queue.task_done()
+                machine.queue.task_done()
 
         # 停止并排空相机线程，异常不阻止其他相机释放。
         camera_results = await asyncio.gather(*(
-            manager.camera.stop() for manager in self.machine_managers.values()
+            machine.camera.stop() for machine in self.machines.values()
         ), return_exceptions=True)
         for result in camera_results:
             if isinstance(result, Exception):
@@ -452,10 +452,10 @@ class App:
 
         # 取消后台工作并等待在途阻塞操作完成。
         background_tasks = []
-        for manager in self.machine_managers.values():
-            background_tasks.extend(manager.deadline_tasks.values())
-            if manager.recognition_task is not None:
-                background_tasks.append(manager.recognition_task)
+        for machine in self.machines.values():
+            background_tasks.extend(machine.deadline_tasks.values())
+            if machine.recognition_task is not None:
+                background_tasks.append(machine.recognition_task)
         all_tasks = background_tasks + self.worker_tasks
         for task in all_tasks:
             task.cancel()
@@ -463,25 +463,25 @@ class App:
         self.worker_tasks.clear()
 
         # 业务任务停止后释放各周期最终图片和剩余事件。
-        for machine_manager in self.machine_managers.values():
-            session = machine_manager.current_session
+        for machine in self.machines.values():
+            session = machine.current_session
             if session is not None:
                 # 标记退出时未完成的周期，只打印日志并执行失败清理。
                 if session.state != SessionState.FAILED:
                     session.errors.append("PROGRAM_FAILED" if self.failure is not None else "SHUTDOWN_TIMEOUT")
                     try:
-                        await machine_manager.handle_measurement_failure(session)
+                        await machine.handle_measurement_failure(session)
                     except Exception as error:
                         self.report_failure(error)
             # 清空退出后的周期身份与未完成档案。
-            machine_manager.current_session = None
-            machine_manager.frequency_adapter.active_session_id = None
+            machine.current_session = None
+            machine.frequency_adapter.active_session_id = None
             # 清空不再处理的事件，释放事件携带的图片引用。
-            while not machine_manager.queue.empty():
-                event = machine_manager.queue.get_nowait()
+            while not machine.queue.empty():
+                event = machine.queue.get_nowait()
                 if event.acknowledgement is not None and not event.acknowledgement.done():
                     event.acknowledgement.cancel()
-                machine_manager.queue.task_done()
+                machine.queue.task_done()
         # 清空退出后未执行的存储请求和排队身份。
         while not self.database.queue.empty():
             self.database.queue.get_nowait()

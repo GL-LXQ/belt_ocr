@@ -1,4 +1,4 @@
-"""验证启动阶段建立的逐机处理器能跑完整轮采集、识别、频率与存储闭环。"""
+"""验证启动阶段建立的机器运行对象能跑完整轮采集、识别、频率与存储闭环。"""
 
 import asyncio
 import json
@@ -129,7 +129,7 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
                     None  # 本轮测量已结算，资源已释放
             """
             await application.start()
-            machine_ids = list(application.machine_managers)
+            machine_ids = list(application.machines)
             await asyncio.gather(*(
                 application.handle_start(machine_id) for machine_id in machine_ids
             ))
@@ -156,7 +156,7 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
 
     # 逐台核对最终文字、最后交付频率、选中图片文件与相机状态。
     for machine_id, ordered_lines, final_frequency_hz, evidence_refs in records:
-        manager = application.machine_managers[machine_id]
+        manager = application.machines[machine_id]
         delivered_values_hz = manager.frequency_adapter.delivered_values_hz
         assert json.loads(ordered_lines) == ["MODEL-1"]
         assert delivered_values_hz

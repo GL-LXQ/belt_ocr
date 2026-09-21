@@ -53,15 +53,15 @@ uv run python -X utf8 -m pytest -q
 
 #### 1.2.2 数据流动逻辑
 
-入口 `src/main.py` 读取配置文件中的公共参数，`src/app.py` 构造时只保存配置、创建共享存储与运行状态，`start()` 再按顺序初始化图片目录与双库、按业务库 `machine` 表读取启用机器并逐台建立采集器、频率接收、共享 OCR 和存储任务；采集帧与频率读数按周期汇入机器管理器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera.py` 的 `SessionCamera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器管理器在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，机器故障停止整个应用。
+入口 `src/main.py` 读取配置文件中的公共参数，`src/app.py` 构造时只保存配置、创建共享存储与运行状态，`start()` 再按顺序初始化图片目录与双库、按业务库 `machine` 表读取启用机器并逐台建立采集器、频率接收、共享 OCR 和存储任务；采集帧与频率读数按周期汇入对应机器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera.py` 的 `SessionCamera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器运行对象在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，机器故障停止整个应用。
 
 #### 1.2.3 处理阶段与职责
 
 1. **启动**：校验配置，初始化双库并获取实例锁，加载 SDK、打开全部相机，根据初始机器状态决定是否等待关闭复位，启动机器事件、频率和存储任务。任一机器打开失败则整体启动失败并释放已打开机器。
-2. **采集**：START 的单调时间是窗口起点，默认 1000 ms；唯一采集线程顺序执行启动、取帧、复制独立内存、归还 SDK Buffer、停止和释放相机占用，移除这条串行链路中无竞争者的 buffer_lock；机器关闭继续通过 capture_lock 等待采集结束。相机只保留 current_capture 和一个结果交付任务，不维护 windows 字典；取消前 5 帧限制，不设置应用层帧队列，不执行质量筛选和图片编码。单次等帧固定使用配置超时，默认 50 ms，不按窗口剩余时间缩短；读取返回后检查是否继续采集。CLOSE 发出停止信号，当前读取结束后退出；采集和机器管理器均不再按帧时间筛除尾帧。
+2. **采集**：START 的单调时间是窗口起点，默认 1000 ms；唯一采集线程顺序执行启动、取帧、复制独立内存、归还 SDK Buffer、停止和释放相机占用，移除这条串行链路中无竞争者的 buffer_lock；机器关闭继续通过 capture_lock 等待采集结束。相机只保留 current_capture 和一个结果交付任务，不维护 windows 字典；取消前 5 帧限制，不设置应用层帧队列，不执行质量筛选和图片编码。单次等帧固定使用配置超时，默认 50 ms，不按窗口剩余时间缩短；读取返回后检查是否继续采集。CLOSE 发出停止信号，当前读取结束后退出；采集和机器运行对象均不再按帧时间筛除尾帧。
 3. **一次性交付**：CAPTURE_COMPLETED 携带原始帧和统计；机器采集失败在捕获处记录日志并抛出异常，由任务结束回调安排全局退出，不再生成失败采集结果。统计只包含采集耗时、接收帧数和保留帧数。
 4. **OCR**：每台机器最多一个识别任务，三台机器共用处理锁。`process_session_frames` 顺序完成编码 → `filter_qualified_frames` → `recognize_images` → `generate_final_text_and_images`。锁覆盖整轮处理，无批次队列和消费者。成功只发送一次 OCR_COMPLETED，普通识别失败发送 OCR_FAILED；SDK 编码异常在编码处记录日志，再沿后台任务传播并触发全局退出，不转换为普通识别失败。
-5. **关闭与结算**：CLOSE 停止本轮采集，封闭频率接收并选取最后一条有效读数；没有读数或周期中断则失败。关闭后当前周期继续占用本机，直到图片、数据库保存或失败清理全部完成，才接收下一轮。机器管理器不参与 OCR 中间结果整理。
+5. **关闭与结算**：CLOSE 停止本轮采集，封闭频率接收并选取最后一条有效读数；没有读数或周期中断则失败。关闭后当前周期继续占用本机，直到图片、数据库保存或失败清理全部完成，才接收下一轮。机器运行对象不参与 OCR 中间结果整理。
 6. **提交**：正常关闭、OCR 成功和频率成功后，生成 `evidence_directory / machine_id / session_id / frame_id.bmp` 路径，生成包含业务字段和选中图片的存储请求，进入 WAITING_COMMIT_DB。存储线程先原子保存图片，再写数据库，完成后返回 COMMIT_SUCCEEDED 或 COMMIT_FAILED，不自动重试。
 7. **失败与退出**：整轮 OCR 超时从 START 计时，包含采集、排队和处理。等待锁的任务取消后不执行模型；已开始的阻塞操作等线程实际结束后再释放锁，迟到结果丢弃。退出时关闭入口、排空事件、停止采集、收尾后台处理，最后关闭相机、SDK 和数据库。退出等待期限不能强制终止已经运行的线程。
 
@@ -85,7 +85,7 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 |---|---|
 | `src/main.py` | 演示启停、故障等待和退出码 |
 | `src/app.py` | 读取启用机器、初始化、信号路由、容量维护、全局故障与资源释放 |
-| `src/machine_manager.py` | 每机周期状态、启停、频率、整轮 OCR 调度及提交条件 |
+| `src/machine.py` | 每机周期状态、启停、频率、整轮 OCR 调度及提交条件 |
 | `src/camera.py` | 创建采集任务、启动单线程收集整轮帧、停止采集并一次性交付结果 |
 | `src/mvs_sdk.py` | SDK 加载、相机打开、取帧、内存 BMP 编码和关闭 |
 | `src/text_recognition.py` | 共享处理锁、OCR 主流程、筛帧与终选黑盒 |
@@ -426,3 +426,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 启动阶段的阻塞调用改为同步执行
 
 `App.start()` 中并发任务创建之前的五处阻塞调用不再经过 `run_blocking_operation()`：`self.config.evidence_directory.mkdir(parents=True, exist_ok=True)`、`self.database.initialize()`、`self.create_machine_managers()`、`self.camera_sdk = load_mvs_sdk(...)` 与 `manager.camera.device = self.camera_sdk.open_camera(...)` 全部改为直接同步调用，并在这几处各留一行注释说明按同步方式执行。理由是这些调用都发生在并发任务注册之前（机器事件、频率监听与共享存储任务在本函数末尾才创建），事件循环上没有其他协程在等，同步执行不耽误并发；另外取消落在包装调用上时，包装函数是"等线程结束再抛 `CancelledError`"，抛出的那一刻赋值语句不会执行——取消落在加载 SDK 时 `self.camera_sdk` 保持 `None`，这次 `MV_CC_Initialize()` 就没有对应的 `MV_CC_Finalize()`；取消落在打开相机时 `manager.camera.device` 保持 `None`（这一条由 `camera_sdk.close()` 兜住，它会关闭 SDK 内部登记的全部相机）。同步调用一定返回并完成赋值，后续清理路径能正常关闭 SDK 与相机。代价是启动期间的取消不再逐台中断：`start()` 会把 SDK 加载和全部相机打开做完，取消在调用方的第一个 await 处才生效并接着走清理；响应快慢本身不变，因为包装函数本来也要等线程跑完才抛取消。`start()` 里另外两处包装保留不动：`publish_event()` 中未知机器事件写审计（运行期间全流程并发，运行库是 WAL 加 `synchronous=FULL`，写入带 fsync），以及 `release_resources()` 中的 `camera_sdk.close()`（清理任务由 `report_failure()` 与 `stop()` 各自 `asyncio.create_task` 独立运行，可能与其他协程同时存活）。`src/async_utils.py` 与 `run_blocking_operation()` 本身未改动，`src/app.py` 仍保留该导入，`src/app.py` 里 `self.database.close()` 继续在 `finally` 中同步执行，保证关闭连接与释放实例锁不被取消打断。数据流：`load_config()` 读 YAML 公共参数 → `App(config)` 只组装共享依赖 → `start()` 同步建图片目录与双库、同步读业务库机器表并逐台建立处理器、同步加载 SDK 并逐台打开相机 → START 采集图片与频率 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 退出时关闭相机并释放实例锁。全量 pytest：5 项通过（`tests/test_app_start_assembly.py` 4 项与 `tests/test_app_measurement_cycle.py` 1 项，启动装配用例覆盖没有启用机器时抛出业务异常、启动读取构造之后新增的启用机器并打开相机）。
+
+### 每机运行对象改名为 Machine
+
+`src/machine_manager.py` 更名并移到 `src/machine.py`，类 `MachineManager` 改名为 `Machine`：每台机器只有一个实例，它本身就是这台机器在程序里的运行对象（唯一事件队列、当前周期、相机、频率适配器与受理状态都在它身上），原来的 `-Manager` 后缀在全仓库独一无二，和 `SessionCamera`、`FrequencyAdapter`、`TextRecognizer`、`MachineRepo` 这类具体名词不一致。配套改名避免出现 `machine.machine`：构造参数与属性 `self.machine`（`MachineConfig`）统一改为 `machine_config`，`App.machine_managers` 改为 `App.machines`，`App.create_machine_managers()` 改为 `App.initialize_machines()`（保留 `机器管理页新增机器` 与启动期建立运行对象的区分），`src/app.py` 中循环变量与局部变量统一为 `machine`（运行对象）与 `machine_config`（配置），原先 `machine = manager.machine`、`machine_manager.machine.machine_id` 这类读法随之消除；注释措辞统一为「机器运行对象」，不再混用机器管理器/机器管理员/逐机处理器，`src/camera.py` 的交付注释改为「交回所属机器」。`src/repo/machine_repo.py`、`machine` 表、`MachineConfig`、`MachineState` 与 `FrequencyAdapter` 内部持有配置的 `self.machine` 均未改动，`ui/` 不引用该类。数据流不变：`load_config()` 读 YAML 公共参数 → `App(config)` 只组装共享依赖 → `start()` 同步建图片目录与双库、`initialize_machines()` 读业务库机器表并逐台建立 `Machine`、同步加载 SDK 并逐台打开相机 → START 采集图片与频率 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 退出时关闭相机并释放实例锁。全量 pytest：5 项通过（原 `test_create_machine_managers_binds_enabled_machines` 更名为 `test_initialize_machines_binds_enabled_machines`，断言改为 `application.machines` 与 `machine_config`）。
