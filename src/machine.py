@@ -579,8 +579,7 @@ class Machine:
 
         # 正常关闭并且 OCR、频率均成功后，才准备提交。
         if (
-            not session.frequency_window_sealed
-            or session.capture_stop_time is None
+            session.capture_stop_time is None
             or session.ocr_state != OCRState.SUCCESS
             or session.frequency_state != FrequencyState.SUCCESS
         ):
@@ -612,25 +611,16 @@ class Machine:
             evidence_refs=evidence_refs,
             selected_frames=ocr_result.selected_frames,
         )
-        # 撤销剩余期限任务，并标记本轮等待入库。
-        for task in self.deadline_tasks.values():
-            task.cancel()
-        self.deadline_tasks.clear()
+        # 标记本轮等待入库。
         session.state = SessionState.WAITING_COMMIT_DB
 
         # 将最终图片所有权交给提交请求，Session 不再保留图片。
         session.ocr_result = None
 
-        # 提交存储队列，登记入队异常或容量不足。
-        try:
-            accepted = await self.database.submit(request)
-        except Exception:
-            logger.exception("提交异常 session_id=%s", session.session_id)
-            session.errors.append("DATABASE_SUBMIT_FAILED")
-        else:
-            if accepted:
-                return
-            session.errors.append("DATABASE_QUEUE_FULL")
+        # 提交存储队列，队列满时登记失败原因。
+        if await self.database.submit(request):
+            return
+        session.errors.append("DATABASE_QUEUE_FULL")
 
         # 打印失败日志并清理本轮档案。
         await self.handle_measurement_failure(session)
