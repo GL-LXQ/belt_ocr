@@ -27,14 +27,14 @@ logger = logging.getLogger(__name__)
 
 class App:
     def __init__(self, config: AppConfig) -> None:
-        """初始化共享存储、逐机处理器与运行状态。
+        """保存运行配置，创建共享存储和运行状态。
 
         Args:
             config: 数据库路径、采集期限和退出参数。
 
         Returns:
             返回示例：
-                None  # 共享依赖已登记，尚未连接相机和数据库
+                None  # 共享依赖已登记，尚未读取机器和连接相机
         """
         config.validate()
         self.config = config
@@ -52,12 +52,22 @@ class App:
         self.failure_event = asyncio.Event()
         self.shutdown_task: asyncio.Task[None] | None = None
 
-        # 确保业务库的机器表存在，再读取启用机器。
-        config.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(config.database_path)) as connection, connection:
+    def create_machine_managers(self) -> None:
+        """建好业务库机器表，读取启用机器并逐台建立相机、频率适配器和业务处理器。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 每台启用机器已按机器编号登记处理器，没有启用机器时抛出 ValueError
+        """
+        # 确保业务库目录和机器表存在，再读取启用机器。
+        database_path = self.config.database_path
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(database_path)) as connection, connection:
             MachineRepo.create_table(connection)
-        machine_repo = MachineRepo(config.database_path)
-        enabled_machines = machine_repo.list_enabled()
+        enabled_machines = MachineRepo(database_path).list_enabled()
         if not enabled_machines:
             raise ValueError("没有启用的机器，请先在机器管理页添加并启用机器。")
 
@@ -70,15 +80,15 @@ class App:
             )
             camera = SessionCamera(
                 machine.machine_id,
-                config.capture_window_ms,
-                config.camera_timeout_ms,
+                self.config.capture_window_ms,
+                self.config.camera_timeout_ms,
                 self.publish_event,
                 self.report_failure,
             )
-            frequency_adapter = FrequencyAdapter(machine, config, self.publish_event)
+            frequency_adapter = FrequencyAdapter(machine, self.config, self.publish_event)
             self.machine_managers[machine.machine_id] = MachineManager(
                 machine,
-                config,
+                self.config,
                 camera,
                 frequency_adapter,
                 self.text_recognizer,
@@ -102,15 +112,15 @@ class App:
         if self.has_started:
             raise RuntimeError("请为新一次运行创建新的测量应用实例。")
         try:
-            # 初始化图片目录、本地运行库和最终结果库。
-            await run_blocking_operation(
-                self.config.evidence_directory.mkdir, parents=True, exist_ok=True,
-            )
-            await run_blocking_operation(self.database.initialize)
+            # 初始化图片目录、本地运行库和最终结果库，此处按同步方式执行。
+            self.config.evidence_directory.mkdir(parents=True, exist_ok=True)
+            self.database.initialize()
 
-            # 加载相机驱动，按配置逐台打开相机。
-            self.camera_sdk = await run_blocking_operation(
-                load_mvs_sdk,
+            # 读取启用机器并建立逐机处理器，没有启用机器时拒绝启动。
+            self.create_machine_managers()
+
+            # 加载相机驱动，按配置逐台打开相机，此处按同步方式执行。
+            self.camera_sdk = load_mvs_sdk(
                 self.config.mvs_development_directory,
                 self.config.mvs_dll_directory,
             )
@@ -120,8 +130,7 @@ class App:
                 if notify_camera_state is not None:
                     notify_camera_state(machine.machine_id, "连接中", "")
                 try:
-                    manager.camera.device = await run_blocking_operation(
-                        self.camera_sdk.open_camera,
+                    manager.camera.device = self.camera_sdk.open_camera(
                         machine.camera_serial,
                         pixel_format=machine.camera_pixel_format,
                         exposure_time_us=machine.camera_exposure_time_us,
