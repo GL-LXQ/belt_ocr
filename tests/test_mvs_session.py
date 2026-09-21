@@ -35,7 +35,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         # 为三台相机设置不同灰度值，并同步第一帧读取线程。
         app = await self.start_app(capture_window_ms=400)
         capture_barrier = threading.Barrier(3)
-        pixel_values = {"M01": 32, "M02": 96, "M03": 160}
+        pixel_values = {"1": 32, "2": 96, "3": 160}
         handle_pixels = {}
         publishers = {}
         for machine_id, manager in app.machine_managers.items():
@@ -143,7 +143,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
             None  # 交付顺序和全部帧数量已验证
         """
         app = await self.start_app(capture_window_ms=400)
-        manager = app.machine_managers["M01"]
+        manager = app.machine_managers["1"]
         publisher = AsyncMock(wraps=manager.camera.publish_event)
         manager.camera.publish_event = publisher
         original_encode = manager.camera.device.encode_image
@@ -164,7 +164,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
             return original_encode(frame)
 
         manager.camera.device.encode_image = encode_after_capture
-        await app.handle_start("M01")
+        await app.handle_start("1")
         session = manager.current_session
         await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
         events = [call.args[0] for call in publisher.call_args_list]
@@ -205,30 +205,30 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
 
         app.text_recognizer.process_session_frames = block_first_session
         try:
-            await app.handle_start("M01")
-            first_manager = app.machine_managers["M01"]
+            await app.handle_start("1")
+            first_manager = app.machine_managers["1"]
             first = first_manager.current_session
             self.assertTrue(await asyncio.to_thread(started.wait, 2))
-            await app.handle_start("M02")
-            second_manager = app.machine_managers["M02"]
+            await app.handle_start("2")
+            second_manager = app.machine_managers["2"]
             second = second_manager.current_session
             await self.wait_for_state(lambda: second.ocr_state == OCRState.RUNNING)
             # 首轮超时后保留锁，第二轮可以正常关闭并等待处理。
-            await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "M01", first.session_id))
+            await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "1", first.session_id))
             await self.wait_for_state(lambda: first.state == SessionState.FAILED)
-            await asyncio.wait_for(app.handle_close("M01"), 1)
-            await asyncio.wait_for(app.handle_close("M02"), 1)
+            await asyncio.wait_for(app.handle_close("1"), 1)
+            await asyncio.wait_for(app.handle_close("2"), 1)
             self.assertEqual(processed_sessions, [first.session_id])
             self.assertTrue(app.text_recognizer.processing_lock.locked())
             self.assertTrue(second.measurement_frequencies)
             # 第三轮在锁上等待时失败，永远不调用模型。
-            await app.handle_start("M03")
-            third_manager = app.machine_managers["M03"]
+            await app.handle_start("3")
+            third_manager = app.machine_managers["3"]
             third = third_manager.current_session
             await self.wait_for_state(lambda: third.ocr_state == OCRState.RUNNING)
-            await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "M03", third.session_id))
+            await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "3", third.session_id))
             await self.wait_for_state(lambda: third.state == SessionState.FAILED)
-            await app.handle_close("M03")
+            await app.handle_close("3")
         finally:
             release.set()
         await app.wait_until_idle()
@@ -247,7 +247,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
             None  # 锁和相机的释放顺序已验证
         """
         app = await self.start_app(shutdown_timeout_ms=100)
-        manager = app.machine_managers["M01"]
+        manager = app.machine_managers["1"]
         started = threading.Event()
         release = threading.Event()
         original_encode = manager.camera.device.encode_image
@@ -267,7 +267,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
             return original_encode(frame)
 
         manager.camera.device.encode_image = block_encoding
-        await app.handle_start("M01")
+        await app.handle_start("1")
         self.assertTrue(await asyncio.to_thread(started.wait, 2))
         shutdown = asyncio.create_task(app.stop())
         try:
@@ -293,7 +293,7 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         """
         # 建立可控编码线程和相机故障观察入口。
         app = await self.start_app()
-        manager = app.machine_managers["M01"]
+        manager = app.machine_managers["1"]
         encoding_started = threading.Event()
         release_encoding = threading.Event()
         encoding_failure = MvsError("测试编码相机故障")
@@ -318,10 +318,10 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs(level="ERROR") as captured_logs:
             try:
                 # 等待编码开始，注入 OCR 超时并确认线程仍占用相机。
-                await app.handle_start("M01")
+                await app.handle_start("1")
                 session = manager.current_session
                 self.assertTrue(await asyncio.to_thread(encoding_started.wait, 2))
-                await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "M01", session.session_id))
+                await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "1", session.session_id))
                 await self.wait_for_state(lambda: session.state == SessionState.FAILED)
                 self.assertFalse(manager.recognition_task.done())
                 self.assertTrue(app.text_recognizer.processing_lock.locked())
@@ -357,14 +357,14 @@ class MvsSessionTests(unittest.IsolatedAsyncioTestCase):
             None  # 两种空结果均失败且无测量记录
         """
         app = await self.start_app()
-        app.machine_managers["M01"].camera.device.handle.return_no_data = True
+        app.machine_managers["1"].camera.device.handle.return_no_data = True
         app.text_recognizer.filter_qualified_frames = lambda frames: ()
-        await asyncio.gather(app.handle_start("M01"), app.handle_start("M02"))
+        await asyncio.gather(app.handle_start("1"), app.handle_start("2"))
         sessions = [manager.current_session for manager in list(app.machine_managers.values())[:2]]
         await self.wait_for_state(lambda: all(session.state == SessionState.FAILED for session in sessions))
         self.assertIn("CAPTURE_NO_FRAMES", sessions[0].errors)
         self.assertIn("OCR_NO_QUALIFIED_FRAMES", sessions[1].errors)
-        await asyncio.gather(app.handle_close("M01"), app.handle_close("M02"))
+        await asyncio.gather(app.handle_close("1"), app.handle_close("2"))
         await app.wait_until_idle()
         self.assertEqual(self.read_records(), [])
         self.assertEqual(list(self.output_directory.rglob("*.bmp")), [])

@@ -10,8 +10,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from config_util import MachineConfig, AppConfig
+from config_util import AppConfig
 from app import App
+from configuration_support import create_machine_database
 from enums import OCRState
 from models import MeasurementEvent, OCRResult
 from fake_mvs import FakeMvsSdk
@@ -45,19 +46,28 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
         self.temporary_directory.cleanup()
 
     async def start_app(self, **overrides: object) -> App:
-        """创建三台机器的测试配置并启动应用实例。"""
-        machines = tuple(
-            MachineConfig(
-                machine_id=f"M{machine_number:02}",
-                frequency_meter_serial=f"FREQ{machine_number:02}",
-                camera_serial=f"SERIAL{machine_number:02}",
-                simulated_frequencies_hz=(40.0, 40.0, 43.0),
-            )
+        """先建业务库写入三台机器，再按公共参数启动应用实例。
+
+        Args:
+            **overrides: 覆盖公共参数的关键字参数，省略时使用测试默认配置。
+
+        Returns:
+            App  # 已启动的应用实例，机器编号为数据库自增编号 "1"、"2"、"3"
+        """
+        # 建好业务库并按顺序写入三台机器，机器编号由数据库自增生成。
+        database_path = self.output_directory / "measurements.sqlite3"
+        create_machine_database(database_path, [
+            {
+                "machine_name": f"测试皮带机{machine_number:02}",  # 机器名称
+                "camera_serial": f"SERIAL{machine_number:02}",  # 相机序列号
+                "frequency_meter_serial": f"FREQ{machine_number:02}",  # 频率仪序列号
+            }
             for machine_number in range(1, 4)
-        )
+        ])
+
+        # 按公共参数创建配置并启动应用实例。
         config = AppConfig(
-            machines=machines,
-            database_path=self.output_directory / "measurements.sqlite3",
+            database_path=database_path,
             evidence_directory=self.output_directory / "evidence",
             mvs_development_directory=Path("test-sdk"),
             capture_window_ms=180,
@@ -67,6 +77,12 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             shutdown_timeout_ms=2000,
         )
         self.app = App(replace(config, **overrides))
+        # 为测试频率仪补入固定读数，机器身份仍由数据库记录提供。
+        for machine_manager in self.app.machine_managers.values():
+            machine_manager.frequency_adapter.machine = replace(
+                machine_manager.frequency_adapter.machine,
+                simulated_frequencies_hz=(40.0, 40.0, 43.0),
+            )
         # 仅在测试中提供确定性识别和终选，生产黑盒继续保持未实现。
         self.app.text_recognizer.recognize_images = lambda images: [{"blocks": []} for image in images]
         self.app.text_recognizer.generate_final_text_and_images = lambda results, frames: OCRResult(
@@ -116,7 +132,7 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             返回示例：
                 [{
                     "session_id": "session-1",  # 周期编号
-                    "machine_id": "M01",  # 机器编号
+                    "machine_id": "1",  # 机器编号，取数据库自增编号
                     "start_time": "2026-09-20T00:00:00+00:00",  # 开始时间
                     "finish_time": "2026-09-20T00:00:01+00:00",  # 结算时间
                     "ordered_lines": ["MODEL"],  # 识别文字
@@ -185,12 +201,12 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
             None  # 两轮各自产生一次正确归属的记录
         """
         app = await self.start_app(capture_window_ms=1000)
-        manager = app.machine_managers["M01"]
+        manager = app.machine_managers["1"]
         for cycle_number in range(2):
-            await app.handle_start("M01")
+            await app.handle_start("1")
             session = manager.current_session
             await self.wait_for_state(lambda: bool(session.measurement_frequencies))
-            await app.handle_close("M01")
+            await app.handle_close("1")
             await app.wait_until_idle()
         await app.wait_until_idle()
         records = self.read_records()
@@ -213,12 +229,12 @@ class MeasurementFlowTests(unittest.IsolatedAsyncioTestCase):
 
         app = await self.start_app()
         app.text_recognizer.recognize_images = TextRecognizer().recognize_images
-        await app.handle_start("M01")
-        manager = app.machine_managers["M01"]
+        await app.handle_start("1")
+        manager = app.machine_managers["1"]
         session = manager.current_session
         await self.wait_for_state(lambda: session.state == SessionState.FAILED)
         self.assertIn("OCR_MODEL_NOT_IMPLEMENTED", session.errors)
         self.assertEqual(manager.current_session.session_id, session.session_id)
-        await app.handle_close("M01")
+        await app.handle_close("1")
         await app.wait_until_idle()
         self.assertEqual(self.read_records(), [])

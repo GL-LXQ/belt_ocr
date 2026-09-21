@@ -27,7 +27,6 @@ def machine_database(tmp_path):
     """
     # 准备不连接硬件的临时数据库配置。
     config = AppConfig(
-        machines=(),
         database_path=tmp_path / "business" / "measurements.sqlite3",
         evidence_directory=tmp_path / "evidence",
         mvs_development_directory=tmp_path / "sdk",

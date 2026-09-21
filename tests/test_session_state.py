@@ -116,7 +116,7 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
 
         # 整轮 OCR 失败后清理图片，保留活动编号和等待关闭的期限。
         await manager.handle_event(MeasurementEvent(
-            EventType.OCR_FAILED, "M01", session.session_id, "MODEL_FAILED",
+            EventType.OCR_FAILED, "1", session.session_id, "MODEL_FAILED",
         ))
         assert session.state == SessionState.FAILED
         assert session.ocr_result is None
@@ -129,14 +129,14 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
         # 重复启动和迟到图片不得恢复失败周期或创建新周期。
         await manager.handle_machine_start()
         await manager.handle_event(MeasurementEvent(
-            EventType.OCR_COMPLETED, "M01", session.session_id, frame,
+            EventType.OCR_COMPLETED, "1", session.session_id, frame,
         ))
         assert manager.current_session is session
         assert not manager.recognition_task
 
         # 真实关闭或关闭超时释放活动身份，超时仍要求机器复位。
         await manager.handle_event(MeasurementEvent(
-            end_event, "M01", session.session_id,
+            end_event, "1", session.session_id,
         ))
         assert manager.current_session is None
         assert manager.current_session is None
@@ -145,7 +145,7 @@ def test_failure_before_close_keeps_machine_identity(frequency_context, end_even
         await asyncio.gather(*deadlines, return_exceptions=True)
         if end_event == EventType.CYCLE_TIMEOUT:
             await manager.handle_event(MeasurementEvent(
-                EventType.MACHINE_CLOSED, "M01", session.session_id,
+                EventType.MACHINE_CLOSED, "1", session.session_id,
             ))
             assert not manager.waiting_cycle_reset
         assert app.database.queue.empty()
@@ -244,8 +244,8 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         """
         # 启动真实业务流程，保留活动周期对象。
         app = await self.start_app(capture_window_ms=10000)
-        await app.handle_start("M01")
-        manager = app.machine_managers["M01"]
+        await app.handle_start("1")
+        manager = app.machine_managers["1"]
         session = manager.current_session
 
         # 退出应用，确认未伪造关闭或保存异常记录。
@@ -270,11 +270,11 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         # 正常关闭本轮，保留等待占位 OCR 的运行状态。
         app = await self.start_app(shutdown_timeout_ms=100)
         await app.text_recognizer.processing_lock.acquire()
-        await app.handle_start("M01")
-        manager = app.machine_managers["M01"]
+        await app.handle_start("1")
+        manager = app.machine_managers["1"]
         session = manager.current_session
         await self.wait_for_state(lambda: bool(session.measurement_frequencies))
-        await app.handle_close("M01")
+        await app.handle_close("1")
         self.assertEqual(session.state, SessionState.RUNNING)
 
         # 等待退出期限，确认失败清理不创建测量记录。
@@ -296,9 +296,9 @@ class SessionShutdownTests(unittest.IsolatedAsyncioTestCase):
         """
         # 注入图片编码故障并启动测量。
         app = await self.start_app(capture_window_ms=100)
-        manager = app.machine_managers["M01"]
+        manager = app.machine_managers["1"]
         manager.camera.device.handle.encoding_error = 123
-        await app.handle_start("M01")
+        await app.handle_start("1")
         session = manager.current_session
 
         # 等待应用报告故障并完成自动退出。
@@ -347,10 +347,10 @@ def test_delayed_close_keeps_all_delivered_frames(frequency_context):
             None  # 后台 OCR 已执行且保留全部交付帧
         """
         await manager.handle_event(MeasurementEvent(
-            EventType.MACHINE_CLOSED, "M01", session.session_id, received_monotonic=12,
+            EventType.MACHINE_CLOSED, "1", session.session_id, received_monotonic=12,
         ))
         await manager.handle_event(MeasurementEvent(
-            EventType.CAPTURE_COMPLETED, "M01", session.session_id,
+            EventType.CAPTURE_COMPLETED, "1", session.session_id,
             CaptureResult(frames=frames),
         ))
         await asyncio.gather(*tuple((manager.recognition_task,)))

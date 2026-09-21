@@ -1,7 +1,6 @@
 """按验收场景验证跨轮回调、机器故障和持久化边界。"""
 
 import asyncio
-import json
 import sys
 import unittest
 from dataclasses import replace
@@ -11,6 +10,7 @@ from uuid import uuid4
 
 import test_measurement_flow as flow_support
 import test_recovery_and_faults as recovery_support
+from app import App
 from enums import OCRState, FrequencyState, EventType
 from mvs_sdk import CameraFrame
 from models import CapturedFrame, CaptureResult, FrequencyMeasurement, MeasurementEvent
@@ -126,7 +126,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         # 检查配置绑定，并向同一机器注入错误频率通道。
         for session in sessions:
-            machine_number = int(session.machine_id[1:])
+            # 机器编号取业务库自增编号，序列号仍按机器序号逐台绑定。
+            machine_number = int(session.machine_id)
             self.assertEqual(session.camera_serial, f"SERIAL{machine_number:02}")
             self.assertEqual(session.frequency_meter_serial, f"FREQ{machine_number:02}")
             frame, measurement = await self.supply_valid_inputs(session)
@@ -156,8 +157,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_06_repeated_start_input_creates_one_cycle(self):
         # 并发重复启动后，只为唯一活动周期完成一次测量。
         app = await self.start_controlled_app()
-        await asyncio.gather(*(app.handle_start("M01") for repeat in range(40)))
-        machine_manager = app.machine_managers["M01"]
+        await asyncio.gather(*(app.handle_start("1") for repeat in range(40)))
+        machine_manager = app.machine_managers["1"]
         self.assertIsNotNone(machine_manager.current_session)
         session = machine_manager.current_session
         await self.supply_valid_inputs(session)
@@ -169,16 +170,16 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_07_replayed_close_does_not_close_the_next_cycle(self):
         # 保存旧轮关闭事件，并完成该轮图像与频率封口。
         app = await self.start_controlled_app()
-        machine_manager = app.machine_managers["M01"]
-        await app.handle_start("M01")
+        machine_manager = app.machine_managers["1"]
+        await app.handle_start("1")
         first_session = machine_manager.current_session
         await self.supply_valid_inputs(first_session)
-        close_event = MeasurementEvent(EventType.MACHINE_CLOSED, "M01", first_session.session_id)
+        close_event = MeasurementEvent(EventType.MACHINE_CLOSED, "1", first_session.session_id)
         await self.publish_and_wait(close_event)
         await app.wait_until_idle(3)
 
         # 新轮启动后重放原关闭事件，再用新事件身份重发旧轮关闭。
-        await app.handle_start("M01")
+        await app.handle_start("1")
         second_session = machine_manager.current_session
         await self.supply_valid_inputs(second_session)
         await self.publish_and_wait(close_event)
@@ -200,8 +201,8 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         app = await self.start_controlled_app()
         expected_measurements = {}
         for cycle_number in range(2):
-            await app.handle_start("M01")
-            machine_manager = app.machine_managers["M01"]
+            await app.handle_start("1")
+            machine_manager = app.machine_managers["1"]
             session = machine_manager.current_session
             frame, measurement = await self.supply_valid_inputs(session, 42.0)
             expected_measurements[session.session_id] = measurement.value_hz
@@ -236,25 +237,25 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
         """
         # 保存上一轮读数，并打开新的测量窗口。
         app = await self.start_controlled_app()
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
+        await app.handle_start("1")
+        machine_manager = app.machine_managers["1"]
         first_session = machine_manager.current_session
         frame, old_measurement = await self.supply_valid_inputs(first_session)
         await self.close_controlled_cycle(first_session)
         await app.wait_until_idle(3)
-        await app.handle_start("M01")
+        await app.handle_start("1")
         second_session = machine_manager.current_session
 
         # 保留旧读数的周期归属，向机器队列交付迟到事件。
         await self.publish_and_wait(MeasurementEvent(
-            EventType.FREQUENCY_MEASURED, "M01", first_session.session_id,
+            EventType.FREQUENCY_MEASURED, "1", first_session.session_id,
             old_measurement,
         ))
         self.assertEqual(second_session.measurement_frequencies, [])
 
         # 仅补充新周期图像，关闭后确认缺少有效频率的周期未入库。
         await self.publish_and_wait(MeasurementEvent(
-            EventType.CAPTURE_COMPLETED, "M01", second_session.session_id,
+            EventType.CAPTURE_COMPLETED, "1", second_session.session_id,
             CaptureResult(
                 frames=(replace(frame, received_monotonic=asyncio.get_running_loop().time()),),
             ),
@@ -270,18 +271,18 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_11_unassigned_delayed_frequency_is_recorded_without_guessing(self):
         # 保留关闭后尚未封口的旧轮，同时启动新轮。
         app = await self.start_controlled_app()
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
+        await app.handle_start("1")
+        machine_manager = app.machine_managers["1"]
         first_session = machine_manager.current_session
         frame, measurement = await self.supply_valid_inputs(first_session)
-        await app.handle_close("M01")
+        await app.handle_close("1")
         await app.wait_until_idle(3)
-        await app.handle_start("M01")
+        await app.handle_start("1")
         second_session = machine_manager.current_session
 
         # 同时存在旧轮和新轮时，注入没有周期归属的延迟读数。
         await self.publish_and_wait(MeasurementEvent(
-            EventType.FREQUENCY_MEASURED, "M01", None,
+            EventType.FREQUENCY_MEASURED, "1", None,
             replace(measurement, session_id=""),
         ))
         self.assertEqual(len(first_session.frequency_candidates), 1)
@@ -301,18 +302,18 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_11_conflicting_cycle_identity_cannot_produce_normal_record(self):
         # 创建等待旧频率封口的档案和新活动周期。
         app = await self.start_controlled_app()
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
+        await app.handle_start("1")
+        machine_manager = app.machine_managers["1"]
         first_session = machine_manager.current_session
         frame, measurement = await self.supply_valid_inputs(first_session)
-        await app.handle_close("M01")
+        await app.handle_close("1")
         await app.wait_until_idle(3)
-        await app.handle_start("M01")
+        await app.handle_start("1")
         second_session = machine_manager.current_session
 
         # 外层事件声明旧轮、测量声明新轮，保持旧轮冲突待复核。
         await self.publish_and_wait(MeasurementEvent(
-            EventType.FREQUENCY_MEASURED, "M01", first_session.session_id,
+            EventType.FREQUENCY_MEASURED, "1", first_session.session_id,
             replace(measurement, session_id=second_session.session_id),
         ))
         self.assertEqual(first_session.frequency_state, FrequencyState.FAILED)
@@ -369,12 +370,9 @@ class AcceptanceScenarioTests(unittest.IsolatedAsyncioTestCase):
             app.config, capture_window_ms=120, frequency_interval_ms=20,
         )
         await app.stop()
-        configuration_path = self.output_directory / "closed-crash-configuration.json"
-        configuration_path.write_text(
-            json.dumps(serialize_value(config)), encoding="utf-8",
-        )
-        # 为正式加载入口写入 YAML，JSON 单独保存子进程的机器替身数据。
-        write_configuration_files(configuration_path.with_suffix(""), serialize_value(config))
+        # 正式加载入口只读 YAML 公共参数，机器记录沿用业务库中的启用机器。
+        configuration_directory = self.output_directory / "closed-crash-configuration"
+        write_configuration_files(configuration_directory, serialize_value(config))
 
         # 子进程在图片批次入队、关闭和封口事件处理完成后直接退出。
         script = """
@@ -384,7 +382,7 @@ import sys
 from pathlib import Path
 # 添加子进程使用的后端模块目录。
 sys.path.insert(0, "src")
-from config_util import load_configuration
+from config_util import load_config
 from enums import OCRState
 from app import App
 import app as application_module
@@ -393,26 +391,16 @@ from fake_mvs import FakeMvsSdk
 application_module.load_mvs_sdk = FakeMvsSdk
 
 async def crash_after_close():
-    # 将子进程的机器写入业务库，再通过正式配置入口读取。
-    import json
-    import sqlite3
-    from contextlib import closing
+    # 通过正式配置入口读取公共参数，机器身份取自业务库中已写入的启用机器。
     from dataclasses import replace
-    from repo.machine_repo import MachineRepo
-    settings = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-    database_path = Path(settings["database_path"])
-    with closing(sqlite3.connect(database_path)) as connection, connection:
-        MachineRepo.create_table(connection)
-    repository = MachineRepo(database_path)
-    for machine in settings["machines"]:
-        repository.insert(machine["machine_id"], machine["camera_serial"], machine["frequency_meter_serial"])
-    config = load_configuration(Path(sys.argv[1]).with_suffix(""))
-    # 为崩溃测试显式注入频率替身读数。
-    config = replace(config, machines=tuple(
-        replace(machine, simulated_frequencies_hz=tuple(original["simulated_frequencies_hz"]))
-        for machine, original in zip(config.machines, settings["machines"])
-    ))
+    config = load_config(Path(sys.argv[1]))
     app = App(config)
+    # 为崩溃测试显式注入频率替身读数。
+    for machine_manager in app.machine_managers.values():
+        machine_manager.frequency_adapter.machine = replace(
+            machine_manager.frequency_adapter.machine,
+            simulated_frequencies_hz=(40.0, 40.0, 43.0),
+        )
     await app.start()
     await app.text_recognizer.processing_lock.acquire()
     await app.handle_start("1")
@@ -434,7 +422,7 @@ async def crash_after_close():
 asyncio.run(crash_after_close())
 """
         process = await asyncio.create_subprocess_exec(
-            sys.executable, "-X", "utf8", "-c", script, str(configuration_path),
+            sys.executable, "-X", "utf8", "-c", script, str(configuration_directory),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
@@ -448,12 +436,14 @@ asyncio.run(crash_after_close())
         self.assertEqual(process.returncode, 24, standard_error.decode("utf-8"))
         session_id = standard_output.decode("utf-8").strip()
 
-        # 重启后不恢复旧 Session，也不生成旧周期的测量结果。
-        restarted = await self.start_app()
+        # 用同一业务库重启后不恢复旧 Session，也不生成旧周期的测量结果。
+        restarted = App(self.app.config)
+        self.app = restarted
+        await restarted.start()
         await restarted.wait_until_idle(10)
         self.assertTrue(session_id)
-        self.assertEqual(restarted.machine_managers["M01"].current_session, None)
-        self.assertFalse(restarted.machine_managers["M01"].recognition_task)
+        self.assertEqual(restarted.machine_managers["1"].current_session, None)
+        self.assertFalse(restarted.machine_managers["1"].recognition_task)
         self.assertEqual(self.read_records(), [])
 
 
@@ -471,8 +461,8 @@ asyncio.run(crash_after_close())
         """
         # 建立受控周期并取得原有频率候选。
         app = await self.start_controlled_app()
-        await app.handle_start("M01")
-        machine_manager = app.machine_managers["M01"]
+        await app.handle_start("1")
+        machine_manager = app.machine_managers["1"]
         session = machine_manager.current_session
         frame, measurement = await self.supply_valid_inputs(session)
 
@@ -480,7 +470,7 @@ asyncio.run(crash_after_close())
         conflicting_measurement = replace(measurement, session_id="another-session")
         event = MeasurementEvent(
             EventType.FREQUENCY_MEASURED,
-            "M01",
+            "1",
             session.session_id,
             conflicting_measurement,
         )

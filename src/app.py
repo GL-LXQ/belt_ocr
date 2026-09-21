@@ -3,14 +3,17 @@
 import asyncio
 import logging
 import shutil
+import sqlite3
 import time
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 
 from camera import SessionCamera
 from mvs_sdk import load_mvs_sdk
-from config_util import AppConfig
+from config_util import AppConfig, MachineConfig
+from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
 from machine_manager import MachineManager
 from enums import MachineState, SessionState, EventType
@@ -28,7 +31,7 @@ class App:
         """初始化共享存储、逐机处理器与运行状态。
 
         Args:
-            config: 数据库路径、各机设备绑定、采集期限和退出参数。
+            config: 数据库路径、采集期限和退出参数。
 
         Returns:
             返回示例：
@@ -50,11 +53,28 @@ class App:
         self.failure_event = asyncio.Event()
         self.shutdown_task: asyncio.Task[None] | None = None
 
+        # 确保业务库的机器表存在，再读取启用机器。
+        config.database_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(config.database_path)) as connection, connection:
+            MachineRepo.create_table(connection)
+        machine_repo = MachineRepo(config.database_path)
+        enabled_machines = machine_repo.list_enabled()
+        if not enabled_machines:
+            raise ValueError("没有启用的机器，请先在机器管理页添加并启用机器。")
+
         # 为每台机器建立独立的采集器和业务处理器。
-        for machine in config.machines:
+        for machine_row in enabled_machines:
+            machine = MachineConfig(
+                machine_id=str(machine_row["id"]),
+                camera_serial=machine_row["camera_serial"],
+                frequency_meter_serial=machine_row["frequency_meter_serial"],
+            )
             camera = SessionCamera(
-                machine.machine_id, config.capture_window_ms, config.camera_timeout_ms,
-                self.publish_event, self.report_failure,
+                machine.machine_id,
+                config.capture_window_ms,
+                config.camera_timeout_ms,
+                self.publish_event,
+                self.report_failure,
             )
             frequency_adapter = FrequencyAdapter(machine, config, self.publish_event)
             self.machine_managers[machine.machine_id] = MachineManager(

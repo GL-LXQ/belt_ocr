@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app import App
-from config_util import MachineConfig, AppConfig
+from config_util import AppConfig
+from configuration_support import create_machine_database
 from enums import OCRState, FrequencyState, SessionState, EventType
 from models import CapturedFrame, BeltSession, FrequencyMeasurement, MeasurementEvent, OCRResult
 
@@ -25,26 +26,33 @@ def frequency_context(tmp_path):
     Returns:
         (
             app,  # 未启动机器的应用及独立数据库
-            manager,  # M01 的串行业务处理器
+            manager,  # 编号 1 的串行业务处理器
             session,  # 图像已收尾、OCR 已成功的测试周期
         )
     """
+    # 先建业务库写入一台机器，机器编号由数据库自增生成。
+    database_path = tmp_path / "measurements.sqlite3"
+    create_machine_database(database_path, [{
+        "machine_name": "测试皮带机",  # 机器名称
+        "camera_serial": "CAM01",  # 相机序列号
+        "frequency_meter_serial": "FREQ01",  # 频率仪序列号
+    }])
+
     # 创建独立存储配置，启用较短的频率收尾期限。
     config = AppConfig(
-        machines=(MachineConfig("M01", "CAM01", "FREQ01"),),
         mvs_development_directory=Path("fake-sdk"),
-        database_path=tmp_path / "measurements.sqlite3",
+        database_path=database_path,
         recovery_database_path=tmp_path / "recovery.sqlite3",
         evidence_directory=tmp_path / "evidence",
     )
     app = App(config)
     app.database.initialize()
-    manager = app.machine_managers["M01"]
+    manager = app.machine_managers["1"]
 
     # 建立已完成图像收尾但尚未关闭的周期。
     session = BeltSession(
         session_id="frequency-session",
-        machine_id="M01",
+        machine_id="1",
         camera_serial="CAM01",
         frequency_meter_serial="FREQ01",
         capture_id="capture-frequency",
@@ -122,7 +130,7 @@ def test_close_freezes_received_frequencies_and_saves_together(frequency_context
             create_measurement(session, 43.0),
         ):
             await manager.handle_event(MeasurementEvent(
-                EventType.FREQUENCY_MEASURED, "M01", session.session_id, measurement,
+                EventType.FREQUENCY_MEASURED, "1", session.session_id, measurement,
             ))
         assert len(session.measurement_frequencies) == 3
         assert session.state != SessionState.WAITING_COMMIT_DB
@@ -180,7 +188,7 @@ def test_close_preserves_partial_data_without_final_value(frequency_context, out
         # 中断场景先接收部分有效数据。
         if outcome != "empty":
             await manager.handle_event(MeasurementEvent(
-                EventType.FREQUENCY_MEASURED, "M01", session.session_id,
+                EventType.FREQUENCY_MEASURED, "1", session.session_id,
                 create_measurement(session, 42.0),
             ))
 
@@ -220,12 +228,12 @@ def test_fifo_includes_queued_reading_before_close_and_rejects_late_reading(freq
         """
         # 关闭前的测量先入队；即使尚未处理，也必须计入本轮。
         await app.publish_event(MeasurementEvent(
-            EventType.FREQUENCY_MEASURED, "M01", session.session_id,
+            EventType.FREQUENCY_MEASURED, "1", session.session_id,
             create_measurement(session, 42.0),
         ))
-        await app.publish_event(MeasurementEvent(EventType.MACHINE_CLOSED, "M01"))
+        await app.publish_event(MeasurementEvent(EventType.MACHINE_CLOSED, "1"))
         await app.publish_event(MeasurementEvent(
-            EventType.FREQUENCY_MEASURED, "M01", session.session_id,
+            EventType.FREQUENCY_MEASURED, "1", session.session_id,
             create_measurement(session, 99.0),
         ))
 
@@ -271,7 +279,7 @@ def test_next_session_is_not_changed_by_old_frequency_event(frequency_context):
         )
         manager.frequency_adapter.active_session_id = "next-session"
         await manager.handle_event(MeasurementEvent(
-            EventType.FREQUENCY_MEASURED, "M01", session.session_id,
+            EventType.FREQUENCY_MEASURED, "1", session.session_id,
             create_measurement(session, 42.0),
         ))
         assert session.measurement_frequencies == []

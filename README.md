@@ -53,7 +53,7 @@ uv run python -X utf8 -m pytest -q
 
 #### 1.2.2 数据流动逻辑
 
-入口 `src/main.py` 从项目根目录读取默认配置，由 `src/app.py` 初始化相机、频率接收、共享 OCR 和存储任务；采集帧与频率读数按周期汇入机器管理器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera.py` 的 `SessionCamera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器管理器在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，机器故障停止整个应用。
+入口 `src/main.py` 读取配置文件中的公共参数，`src/app.py` 从业务库读取启用机器并逐台建立采集器、频率接收、共享 OCR 和存储任务；采集帧与频率读数按周期汇入机器管理器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera.py` 的 `SessionCamera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器管理器在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，机器故障停止整个应用。
 
 #### 1.2.3 处理阶段与职责
 
@@ -84,7 +84,7 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 | 文件 | 职责 |
 |---|---|
 | `src/main.py` | 演示启停、故障等待和退出码 |
-| `src/app.py` | 初始化、信号路由、容量维护、全局故障与资源释放 |
+| `src/app.py` | 读取启用机器、初始化、信号路由、容量维护、全局故障与资源释放 |
 | `src/machine_manager.py` | 每机周期状态、启停、频率、整轮 OCR 调度及提交条件 |
 | `src/camera.py` | 创建采集任务、启动单线程收集整轮帧、停止采集并一次性交付结果 |
 | `src/mvs_sdk.py` | SDK 加载、相机打开、取帧、内存 BMP 编码和关闭 |
@@ -381,7 +381,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 
 五个段落目前只做人工分组，读取时 `read_configuration_settings()` 按固定段落顺序把各段合并成同一份扁平参数，再构造一份 `AppConfig`，因此代码里仍统一写 `config.xxx`，段落归属靠键名搜索回溯。每个配置键在五个段落之间全局唯一（`read_configuration_settings()` 遇到跨段重名会直接报错并报出两个来源段，并由测试用例守住），所以查一个配置项从哪来、谁在用，直接按键名搜索即可：`grep -rn capture_window_ms config/ src/` 会依次给出 YAML 定义、`AppConfig` 字段和全部使用点。另外用 `fields(AppConfig)` 与配置键集合的一致性测试，保证新增或改名键时不会漏改配置类。
 
-数据流：GUI 和后端通过 `src/config_util.py` 的 `read_configuration_settings()` 读取 `config/config.yaml` 的五个段落、合并公共参数并转换路径和初始状态；GUI 使用业务库路径初始化设备表，允许空设备列表；后端通过 `load_configuration()` 查询数据库中的启用机器，组装并校验原有配置对象，再交给 App 连接相机和组织测量。START 创建周期并采集图片与频率，OCR 完成编码、筛帧、识别及终选，CLOSE 选取最后有效频率，完整成功后由存储队列先保存图片、再写 SQLite，结束时释放资源。机器清单仍由数据库管理，曝光、增益和像素格式仍保留相机自身设置。
+数据流：GUI 和后端通过 `src/config_util.py` 的 `read_configuration_settings()` 读取 `config/config.yaml` 的五个段落、合并公共参数并转换路径和初始状态；GUI 使用业务库路径初始化设备表，允许空设备列表；后端通过 `load_config()` 读取公共参数、组装并校验配置对象，再由 `App` 从业务库读取启用机器，然后连接相机、组织测量。START 创建周期并采集图片与频率，OCR 完成编码、筛帧、识别及终选，CLOSE 选取最后有效频率，完整成功后由存储队列先保存图片、再写 SQLite，结束时释放资源。机器清单仍由数据库管理，曝光、增益和像素格式仍保留相机自身设置。
 
 本次配置、机器状态与监测服务专项 pytest：13 项通过；全量 pytest：147 项通过、10 项既有失败，失败名单与修改前的 144 项通过、10 项失败一致。新增验证覆盖配置目录路径解析、默认参数、跨文件重复键和无机器时桌面启动。
 
@@ -412,3 +412,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 配置校验精简
 
 `AppConfig.validate()` 删除两处重复检查：机器绑定不再逐字段比较唯一性，只保留 `camera_serial` 与 `frequency_meter_serial` 非空检查（`machine_id` 由数据库主键保证唯一，两个序列号由 `machine` 表未删除记录的部分唯一索引保证，机器清单经 `MachineRepo.list_enabled()` 读取，重复不可能出现）；删除 `initial_machine_state` 成员检查，非法状态仍由 `read_configuration_settings()` 中的 `MachineState(...)` 转换直接抛出 `ValueError`，`tests/test_machine_state.py` 的非法状态用例继续通过。启动期其余校验保持不变：至少一台启用机器、期限与容量为正数、频率范围递增、磁盘保留空间非负、恢复库与结果库不同文件。数据流不变：`read_configuration_settings()` 读取 `config/config.yaml` 五个段落并转换路径与初始状态，`load_configuration()` 从数据库读取启用机器、组装并校验 `AppConfig`，`App` 按配置逐台创建相机与频率适配器，采集、OCR、频率、存储与 SQLite 写入流程不受影响。全量 pytest：148 项通过、10 项既有失败，与本次改动前实测完全一致，失败名单未变。
+
+### 机器清单改由 App 读取数据库
+
+`AppConfig` 删除 `machines` 字段，`src/config_util.py` 的 `load_configuration()` 更名为 `load_config()`，只读取 `config/config.yaml` 的公共参数并校验运行参数，不再导入 `sqlite3` 与 `MachineRepo`；`App.__init__` 改为先按 `config.database_path` 建好机器表，再 `MachineRepo.list_enabled()` 读取启用机器，逐台构造 `MachineConfig(machine_id=str(row["id"]), camera_serial=..., frequency_meter_serial=...)` 与采集器、频率适配器、机器处理器，机器编号因此是数据库自增编号的字符串。`AppConfig.validate()` 删除机器相关的两条检查：没有启用机器时由 `App.__init__` 抛出「没有启用的机器，请先在机器管理页添加并启用机器。」，GUI 沿用的仍是这句提示；`camera_serial`、`frequency_meter_serial` 非空检查删除，序列号在写入前已由机器管理页与服务层保证。数据流：`load_config()` 读 YAML 公共参数 → `App.__init__` 读业务库启用机器 → 逐台建立处理器 → START 采集图片与频率 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite。测试侧新增 `tests/configuration_support.py` 的 `create_machine_database()`（建表并按顺序插入机器），原先在内存里构造机器清单的 12 处 `App(config)`、全部旧机器编号（`M01` 等）以及 `main.load_configuration` 替身一并改为数据库自增编号与新函数名，`tests/test_fatal_shutdown.py` 的启动失败阶段由「相机序列号为空」改为「机器全部停用」。全量 pytest：148 项通过、10 项既有失败，失败名单与改动前一致。

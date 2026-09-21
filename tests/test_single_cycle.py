@@ -29,22 +29,22 @@ class SingleCycleTests(unittest.IsolatedAsyncioTestCase):
             None  # 两轮顺序提交，忙时启动未覆盖当前数据
         """
         app = await self.start_app(capture_window_ms=150)
-        manager = app.machine_managers["M01"]
+        manager = app.machine_managers["1"]
         await app.text_recognizer.processing_lock.acquire()
         try:
             # 采集期间的 START 不创建第二个任务。
-            await app.handle_start("M01")
+            await app.handle_start("1")
             session = manager.current_session
             capture = manager.camera.current_capture
             with self.assertLogs("machine_manager", level="WARNING"):
-                await app.handle_start("M01")
+                await app.handle_start("1")
             self.assertIs(manager.current_session, session)
             self.assertIs(manager.camera.current_capture, capture)
             # 正常关闭后等待 OCR，周期继续占用机器。
             await self.wait_for_state(lambda: session.ocr_state == OCRState.RUNNING)
-            await app.handle_close("M01")
+            await app.handle_close("1")
             with self.assertLogs("machine_manager", level="WARNING"):
-                await app.handle_start("M01")
+                await app.handle_start("1")
             self.assertIs(manager.current_session, session)
             self.assertIsNone(manager.camera.current_capture)
             self.assertTrue(app.accepting_signals)
@@ -53,11 +53,11 @@ class SingleCycleTests(unittest.IsolatedAsyncioTestCase):
         # 保存完成后自动清空，下一轮可以正常启动和提交。
         await app.wait_until_idle(3)
         self.assertIsNone(manager.current_session)
-        await app.handle_start("M01")
+        await app.handle_start("1")
         following_session = manager.current_session
         self.assertNotEqual(following_session.session_id, session.session_id)
         await self.wait_for_state(lambda: following_session.ocr_state == OCRState.SUCCESS)
-        await app.handle_close("M01")
+        await app.handle_close("1")
         await app.wait_until_idle(3)
         self.assertEqual(len(self.read_records()), 2)
 
@@ -71,13 +71,13 @@ class SingleCycleTests(unittest.IsolatedAsyncioTestCase):
             None  # 保存期间无跨轮重叠，其他机器可以独立测量
         """
         app = await self.start_app()
-        manager = app.machine_managers["M01"]
+        manager = app.machine_managers["1"]
         saving = threading.Event()
         release = threading.Event()
         original_persist = app.database.persist_measurement
 
         def hold_storage(request):
-            """暂停 M01 的持久化。
+            """暂停编号 1 机器的持久化。
 
             Args:
                 request: 正常测量提交请求。
@@ -85,27 +85,27 @@ class SingleCycleTests(unittest.IsolatedAsyncioTestCase):
             Returns:
                 None  # 释放等待后完成真实保存
             """
-            if request.machine_id == "M01":
+            if request.machine_id == "1":
                 saving.set()
                 assert release.wait(5)
             original_persist(request)
 
         with patch.object(app.database, "persist_measurement", side_effect=hold_storage):
             try:
-                await app.handle_start("M01")
+                await app.handle_start("1")
                 session = manager.current_session
                 await self.wait_for_state(lambda: session.ocr_state == OCRState.SUCCESS)
-                await app.handle_close("M01")
+                await app.handle_close("1")
                 self.assertTrue(await asyncio.to_thread(saving.wait, 2))
                 with self.assertLogs("machine_manager", level="WARNING"):
-                    await app.handle_start("M01")
+                    await app.handle_start("1")
                 self.assertIs(manager.current_session, session)
                 self.assertEqual(session.state, SessionState.WAITING_COMMIT_DB)
                 # 另一台机器的 OCR 不等待本机数据库提交。
-                await app.handle_start("M02")
-                second = app.machine_managers["M02"].current_session
+                await app.handle_start("2")
+                second = app.machine_managers["2"].current_session
                 await self.wait_for_state(lambda: second.ocr_state == OCRState.SUCCESS)
-                await app.handle_close("M02")
+                await app.handle_close("2")
             finally:
                 release.set()
             await app.wait_until_idle(3)
@@ -122,7 +122,7 @@ class SingleCycleTests(unittest.IsolatedAsyncioTestCase):
             None  # 失败周期不入库，线程释放后下一轮正常完成
         """
         app = await self.start_app()
-        manager = app.machine_managers["M01"]
+        manager = app.machine_managers["1"]
         started = threading.Event()
         release = threading.Event()
         original_process = app.text_recognizer.process_session_frames
@@ -142,16 +142,16 @@ class SingleCycleTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(app.text_recognizer, "process_session_frames", side_effect=hold_recognition):
             try:
-                await app.handle_start("M01")
+                await app.handle_start("1")
                 session = manager.current_session
                 self.assertTrue(await asyncio.to_thread(started.wait, 2))
-                await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "M01", session.session_id))
+                await app.publish_event(MeasurementEvent(EventType.OCR_TIMEOUT, "1", session.session_id))
                 await self.wait_for_state(lambda: session.state == SessionState.FAILED)
                 # 失败前后的 START 均不覆盖尚未释放的周期。
-                await app.handle_start("M01")
+                await app.handle_start("1")
                 self.assertIs(manager.current_session, session)
-                await app.handle_close("M01")
-                await app.handle_start("M01")
+                await app.handle_close("1")
+                await app.handle_start("1")
                 self.assertIs(manager.current_session, session)
                 self.assertTrue(app.text_recognizer.processing_lock.locked())
             finally:
@@ -161,11 +161,11 @@ class SingleCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(manager.camera.delivery_task)
         self.assertEqual(self.read_records(), [])
         # 清理后下一轮正常提交，旧结果不会回填到新周期。
-        await app.handle_start("M01")
+        await app.handle_start("1")
         following = manager.current_session
-        await app.publish_event(MeasurementEvent(EventType.OCR_FAILED, "M01", session.session_id, "LATE"))
+        await app.publish_event(MeasurementEvent(EventType.OCR_FAILED, "1", session.session_id, "LATE"))
         await self.wait_for_state(lambda: following.ocr_state == OCRState.SUCCESS)
-        await app.handle_close("M01")
+        await app.handle_close("1")
         await app.wait_until_idle(3)
         self.assertEqual([record["session_id"] for record in self.read_records()], [following.session_id])
 
@@ -184,5 +184,5 @@ class SingleCycleTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(run_measurement_cycles(app), 4)
         records = self.read_records()
         self.assertEqual(len(records), 4)
-        self.assertEqual(sum(record["machine_id"] == "M01" for record in records), 2)
+        self.assertEqual(sum(record["machine_id"] == "1" for record in records), 2)
         self.assertTrue(all(manager.current_session is None for manager in app.machine_managers.values()))

@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from app import App
-from config_util import load_configuration
+from config_util import load_config
 
 
 class MonitoringService(QThread):
@@ -55,7 +55,7 @@ class MonitoringService(QThread):
             None  # 监测结束，相机及数据库资源已释放
         """
         # 从业务库构建机器配置并创建后台处理器。
-        config = load_configuration(self.configuration_directory)
+        config = load_config(self.configuration_directory)
         application = App(config)
         try:
             # 连接相机并等待停止通知，不发送模拟启停信号。

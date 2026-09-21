@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from config_util import AppConfig, load_configuration, read_configuration_settings
-from configuration_support import write_configuration_files
+from app import App
+from config_util import AppConfig, load_config, read_configuration_settings
+from configuration_support import create_machine_database, write_configuration_files
 from repo.machine_repo import MachineRepo
 from test_ui_shell import application
 
@@ -42,20 +43,34 @@ def test_configuration_paths_and_defaults(tmp_path: Path, monkeypatch) -> None:
     assert public_settings["mvs_dll_directory"] == tmp_path / "dll"
     assert not database_path.exists()
 
-    # 完整运行配置在没有启用机器时拒绝启动，保留设备表供新增机器。
+    # 完整运行配置只读取公共参数，没有启用机器时由应用启动入口拒绝。
+    config = load_config(configuration_directory)
     with pytest.raises(ValueError, match="没有启用的机器"):
-        load_configuration(configuration_directory)
-    machine_identifier = MachineRepo(database_path).insert("测试机器", "CAM001", "FREQ001")
-    config = load_configuration(configuration_directory)
+        App(config)
+
+    # 启动被拒绝时机器表已建好，可直接新增机器。
+    assert MachineRepo(database_path).list_enabled() == []
+
+    # 建好业务库并写入一台机器，应用按数据库自增编号绑定机器配置。
+    created_machine_ids = create_machine_database(database_path, [{
+        "machine_name": "测试机器",
+        "camera_serial": "CAM001",
+        "frequency_meter_serial": "FREQ001",
+    }])
+    machine_id = str(created_machine_ids[0])
+    application = App(config)
 
     # 检查默认运行参数与数据库机器绑定，不覆盖相机自身参数。
     assert config.capture_window_ms == 1000
     assert config.ocr_result_timeout_ms == 30000
     assert config.recovery_path == database_path.with_suffix(".recovery.sqlite3")
-    assert config.machines[0].machine_id == str(machine_identifier)
-    assert config.machines[0].camera_exposure_time_us is None
-    assert config.machines[0].camera_gain is None
-    assert config.machines[0].camera_pixel_format is None
+    assert list(application.machine_managers) == [machine_id]
+    machine = application.machine_managers[machine_id].machine
+    assert machine.camera_serial == "CAM001"
+    assert machine.frequency_meter_serial == "FREQ001"
+    assert machine.camera_exposure_time_us is None
+    assert machine.camera_gain is None
+    assert machine.camera_pixel_format is None
 
 
 def test_configuration_keys_match_config_fields() -> None:
@@ -72,7 +87,7 @@ def test_configuration_keys_match_config_fields() -> None:
     settings = read_configuration_settings(configuration_directory)
 
     # 逐项比对配置类字段，机器清单由数据库提供、不来自 YAML。
-    field_names = {field.name for field in fields(AppConfig)} - {"machines"}
+    field_names = {field.name for field in fields(AppConfig)}
     assert set(settings) == field_names
 
 

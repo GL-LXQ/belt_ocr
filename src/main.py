@@ -5,7 +5,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from config_util import load_configuration
+from config_util import load_config
 from app import App
 
 
@@ -20,7 +20,7 @@ async def run_measurement_demo(configuration_directory: Path) -> None:
     """
     # 读取配置并准备应用和本次主流程任务。
     try:
-        config = load_configuration(configuration_directory)
+        config = load_config(configuration_directory)
         app = App(config)
     except Exception:
         logging.exception("测量配置初始化失败")

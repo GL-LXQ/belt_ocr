@@ -10,7 +10,8 @@ import pytest
 
 import main
 from app import App
-from config_util import MachineConfig, AppConfig
+from config_util import AppConfig
+from configuration_support import create_machine_database
 from fake_mvs import FakeMvsSdk
 from enums import EventType
 from models import MeasurementEvent
@@ -18,7 +19,7 @@ from models import MeasurementEvent
 
 @pytest.fixture
 def device_environment(tmp_path, monkeypatch):
-    """准备两台假相机和独立运行目录。
+    """准备业务库中的两台机器、两台假相机和独立运行目录。
 
     Args:
         tmp_path: 测试临时目录。
@@ -27,18 +28,24 @@ def device_environment(tmp_path, monkeypatch):
     Returns:
         (config, sdk)  # 测量配置和可检查释放状态的相机驱动
     """
-    # 建立两台机器和独立存储路径，频率默认无读数。
-    machines = tuple(
-        MachineConfig(
-            machine_id=f"M{number}",
-            frequency_meter_serial=f"FREQ{number}",
-            camera_serial=f"SERIAL{number}",
-        )
-        for number in (1, 2)
-    )
+    # 在业务库写入两台启用机器，机器编号由数据库自增编号生成。
+    database_path = tmp_path / "results.sqlite3"
+    create_machine_database(database_path, [
+        {
+            "machine_name": "1# 皮带机",
+            "camera_serial": "SERIAL1",
+            "frequency_meter_serial": "FREQ1",
+        },
+        {
+            "machine_name": "2# 皮带机",
+            "camera_serial": "SERIAL2",
+            "frequency_meter_serial": "FREQ2",
+        },
+    ])
+
+    # 组装公共运行配置，机器清单由应用自行从业务库读取。
     config = AppConfig(
-        machines=machines,
-        database_path=tmp_path / "results.sqlite3",
+        database_path=database_path,
         evidence_directory=tmp_path / "evidence",
         mvs_development_directory=Path("fake-sdk"),
         capture_window_ms=60000,
@@ -51,7 +58,7 @@ def device_environment(tmp_path, monkeypatch):
     return config, sdk
 
 
-@pytest.mark.parametrize("failure_stage", ["driver", "serial", "second_camera"])
+@pytest.mark.parametrize("failure_stage", ["driver", "disabled", "second_camera"])
 def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, caplog, failure_stage):
     """验证启动失败记录日志并释放此前已打开的资源。
 
@@ -59,7 +66,7 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
         device_environment: 测试配置与假驱动。
         monkeypatch: 测试依赖替换工具。
         caplog: 日志捕获器。
-        failure_stage: 驱动、序列号或第二台相机失败阶段。
+        failure_stage: 驱动、机器停用或第二台相机失败阶段。
 
     Returns:
         None  # 启动失败，已打开的相机和实例锁均已释放
@@ -68,11 +75,17 @@ def test_startup_failure_closes_opened_devices(device_environment, monkeypatch, 
     config, sdk = device_environment
     if failure_stage == "driver":
         monkeypatch.setattr("app.load_mvs_sdk", Mock(side_effect=OSError("驱动加载失败")))
-    elif failure_stage == "serial":
-        machines = (config.machines[0], replace(config.machines[1], camera_serial=""))
-        config = replace(config, machines=machines)
-        # 缺失序列号在配置边界拒绝，尚未加载或打开相机。
-        with pytest.raises(ValueError, match="camera_serial"):
+    elif failure_stage == "disabled":
+        # 机器记录全部停用时在建立处理器前拒绝启动，尚未加载或打开相机。
+        disabled_database_path = config.database_path.with_name("disabled.sqlite3")
+        create_machine_database(disabled_database_path, [{
+            "machine_name": "1# 皮带机",
+            "camera_serial": "SERIAL1",
+            "frequency_meter_serial": "FREQ1",
+            "enabled": False,
+        }])
+        config = replace(config, database_path=disabled_database_path)
+        with pytest.raises(ValueError, match="没有启用的机器"):
             App(config)
         assert not sdk.cameras
         return
@@ -183,7 +196,7 @@ def test_background_failure_stops_all_devices(device_environment, caplog, worker
         application = App(config)
         if worker_kind == "frequency":
             operation = AsyncMock(side_effect=OSError("频率连接断开"))
-            application.machine_managers["M1"].frequency_adapter.listen_measurements = operation
+            application.machine_managers["1"].frequency_adapter.listen_measurements = operation
         else:
             operation = AsyncMock(side_effect=OSError("存储任务失败"))
             if worker_kind == "return":
@@ -260,7 +273,7 @@ def test_camera_fault_interrupts_main_workflow(device_environment, monkeypatch, 
 
     # 主流程的长时间等待必须被故障立即打断。
     monkeypatch.setattr(sdk, "open_camera", open_faulty_camera)
-    monkeypatch.setattr(main, "load_configuration", lambda path: config)
+    monkeypatch.setattr(main, "load_config", lambda path: config)
     with pytest.raises(OSError, match="相机连接断开"):
         asyncio.run(asyncio.wait_for(main.run_measurement_demo(Path("unused")), 3))
     assert sdk.closed
@@ -296,8 +309,8 @@ def test_no_data_and_normal_shutdown_are_not_faults(device_environment):
         """
         application = App(config)
         await application.start()
-        application.machine_managers["M1"].camera.device.read_frame = Mock(return_value=None)
-        await application.handle_start("M1")
+        application.machine_managers["1"].camera.device.read_frame = Mock(return_value=None)
+        await application.handle_start("1")
         await asyncio.sleep(0.05)
         assert application.failure is None
         await application.stop()
@@ -318,7 +331,7 @@ def test_command_line_failure_returns_nonzero(monkeypatch, caplog):
         None  # 命令行以退出码 1 结束
     """
     # 替换主流程为相机异常并清空测试命令行参数。
-    monkeypatch.setattr(main, "load_configuration", Mock(side_effect=OSError("配置读取失败")))
+    monkeypatch.setattr(main, "load_config", Mock(side_effect=OSError("配置读取失败")))
     monkeypatch.setattr("sys.argv", ["main.py"])
 
     # 验证日志和失败退出码。
@@ -350,8 +363,8 @@ def test_failure_releases_publishers_waiting_for_queue(device_environment):
         """
         # 不启动消费者，创建多个等待容量的事件交付任务。
         application = App(replace(config, event_queue_capacity=1))
-        manager = application.machine_managers["M1"]
-        event = MeasurementEvent(EventType.CAPACITY_CHANGED, "M1", payload=True)
+        manager = application.machine_managers["1"]
+        event = MeasurementEvent(EventType.CAPACITY_CHANGED, "1", payload=True)
         await manager.queue.put(event)
         publishers = [asyncio.create_task(application.publish_event(event)) for _ in range(3)]
         await asyncio.sleep(0)

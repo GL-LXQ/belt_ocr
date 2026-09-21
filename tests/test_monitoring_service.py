@@ -7,8 +7,9 @@ from unittest.mock import Mock
 import pytest
 from PySide6.QtTest import QTest
 
-from config_util import load_configuration
-from configuration_support import write_configuration_files
+from app import App
+from config_util import load_config
+from configuration_support import create_machine_database, write_configuration_files
 from fake_mvs import FakeMvsSdk
 from test_ui_shell import application, window
 
@@ -81,16 +82,39 @@ def test_connects_enabled_database_machines_and_stops(monitoring_environment):
     page, sdk, warnings = monitoring_environment
     repository = page.machine_service.machine_repo
     # 建立启用、停用和软删除机器，序列号不依赖卡片序号。
-    first_id = repository.insert("一号机器", "SERIAL-B", "FREQ-B")
-    repository.insert("停用机器", "DISABLED", "FREQ-D", False)
-    deleted_id = repository.insert("删除机器", "DELETED", "FREQ-X")
+    machine_ids = create_machine_database(repository.database_path, [
+        {
+            "machine_name": "一号机器",
+            "camera_serial": "SERIAL-B",
+            "frequency_meter_serial": "FREQ-B",
+        },
+        {
+            "machine_name": "停用机器",
+            "camera_serial": "DISABLED",
+            "frequency_meter_serial": "FREQ-D",
+            "enabled": False,
+        },
+        {
+            "machine_name": "删除机器",
+            "camera_serial": "DELETED",
+            "frequency_meter_serial": "FREQ-X",
+        },
+        {
+            "machine_name": "二号机器",
+            "camera_serial": "SERIAL-A",
+            "frequency_meter_serial": "FREQ-A",
+        },
+    ])
+    first_id, _, deleted_id, second_id = machine_ids
     repository.soft_delete(deleted_id)
-    second_id = repository.insert("二号机器", "SERIAL-A", "FREQ-A")
-    config = load_configuration(page.configuration_directory)
-    assert [machine.machine_id for machine in config.machines] == [str(first_id), str(second_id)]
-    assert [machine.camera_serial for machine in config.machines] == ["SERIAL-B", "SERIAL-A"]
-    assert [machine.frequency_meter_serial for machine in config.machines] == ["FREQ-B", "FREQ-A"]
-    assert all(not machine.simulated_frequencies_hz for machine in config.machines)
+
+    # 读取公共配置并构建应用，只绑定启用机器且编号取业务库自增编号。
+    configured_app = App(load_config(page.configuration_directory))
+    machine_managers = list(configured_app.machine_managers.values())
+    assert [manager.machine.machine_id for manager in machine_managers] == [str(first_id), str(second_id)]
+    assert [manager.machine.camera_serial for manager in machine_managers] == ["SERIAL-B", "SERIAL-A"]
+    assert [manager.machine.frequency_meter_serial for manager in machine_managers] == ["FREQ-B", "FREQ-A"]
+    assert all(not manager.machine.simulated_frequencies_hz for manager in machine_managers)
 
     # 点击后连接，刷新仍显示实际连接状态且尚未取流。
     page.start_button.click()
