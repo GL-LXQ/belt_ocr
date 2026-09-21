@@ -6,7 +6,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from camera import SessionCamera
+from camera import Camera
 from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
 from enums import OCRState, FrequencyState, MachineState, SessionState, EventType
@@ -25,7 +25,7 @@ class Machine:
         self,
         machine_config: MachineConfig,
         config: AppConfig,
-        camera: SessionCamera,
+        camera: Camera,
         frequency_adapter: FrequencyAdapter,
         text_recognizer: TextRecognizer,
         database: Database,
@@ -498,11 +498,11 @@ class Machine:
                     session.capture_id,
                     session.camera_serial,
                     frames,
-                    self.camera.device.encode_image,
+                    self.camera.sdk_camera.encode_image,
                 )
             except ImageEncodingError as error:
                 # 相机编码异常已经记录，继续抛给任务结束回调处理应用退出。
-                self.camera.device.faulted = True
+                self.camera.sdk_camera.faulted = True
                 raise error.__cause__
             except Exception as error:
                 logger.exception("OCR 处理失败 session_id=%s", session.session_id)

@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class CaptureTask:
     """保存采集参数、停止信号和完成通知。"""
 
-    camera: MvsCamera
+    sdk_camera: MvsCamera
     capture_start_time: float
     duration_seconds: float
     timeout_ms: int
@@ -45,34 +45,34 @@ class CaptureTask:
         """
         # 准备本轮帧集合、截止时间和统计基线。
         frames = []   # 存放这一轮采集到的原始帧
-        initial_frame_count = self.camera.received_frame_count
+        initial_frame_count = self.sdk_camera.received_frame_count
         deadline = self.capture_start_time + self.duration_seconds  # 本轮采集的截止时间
         try:
             # 未提前关闭且窗口未到期时启动取流。
             if not self.stop_requested.is_set() and time.monotonic() < deadline:
                 # 没有收到停止信号；采集窗口还没过期，执行 start_grabbing
-                self.camera.start_grabbing()
+                self.sdk_camera.start_grabbing()
 
             # 本次采集未提前停止并且没过期，进入循环，每次读取一帧
             while not self.stop_requested.is_set() and time.monotonic() < deadline:
                 # 按固定超时读取一帧，返回后在下一次循环检查是否结束。
-                frame = self.camera.read_frame(self.stop_requested, self.timeout_ms)
+                frame = self.sdk_camera.read_frame(self.stop_requested, self.timeout_ms)
                 if frame is None:
                     continue
                 # 保存本次读取的帧，允许停止信号或窗口到期时的尾帧。
                 frames.append(frame)
         except Exception:
             # 记录采集异常，标记相机故障并继续抛出。
-            self.camera.faulted = True
-            logger.exception("相机采集失败 serial=%s", self.camera.serial)
+            self.sdk_camera.faulted = True
+            logger.exception("相机采集失败 serial=%s", self.sdk_camera.serial)
             raise
         finally:
             # 在同一线程停止取流，停流异常保留此前的采集异常链。
             try:
-                self.camera.stop_grabbing()
+                self.sdk_camera.stop_grabbing()
             except Exception:
-                self.camera.faulted = True
-                logger.exception("相机停流失败 serial=%s", self.camera.serial)
+                self.sdk_camera.faulted = True
+                logger.exception("相机停流失败 serial=%s", self.sdk_camera.serial)
                 raise
 
         # 成功停流后返回本轮全部帧和统计。
@@ -80,13 +80,13 @@ class CaptureTask:
             frames=tuple(frames),
             statistics={
                 "capture_duration_seconds": time.monotonic() - self.capture_start_time,
-                "received_frame_count": self.camera.received_frame_count - initial_frame_count,
+                "received_frame_count": self.sdk_camera.received_frame_count - initial_frame_count,
                 "retained_frame_count": len(frames),
             },
         )
 
 
-class SessionCamera:
+class Camera:
     """管理相机采集生命周期和周期身份。"""
 
     def __init__(
@@ -109,13 +109,13 @@ class SessionCamera:
         Returns:
             None  # 相机适配器初始化完成
         """
-        # 保存外部依赖和相机句柄。
+        # 保存外部依赖和 SDK 相机对象。
         self.machine_id = machine_id
         self.capture_window_ms = capture_window_ms
         self.camera_timeout_ms = camera_timeout_ms
         self.publish_event = publish_event
         self.report_failure = report_failure
-        self.device: MvsCamera | None = None
+        self.sdk_camera: MvsCamera | None = None
         # 分别登记现场采集与结果交付任务。
         self.current_capture: CaptureTask | None = None
         self.delivery_task: asyncio.Task | None = None
@@ -130,7 +130,7 @@ class SessionCamera:
         Returns:
             True  # 相机已打开且无故障，否则为 False
         """
-        return self.device is not None and not self.device.closed and not self.device.faulted
+        return self.sdk_camera is not None and not self.sdk_camera.closed and not self.sdk_camera.faulted
 
     @property
     def is_capturing(self) -> bool:
@@ -142,7 +142,7 @@ class SessionCamera:
         Returns:
             True  # 相机被占用，否则为 False
         """
-        return self.device is not None and self.device.capture_lock.locked()
+        return self.sdk_camera is not None and self.sdk_camera.capture_lock.locked()
 
     def start_capture(self, session_id: str, capture_start_time: float) -> None:
         """启动整轮采集并安排一次性结果交付。
@@ -155,16 +155,16 @@ class SessionCamera:
             None  # 后台采集和结果交付已启动
         """
         # 取得相机采集锁，检查相机状态。
-        camera = self.device
-        if not camera.capture_lock.acquire(blocking=False):
-            raise MvsError(f"相机正在采集：{camera.serial}")
+        sdk_camera = self.sdk_camera
+        if not sdk_camera.capture_lock.acquire(blocking=False):
+            raise MvsError(f"相机正在采集：{sdk_camera.serial}")
         try:
-            if camera.closed or camera.faulted:
-                raise MvsError(f"相机不可用：{camera.serial}")
+            if sdk_camera.closed or sdk_camera.faulted:
+                raise MvsError(f"相机不可用：{sdk_camera.serial}")
 
             # 创建本轮任务，登记采集窗口和单次取帧超时。
             capture_task = CaptureTask(
-                camera=camera,
+                sdk_camera=sdk_camera,
                 capture_start_time=capture_start_time,
                 duration_seconds=self.capture_window_ms / 1000,
                 timeout_ms=self.camera_timeout_ms,
@@ -172,7 +172,7 @@ class SessionCamera:
 
         except Exception:
             # 启动失败时释放相机采集锁。
-            camera.capture_lock.release()
+            sdk_camera.capture_lock.release()
             raise
 
         # 创建采集任务，创建失败时关闭尚未启动的协程并归还相机占用。
@@ -181,7 +181,7 @@ class SessionCamera:
             self.delivery_task = asyncio.create_task(capture_workflow)
         except Exception:
             capture_workflow.close()
-            camera.capture_lock.release()
+            sdk_camera.capture_lock.release()
             raise
 
         # 登记采集引用与结束回调。
@@ -199,7 +199,7 @@ class SessionCamera:
         """
         # 清理尚未开始执行就被取消的任务，归还相机占用。
         if self.current_capture is not None:
-            self.current_capture.camera.capture_lock.release()
+            self.current_capture.sdk_camera.capture_lock.release()
             self.current_capture.capture_finished.set()
             self.current_capture = None
         self.delivery_task = None
@@ -242,12 +242,12 @@ class SessionCamera:
             result = await run_blocking_operation(capture_task.run_capture)
         except Exception:
             # 采集线程尚未记录的调度异常在此记录。
-            if not capture_task.camera.faulted:
+            if not capture_task.sdk_camera.faulted:
                 logger.exception("采集任务执行失败 machine_id=%s", self.machine_id)
             raise
         finally:
             # 释放相机占用，并通知等待方：本轮采集已结束，相机已完成停流处理。
-            capture_task.camera.capture_lock.release()
+            capture_task.sdk_camera.capture_lock.release()
             capture_task.capture_finished.set()
             self.current_capture = None
         # 将成功采集的整轮结果交回所属机器。

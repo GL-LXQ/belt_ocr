@@ -162,8 +162,8 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
         assert delivered_values_hz
         assert final_frequency_hz == delivered_values_hz[-1]
         assert len(json.loads(evidence_refs)) == 1
-        assert manager.camera.device.received_frame_count > 0
-        assert manager.camera.device.closed
+        assert manager.camera.sdk_camera.received_frame_count > 0
+        assert manager.camera.sdk_camera.closed
 
     # 证据图片按机器编号与周期编号落盘，内容非空。
     saved_images = list(config.evidence_directory.rglob("*.bmp"))

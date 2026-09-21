@@ -132,7 +132,7 @@ def test_start_reads_machines_added_after_construction(tmp_path: Path, monkeypat
 
     # 检查机器登记、相机绑定和退出后的资源状态。
     assert list(application.machines) == [str(machine_id)]
-    assert application.machines[str(machine_id)].camera.device.serial == "CAM-A"
+    assert application.machines[str(machine_id)].camera.sdk_camera.serial == "CAM-A"
     assert sdk.closed
     assert sdk.cameras["CAM-A"].closed
     assert not application.database.lock_acquired

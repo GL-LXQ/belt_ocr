@@ -9,7 +9,7 @@ from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from camera import SessionCamera
+from camera import Camera
 from mvs_sdk import load_mvs_sdk
 from config_util import AppConfig, MachineConfig
 from repo.machine_repo import MachineRepo
@@ -78,7 +78,7 @@ class App:
                 camera_serial=machine_row["camera_serial"],
                 frequency_meter_serial=machine_row["frequency_meter_serial"],
             )
-            camera = SessionCamera(
+            camera = Camera(
                 machine_config.machine_id,
                 self.config.capture_window_ms,
                 self.config.camera_timeout_ms,
@@ -130,7 +130,7 @@ class App:
                 if notify_camera_state is not None:
                     notify_camera_state(machine_config.machine_id, "连接中", "")
                 try:
-                    machine.camera.device = self.camera_sdk.open_camera(
+                    machine.camera.sdk_camera = self.camera_sdk.open_camera(
                         machine_config.camera_serial,
                         pixel_format=machine_config.camera_pixel_format,
                         exposure_time_us=machine_config.camera_exposure_time_us,
