@@ -16,6 +16,9 @@ class MonitoringService(QThread):
     # 相机连接状态信号，参数依次为机器编号、连接状态和失败原因。
     camera_state_changed_signal = Signal(str, str, str)
 
+    # 本轮进度信号，参数依次为机器编号、周期编号、处理阶段和阶段状态。
+    measurement_progress_changed_signal = Signal(str, str, str, str)
+
     def __init__(self, configuration_directory: Path):
         """保存配置路径并创建跨线程停止通知。
 
@@ -59,7 +62,10 @@ class MonitoringService(QThread):
         application = App(config)
         try:
             # 连接相机并等待停止通知，不发送模拟启停信号。
-            await application.start(self.camera_state_changed_signal.emit)
+            await application.start(
+                self.camera_state_changed_signal.emit,
+                self.measurement_progress_changed_signal.emit,
+            )
             while not self.stop_requested.is_set() and application.failure is None:
                 await asyncio.sleep(0.1)
         finally:

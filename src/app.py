@@ -13,7 +13,7 @@ from config_util import AppConfig, MachineConfig
 from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
 from machine import Machine
-from enums import MachineState, SessionState, EventType
+from enums import EventType, MachineState, ProgressStage, ProgressStatus, SessionState
 from models import MeasurementEvent
 from async_utils import run_blocking_operation
 from text_recognition import TextRecognizer
@@ -50,11 +50,14 @@ class App:
         self.failure_event = asyncio.Event()
         self.shutdown_task: asyncio.Task[None] | None = None
 
-    def initialize_machines(self) -> None:
+    def initialize_machines(
+        self,
+        notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None = None,
+    ) -> None:
         """在双库初始化之后读取启用机器，并逐台建立相机、频率适配器和机器运行对象。
 
         Args:
-            无外部参数。
+            notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
 
         Returns:
             返回示例：
@@ -88,15 +91,21 @@ class App:
                 self.text_recognizer,
                 self.database,
                 self.publish_event,
+                notify_measurement_progress,
                 self.report_failure,
                 self.state_changed,
             )
 
-    async def start(self, notify_camera_state: Callable[[str, str, str], None] | None = None) -> None:
+    async def start(
+        self,
+        notify_camera_state: Callable[[str, str, str], None] | None = None,
+        notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None = None,
+    ) -> None:
         """初始化本次运行的机器状态和存储，启动监听与处理任务。
 
         Args:
             notify_camera_state: 可选连接通知函数，接收机器编号、连接状态和失败原因；GUI 由 MonitoringService 的信号提供，无界面时传 None。
+            notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
 
         Returns:
             None: 完成启动并开放信号入口，无返回数据。
@@ -112,7 +121,7 @@ class App:
             self.database.initialize()
 
             # 读取启用机器并逐台建立机器运行对象，没有启用机器时拒绝启动。
-            self.initialize_machines()
+            self.initialize_machines(notify_measurement_progress)
 
             # 加载相机驱动，按配置逐台打开相机，此处按同步方式执行。
             self.camera_sdk = load_mvs_sdk(

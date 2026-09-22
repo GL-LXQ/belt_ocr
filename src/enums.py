@@ -43,6 +43,24 @@ class FrequencyState(str, Enum):
     FAILED = "FAILED"  # 本 Session 缺少有效频率、频率采集故障或周期中断
 
 
+class ProgressStage(str, Enum):
+    """定义实时监测页面展示的本轮处理阶段。"""
+
+    SESSION_START = "session_start"  # 本轮启动
+    IMAGE_CAPTURE = "image_capture"  # 图像采集
+    FREQUENCY_COLLECTION = "frequency_collection"  # 频率采集
+    CHARACTER_RECOGNITION = "character_recognition"  # 字符识别
+    EVIDENCE_STORAGE = "evidence_storage"  # 证据入库
+
+
+class ProgressStatus(str, Enum):
+    """定义本轮处理阶段已经产生的状态。"""
+
+    RUNNING = "running"  # 正在处理
+    SUCCESS = "success"  # 处理成功
+    FAILED = "failed"  # 处理失败
+
+
 class EventType(str, Enum):
     """定义机器与测量周期的业务事件类型。"""
 

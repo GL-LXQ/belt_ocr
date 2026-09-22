@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from app import App
 from config_util import AppConfig, MachineConfig
-from enums import EventType
+from enums import EventType, ProgressStage, ProgressStatus
 from frequency_adapter import FrequencyAdapter
 from models import FrequencyMeasurement, MeasurementEvent, OCRResult, PublishEvent
 from local_test_support import FakeMvsSdk, build_config, create_machine_database
@@ -111,6 +111,7 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
         },
     ])
     sdk = FakeMvsSdk()
+    progress_events = []
 
     # 用相机与频率仪替身启动应用，仅替换未实现的识别黑盒。
     with patch("app.load_mvs_sdk", lambda *arguments: sdk), \
@@ -128,7 +129,11 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
                 返回示例：
                     None  # 本轮测量已结算，资源已释放
             """
-            await application.start()
+            await application.start(
+                notify_measurement_progress=lambda machine_id, session_id, stage, status: progress_events.append(
+                    (machine_id, stage, status)
+                )
+            )
             machine_ids = list(application.machines)
             await asyncio.gather(*(
                 application.handle_start(machine_id) for machine_id in machine_ids
@@ -171,3 +176,14 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
     assert all(image_path.stat().st_size > 0 for image_path in saved_images)
     assert sdk.closed
     assert not application.database.lock_acquired
+
+    # 核对本轮进度按生命周期上报五个阶段的关键状态。
+    first_machine_events = [
+        (stage, status) for machine_id, stage, status in progress_events if machine_id == "1"
+    ]
+    assert (ProgressStage.SESSION_START, ProgressStatus.SUCCESS) in first_machine_events
+    assert (ProgressStage.IMAGE_CAPTURE, ProgressStatus.SUCCESS) in first_machine_events
+    assert (ProgressStage.FREQUENCY_COLLECTION, ProgressStatus.SUCCESS) in first_machine_events
+    assert (ProgressStage.CHARACTER_RECOGNITION, ProgressStatus.SUCCESS) in first_machine_events
+    assert (ProgressStage.EVIDENCE_STORAGE, ProgressStatus.RUNNING) in first_machine_events
+    assert (ProgressStage.EVIDENCE_STORAGE, ProgressStatus.SUCCESS) in first_machine_events

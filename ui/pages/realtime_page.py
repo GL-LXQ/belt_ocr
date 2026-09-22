@@ -32,6 +32,22 @@ from ui.theme import create_icon
 # 卡片区每行固定放置的机器数量。
 CARDS_PER_ROW = 3
 
+# 本轮处理阶段按界面展示顺序排列。
+PROGRESS_STAGE_TITLES = {
+    "session_start": "本轮启动",
+    "image_capture": "图像采集",
+    "frequency_collection": "频率采集",
+    "character_recognition": "字符识别",
+    "evidence_storage": "证据入库",
+}
+
+# 阶段状态转换为界面文字。
+PROGRESS_STATUS_TITLES = {
+    "running": "进行中",
+    "success": "已完成",
+    "failed": "失败",
+}
+
 
 class CapturePreview(QLabel):
     """暂无实时画面时的灰色占位区域。"""
@@ -77,7 +93,7 @@ class StepProgress(QFrame):
         self.step_labels = []
 
         # 在五个等宽列中放置圆点和文字，连接线置于圆点下层。
-        for index, title in enumerate(("等待启动", "采集图像", "准备字符识别", "识别中", "完成")):
+        for index, title in enumerate(PROGRESS_STAGE_TITLES.values()):
             dot = QLabel()
             dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
             dot.setFixedSize(25, 25)
@@ -95,35 +111,38 @@ class StepProgress(QFrame):
                 connector.lower()
                 self.connectors.append(connector)
 
-    def update_steps(self, completed: int, tone: str):
-        """更新已完成步骤与当前步骤颜色。
+        self.update_steps({})
+
+    def update_steps(self, progress_statuses: dict[str, str]):
+        """根据各阶段状态更新五个进度节点。
 
         Args:
-            completed: 已完成步骤数量。
-            tone: running、idle 或 waiting 展示状态。
+            progress_statuses: 以阶段标识为键、running、success 或 failed 为值的状态字典。
 
         Returns:
             返回示例：
                 None  # 更新步骤圆点及连接线
         """
-        # 根据演示状态设置步骤圆点、勾选图标和当前步骤边框。
-        accent = "#FF9818" if tone == "waiting" else "#18AE59"
+        # 根据每个阶段的实际状态设置圆点颜色和图标。
+        stage_names = tuple(PROGRESS_STAGE_TITLES)
         for index, dot in enumerate(self.dots):
-            active = (tone == "running" and index == completed) or (tone == "waiting" and index == 2)
-            color = "#2F7CF6" if active and tone == "running" else accent if index < completed else "#C5CFDA"
-            border = ("#A6C9FF" if tone == "running" else "#FFD3A1") if active else "white"
-            checkmark = create_icon("check", "white").pixmap(QSize(16, 16))
-            dot.setPixmap(checkmark if index < completed or active else QPixmap())
+            progress_status = progress_statuses.get(stage_names[index])
+            color = {
+                "running": "#2F7CF6",
+                "success": "#18AE59",
+                "failed": "#EF4444",
+            }.get(progress_status, "#C5CFDA")
+            icon_name = "check" if progress_status == "success" else "close"
+            icon = create_icon(icon_name, "white").pixmap(QSize(16, 16))
+            dot.setPixmap(icon if progress_status in ("success", "failed") else QPixmap())
+            active = progress_status in ("running", "failed")
+            border = "#A6C9FF" if progress_status == "running" else "#FFD0D0" if progress_status == "failed" else "white"
             self.step_labels[index].setStyleSheet("color: #34465F; font-weight: bold;" if active else "")
             dot.setStyleSheet(
                 f"background: {color}; color: white; border: 2px solid {border}; border-radius: 12px;"
             )
 
-        # 将已完成步骤之间的连接线设置为状态颜色。
-        for index, connector in enumerate(self.connectors):
-            color = accent if index < completed else "#D9E1EA"
-            connector.setStyleSheet(f"background: {color}; border: none;")
-
+        # 连接线只在相邻阶段均已成功时显示完成颜色。
     def resizeEvent(self, event):
         """让连接线随相邻圆点位置伸缩。
 
@@ -160,6 +179,8 @@ class MachineCard(QFrame):
         """
         super().__init__()
         self.setObjectName("machineCard")
+        self.progress_session_id = ""
+        self.progress_statuses = {}
         self.setMinimumWidth(326)
         # 高度按内容决定，可以被拉高但不会被压扁。
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
@@ -284,8 +305,7 @@ class MachineCard(QFrame):
             "background: #FFA43A; border-radius: 14px;" if data["tone"] == "waiting" else ""
         )
 
-        # 更新步骤和最近事件。
-        self.steps.update_steps(data["completed_steps"], data["tone"])
+        # 更新最近事件。
         for label in self.event_labels:
             label.clear()
         for index, (label, (timestamp, message)) in enumerate(zip(self.event_labels, data["events"])):
@@ -480,7 +500,6 @@ class RealtimePage(QWidget):
                 "status": "未启动",
                 "state": "未启动监测",
                 "frequency": "--",
-                "completed_steps": 0,
                 "events": (),
             })
             self.cards_layout.addWidget(card, index // CARDS_PER_ROW, index % CARDS_PER_ROW)
@@ -511,6 +530,7 @@ class RealtimePage(QWidget):
         # 创建后台线程，先接好连接进度和线程结束两个信号，再启动线程。
         self.monitoring_service = MonitoringService(self.configuration_directory)
         self.monitoring_service.camera_state_changed_signal.connect(self.update_connection_state)
+        self.monitoring_service.measurement_progress_changed_signal.connect(self.update_measurement_progress)
         self.monitoring_service.finished.connect(self.finish_monitoring)
         self.monitoring_service.start()
 
@@ -554,10 +574,42 @@ class RealtimePage(QWidget):
             "status": status,
             "state": "等待启停信号接入" if status == "相机已连接" else status,
             "frequency": "--",
-            "completed_steps": 0,
             "events": (("连接", reason),) if reason else (),
         })
         card.setToolTip(reason)
+
+    def update_measurement_progress(self, machine_id: str, session_id: str, stage: str, status: str):
+        """将后台发送的本轮阶段状态更新到对应机器卡片。
+
+        Args:
+            machine_id: 数据库机器编号的字符串形式。
+            session_id: 本轮测量周期编号。
+            stage: 本次更新的处理阶段标识。
+            status: 本次更新的 running、success 或 failed 状态。
+
+        Returns:
+            None  # 对应卡片显示当前周期的阶段状态
+        """
+        # 新周期到达时清空上一轮进度，再保存本次阶段状态。
+        card = self.cards_by_machine_id[machine_id]
+        if card.progress_session_id != session_id:
+            card.progress_session_id = session_id
+            card.progress_statuses = {}
+        progress_statuses = card.progress_statuses
+        progress_statuses[stage] = status
+
+        # 更新进度节点和卡片当前状态。
+        card.steps.update_steps(progress_statuses)
+        stage_title = PROGRESS_STAGE_TITLES[stage]
+        status_title = PROGRESS_STATUS_TITLES[status]
+        card.update_data({
+            "title": card.title.text(),
+            "tone": "waiting" if status == "failed" else "running",
+            "status": "测量失败" if status == "failed" else "测量中",
+            "state": f"{stage_title}{status_title}",
+            "frequency": card.frequency_label.text(),
+            "events": (),
+        })
 
     def finish_monitoring(self):
         """显示最终停止结果并恢复启动入口。

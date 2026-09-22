@@ -10,7 +10,15 @@ from uuid import uuid4
 from camera import Camera
 from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
-from enums import OCRState, FrequencyState, MachineState, SessionState, EventType
+from enums import (
+    EventType,
+    FrequencyState,
+    MachineState,
+    OCRState,
+    ProgressStage,
+    ProgressStatus,
+    SessionState,
+)
 from mvs_sdk import CameraFrame
 from models import BeltSession, MeasurementEvent, PublishEvent
 from async_utils import run_blocking_operation
@@ -31,6 +39,7 @@ class Machine:
         text_recognizer: TextRecognizer,
         database: Database,
         publish_event: PublishEvent,
+        notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None,
         report_failure: Callable[[Exception], None],
         state_changed: asyncio.Event,
     ) -> None:
@@ -44,6 +53,7 @@ class Machine:
             text_recognizer: 三台机器共享的 OCR 处理器。
             database: 共享存储入口。
             publish_event: 业务事件路由入口。
+            notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
             report_failure: 应用故障入口。
             state_changed: 周期状态变化通知。
 
@@ -58,6 +68,7 @@ class Machine:
         self.text_recognizer = text_recognizer
         self.database = database
         self.publish_event = publish_event
+        self.notify_measurement_progress = notify_measurement_progress
         self.report_failure = report_failure
         self.state_changed = state_changed
         self.queue: asyncio.Queue[MeasurementEvent] = asyncio.Queue(
@@ -171,6 +182,18 @@ class Machine:
         # 登记频率接收的当前周期，新测量按接收顺序交给本轮。
         self.frequency_adapter.active_session_id = session.session_id
 
+        # 通知界面本轮已经启动，图像和频率开始并行采集。
+        if self.notify_measurement_progress is not None:
+            self.notify_measurement_progress(
+                session.machine_id, session.session_id, ProgressStage.SESSION_START, ProgressStatus.SUCCESS,
+            )
+            self.notify_measurement_progress(
+                session.machine_id, session.session_id, ProgressStage.IMAGE_CAPTURE, ProgressStatus.RUNNING,
+            )
+            self.notify_measurement_progress(
+                session.machine_id, session.session_id, ProgressStage.FREQUENCY_COLLECTION, ProgressStatus.RUNNING,
+            )
+
         # 安排本轮运行超时和 OCR 超时事件。
         self.schedule_timeout(session, EventType.CYCLE_TIMEOUT, self.config.max_cycle_open_ms)
         # 登记本轮 OCR 等待期限，此处只安排超时事件。
@@ -241,6 +264,20 @@ class Machine:
             # 本轮没有有效读数时，标记频率异常并记录缺少测量的错误。
             session.frequency_state = FrequencyState.FAILED
             session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
+
+        # 通知界面本轮频率采集的结算结果。
+        if self.notify_measurement_progress is not None:
+            frequency_progress_status = (
+                ProgressStatus.SUCCESS
+                if session.frequency_state == FrequencyState.SUCCESS
+                else ProgressStatus.FAILED
+            )
+            self.notify_measurement_progress(
+                session.machine_id,
+                session.session_id,
+                ProgressStage.FREQUENCY_COLLECTION,
+                frequency_progress_status,
+            )
 
         # 停止本轮采集，当前周期继续占用机器直到保存或失败清理完成。
         await self.camera.inform_capture_workflow_stop()
@@ -342,6 +379,21 @@ class Machine:
                     return
                 capture_result = event.payload
                 session.capture_summary = capture_result.statistics
+
+                # 通知界面图像采集完成并开始字符识别。
+                if self.notify_measurement_progress is not None:
+                    self.notify_measurement_progress(
+                        session.machine_id,
+                        session.session_id,
+                        ProgressStage.IMAGE_CAPTURE,
+                        ProgressStatus.SUCCESS,
+                    )
+                    self.notify_measurement_progress(
+                        session.machine_id,
+                        session.session_id,
+                        ProgressStage.CHARACTER_RECOGNITION,
+                        ProgressStatus.RUNNING,
+                    )
                 # 启动一个整轮后台任务并登记完成回调。
                 session.ocr_state = OCRState.RUNNING
                 task = asyncio.create_task(self.recognize_session(session, capture_result.frames))
@@ -354,6 +406,13 @@ class Machine:
                     return
                 session.ocr_result = event.payload
                 session.ocr_state = OCRState.SUCCESS
+                if self.notify_measurement_progress is not None:
+                    self.notify_measurement_progress(
+                        session.machine_id,
+                        session.session_id,
+                        ProgressStage.CHARACTER_RECOGNITION,
+                        ProgressStatus.SUCCESS,
+                    )
                 # 撤销已经成功周期的 OCR 超时通知。
                 deadline = self.deadline_tasks.pop(EventType.OCR_TIMEOUT, None)
                 if deadline is not None:
@@ -364,6 +423,13 @@ class Machine:
                     return
                 session.ocr_state = OCRState.TIMED_OUT if event.event_type == EventType.OCR_TIMEOUT else OCRState.FAILED
                 session.errors.append(event.payload or "OCR_TIMEOUT")
+                if self.notify_measurement_progress is not None:
+                    self.notify_measurement_progress(
+                        session.machine_id,
+                        session.session_id,
+                        ProgressStage.CHARACTER_RECOGNITION,
+                        ProgressStatus.FAILED,
+                    )
             case EventType.FREQUENCY_MEASURED:
                 await self.handle_frequency_measured(session, event)
                 return
@@ -395,6 +461,13 @@ class Machine:
         # 判断提交是否成功，标记已入库并移除本轮档案。
         if event.event_type == EventType.COMMIT_SUCCEEDED:
             session.state = SessionState.COMMITTED
+            if self.notify_measurement_progress is not None:
+                self.notify_measurement_progress(
+                    session.machine_id,
+                    session.session_id,
+                    ProgressStage.EVIDENCE_STORAGE,
+                    ProgressStatus.SUCCESS,
+                )
             logger.info(
                 "已保存 machine_id=%s session_id=%s",
                 session.machine_id,
@@ -404,6 +477,13 @@ class Machine:
         else:
             # 登记提交失败原因，打印日志并清理本轮档案。
             session.errors.append(event.payload["error_code"])
+            if self.notify_measurement_progress is not None:
+                self.notify_measurement_progress(
+                    session.machine_id,
+                    session.session_id,
+                    ProgressStage.EVIDENCE_STORAGE,
+                    ProgressStatus.FAILED,
+                )
             await self.handle_measurement_failure(session)
 
     async def handle_measurement_failure(self, session: BeltSession) -> None:
@@ -614,6 +694,15 @@ class Machine:
         # 标记本轮等待入库。
         session.state = SessionState.WAITING_COMMIT_DB
 
+        # 通知界面本轮结果和证据开始入库。
+        if self.notify_measurement_progress is not None:
+            self.notify_measurement_progress(
+                session.machine_id,
+                session.session_id,
+                ProgressStage.EVIDENCE_STORAGE,
+                ProgressStatus.RUNNING,
+            )
+
         # 将最终图片所有权交给提交请求，Session 不再保留图片。
         session.ocr_result = None
 
@@ -621,6 +710,13 @@ class Machine:
         if await self.database.submit(request):
             return
         session.errors.append("DATABASE_QUEUE_FULL")
+        if self.notify_measurement_progress is not None:
+            self.notify_measurement_progress(
+                session.machine_id,
+                session.session_id,
+                ProgressStage.EVIDENCE_STORAGE,
+                ProgressStatus.FAILED,
+            )
 
         # 打印失败日志并清理本轮档案。
         await self.handle_measurement_failure(session)
