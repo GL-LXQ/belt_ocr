@@ -519,3 +519,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### Modbus RTU DI 通信
 
 `load_config()` 从 `io` 段读取串口参数与机器 DI 映射（`read_configuration_settings()` 把 `io_machine_channels` 的键统一转成字符串，YAML 写 `1: 0` 或 `"1": 0` 都归一为 `{"1": 0}`）→ `SystemRuntime.start()` 在加载启用机器后校验每台机器具有唯一非负通道 → 校验通过后按串口配置创建 `ModbusClient`（构造阶段只留 `None` 空位，串口缺失由 `validate_io_configuration()` 按配置项报错，创建后不主动连接）→ 机器、频率和存储任务启动后开放信号入口并启动 Modbus IO worker → `ModbusClient.read_discrete_inputs()` 自动建立或恢复 RTU 连接并读取 FC02 → 首次有效状态通过 `synchronize_machine()` 同步现场 OPEN/CLOSED，后续 False→True 调用 `handle_start()`、True→False 调用 `handle_close()` → 通信失败保留上次状态并等待重连 → 退出时取消 IO worker 并关闭串口。
+
+### Machine 资源释放收回 Machine 自身
+
+`src/machine.py` 新增 `Machine.release_resources(shutdown_error_code)`：停止本机相机采集 → 取消并等待本机识别任务与全部期限任务、期限任务表清空 → 退出时仍未结算的周期按传入原因走 `handle_measurement_failure()` → 清空 `current_session` 与 `frequency_adapter.active_session_id`，过程中的异常统一交给 `on_fatal_error`。`SystemRuntime.release_resources()` 不再读写这些机器内部字段，改为 `asyncio.gather` 并行调用各机器的 `release_resources()` 并逐条登记返回的异常，退出原因代码在调用前按 `self.failure` 取 `PROGRAM_FAILED` 或 `SHUTDOWN_TIMEOUT`。退出数据流不变：关闭信号入口 → SHUTDOWN 中断活动周期并等待周期、存储队列与机器队列排空（`shutdown_timeout_ms` 期限内，正常路径仍走机器自身的中断与结算）→ 超时或已故障转入强制释放 → 排空机器事件队列 → 逐台机器停止采集、取消本机任务并结算未完成周期 → 取消并等待系统级 worker 任务 → 断开 Modbus → 清空存储队列 → 关闭共享相机 SDK 与本地记录库。`tests/test_app_shutdown_release.py` 覆盖正常中断退出、故障退出和未关闭周期释放三种收尾。

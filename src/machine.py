@@ -675,6 +675,46 @@ class Machine:
         # 尝试释放本轮周期。
         self.release_finished_session()
 
+    async def release_resources(self, shutdown_error_code: str) -> None:
+        """停止本机采集，取消本机任务，并结算退出时未完成的周期。
+
+        Args:
+            shutdown_error_code: 未完成周期的退出原因代码，取 PROGRAM_FAILED 或 SHUTDOWN_TIMEOUT。
+
+        Returns:
+            返回示例：
+                None  # 相机已停止，本机任务已结束，周期与频率交付身份已清空
+        """
+        # 停止本机采集并等待结果交付结束，异常交给致命故障入口。
+        try:
+            await self.camera.stop()
+        except Exception as error:
+            self.on_fatal_error(error)
+
+        # 收集并取消本机识别任务与全部期限任务。
+        machine_tasks = [*self.deadline_tasks.values()]
+        if self.recognition_task is not None:
+            machine_tasks.append(self.recognition_task)
+        self.deadline_tasks.clear()
+        for task in machine_tasks:
+            task.cancel()
+
+        # 等待本机任务全部结束。
+        await asyncio.gather(*machine_tasks, return_exceptions=True)
+
+        # 退出时仍未结算的周期按退出原因执行失败清理。
+        session = self.current_session
+        if session is not None and session.state != SessionState.FAILED:
+            session.errors.append(shutdown_error_code)
+            try:
+                await self.handle_measurement_failure(session)
+            except Exception as error:
+                self.on_fatal_error(error)
+
+        # 清空退出后不再保留的周期身份与频率交付身份。
+        self.current_session = None
+        self.frequency_adapter.active_session_id = None
+
     async def recognize_session(self, session: BeltSession, frames: tuple[CameraFrame, ...]) -> None:
         """等待共享锁并执行整轮 OCR，向所属周期交付一次结果。
 

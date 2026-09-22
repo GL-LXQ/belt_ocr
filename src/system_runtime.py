@@ -13,7 +13,7 @@ from config_util import AppConfig, MachineConfig
 from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
 from machine import Machine
-from enums import EventType, MachineState, ProgressStage, ProgressStatus, SessionState
+from enums import EventType, MachineState, ProgressStage, ProgressStatus
 from models import RuntimeEvent
 from async_utils import run_blocking_operation
 from text_recognition import TextRecognizer
@@ -678,30 +678,25 @@ class SystemRuntime:
                     event.acknowledgement.cancel()
                 machine.queue.task_done()
 
-        # 停止全部相机的采集线程。
-        camera_results = await asyncio.gather(*(
-            machine.camera.stop() for machine in self.machines.values()
+        # 未完成周期按系统当前故障状态取退出原因代码。
+        shutdown_error_code = "PROGRAM_FAILED" if self.failure is not None else "SHUTDOWN_TIMEOUT"
+
+        # 逐台机器并行停止采集、取消本机任务并结算未完成周期。
+        release_results = await asyncio.gather(*(
+            machine.release_resources(shutdown_error_code) for machine in self.machines.values()
         ), return_exceptions=True)
 
-        # 逐条登记相机释放过程中的异常。
-        for result in camera_results:
+        # 逐条登记机器资源释放过程中的异常。
+        for result in release_results:
             if isinstance(result, Exception):
                 self.handle_fatal_error(result)
 
-        # 收集各机器的期限任务与识别任务。
-        background_tasks = []
-        for machine in self.machines.values():
-            background_tasks.extend(machine.deadline_tasks.values())
-            if machine.recognition_task is not None:
-                background_tasks.append(machine.recognition_task)
-
-        # 取消全部后台任务。
-        all_tasks = background_tasks + self.worker_tasks
-        for task in all_tasks:
+        # 取消全部系统级后台任务。
+        for task in self.worker_tasks:
             task.cancel()
 
         # 等待被取消的任务结束。
-        await asyncio.gather(*all_tasks, return_exceptions=True)
+        await asyncio.gather(*self.worker_tasks, return_exceptions=True)
 
         # 任务未启动或已异常退出时仍关闭 Modbus 客户端。
         if self.modbus_client is not None:
@@ -710,24 +705,8 @@ class SystemRuntime:
         # 清空已登记的后台任务列表。
         self.worker_tasks.clear()
 
-        # 业务任务停止后释放各周期最终图片和剩余事件。
+        # 清空不再处理的事件，释放事件携带的图片引用。
         for machine in self.machines.values():
-            session = machine.current_session
-
-            # 退出时未完成的周期按故障或超时登记，并执行失败清理。
-            if session is not None:
-                if session.state != SessionState.FAILED:
-                    session.errors.append("PROGRAM_FAILED" if self.failure is not None else "SHUTDOWN_TIMEOUT")
-                    try:
-                        await machine.handle_measurement_failure(session)
-                    except Exception as error:
-                        self.handle_fatal_error(error)
-
-            # 清空退出后的周期身份与未完成档案。
-            machine.current_session = None
-            machine.frequency_adapter.active_session_id = None
-
-            # 清空不再处理的事件，释放事件携带的图片引用。
             while not machine.queue.empty():
                 event = machine.queue.get_nowait()
                 if event.acknowledgement is not None and not event.acknowledgement.done():
