@@ -1,6 +1,6 @@
 # 项目概述与进度
 
-> 本文档是项目结构、数据流和进度的入口，更新于 2026-09-21。第一节分别说明 GUI 与后端，第二节集中记录项目进度，第三节列出当前状态与后续工作。
+> 本文档是项目结构、数据流和进度的入口，更新于 2026-09-22。第一节分别说明 GUI 与后端，第二节集中记录项目进度，第三节列出当前状态与后续工作。
 
 ## 一、项目概述
 
@@ -87,7 +87,7 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 |---|---|
 | `src/main.py` | 演示启停、故障等待和退出码 |
 | `src/system_runtime.py` | 读取启用机器、初始化、信号路由、全局故障与资源释放 |
-| `src/machine.py` | 每机周期状态、启停、频率、整轮 OCR 调度及提交条件 |
+| `src/machine.py` | 每机事件队列、周期状态、启停、频率、整轮 OCR 调度及提交条件 |
 | `src/camera/camera.py` | 创建采集任务、启动单线程收集整轮帧、停止采集并一次性交付结果 |
 | `src/camera/hikrobot_sdk.py` | SDK 加载、相机打开、取帧、内存 BMP 编码和关闭 |
 | `src/text_recognition.py` | 共享处理锁、OCR 主流程、筛帧与终选黑盒 |
@@ -527,3 +527,11 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### Database 队列职责收回 Database
 
 `src/database.py` 新增 `wait_until_queue_drained()`（等待已提交请求全部写入，内部仍是 `queue.join()`）与 `discard_pending_requests()`（逐条取出尚未消费的请求、清除对应 `queued_records` 并 `task_done()`，最后清空排队身份）。`SystemRuntime._shutdown_system_and_release_resources()` 不再直接操作 `database.queue` 和 `database.queued_records`：正常收尾阶段改为 `await self.database.wait_until_queue_drained()`，强制释放阶段改为 `self.database.discard_pending_requests()`，两处调用位置与先后顺序保持原样——先取消并等待"测量存储" worker 结束，再丢弃剩余请求，`Database.close()` 仍只负责关闭运行库连接、释放进程锁与锁文件。退出数据流因此是：SHUTDOWN 中断活动周期 → 等待周期结算 → `database.wait_until_queue_drained()` 写完已提交请求 → 等待机器队列 → 超时或故障转强制释放 → 取消系统 worker → 各 `machine.release_resources()` → `database.discard_pending_requests()` → `database.close()`。`tests/test_database_storage_queue.py` 覆盖等待写入不丢数据、丢弃后队列与排队身份无残留且 `join()` 不卡住。
+
+### 2026-09-22：Machine 事件队列职责收回 Machine
+
+与上一节对 `Database` 的处理对称，`src/machine.py` 新增 `wait_until_event_queue_drained()`（等待本机已提交事件全部处理结束，内部仍是 `queue.join()`）与同步方法 `discard_pending_events()`（逐条取出尚未被 worker 取走的事件、取消其未完成的 `acknowledgement` 并逐条 `task_done()`）。`SystemRuntime` 中此前逐字符重复三遍的清理循环全部改为一次 `machine.discard_pending_events()` 调用，三处调用时机与先后顺序保持原样：`publish_event()` 中阻塞 `put()` 返回后遇到 `releasing_resources` 的补偿清理、`_shutdown_system_and_release_resources()` 中 `releasing_resources = True` 之后的排空、以及取消全部系统级 worker 任务之后释放事件携带的图片引用；`_drain_pending_work()` 的 `machine.queue.join()` 改为 `machine.wait_until_event_queue_drained()`。`await machine.queue.put(event)` 保留在 `publish_event()` 中——它只有一个调用点且含义直白，不为隐藏队列类型增加一行包装，因此 `SystemRuntime` 仍不认识 `empty`/`get_nowait`/`task_done`/`join` 这些队列操作。worker 的 `listen_events()` 消费与 `task_done()` 结算逻辑、正在处理中的那条事件由 worker 自行结算的语义、正常退出与强制退出的现有行为均未改动。
+
+退出数据流：SHUTDOWN 中断活动周期 → 等待周期结算 → `database.wait_until_queue_drained()` 写完已提交请求 → 逐台 `machine.wait_until_event_queue_drained()` → 超时或故障转强制释放 → 逐台 `machine.discard_pending_events()` → 各 `machine.release_resources()` → 取消系统 worker → 逐台再次 `machine.discard_pending_events()` → `database.discard_pending_requests()` → `database.close()`。
+
+新增 `tests/test_machine_event_queue.py`（5 项）：worker 取出事件并结算回执、等待排空在无消费者时阻塞且处理完成后立即结束（沿用原 `join()` 语义）、丢弃会取消未完成回执而不动已完成回执且后续等待不卡住、只清掉未取走的事件而正被处理的那条仍由 worker 结算（`task_done()` 计数不超发），以及退出流程仍按原有阶段调用一次等待排空与不少于两次丢弃。`publish_event()` 的阻塞入队补偿分支需要「队列满时 `put()` 阻塞、期间 `releasing_resources` 翻真、随后 worker 又腾出空位」这一时序才能触发，构造成本高于被测逻辑本身，因此未单独写用例，该分支的代码与语义原样保留，退出流程中的两处丢弃调用由计数用例守住。全量 pytest：344 项通过、1 项失败，失败项仍是既有的 `test_progress_for_missing_card_is_ignored`，与本次改动无关（新增测试前基线为 339 项通过、同一项失败）。

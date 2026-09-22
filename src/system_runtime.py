@@ -466,11 +466,7 @@ class SystemRuntime:
 
         # 退出期间释放此前阻塞入队的事件和回执。
         if self.releasing_resources:
-            while not machine.queue.empty():
-                pending_event = machine.queue.get_nowait()
-                if pending_event.acknowledgement is not None and not pending_event.acknowledgement.done():
-                    pending_event.acknowledgement.cancel()
-                machine.queue.task_done()
+            machine.discard_pending_events()
 
     async def synchronize_machine(self, machine_id: str, observed_state: MachineState | str) -> None:
         """将现场状态转换为枚举并发送机器同步事件。
@@ -638,7 +634,7 @@ class SystemRuntime:
 
         # 等待各机器事件队列排空。
         for machine in self.machines.values():
-            await machine.queue.join()
+            await machine.wait_until_event_queue_drained()
 
     async def _shutdown_system_and_release_resources(self) -> None:
         """停止全部测量，释放后台任务、相机和数据库资源。
@@ -672,11 +668,7 @@ class SystemRuntime:
 
         # 排空各机器事件队列，释放阻塞入队的相机交付任务。
         for machine in self.machines.values():
-            while not machine.queue.empty():
-                event = machine.queue.get_nowait()
-                if event.acknowledgement is not None and not event.acknowledgement.done():
-                    event.acknowledgement.cancel()
-                machine.queue.task_done()
+            machine.discard_pending_events()
 
         # 未完成周期按系统当前故障状态取退出原因代码。
         shutdown_error_code = "PROGRAM_FAILED" if self.failure is not None else "SHUTDOWN_TIMEOUT"
@@ -707,11 +699,7 @@ class SystemRuntime:
 
         # 清空不再处理的事件，释放事件携带的图片引用。
         for machine in self.machines.values():
-            while not machine.queue.empty():
-                event = machine.queue.get_nowait()
-                if event.acknowledgement is not None and not event.acknowledgement.done():
-                    event.acknowledgement.cancel()
-                machine.queue.task_done()
+            machine.discard_pending_events()
 
         # 丢弃存储队列中尚未执行的请求。
         self.database.discard_pending_requests()

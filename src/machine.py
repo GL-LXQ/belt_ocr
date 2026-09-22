@@ -156,6 +156,40 @@ class Machine:
                 # 释放本次事件的引用。
                 event = None
 
+    async def wait_until_event_queue_drained(self) -> None:
+        """等待本机事件队列中已提交的事件全部处理结束。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 队列中不再有等待处理和正在处理的事件
+        """
+        # 等待全部已入队事件完成队列结算。
+        await self.queue.join()
+
+    def discard_pending_events(self) -> None:
+        """丢弃队列中尚未处理的事件，并取消这些事件未完成的处理回执。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 队列已清空，被丢弃事件的回执已取消，不再有人等待
+        """
+        # 逐条取出队列中尚未被 worker 取走的事件。
+        while not self.queue.empty():
+            pending_event = self.queue.get_nowait()
+
+            # 取消该事件尚未完成的处理回执。
+            if pending_event.acknowledgement is not None and not pending_event.acknowledgement.done():
+                pending_event.acknowledgement.cancel()
+
+            # 结算本次取出对应的队列任务计数。
+            self.queue.task_done()
+
     async def handle_machine_start(self) -> None:
         """检查接收条件，创建本轮测量档案并启动采集窗口和超时任务。
 
