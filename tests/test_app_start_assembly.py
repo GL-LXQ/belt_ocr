@@ -1,4 +1,4 @@
-"""验证 App 构造只组装依赖，机器清单和相机在启动阶段准备。"""
+"""验证 SystemRuntime 构造只组装依赖，机器清单和相机在启动阶段准备。"""
 
 import asyncio
 from pathlib import Path
@@ -6,13 +6,13 @@ from unittest.mock import Mock
 
 import pytest
 
-from app import App
+from system_runtime import SystemRuntime
 from repo.machine_repo import MachineRepo
 from local_test_support import FakeMvsSdk, build_config, create_machine_database
 
 
 def test_construction_does_not_touch_database(tmp_path: Path) -> None:
-    """验证构造 App 只登记依赖，不建库也不读机器。
+    """验证构造 SystemRuntime 只登记依赖，不建库也不读机器。
 
     Args:
         tmp_path: 测试临时目录。
@@ -23,8 +23,8 @@ def test_construction_does_not_touch_database(tmp_path: Path) -> None:
     config = build_config(tmp_path)
 
     # 构造应用后检查业务库目录和机器运行对象。
-    application = App(config)
-    assert application.machines == {}
+    system_runtime = SystemRuntime(config)
+    assert system_runtime.machines == {}
     assert not config.database_path.exists()
     assert not config.database_path.parent.exists()
 
@@ -59,10 +59,10 @@ def test_initialize_machines_binds_enabled_machines(tmp_path: Path) -> None:
     ])
 
     # 建立机器运行对象后检查登记范围与机器身份。
-    application = App(config)
-    application.initialize_machines()
-    assert list(application.machines) == [str(first_id), str(second_id)]
-    second_machine = application.machines[str(second_id)].machine_config
+    system_runtime = SystemRuntime(config)
+    system_runtime.initialize_machines()
+    assert list(system_runtime.machines) == [str(first_id), str(second_id)]
+    second_machine = system_runtime.machines[str(second_id)].machine_config
     assert second_machine.camera_serial == "CAM-B"
     assert second_machine.frequency_meter_serial == "FREQ-B"
 
@@ -79,15 +79,15 @@ def test_start_rejects_missing_enabled_machines(tmp_path: Path, monkeypatch) -> 
     """
     config = build_config(tmp_path)
     loader = Mock()
-    monkeypatch.setattr("app.load_mvs_sdk", loader)
+    monkeypatch.setattr("system_runtime.load_mvs_sdk", loader)
 
     # 启动应在读取机器后立即拒绝，不加载 SDK。
-    application = App(config)
+    system_runtime = SystemRuntime(config)
     with pytest.raises(ValueError, match="没有启用的机器"):
-        asyncio.run(application.start())
+        asyncio.run(system_runtime.start())
     loader.assert_not_called()
-    assert not application.worker_tasks
-    assert not application.database.lock_acquired
+    assert not system_runtime.worker_tasks
+    assert not system_runtime.database.lock_acquired
 
     # 启动被拒绝时机器表已建好，可直接新增机器。
     assert MachineRepo(config.database_path).list_enabled() == []
@@ -105,8 +105,8 @@ def test_start_reads_machines_added_after_construction(tmp_path: Path, monkeypat
     """
     config = build_config(tmp_path)
     sdk = FakeMvsSdk()
-    monkeypatch.setattr("app.load_mvs_sdk", lambda *arguments: sdk)
-    application = App(config)
+    monkeypatch.setattr("system_runtime.load_mvs_sdk", lambda *arguments: sdk)
+    system_runtime = SystemRuntime(config)
 
     # 构造之后写入启用机器，启动时按数据库记录建立处理器。
     machine_id = create_machine_database(config.database_path, [{
@@ -125,14 +125,14 @@ def test_start_reads_machines_added_after_construction(tmp_path: Path, monkeypat
             返回示例：
                 None  # 启动与资源释放均已完成
         """
-        await application.start()
-        await application.stop()
+        await system_runtime.start()
+        await system_runtime.stop()
 
     asyncio.run(run_start_and_stop())
 
     # 检查机器登记、相机绑定和退出后的资源状态。
-    assert list(application.machines) == [str(machine_id)]
-    assert application.machines[str(machine_id)].camera.sdk_camera.serial == "CAM-A"
+    assert list(system_runtime.machines) == [str(machine_id)]
+    assert system_runtime.machines[str(machine_id)].camera.sdk_camera.serial == "CAM-A"
     assert sdk.closed
     assert sdk.cameras["CAM-A"].closed
-    assert not application.database.lock_acquired
+    assert not system_runtime.database.lock_acquired

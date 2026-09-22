@@ -8,7 +8,7 @@ from itertools import cycle
 from pathlib import Path
 from unittest.mock import patch
 
-from app import App
+from system_runtime import SystemRuntime
 from config_util import AppConfig, MachineConfig
 from enums import EventType, ProgressStage, ProgressStatus
 from frequency_adapter import FrequencyAdapter
@@ -63,19 +63,19 @@ class FixedFrequencyAdapter(FrequencyAdapter):
             ))
 
 
-def stub_text_recognition(application: App) -> None:
+def stub_text_recognition(system_runtime: SystemRuntime) -> None:
     """替换尚未实现的识别与终选黑盒，返回确定性的文字和图片。
 
     Args:
-        application: 待替换识别黑盒的应用实例。
+        system_runtime: 待替换识别黑盒的运行时实例。
 
     Returns:
         返回示例：
             None  # 识别与终选已改为确定性替身
     """
     # 识别按输入图片数量返回空文字块，终选固定取第一张图片。
-    application.text_recognizer.recognize_images = lambda images: [{"blocks": []} for _ in images]
-    application.text_recognizer.generate_final_text_and_images = lambda frame_results, frames: OCRResult(
+    system_runtime.text_recognizer.recognize_images = lambda images: [{"blocks": []} for _ in images]
+    system_runtime.text_recognizer.generate_final_text_and_images = lambda frame_results, frames: OCRResult(
         ordered_lines=("MODEL-1",),
         selected_frames=(frames[0],),
         line_frame_ids=((frames[0].frame_id,),),
@@ -114,10 +114,10 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
     progress_events = []
 
     # 用相机与频率仪替身启动应用，仅替换未实现的识别黑盒。
-    with patch("app.load_mvs_sdk", lambda *arguments: sdk), \
-            patch("app.FrequencyAdapter", FixedFrequencyAdapter):
-        application = App(config)
-        stub_text_recognition(application)
+    with patch("system_runtime.load_mvs_sdk", lambda *arguments: sdk), \
+            patch("system_runtime.FrequencyAdapter", FixedFrequencyAdapter):
+        system_runtime = SystemRuntime(config)
+        stub_text_recognition(system_runtime)
 
         async def run_cycle() -> None:
             """启动两台机器，等待采集窗口结束后正常关闭并释放资源。
@@ -129,25 +129,25 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
                 返回示例：
                     None  # 本轮测量已结算，资源已释放
             """
-            await application.start(
+            await system_runtime.start(
                 notify_measurement_progress=lambda machine_id, session_id, stage, status: progress_events.append(
                     (machine_id, stage, status)
                 )
             )
-            machine_ids = list(application.machines)
+            machine_ids = list(system_runtime.machines)
             await asyncio.gather(*(
-                application.handle_start(machine_id) for machine_id in machine_ids
+                system_runtime.handle_start(machine_id) for machine_id in machine_ids
             ))
 
             # 等待采集窗口结束并累计频率读数，再发送正常关闭。
             await asyncio.sleep(0.4)
             await asyncio.gather(*(
-                application.handle_close(machine_id) for machine_id in machine_ids
+                system_runtime.handle_close(machine_id) for machine_id in machine_ids
             ))
 
             # 等待识别和存储完成本轮结算，然后释放资源。
-            await application.wait_until_idle(10)
-            await application.stop()
+            await system_runtime.wait_until_idle(10)
+            await system_runtime.stop()
 
         asyncio.run(run_cycle())
 
@@ -161,7 +161,7 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
 
     # 逐台核对最终文字、最后交付频率、选中图片文件与相机状态。
     for machine_id, ordered_lines, final_frequency_hz, evidence_refs in records:
-        manager = application.machines[machine_id]
+        manager = system_runtime.machines[machine_id]
         delivered_values_hz = manager.frequency_adapter.delivered_values_hz
         assert json.loads(ordered_lines) == ["MODEL-1"]
         assert delivered_values_hz
@@ -175,7 +175,7 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
     assert len(saved_images) == 2
     assert all(image_path.stat().st_size > 0 for image_path in saved_images)
     assert sdk.closed
-    assert not application.database.lock_acquired
+    assert not system_runtime.database.lock_acquired
 
     # 核对本轮进度按生命周期上报五个阶段的关键状态。
     first_machine_events = [

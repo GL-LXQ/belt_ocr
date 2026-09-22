@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from app import App
+from system_runtime import SystemRuntime
 from config_util import load_config
 
 
@@ -59,19 +59,19 @@ class MonitoringService(QThread):
         """
         # 从业务库构建机器配置并创建后台处理器。
         config = load_config(self.configuration_directory)
-        application = App(config)
+        system_runtime = SystemRuntime(config)
         try:
             # 连接相机并等待停止通知，不发送模拟启停信号。
-            await application.start(
+            await system_runtime.start(
                 self.camera_state_changed_signal.emit,
                 self.measurement_progress_changed_signal.emit,
             )
-            while not self.stop_requested.is_set() and application.failure is None:
+            while not self.stop_requested.is_set() and system_runtime.failure is None:
                 await asyncio.sleep(0.1)
         finally:
             # 等待已有后台流程退出并释放相机和数据库。
-            await application.stop()
+            await system_runtime.stop()
 
         # 将运行或资源释放故障交给线程入口。
-        if application.failure is not None:
-            raise application.failure
+        if system_runtime.failure is not None:
+            raise system_runtime.failure

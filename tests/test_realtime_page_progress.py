@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtWidgets import QApplication
 
-from app import App
+from system_runtime import SystemRuntime
 from enums import ProgressStage, ProgressStatus
 from local_test_support import FakeMvsSdk, build_config, create_machine_database
 from repo.machine_repo import MachineRepo
@@ -323,7 +323,7 @@ def test_failed_cycle_reports_to_page_without_evidence(tmp_path: Path) -> None:
     ])
     sdk = FakeMvsSdk()
     progress_events = []
-    application = App(config)
+    system_runtime = SystemRuntime(config)
 
     def fail_recognition(images: list[bytes]) -> list[dict]:
         """用模型故障构造整轮识别失败。
@@ -336,7 +336,7 @@ def test_failed_cycle_reports_to_page_without_evidence(tmp_path: Path) -> None:
         """
         raise RuntimeError("OCR_MODEL_FAILED")
 
-    application.text_recognizer.recognize_images = fail_recognition
+    system_runtime.text_recognizer.recognize_images = fail_recognition
 
     async def run_failed_cycle() -> None:
         """启动一轮采集，等识别失败后关闭并释放资源。
@@ -349,13 +349,13 @@ def test_failed_cycle_reports_to_page_without_evidence(tmp_path: Path) -> None:
                 None  # 失败轮已结算，资源已释放
         """
         # 启动应用并开始本轮采集。
-        await application.start(
+        await system_runtime.start(
             notify_measurement_progress=lambda machine_id, session_id, stage, status: progress_events.append(
                 (machine_id, session_id, stage, status)
             )
         )
-        machine_id = next(iter(application.machines))
-        await application.handle_start(machine_id)
+        machine_id = next(iter(system_runtime.machines))
+        await system_runtime.handle_start(machine_id)
 
         # 等识别失败上报后再关闭，避免关闭先结算导致失败事件被状态守卫丢弃。
         deadline = asyncio.get_running_loop().time() + 5
@@ -367,11 +367,11 @@ def test_failed_cycle_reports_to_page_without_evidence(tmp_path: Path) -> None:
             await asyncio.sleep(0.02)
 
         # 发送正常关闭，等本轮失败清理完成并释放资源。
-        await application.handle_close(machine_id)
-        await application.wait_until_idle(10)
-        await application.stop()
+        await system_runtime.handle_close(machine_id)
+        await system_runtime.wait_until_idle(10)
+        await system_runtime.stop()
 
-    with patch("app.load_mvs_sdk", lambda *arguments: sdk):
+    with patch("system_runtime.load_mvs_sdk", lambda *arguments: sdk):
         asyncio.run(run_failed_cycle())
 
     # 失败轮只上报识别失败与频率结算失败，不上报证据入库。

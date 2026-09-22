@@ -23,7 +23,7 @@ BeltVision 主窗口默认 1600 × 900、最小 1280 × 720，支持标题栏拖
 
 用户点击侧栏导航或顶部设置入口后，MainWindow 同步更新 QStackedWidget、导航高亮和标题栏；QTimer 每秒刷新本地时间；后续业务层可通过 `set_system_status(text, status)` 和 `set_connection_status(connected)` 更新状态文案与圆点。机器管理页支持数据库新增、编辑和软删除，实时监测页点击“启动监测”后读取启用机器并显示真实相机连接结果，停止监测或关闭窗口会等待后台释放资源；其他四页仍为占位页面。顶部系统状态仍是演示文案，频率、画面和日志尚未接入真实数据，测量进度已接入后台阶段信号，但当前不自动发送测量启停信号。
 
-实时监测进度复用后端 `Machine` 的本轮生命周期，通过 `App.start()` 的可选回调传到 `MonitoringService` 的 Qt 信号，再由实时监测页更新卡片。阶段定义集中在 `src/enums.py`，包括本轮启动、图像采集、频率采集、字符识别和证据入库；未收到阶段信号时页面显示未开始，图像采集和频率采集并行，只有 OCR、频率和正常关闭均完成后才发送证据入库状态。五个阶段节点之间由固定颜色的连接线连成轨道，连接线只表示步骤先后，不随阶段状态变化。
+实时监测进度复用后端 `Machine` 的本轮生命周期，通过 `SystemRuntime.start()` 的可选回调传到 `MonitoringService` 的 Qt 信号，再由实时监测页更新卡片。阶段定义集中在 `src/enums.py`，包括本轮启动、图像采集、频率采集、字符识别和证据入库；未收到阶段信号时页面显示未开始，图像采集和频率采集并行，只有 OCR、频率和正常关闭均完成后才发送证据入库状态。五个阶段节点之间由固定颜色的连接线连成轨道，连接线只表示步骤先后，不随阶段状态变化。
 
 #### 1.1.3 GUI 模块职责
 
@@ -55,7 +55,7 @@ uv run python -X utf8 -m pytest -q
 
 #### 1.2.2 数据流动逻辑
 
-入口 `src/main.py` 读取配置文件中的公共参数，`src/app.py` 构造时只保存配置、创建共享存储与运行状态，`start()` 再按顺序初始化图片目录与双库、按业务库 `machine` 表读取启用机器并逐台建立采集器、频率接收、共享 OCR 和存储任务；采集帧与频率读数按周期汇入对应机器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera.py` 的 `Camera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器运行对象在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，机器故障停止整个应用。
+入口 `src/main.py` 读取配置文件中的公共参数，`src/system_runtime.py` 构造时只保存配置、创建共享存储与运行状态，`start()` 再按顺序初始化图片目录与双库、按业务库 `machine` 表读取启用机器并逐台建立采集器、频率接收、共享 OCR 和存储任务；采集帧与频率读数按周期汇入对应机器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera.py` 的 `Camera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器运行对象在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，机器故障停止整个应用。
 
 #### 1.2.3 处理阶段与职责
 
@@ -86,7 +86,7 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 | 文件 | 职责 |
 |---|---|
 | `src/main.py` | 演示启停、故障等待和退出码 |
-| `src/app.py` | 读取启用机器、初始化、信号路由、全局故障与资源释放 |
+| `src/system_runtime.py` | 读取启用机器、初始化、信号路由、全局故障与资源释放 |
 | `src/machine.py` | 每机周期状态、启停、频率、整轮 OCR 调度及提交条件 |
 | `src/camera.py` | 创建采集任务、启动单线程收集整轮帧、停止采集并一次性交付结果 |
 | `src/mvs_sdk.py` | SDK 加载、相机打开、取帧、内存 BMP 编码和关闭 |
@@ -484,3 +484,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 实时监测页进度连接线固定颜色
 
 `ui/pages/realtime_page.py` 的 `StepProgress` 中，五个阶段节点之间的四条连接线改为在构造时设置一次固定轨道颜色（`background: #D9E1EA; border: none;`），不再随阶段状态着色：连接线的位置仍由 `resizeEvent` 按相邻圆点对齐，`update_steps` 因此只更新圆点颜色、勾选或叉号图标和步骤文字，方法 docstring 的返回说明改为「更新步骤圆点的颜色、图标和步骤文字」，并删掉原先留在方法末尾、描述连接线按相邻阶段着色的那句注释——对应的着色循环在本轮改动前已被移除，界面因此看不到连接线。新增 `tests/test_realtime_page_progress.py`，用离屏 Qt 建立实时监测页并按 `grab()` 取实际像素，核对圆点与连接线的显示颜色、卡片文案和换轮清空，另用相机替身跑一轮识别失败的完整周期，核对失败轮只上报识别失败与频率结算失败、不上报证据入库、不写测量记录。数据流不变：`load_config()` 读 YAML 公共参数 → `App(config)` 只组装共享依赖 → `start()` 建图片目录与双库、读启用机器并逐台建立 `Machine` 与 `Camera`、打开相机并启动各后台任务 → START 采集图片与频率 → 事件按机器编号进入 FIFO 队列由 `listen_events` 串行处理 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 提交结果回到原周期；本轮阶段状态另经 `App.start()` 的进度回调送到 `MonitoringService` 的 Qt 信号，再由实时监测页更新卡片。全量 pytest：313 项通过、1 项失败（`test_progress_for_missing_card_is_ignored`：机器在监测期间从卡片区移除后，`update_measurement_progress` 按机器编号直接下标取值会抛 `KeyError`，尚未处理）。
+
+### App 改名为 SystemRuntime，文件同步为 src/system_runtime.py
+
+`src/app.py` 更名为 `src/system_runtime.py`，类 `App` 改名为 `SystemRuntime`：这个对象是整套测量系统的运行期入口（读启用机器、组装共享依赖、路由启停与提交事件、持有全局故障和资源释放），`App` 太泛，和桌面应用、Qt 的 `QApplication` 混在一起，改名后与 `Machine`、`Camera`、`FrequencyAdapter` 这类「它是什么就叫什么」的命名一致。实例化后的变量统一为 `system_runtime`：`src/main.py` 的局部变量与 `run_measurement_cycles()` 形参、`src/service/monitoring_service.py` 的局部变量、三个测试文件的局部变量与 `stub_text_recognition()` 形参随之改名，两处描述参数的注释同步改为「测量运行时」「运行时实例」；`ui/__main__.py` 里指向 `QApplication` 的 `application` 和 `src/config_util.py` 的 YAML 段落名 `application` 不是这个对象，保持原样。测试里按模块名打补丁的目标一并改为 `system_runtime.load_mvs_sdk` 与 `system_runtime.FrequencyAdapter`（`patch()` 3 处、`monkeypatch.setattr()` 2 处），导入改为 `from system_runtime import SystemRuntime`；`tests/test_app_start_assembly.py` 与 `tests/test_app_measurement_cycle.py` 两个文件名暂未跟随改名。本文档的概述、模块职责表和当前状态用新名，第二节及以后按天记录的历史条目仍写 `App` 与 `src/app.py`，那是当时的名字。数据流不变：`load_config()` 读 YAML 公共参数 → `SystemRuntime(config)` 只组装共享依赖 → `start()` 同步建图片目录与双库、`initialize_machines()` 读业务库启用机器并逐台建立 `Machine`、同步加载 SDK 并逐台打开相机、启动机器事件与频率监听任务和共享存储任务 → START 采集图片与频率 → 事件按机器编号进入 FIFO 队列由 `listen_events` 串行处理 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 提交结果回到原周期，本轮阶段状态另经 `start()` 的进度回调送到 `MonitoringService` 的 Qt 信号 → 退出时关闭相机并释放实例锁。全量 pytest：313 项通过、1 项失败，与改名前完全一致（失败项是上一节记录的 `test_progress_for_missing_card_is_ignored`，与本次改名无关）。

@@ -23,7 +23,7 @@ from database import Database
 logger = logging.getLogger(__name__)
 
 
-class App:
+class SystemRuntime:
     def __init__(self, config: AppConfig) -> None:
         """保存运行配置，创建共享存储和运行状态。
 

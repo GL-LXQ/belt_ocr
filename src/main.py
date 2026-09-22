@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from config_util import load_config
-from app import App
+from system_runtime import SystemRuntime
 
 
 async def run_measurement_demo(configuration_directory: Path) -> None:
@@ -21,26 +21,26 @@ async def run_measurement_demo(configuration_directory: Path) -> None:
     # 读取配置并准备应用和本次主流程任务。
     try:
         config = load_config(configuration_directory)
-        app = App(config)
+        system_runtime = SystemRuntime(config)
     except Exception:
         logging.exception("测量配置初始化失败")
         raise
     tasks = []
     try:
         # 启动应用，并同时等待测量完成或相机故障。
-        await app.start()
-        measurement_task = asyncio.create_task(run_measurement_cycles(app))
-        failure_task = asyncio.create_task(app.wait_for_failure())
+        await system_runtime.start()
+        measurement_task = asyncio.create_task(run_measurement_cycles(system_runtime))
+        failure_task = asyncio.create_task(system_runtime.wait_for_failure())
         tasks = [measurement_task, failure_task]
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
         # 优先传播相机故障，否则读取测量主流程的执行结果。
-        if app.failure is not None:
-            raise app.failure
+        if system_runtime.failure is not None:
+            raise system_runtime.failure
         await measurement_task
     except Exception:
         # 记录尚未由相机或后台任务处理的演示流程异常。
-        if app.failure is None:
+        if system_runtime.failure is None:
             logging.exception("测量流程失败")
         raise
     finally:
@@ -48,25 +48,25 @@ async def run_measurement_demo(configuration_directory: Path) -> None:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await app.stop()
+        await system_runtime.stop()
 
     # 退出时的相机释放故障同样交给命令行报告失败。
-    if app.failure is not None:
-        raise app.failure
+    if system_runtime.failure is not None:
+        raise system_runtime.failure
 
 
-async def run_measurement_cycles(app: App) -> None:
+async def run_measurement_cycles(system_runtime: SystemRuntime) -> None:
     """执行两轮演示启停并等待测量结算。
 
     Args:
-        app: 已启动的测量应用。
+        system_runtime: 已启动的测量运行时。
 
     Returns:
         None  # 演示周期已结束，测量已完成或失败清理
     """
     # 选择现场状态已就绪的机器。
     machine_ids = [
-        identifier for identifier, machine in app.machines.items()
+        identifier for identifier, machine in system_runtime.machines.items()
         if machine.acceptance_state == "READY"
     ]
     if not machine_ids:
@@ -74,19 +74,19 @@ async def run_measurement_cycles(app: App) -> None:
         return
 
     # 同时启动全部机器的第一轮测量，再发送正常关闭。
-    await asyncio.gather(*(app.handle_start(machine_id) for machine_id in machine_ids))
-    await asyncio.sleep(app.config.capture_window_ms / 1000 + 0.1)
-    await asyncio.gather(*(app.handle_close(machine_id) for machine_id in machine_ids))
+    await asyncio.gather(*(system_runtime.handle_start(machine_id) for machine_id in machine_ids))
+    await asyncio.sleep(system_runtime.config.capture_window_ms / 1000 + 0.1)
+    await asyncio.gather(*(system_runtime.handle_close(machine_id) for machine_id in machine_ids))
 
     # 等待第一轮全部保存或清理完成，再启动下一轮。
-    await app.wait_until_idle()
-    await app.handle_start(machine_ids[0])
-    await asyncio.sleep(app.config.capture_window_ms / 1000 + 0.1)
-    await app.handle_close(machine_ids[0])
+    await system_runtime.wait_until_idle()
+    await system_runtime.handle_start(machine_ids[0])
+    await asyncio.sleep(system_runtime.config.capture_window_ms / 1000 + 0.1)
+    await system_runtime.handle_close(machine_ids[0])
 
     # 等待全部测量结算，输出正常结果的数据库位置。
-    await app.wait_until_idle()
-    logging.info("演示结束，正常结果数据库：%s；失败原因见日志。", app.config.database_path)
+    await system_runtime.wait_until_idle()
+    logging.info("演示结束，正常结果数据库：%s；失败原因见日志。", system_runtime.config.database_path)
 
 
 def main() -> None:
