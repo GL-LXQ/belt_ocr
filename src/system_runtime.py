@@ -610,6 +610,36 @@ class SystemRuntime:
         # 等待清理任务完成，不受本次调用取消的影响。
         await asyncio.shield(self.shutdown_task)
 
+    async def _drain_pending_work(self) -> None:
+        """中断活动周期并等待现有业务队列排空。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 现有测量和队列已结算
+        """
+        # 向每台机器发送中断事件并等待处理回执。
+        for machine in self.machines.values():
+            acknowledgement = asyncio.get_running_loop().create_future()
+            await self.publish_event(RuntimeEvent(
+                EventType.SHUTDOWN,
+                machine.machine_config.machine_id,
+                acknowledgement=acknowledgement,
+            ))
+            await acknowledgement
+
+        # 等待各机器周期结算完成。
+        await self.wait_until_idle(self.config.shutdown_timeout_ms / 1000)
+
+        # 等待共享存储队列排空。
+        await self.database.wait_until_queue_drained()
+
+        # 等待各机器事件队列排空。
+        for machine in self.machines.values():
+            await machine.queue.join()
+
     async def release_resources(self) -> None:
         """停止全部测量，释放后台任务、相机和数据库资源。
 
@@ -624,40 +654,10 @@ class SystemRuntime:
         self.accepting_signals = False
         self.stopping = True
 
-        async def drain_measurements() -> None:
-            """中断活动周期并等待现有业务队列排空。
-
-            Args:
-                无外部参数。
-
-            Returns:
-                返回示例：
-                    None  # 现有测量和队列已结算
-            """
-            # 向每台机器发送中断事件并等待处理回执。
-            for machine in self.machines.values():
-                acknowledgement = asyncio.get_running_loop().create_future()
-                await self.publish_event(RuntimeEvent(
-                    EventType.SHUTDOWN,
-                    machine.machine_config.machine_id,
-                    acknowledgement=acknowledgement,
-                ))
-                await acknowledgement
-
-            # 等待各机器周期结算完成。
-            await self.wait_until_idle(self.config.shutdown_timeout_ms / 1000)
-
-            # 等待共享存储队列排空。
-            await self.database.queue.join()
-
-            # 等待各机器事件队列排空。
-            for machine in self.machines.values():
-                await machine.queue.join()
-
         # 无故障且已启动后台任务时，在退出期限内完成测量收尾。
         try:
             if self.failure is None and self.worker_tasks:
-                await asyncio.wait_for(drain_measurements(), self.config.shutdown_timeout_ms / 1000)
+                await asyncio.wait_for(self._drain_pending_work(), self.config.shutdown_timeout_ms / 1000)
         # 收尾超时只记录日志，继续释放资源。
         except asyncio.TimeoutError:
             logger.warning("退出等待到期，未完成测量将标记失败并释放资源。")
@@ -713,13 +713,8 @@ class SystemRuntime:
                     event.acknowledgement.cancel()
                 machine.queue.task_done()
 
-        # 清空未执行的存储请求。
-        while not self.database.queue.empty():
-            self.database.queue.get_nowait()
-            self.database.queue.task_done()
-
-        # 清空存储队列记录的排队身份。
-        self.database.queued_records.clear()
+        # 丢弃存储队列中尚未执行的请求。
+        self.database.discard_pending_requests()
 
         # 关闭相机驱动与共享 SDK。
         try:

@@ -402,3 +402,35 @@ class Database:
 
                 # 释放本次请求的引用。
                 request = None
+
+    async def wait_until_queue_drained(self) -> None:
+        """等待队列中已提交的存储请求全部处理结束。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 已提交的存储请求全部写入结束
+        """
+        # 等待全部已入队请求完成队列结算。
+        await self.queue.join()
+
+    def discard_pending_requests(self) -> None:
+        """丢弃队列中尚未执行的存储请求，并清除对应的排队身份。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 队列已清空，被丢弃的请求不再写入数据库
+        """
+        # 逐条取出尚未消费的请求，清除排队身份并结算队列任务计数。
+        while not self.queue.empty():
+            request = self.queue.get_nowait()
+            self.queued_records.discard(request.session_id)
+            self.queue.task_done()
+
+        # 清除退出后不再有效的排队身份。
+        self.queued_records.clear()
