@@ -116,7 +116,7 @@ class AppConfig:
 
 
 def read_configuration_settings(configuration_directory: Path) -> dict:
-    """读取单一配置文件的六个业务段落并转换路径和初始机器状态。
+    """读取单一配置文件的六个业务段落，并转换路径、初始机器状态和 DI 通道映射键。
 
     Args:
         configuration_directory: 包含 config.yaml 的配置目录。
@@ -180,6 +180,10 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
 
     # 转换初始机器状态，未配置时使用已关闭。
     settings["initial_machine_state"] = MachineState(settings.get("initial_machine_state", MachineState.CLOSED))
+
+    # 统一 DI 通道映射的机器编号为字符串，兼容 YAML 中的数字键。
+    channel_items = (settings.get("io_machine_channels") or {}).items()
+    settings["io_machine_channels"] = {str(machine_id): channel for machine_id, channel in channel_items}
 
     # 返回合并后的扁平参数字典。
     return settings
