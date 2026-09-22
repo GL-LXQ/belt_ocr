@@ -134,11 +134,11 @@ class ModbusClient:
 
         Returns:
             返回示例：
-                None  # 尚未连接、响应为异常帧或发生 Modbus 异常
+                None  # 连接失败、响应异常、状态数量不足或发生通信异常
                 [True, False]  # 自起始地址开始的各离散输入状态
         """
-        # 未建立连接时不发起读取。
-        if self._client is None or not self._connected:
+        # 读取前确保客户端已连接。
+        if not await self._ensure_connected():
             return None
 
         try:
@@ -150,12 +150,27 @@ class ModbusClient:
                 logger.warning("读取离散输入失败，地址: %s", address)
                 return None
 
+            # 响应数量不足时放弃本次结果。
+            if len(result.bits) < count:
+                logger.warning("离散输入响应数量不足，地址: %s", address)
+                return None
+
             # 按请求数量返回输入状态列表。
             return list(result.bits[:count])
-        except ModbusException as error:
-            # Modbus 通信异常时记录原因并返回空。
-            logger.error("读取离散输入时发生 Modbus 异常: %s", error)
-            return None
+        except Exception as error:
+            # 连接失效时复位状态并等待下一轮重连。
+            if self._is_connection_error(error):
+                self._connected = False
+                logger.error("读取离散输入时连接失效: %s", error)
+                return None
+
+            # Modbus 协议异常时放弃本次结果。
+            if isinstance(error, ModbusException):
+                logger.error("读取离散输入时发生 Modbus 异常: %s", error)
+                return None
+
+            # 非通信异常交给调用方处理。
+            raise
 
     async def _ensure_connected(self) -> bool:
         """确保当前存在有效的 Modbus RTU 连接。

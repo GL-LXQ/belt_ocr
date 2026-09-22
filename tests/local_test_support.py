@@ -33,6 +33,8 @@ def build_config(directory: Path, **overrides) -> AppConfig:
         evidence_directory=directory / "evidence",
         mvs_development_directory=directory / "sdk",
         shutdown_timeout_ms=2000,
+        modbus_serial_port="COM-TEST",
+        io_machine_channels={str(machine_number): machine_number - 1 for machine_number in range(1, 11)},
     )
     return replace(config, **overrides)
 

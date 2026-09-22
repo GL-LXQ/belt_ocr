@@ -1,5 +1,5 @@
 # 公共运行配置。相对路径以本文件所在目录为基准解析。
-# 五个顶层段落对应原 application/camera/ocr/frequency/machine 五个文件的业务分组，配置键保持原名。
+# 六个顶层段落对应 application/camera/ocr/frequency/machine/io 业务分组，配置键保持原名。
 
 # 数据库与图片保存路径，相对本配置目录解析。
 application:
@@ -35,3 +35,17 @@ machine:
   initial_machine_state: CLOSED
   max_cycle_open_ms: 60000
   event_queue_capacity: 128
+
+# Modbus RTU 参数与机器到 DI 通道的绑定关系。
+io:
+  modbus_serial_port: null
+  modbus_baudrate: 9600
+  modbus_parity: N
+  modbus_stopbits: 1
+  modbus_bytesize: 8
+  modbus_unit_id: 1
+  modbus_timeout_seconds: 3.0
+  modbus_input_address: 0
+  modbus_poll_interval_ms: 50
+  modbus_reconnect_interval_ms: 1000
+  io_machine_channels: {}

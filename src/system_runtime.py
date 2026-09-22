@@ -18,6 +18,7 @@ from models import RuntimeEvent
 from async_utils import run_blocking_operation
 from text_recognition import TextRecognizer
 from database import Database
+from modbus_client import ModbusClient
 
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,20 @@ class SystemRuntime:
         self.failure: Exception | None = None
         self.failure_event = asyncio.Event()
         self.shutdown_task: asyncio.Task[None] | None = None
+
+        # 按配置创建 Modbus 客户端，不在构造阶段连接串口。
+        self.modbus_client: ModbusClient | None = None
+        if config.modbus_serial_port is not None:
+            self.modbus_client = ModbusClient(
+                serial_port=config.modbus_serial_port,
+                baudrate=config.modbus_baudrate,
+                parity=config.modbus_parity,
+                stopbits=config.modbus_stopbits,
+                bytesize=config.modbus_bytesize,
+                unit_id=config.modbus_unit_id,
+                timeout=config.modbus_timeout_seconds,
+            )
+        self.io_previous_states: dict[int, bool] = {}
 
     def initialize_machines(
         self,
@@ -145,6 +160,9 @@ class SystemRuntime:
             # 读取启用机器并逐台建立机器运行对象。
             self.initialize_machines(notify_measurement_progress)
 
+            # 校验当前启用机器的串口和 DI 通道绑定。
+            self.validate_io_configuration()
+
             # 加载相机驱动，此处按同步方式执行。
             self.camera_sdk = load_mvs_sdk(self.config.mvs_development_directory, self.config.mvs_dll_directory)
 
@@ -201,9 +219,14 @@ class SystemRuntime:
             # 启动共享的测量存储任务。
             self.worker_tasks.append(asyncio.create_task(self.run_worker("测量存储", self.database.consume_storage_queue)))
 
-            # 标记启动完成并开放信号入口。
+            # 标记启动完成。
             self.has_started = True
+
+            # 开放机器信号入口。
             self.accepting_signals = True
+
+            # 启动 Modbus DI 监听任务。
+            self.worker_tasks.append(asyncio.create_task(self.run_worker("Modbus IO监听", self.listen_io)))
         except BaseException as error:
             # 记录启动失败异常。
             logger.exception("测量系统初始化失败")
@@ -221,6 +244,114 @@ class SystemRuntime:
                     if self.shutdown_task.cancelled():
                         raise
             raise
+
+    def validate_io_configuration(self) -> None:
+        """校验启用机器对应的 Modbus 串口和 DI 通道配置。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 当前启用机器均已配置唯一的非负 DI 通道
+        """
+        if self.modbus_client is None:
+            raise ValueError("未配置 Modbus RTU 串口。")
+
+        # 找出未绑定 DI 通道的启用机器。
+        enabled_machine_ids = set(self.machines)
+        channel_mapping = self.config.io_machine_channels
+        missing_machine_ids = enabled_machine_ids - channel_mapping.keys()
+        if missing_machine_ids:
+            missing_ids = ", ".join(sorted(missing_machine_ids))
+            raise ValueError(f"启用机器未配置 DI 通道：{missing_ids}。")
+
+        # 检查启用机器的通道非负且互不重复。
+        enabled_channels = [channel_mapping[machine_id] for machine_id in enabled_machine_ids]
+        if any(
+            not isinstance(channel, int) or isinstance(channel, bool) or channel < 0
+            for channel in enabled_channels
+        ):
+            raise ValueError("DI 通道必须是大于等于零的整数。")
+        if len(enabled_channels) != len(set(enabled_channels)):
+            raise ValueError("启用机器不能绑定相同的 DI 通道。")
+
+    async def listen_io(self) -> None:
+        """持续读取 DI 状态并交给机器状态处理流程。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 停止流程开始后结束监听并释放 Modbus 串口
+        """
+        if self.modbus_client is None:
+            raise RuntimeError("Modbus RTU 客户端未初始化。")
+
+        # 根据启用机器的最大通道确定连续读取数量。
+        input_count = max(self.config.io_machine_channels[machine_id] for machine_id in self.machines) + 1
+        try:
+            while not self.stopping:
+                # 读取全部启用机器覆盖范围内的 DI 状态。
+                states = await self.modbus_client.read_discrete_inputs(
+                    address=self.config.modbus_input_address,
+                    count=input_count,
+                )
+
+                # 通信失败时按重连间隔等待下一轮读取。
+                if states is None:
+                    await asyncio.sleep(self.config.modbus_reconnect_interval_ms / 1000)
+                    continue
+
+                # 停止流程开始或信号入口关闭时结束监听。
+                if self.stopping or not self.accepting_signals:
+                    break
+
+                # 处理有效状态后按正常轮询间隔等待。
+                await self.handle_io_states(states)
+                await asyncio.sleep(self.config.modbus_poll_interval_ms / 1000)
+        finally:
+            await self.modbus_client.disconnect()
+
+    async def handle_io_states(self, states: list[bool]) -> None:
+        """把当前 DI 状态转换为机器同步、启动或关闭处理。
+
+        Args:
+            states: 从 Modbus 起始地址返回的零基 DI 状态列表。
+
+        Returns:
+            返回示例：
+                None  # 当前状态已同步或状态变化已交给现有机器入口
+        """
+        input_count = max(self.config.io_machine_channels[machine_id] for machine_id in self.machines) + 1
+
+        # 状态数量不足时放弃整次读取结果。
+        if len(states) < input_count:
+            logger.warning("DI 状态数量不足，期望 %s，实际 %s", input_count, len(states))
+            return
+
+        # 按机器绑定通道逐一处理首次状态或状态变化。
+        for machine_id in self.machines:
+            channel = self.config.io_machine_channels[machine_id]
+            current_state = bool(states[channel])
+            previous_state = self.io_previous_states.get(channel)
+
+            # 首次有效状态进入现场状态同步。
+            if previous_state is None:
+                await self.synchronize_machine(machine_id, MachineState.OPEN if current_state else MachineState.CLOSED)
+
+            # 后续状态变化进入现有启动或关闭入口。
+            elif previous_state != current_state:
+                if current_state:
+                    await self.handle_start(machine_id)
+                else:
+                    await self.handle_close(machine_id)
+            else:
+                continue
+
+            # 业务入口处理成功后登记本次状态。
+            self.io_previous_states[channel] = current_state
 
     async def handle_start(self, machine_id: str) -> None:
         """处理某台皮带机启动，不依赖信号来源。
@@ -562,6 +693,10 @@ class SystemRuntime:
 
         # 等待被取消的任务结束。
         await asyncio.gather(*all_tasks, return_exceptions=True)
+
+        # 任务未启动或已异常退出时仍关闭 Modbus 客户端。
+        if self.modbus_client is not None:
+            await self.modbus_client.disconnect()
 
         # 清空已登记的后台任务列表。
         self.worker_tasks.clear()
