@@ -62,18 +62,10 @@ class SystemRuntime:
         self.failure_event = asyncio.Event()
         self.shutdown_task: asyncio.Task[None] | None = None
 
-        # 按配置创建 Modbus 客户端，不在构造阶段连接串口。
+        # 登记 Modbus 客户端空位，客户端在启动校验通过后创建。
         self.modbus_client: ModbusClient | None = None
-        if config.modbus_serial_port is not None:
-            self.modbus_client = ModbusClient(
-                serial_port=config.modbus_serial_port,
-                baudrate=config.modbus_baudrate,
-                parity=config.modbus_parity,
-                stopbits=config.modbus_stopbits,
-                bytesize=config.modbus_bytesize,
-                unit_id=config.modbus_unit_id,
-                timeout=config.modbus_timeout_seconds,
-            )
+
+        # 初始化 DI 上次状态空位。
         self.io_previous_states: dict[int, bool] = {}
 
     def initialize_machines(
@@ -162,6 +154,22 @@ class SystemRuntime:
 
             # 校验当前启用机器的串口和 DI 通道绑定。
             self.validate_io_configuration()
+
+            # 串口名称缺失时拒绝启动。
+            serial_port = self.config.modbus_serial_port
+            if serial_port is None:
+                raise ValueError("未配置 Modbus RTU 串口。")
+
+            # 创建 Modbus 客户端，连接由 IO 监听轮询时建立。
+            self.modbus_client = ModbusClient(
+                serial_port=serial_port,
+                baudrate=self.config.modbus_baudrate,
+                parity=self.config.modbus_parity,
+                stopbits=self.config.modbus_stopbits,
+                bytesize=self.config.modbus_bytesize,
+                unit_id=self.config.modbus_unit_id,
+                timeout=self.config.modbus_timeout_seconds,
+            )
 
             # 加载相机驱动，此处按同步方式执行。
             self.camera_sdk = load_mvs_sdk(self.config.mvs_development_directory, self.config.mvs_dll_directory)
@@ -255,7 +263,8 @@ class SystemRuntime:
             返回示例：
                 None  # 当前启用机器均已配置唯一的非负 DI 通道
         """
-        if self.modbus_client is None:
+        # 未配置串口时拒绝启用 IO。
+        if self.config.modbus_serial_port is None:
             raise ValueError("未配置 Modbus RTU 串口。")
 
         # 找出未绑定 DI 通道的启用机器。

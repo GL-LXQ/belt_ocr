@@ -18,7 +18,7 @@ def test_construction_does_not_touch_database(tmp_path: Path) -> None:
         tmp_path: 测试临时目录。
 
     Returns:
-        None  # 业务库文件未创建，机器运行对象为空
+        None  # 业务库文件未创建，机器运行对象为空，Modbus 客户端未创建
     """
     config = build_config(tmp_path)
 
@@ -27,6 +27,9 @@ def test_construction_does_not_touch_database(tmp_path: Path) -> None:
     assert system_runtime.machines == {}
     assert not config.database_path.exists()
     assert not config.database_path.parent.exists()
+
+    # 构造阶段不创建 Modbus 客户端。
+    assert system_runtime.modbus_client is None
 
 
 def test_initialize_machines_binds_enabled_machines(tmp_path: Path) -> None:
@@ -101,7 +104,7 @@ def test_start_reads_machines_added_after_construction(tmp_path: Path, monkeypat
         monkeypatch: 测试依赖替换工具。
 
     Returns:
-        None  # 新增机器已建立处理器并打开相机，退出后相机与实例锁已释放
+        None  # 新增机器已建立处理器并打开相机，退出后相机与实例锁已释放，Modbus 客户端已创建
     """
     config = build_config(tmp_path)
     sdk = FakeMvsSdk()
@@ -136,3 +139,7 @@ def test_start_reads_machines_added_after_construction(tmp_path: Path, monkeypat
     assert sdk.closed
     assert sdk.cameras["CAM-A"].closed
     assert not system_runtime.database.lock_acquired
+
+    # 检查 IO 配置校验通过后按串口配置创建了客户端。
+    assert system_runtime.modbus_client is not None
+    assert system_runtime.modbus_client.serial_port == config.modbus_serial_port

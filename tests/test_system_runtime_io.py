@@ -9,6 +9,7 @@ import pytest
 
 from enums import MachineState
 from local_test_support import build_config, create_machine_database
+from modbus_client import ModbusClient
 from system_runtime import SystemRuntime
 
 
@@ -215,6 +216,9 @@ def test_listen_io_ignores_failed_read_and_disconnects(tmp_path: Path) -> None:
         modbus_poll_interval_ms=1,
         modbus_reconnect_interval_ms=1,
     )
+
+    # Modbus 客户端已改由启动流程创建，此处按串口配置直接建立客户端。
+    system_runtime.modbus_client = ModbusClient(serial_port="COM-TEST")
     system_runtime.modbus_client.read_discrete_inputs = AsyncMock(side_effect=[[True], None, [True]])
     system_runtime.modbus_client.disconnect = AsyncMock()
 
