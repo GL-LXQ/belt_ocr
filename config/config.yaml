@@ -1,51 +1,49 @@
 # 公共运行配置。相对路径以本文件所在目录为基准解析。
 # 六个顶层段落对应 application/camera/ocr/frequency/machine/io 业务分组，配置键保持原名。
 
-# 数据库与图片保存路径，相对本配置目录解析。
+# 数据库与图片路径、共享存储容量与退出期限。
 application:
-  database_path: ../runtime/measurements.sqlite3
-  recovery_database_path: ../runtime/measurements.recovery.sqlite3
-  evidence_directory: ../runtime/evidence
+  database_path: ../runtime/measurements.sqlite3  # 业务库路径，含机器表与测量结果表
+  recovery_database_path: ../runtime/measurements.recovery.sqlite3  # 运行库路径，保存异常事件审计
+  evidence_directory: ../runtime/evidence  # 证据图片根目录
 
-  # 存储队列容量与退出期限（毫秒）。
-  storage_queue_capacity: 32
-  shutdown_timeout_ms: 10000
+  storage_queue_capacity: 32  # 共享存储队列容量
+  shutdown_timeout_ms: 10000  # 退出收尾期限，毫秒
 
-# SDK 开发目录、可选动态库目录，以及采集窗口和单次取帧超时（毫秒）。
+# 相机 SDK 目录与单轮采集参数。
 camera:
-  mvs_development_directory: D:/app/HIK/MVS/Development
-  mvs_dll_directory: null
+  mvs_development_directory: D:/app/HIK/MVS/Development  # MVS SDK 开发目录
+  mvs_dll_directory: null  # SDK 动态库目录，省略时查找 Windows 公共 MVS Runtime
 
-  capture_window_ms: 1000
-  camera_timeout_ms: 50
+  capture_window_ms: 1000  # 单轮采集窗口，毫秒
+  camera_timeout_ms: 50  # 单次取帧超时，毫秒
 
-# 从 START 起计算的整轮识别期限，包含采集、排队与处理，单位为毫秒。
+# 从 START 起计算的整轮识别期限。
 ocr:
-  ocr_result_timeout_ms: 30000
+  ocr_result_timeout_ms: 30000  # 整轮识别期限，毫秒，包含采集、排队与处理
 
-# 频率读取间隔配置值，沿用当前适配器的换算方式；有效频率下限和上限，单位为 Hz。
+# 频率读取间隔与有效频率范围。
 frequency:
-  frequency_interval_ms: 100
-  minimum_frequency_hz: 0.01
-  maximum_frequency_hz: 10000.0
+  frequency_interval_ms: 100  # 频率读取间隔配置值，占位实现按此值等待下一次读数
+  minimum_frequency_hz: 0.01  # 有效频率下限，单位赫兹
+  maximum_frequency_hz: 10000.0  # 有效频率上限，单位赫兹
 
-# 公共初始状态：CLOSED、OPEN 或 UNKNOWN；机器清单从数据库读取。
-# 等待 CLOSE 的期限（毫秒）与单机事件队列容量。
+# 机器公共初始状态、周期期限与事件队列容量，机器清单从数据库读取。
 machine:
-  initial_machine_state: CLOSED
-  max_cycle_open_ms: 60000
-  event_queue_capacity: 128
+  initial_machine_state: CLOSED  # 启动时的现场状态，取 CLOSED、OPEN 或 UNKNOWN
+  max_cycle_open_ms: 60000  # 等待 CLOSE 的期限，毫秒
+  event_queue_capacity: 128  # 单机事件队列容量
 
-# Modbus RTU 参数与机器到 DI 通道的绑定关系。
+# Modbus RTU 串口参数与机器到 DI 通道的绑定关系。
 io:
-  modbus_serial_port: null
-  modbus_baudrate: 9600
-  modbus_parity: N
-  modbus_stopbits: 1
-  modbus_bytesize: 8
-  modbus_unit_id: 1
-  modbus_timeout_seconds: 3.0
-  modbus_input_address: 0
-  modbus_poll_interval_ms: 50
-  modbus_reconnect_interval_ms: 1000
-  io_machine_channels: {}
+  modbus_serial_port: null  # Modbus RTU 串口号，未配置时启动失败
+  modbus_baudrate: 9600  # 波特率
+  modbus_parity: N  # 校验方式
+  modbus_stopbits: 1  # 停止位数量
+  modbus_bytesize: 8  # 数据位数量
+  modbus_unit_id: 1  # Modbus 设备地址
+  modbus_timeout_seconds: 3.0  # 单次请求超时，秒
+  modbus_input_address: 0  # DI 起始地址
+  modbus_poll_interval_ms: 50  # DI 轮询间隔，毫秒
+  modbus_reconnect_interval_ms: 1000  # 通信失败后的重连等待间隔，毫秒
+  io_machine_channels: {}  # 机器编号到 DI 通道索引的映射，键为机器编号字符串
