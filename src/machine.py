@@ -58,25 +58,37 @@ class Machine:
             state_changed: 周期状态变化通知。
 
         Returns:
-            None  # 本机事件队列、唯一周期空位和任务引用已初始化
+            返回示例：
+                None  # 本机事件队列、唯一周期空位和任务引用已初始化
         """
-        # 登记业务依赖和本机串行事件队列。
+        # 登记机器身份与公共运行配置。
         self.machine_config = machine_config
         self.config = config
+
+        # 登记本机采集器与频率接收适配器。
         self.camera = camera
         self.frequency_adapter = frequency_adapter
+
+        # 登记共享 OCR 处理器、共享存储与事件路由入口。
         self.text_recognizer = text_recognizer
         self.database = database
         self.publish_event = publish_event
+
+        # 登记进度上报、致命故障回调与状态变化通知。
         self.notify_measurement_progress = notify_measurement_progress
         self.on_fatal_error = on_fatal_error
         self.state_changed = state_changed
+
+        # 按配置容量创建本机串行事件队列。
         self.queue: asyncio.Queue[MeasurementEvent] = asyncio.Queue(
             config.event_queue_capacity
         )
-        # 初始化唯一周期、机器复位状态和后台任务引用。
+
+        # 初始化唯一周期与机器复位标志。
         self.current_session: BeltSession | None = None
         self.waiting_cycle_reset = False
+
+        # 初始化期限任务表、启动准备标志和识别任务引用。
         self.deadline_tasks: dict[EventType, asyncio.Task[None]] = {}
         self.initialized = False
         self.recognition_task: asyncio.Task | None = None
@@ -89,18 +101,35 @@ class Machine:
             无外部参数。
 
         Returns:
-            "READY"  # 可接收新周期；其他状态表示初始化、故障、复位等待、忙碌或相机被占用
+            返回示例：
+                "READY"  # 可接收新周期
+                "INITIALIZING"  # 本机尚未完成启动准备
+                "FAULT"  # 相机不可用
+                "WAIT_CYCLE_RESET"  # 等待现场周期复位
+                "ACTIVE"  # 已有活动周期
+                "DEGRADED"  # 相机仍被上一轮占用
         """
+        # 尚未完成启动准备时不受理。
         if not self.initialized:
             return "INITIALIZING"
+
+        # 相机不可用时不受理。
         if not self.camera.available:
             return "FAULT"
+
+        # 等待现场复位时不受理。
         if self.waiting_cycle_reset:
             return "WAIT_CYCLE_RESET"
+
+        # 已有活动周期时不受理。
         if self.current_session is not None:
             return "ACTIVE"
+
+        # 相机仍在采集时不受理。
         if self.camera.is_capturing:
             return "DEGRADED"
+
+        # 全部条件满足时允许接收新周期。
         return "READY"
 
     async def listen_events(self) -> None:
@@ -110,28 +139,31 @@ class Machine:
             无外部参数。
 
         Returns:
-            None: 持续运行直到任务被取消，无返回数据。
-            返回值形式示例：
-                None  # 无返回数据
+            返回示例：
+                None  # 持续运行直到任务被取消
         """
         while True:
             # 等待并取出本机队列中的下一个事件。
             event = await self.queue.get()
             try:
-                # 处理事件后，如果有回执，而且回执还没结束，就通知等待方：处理完成了。
+                # 按顺序处理本次事件。
                 await self.handle_event(event)
+
+                # 回执未完成时通知请求方本次处理结束。
                 if event.acknowledgement is not None:
                     if not event.acknowledgement.done():
                         event.acknowledgement.set_result(None)
             except Exception as error:
-                # 将事件处理异常交给请求方和后台任务入口。
+                # 事件处理异常交给请求方后继续抛出。
                 if event.acknowledgement is not None and not event.acknowledgement.done():
                     event.acknowledgement.set_exception(error)
                 raise
             finally:
-                # 通知状态已变化，并标记当前队列任务处理结束。
+                # 通知状态已变化并标记本次队列任务处理结束。
                 self.state_changed.set()
                 self.queue.task_done()
+
+                # 释放本次事件的引用。
                 event = None
 
     async def handle_machine_start(self) -> None:
@@ -141,25 +173,28 @@ class Machine:
             无外部参数。
 
         Returns:
-            None: 启动本轮测量，或在不满足接收条件时提前结束，无返回数据。
             返回示例：
-                None  # 无返回数据
+                None  # 启动本轮测量，或在不满足接收条件时提前结束
         """
-        # 忽略活动周期内的重复启动和未同步的启动。
+        # 上一轮尚未结束时跳过本次 START。
         if self.current_session is not None:
             logger.warning("上一轮尚未结束，跳过 START machine_id=%s", self.machine_config.machine_id)
             return
+
+        # 等待现场复位时跳过本次 START。
         if self.waiting_cycle_reset:
             return
 
-        # 检查相机状态和采集占用。
+        # 检查相机可用性与采集占用。
         if not self.camera.available or self.camera.is_capturing:
-            # 标记等待周期复位并打印本轮未受理日志。
+            # 标记等待周期复位。
             self.waiting_cycle_reset = True
+
+            # 记录本轮未受理。
             logger.error("本轮未受理 machine_id=%s", self.machine_config.machine_id)
             return
 
-        # 创建本轮档案，记录机器绑定、开始时间和配置。
+        # 创建本轮测量档案，登记周期编号、采集编号和开始时间。
         session = BeltSession(
             session_id=uuid4().hex,
             machine_id=self.machine_config.machine_id,
@@ -176,13 +211,16 @@ class Machine:
         # 记录本轮开始日志。
         logger.info("开始测量 machine_id=%s session_id=%s", session.machine_id, session.session_id)
 
-        # 启动本轮图像采集，打开对应档案的频率窗口。
+        # 启动本轮图像采集。
         self.camera.start_capture(session.session_id, session.capture_start_time)
+
+        # 采集交付结束后尝试释放本轮周期。
         self.camera.delivery_task.add_done_callback(lambda task: self.release_finished_session())
-        # 登记频率接收的当前周期，新测量按接收顺序交给本轮。
+
+        # 登记频率接收的当前周期。
         self.frequency_adapter.active_session_id = session.session_id
 
-        # 通知界面本轮已经启动，图像和频率开始并行采集。
+        # 上报本轮启动，并标记图像采集与频率采集开始。
         if self.notify_measurement_progress is not None:
             self.notify_measurement_progress(
                 session.machine_id, session.session_id, ProgressStage.SESSION_START, ProgressStatus.SUCCESS,
@@ -194,9 +232,10 @@ class Machine:
                 session.machine_id, session.session_id, ProgressStage.FREQUENCY_COLLECTION, ProgressStatus.RUNNING,
             )
 
-        # 安排本轮运行超时和 OCR 超时事件。
+        # 安排本轮运行超时事件。
         self.schedule_timeout(session, EventType.CYCLE_TIMEOUT, self.config.max_cycle_open_ms)
-        # 登记本轮 OCR 等待期限，此处只安排超时事件。
+
+        # 安排本轮 OCR 超时事件。
         self.schedule_timeout(session, EventType.OCR_TIMEOUT, self.config.ocr_result_timeout_ms)
 
     async def handle_machine_close(
@@ -213,7 +252,8 @@ class Machine:
             close_event: 触发本次关闭的事件，省略时表示关闭没有事件来源。
 
         Returns:
-            None  # 本轮现场采集和频率接收已结束，OCR 与存储按各自状态继续处理
+            返回示例：
+                None  # 本轮现场采集和频率接收已结束，OCR 与存储按各自状态继续处理
         """
         # 旧周期的关闭事件只写审计，不操作当前周期。
         if (
@@ -227,51 +267,61 @@ class Machine:
             )
             return
 
-        # 空闲时的关闭用于清除等待复位状态。
+        # 取出本机当前周期。
         session = self.current_session
+
+        # 空闲时的关闭只清除等待复位状态。
         if session is None:
             if not interrupted:
                 self.waiting_cycle_reset = False
             return
-        # 已经关闭的周期继续等待结果，不重复结算频率。
+
+        # 已关闭的周期继续等待结果，不重复结算频率。
         if session.capture_stop_time is not None:
             if not interrupted:
                 self.waiting_cycle_reset = False
             return
 
-        # 记录本轮关闭边界，中断时等待真实关闭复位。
+        # 记录本轮关闭边界时间。
         session.capture_stop_time = (
             capture_stop_time if capture_stop_time is not None else asyncio.get_running_loop().time()
         )
+
+        # 中断关闭时标记等待真实关闭复位。
         self.waiting_cycle_reset = interrupted
         if interrupted:
             session.errors.append("CYCLE_INTERRUPTED")
 
-        # 清空适配器的当前周期，停止向本轮交付频率；同时封闭本轮频率列表。
+        # 清空适配器的当前周期，停止向本轮交付频率。
         self.frequency_adapter.active_session_id = None
+
+        # 封闭本轮频率列表。
         session.frequency_window_sealed = True
 
-        # 根据周期是否中断、频率是否异常以及已有读数，确定最终频率和状态。
+        # 按是否中断、是否已有异常和已有读数结算最终频率。
         if interrupted or session.frequency_state == FrequencyState.FAILED:
-            # 周期中断或频率已异常时，最终频率为空，已收到的明细继续保留。
+            # 中断或已异常时最终频率为空，已收到的明细继续保留。
             session.final_frequency = None
             session.frequency_state = FrequencyState.FAILED
         elif session.measurement_frequencies:
-            # 本轮有有效读数时，取按接收顺序保存的最后一条，标记频率正常。
+            # 有有效读数时取最后收到的读数，标记频率正常。
             session.final_frequency = session.measurement_frequencies[-1]
             session.frequency_state = FrequencyState.SUCCESS
         else:
-            # 本轮没有有效读数时，标记频率异常并记录缺少测量的错误。
+            # 没有有效读数时标记频率异常并记录缺少测量的错误。
             session.frequency_state = FrequencyState.FAILED
             session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
 
         # 通知界面本轮频率采集的结算结果。
         if self.notify_measurement_progress is not None:
+            # 按频率结算状态取上报状态。
             frequency_progress_status = (
                 ProgressStatus.SUCCESS
                 if session.frequency_state == FrequencyState.SUCCESS
                 else ProgressStatus.FAILED
             )
+
+            # 上报本轮频率采集状态。
             self.notify_measurement_progress(
                 session.machine_id,
                 session.session_id,
@@ -279,20 +329,22 @@ class Machine:
                 frequency_progress_status,
             )
 
-        # 停止本轮采集，当前周期继续占用机器直到保存或失败清理完成。
+        # 停止本轮采集交付。
         await self.camera.inform_capture_workflow_stop()
 
-        # 从任务表移除本轮 CycleTimeout；任务仍存在时，取消它后续的超时通知。
+        # 从任务表移除本轮 CycleTimeout 任务。
         deadline_task = self.deadline_tasks.pop(EventType.CYCLE_TIMEOUT, None)
+
+        # 任务仍存在时取消它的超时通知。
         if deadline_task is not None:
             deadline_task.cancel()
 
-        # 判断本轮是否已失败，关闭后移除保留的现场周期身份。
+        # 本轮已失败时尝试释放周期并结束。
         if session.state == SessionState.FAILED:
             self.release_finished_session()
             return
 
-        # 判断本轮是否中断，中断只打印日志并清理资源。
+        # 中断关闭按失败清理并结束。
         if interrupted:
             await self.handle_measurement_failure(session)
             return
@@ -307,39 +359,46 @@ class Machine:
             event: 待处理的测量事件，包含事件身份、来源信息和业务数据。
 
         Returns:
-            None: 完成业务处理，或隔离事件后提前结束。
             返回示例：
-                None  # 无返回数据
+                None  # 完成业务处理，或隔离事件后提前结束
         """
         # 分派不依赖测量档案的机器级事件。
         match event.event_type:
+            # 受理启动信号，建立本轮周期。
             case EventType.MACHINE_STARTED:
                 await self.handle_machine_start()
                 return
+
+            # 受理正常关闭信号。
             case EventType.MACHINE_CLOSED:
                 await self.handle_machine_close(
                     capture_stop_time=event.received_monotonic, close_event=event,
                 )
                 return
+
+            # 退出时中断当前周期。
             case EventType.SHUTDOWN:
                 await self.handle_machine_close(interrupted=True)
                 return
+
+            # 现场状态同步：中断原活动周期，更新机器复位状态。
             case EventType.MACHINE_SYNCHRONIZED:
-                # 中断原活动周期，更新机器复位状态。
                 if self.current_session is not None:
                     await self.handle_machine_close(interrupted=True)
                 self.waiting_cycle_reset = event.payload != MachineState.CLOSED
                 return
 
-        # 隔离没有周期身份的频率，不分配给当前或历史 Session。
+        # 没有周期身份的频率只写审计，不分配给当前或历史周期。
         if event.event_type == EventType.FREQUENCY_MEASURED and not event.session_id:
             await run_blocking_operation(
                 self.database.save_abnormal_event, "AMBIGUOUS_MEASUREMENT", event,
             )
             return
 
-        # 只接收当前周期的结果，忽略已经清理的旧结果。
+        # 取出本机当前周期。
         session = self.current_session
+
+        # 事件不属于当前周期时隔离并结束。
         if session is None or event.session_id != session.session_id:
             logger.warning(
                 "隔离未知或已结算事件 machine_id=%s session_id=%s event=%s",
@@ -351,17 +410,19 @@ class Machine:
 
         # 处理数据库提交回调与周期超时。
         match event.event_type:
+            # 提交结果交回本轮档案。
             case EventType.COMMIT_SUCCEEDED | EventType.COMMIT_FAILED:
                 await self.handle_commit_result(session, event)
                 return
+
+            # 周期超时：未关闭的周期记为超时并进入中断关闭流程。
             case EventType.CYCLE_TIMEOUT:
-                # 周期未关闭时记为超时并进入机器复位流程。
                 if session.capture_stop_time is None:
                     session.errors.append("CYCLE_TIMEOUT")
                     await self.handle_machine_close(interrupted=True)
                 return
 
-        # 判断本轮是否仍在处理，丢弃失败或等待入库后的迟到结果。
+        # 本轮不在处理中时丢弃迟到结果并结束。
         if session.state != SessionState.RUNNING:
             logger.warning(
                 "忽略迟到结果 session_id=%s state=%s event=%s",
@@ -373,14 +434,17 @@ class Machine:
 
         # 分派采集、识别和频率事件。
         match event.event_type:
+            # 整轮采集结果到达。
             case EventType.CAPTURE_COMPLETED:
-                # 仅接收等待阶段的采集结果，保留整轮统计。
+                # 只接收等待阶段的采集结果。
                 if session.ocr_state != OCRState.WAITING:
                     return
+
+                # 保留整轮采集统计。
                 capture_result = event.payload
                 session.capture_summary = capture_result.statistics
 
-                # 通知界面图像采集完成并开始字符识别。
+                # 上报图像采集完成，并标记字符识别开始。
                 if self.notify_measurement_progress is not None:
                     self.notify_measurement_progress(
                         session.machine_id,
@@ -394,18 +458,27 @@ class Machine:
                         ProgressStage.CHARACTER_RECOGNITION,
                         ProgressStatus.RUNNING,
                     )
-                # 启动一个整轮后台任务并登记完成回调。
+
+                # 标记本轮进入识别。
                 session.ocr_state = OCRState.RUNNING
+
+                # 启动整轮识别任务并登记完成回调。
                 task = asyncio.create_task(self.recognize_session(session, capture_result.frames))
                 self.recognition_task = task
                 task.add_done_callback(self.handle_recognition_task_finished)
                 return
+
+            # 识别结果到达。
             case EventType.OCR_COMPLETED:
-                # 只接收正在处理周期的一次最终结果。
+                # 只接收正在处理周期的结果。
                 if session.ocr_state != OCRState.RUNNING:
                     return
+
+                # 保存最终识别结果并标记识别成功。
                 session.ocr_result = event.payload
                 session.ocr_state = OCRState.SUCCESS
+
+                # 上报字符识别完成。
                 if self.notify_measurement_progress is not None:
                     self.notify_measurement_progress(
                         session.machine_id,
@@ -413,16 +486,25 @@ class Machine:
                         ProgressStage.CHARACTER_RECOGNITION,
                         ProgressStatus.SUCCESS,
                     )
-                # 撤销已经成功周期的 OCR 超时通知。
+
+                # 从任务表移除本轮 OCR 超时任务。
                 deadline = self.deadline_tasks.pop(EventType.OCR_TIMEOUT, None)
+
+                # 任务仍存在时取消它的超时通知。
                 if deadline is not None:
                     deadline.cancel()
+
+            # 识别失败或识别超时。
             case EventType.OCR_FAILED | EventType.OCR_TIMEOUT:
-                # 忽略已有终态，登记处理失败或超时。
+                # 已有终态时忽略本次失败或超时。
                 if session.ocr_state not in {OCRState.WAITING, OCRState.RUNNING}:
                     return
+
+                # 登记识别超时或识别失败原因。
                 session.ocr_state = OCRState.TIMED_OUT if event.event_type == EventType.OCR_TIMEOUT else OCRState.FAILED
                 session.errors.append(event.payload or "OCR_TIMEOUT")
+
+                # 上报字符识别失败。
                 if self.notify_measurement_progress is not None:
                     self.notify_measurement_progress(
                         session.machine_id,
@@ -430,9 +512,13 @@ class Machine:
                         ProgressStage.CHARACTER_RECOGNITION,
                         ProgressStatus.FAILED,
                     )
+
+            # 新的有效频率读数到达。
             case EventType.FREQUENCY_MEASURED:
                 await self.handle_frequency_measured(session, event)
                 return
+
+            # 未知事件类型只写审计后结束。
             case _:
                 await run_blocking_operation(
                     self.database.save_abnormal_event, "UNKNOWN_EVENT_TYPE", event,
@@ -450,17 +536,18 @@ class Machine:
             event: 包含事件类型、机器编号、测量编号和数据的业务事件。
 
         Returns:
-            None: 更新业务状态，不返回数据。
             返回示例：
-                None  # 无返回数据
+                None  # 更新业务状态，不返回数据
         """
-        # 判断本轮是否正在等待数据库结果。
+        # 本轮不在等待入库时忽略本次回调。
         if session.state != SessionState.WAITING_COMMIT_DB:
             return
 
-        # 判断提交是否成功，标记已入库并移除本轮档案。
+        # 提交成功时标记已入库。
         if event.event_type == EventType.COMMIT_SUCCEEDED:
             session.state = SessionState.COMMITTED
+
+            # 上报证据入库完成。
             if self.notify_measurement_progress is not None:
                 self.notify_measurement_progress(
                     session.machine_id,
@@ -468,15 +555,21 @@ class Machine:
                     ProgressStage.EVIDENCE_STORAGE,
                     ProgressStatus.SUCCESS,
                 )
+
+            # 记录本轮已保存。
             logger.info(
                 "已保存 machine_id=%s session_id=%s",
                 session.machine_id,
                 session.session_id,
             )
+
+            # 尝试释放本轮周期。
             self.release_finished_session()
+        # 提交失败时登记原因并执行失败清理。
         else:
-            # 登记提交失败原因，打印日志并清理本轮档案。
             session.errors.append(event.payload["error_code"])
+
+            # 上报证据入库失败。
             if self.notify_measurement_progress is not None:
                 self.notify_measurement_progress(
                     session.machine_id,
@@ -484,6 +577,8 @@ class Machine:
                     ProgressStage.EVIDENCE_STORAGE,
                     ProgressStatus.FAILED,
                 )
+
+            # 执行本轮失败清理。
             await self.handle_measurement_failure(session)
 
     async def handle_measurement_failure(self, session: BeltSession) -> None:
@@ -493,11 +588,14 @@ class Machine:
             session: 处理失败、中断或提交失败的测量档案。
 
         Returns:
-            None  # 已打印失败日志并清理资源，活动周期保留至 CLOSE 或中断
+            返回示例：
+                None  # 已打印失败日志并清理资源，活动周期保留至 CLOSE 或中断
         """
-        # 标记本轮失败并打印机器、周期和错误明细。
+        # 标记本轮失败并记录结算时间。
         session.state = SessionState.FAILED
         session.finish_time = datetime.now(timezone.utc).isoformat()
+
+        # 打印机器、周期和错误明细。
         logger.error(
             "测量失败 machine_id=%s session_id=%s errors=%s",
             session.machine_id,
@@ -505,23 +603,29 @@ class Machine:
             session.errors,
         )
 
-        # 取消等待或正在执行的识别任务，后台线程结束后自行释放锁。
+        # 取消等待或正在执行的识别任务。
         recognition_task = self.recognition_task
         if recognition_task is not None:
             recognition_task.cancel()
+
+        # 释放本轮识别结果。
         session.ocr_result = None
 
-        # 取消处理期限，未关闭的失败周期继续等待真实 CLOSE。
+        # 逐个取消期限任务，未关闭的周期保留 CycleTimeout 等待真实 CLOSE。
         for event_type in tuple(self.deadline_tasks):
             if session.capture_stop_time is None and event_type == EventType.CYCLE_TIMEOUT:
                 continue
             self.deadline_tasks.pop(event_type).cancel()
 
-        # 停止本轮交付和采集，已关闭周期在后台资源释放后清空。
+        # 停止向本轮交付频率并封闭频率窗口。
         self.frequency_adapter.active_session_id = None
         session.frequency_window_sealed = True
+
+        # 频率仍在接收时按失败结算。
         if session.frequency_state == FrequencyState.RUNNING:
             session.frequency_state = FrequencyState.FAILED
+
+        # 停止本轮采集交付并尝试释放周期。
         await self.camera.inform_capture_workflow_stop()
         self.release_finished_session()
 
@@ -532,24 +636,33 @@ class Machine:
             无外部参数。
 
         Returns:
-            None  # 条件满足时清空周期并通知等待方，否则继续等待
+            返回示例：
+                None  # 条件满足时清空周期并通知等待方，否则继续等待
         """
-        # 仅释放已经关闭且已经成功或失败的周期。
+        # 只处理已关闭的周期。
         session = self.current_session
         if session is None or session.capture_stop_time is None:
             return
+
+        # 只处理已入库成功或已失败的周期。
         if session.state not in {SessionState.COMMITTED, SessionState.FAILED}:
             return
-        # 等待实际工作结束，避免下一轮与取消中的线程重叠。
+
+        # 识别任务未结束时继续等待。
         if self.recognition_task is not None:
             return
+
+        # 采集交付任务未结束时继续等待。
         if self.camera.delivery_task is not None:
             return
-        # 释放最终结果和期限任务，恢复当前周期空位。
+
+        # 释放识别结果并取消全部期限任务。
         session.ocr_result = None
         for task in self.deadline_tasks.values():
             task.cancel()
         self.deadline_tasks.clear()
+
+        # 清空当前周期并通知等待方。
         self.current_session = None
         self.state_changed.set()
 
@@ -560,15 +673,19 @@ class Machine:
             task: 已结束或取消的整轮识别任务。
 
         Returns:
-            None  # 任务引用已释放，已关闭的结束周期已清理
+            返回示例：
+                None  # 任务引用已释放，已关闭的结束周期已清理
         """
-        # 读取编码或结果交付异常，正常取消不作为相机故障。
+        # 释放本轮识别任务引用。
         self.recognition_task = None
+
+        # 任务未被取消时读取异常并交给致命故障入口。
         if not task.cancelled():
             error = task.exception()
             if error is not None:
                 self.on_fatal_error(error)
-        # 线程实际结束后，失败周期才允许释放当前空位。
+
+        # 尝试释放本轮周期。
         self.release_finished_session()
 
     async def recognize_session(self, session: BeltSession, frames: tuple[CameraFrame, ...]) -> None:
@@ -579,12 +696,16 @@ class Machine:
             frames: 本轮全部原始帧。
 
         Returns:
-            None  # 最终结果或失败原因通过事件交付
+            返回示例：
+                None  # 最终结果或失败原因通过事件交付
         """
-        # 等待共享锁，失效周期不再调用编码和模型。
+        # 等待共享识别锁。
         async with self.text_recognizer.processing_lock:
+            # 周期已失效时直接结束。
             if session.state != SessionState.RUNNING:
                 return
+
+            # 在线程中执行整轮编码、筛帧、识别和终选。
             try:
                 result = await run_blocking_operation(
                     self.text_recognizer.process_session_frames,
@@ -595,18 +716,26 @@ class Machine:
                     self.camera.sdk_camera.encode_image,
                 )
             except ImageEncodingError as error:
-                # 相机编码异常已经记录，继续抛给任务结束回调处理应用退出。
+                # 标记相机编码故障并抛出原始异常。
                 self.camera.sdk_camera.faulted = True
                 raise error.__cause__
             except Exception as error:
+                # 记录整轮处理失败。
                 logger.exception("OCR 处理失败 session_id=%s", session.session_id)
-                # 恢复取消中的退出流程，未取消时继续生成本轮失败事件。
+
+                # 让出一次事件循环控制权。
                 await asyncio.sleep(0)
+
+                # 按识别失败交付原因。
                 event_type, payload = EventType.OCR_FAILED, str(error)
             else:
+                # 按识别成功交付结果。
                 event_type, payload = EventType.OCR_COMPLETED, result
-        # 释放原始帧后只交付仍然有效周期的结果。
+
+        # 释放原始帧引用。
         frames = ()
+
+        # 只向仍然有效的周期交付结果。
         if session.state == SessionState.RUNNING:
             try:
                 await self.publish_event(MeasurementEvent(event_type, session.machine_id, session.session_id, payload))
@@ -623,16 +752,17 @@ class Machine:
             event: 包含事件类型、机器编号、测量编号和数据的业务事件。
 
         Returns:
-            None  # 已追加有效频率，或记录迟到频率审计后忽略事件
+            返回示例：
+                None  # 已追加有效频率，或记录迟到频率审计后忽略事件
         """
-        # 终态后到达的测量只记录异常信息，不修改已封闭列表。
+        # 频率窗口已封闭时只写迟到频率审计。
         if session.frequency_window_sealed:
             await run_blocking_operation(
                 self.database.save_abnormal_event, "LATE_FREQUENCY", event,
             )
             return
 
-        # 按机器事件队列的接收顺序追加明细，不重复检查黑盒保证的数据约束。
+        # 按接收顺序追加本轮频率明细。
         session.measurement_frequencies.append(event.payload)
 
     async def try_finalize(self, session: BeltSession) -> None:
@@ -642,14 +772,14 @@ class Machine:
             session: 待检查完成条件的本轮测量档案。
 
         Returns:
-            None  # 条件不足时继续等待，否则冻结并提交本轮记录
+            返回示例：
+                None  # 条件不足时继续等待，否则冻结并提交本轮记录
         """
-
-        # 判断本轮是否仍在处理。
+        # 本轮不在处理中时直接结束。
         if session.state != SessionState.RUNNING:
             return
 
-        # 判断 OCR 或频率是否失败，失败时只打印日志并清理资源。
+        # OCR 或频率失败时执行本轮失败清理。
         if (
             session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}
             or session.frequency_state == FrequencyState.FAILED
@@ -657,7 +787,7 @@ class Machine:
             await self.handle_measurement_failure(session)
             return
 
-        # 正常关闭并且 OCR、频率均成功后，才准备提交。
+        # 周期未关闭，或 OCR 与频率未全部成功时继续等待。
         if (
             session.capture_stop_time is None
             or session.ocr_state != OCRState.SUCCESS
@@ -665,10 +795,13 @@ class Machine:
         ):
             return
 
-        # 记录结算时间，获取最终频率和 OCR 结果。
+        # 记录本轮结算时间。
         session.finish_time = datetime.now(timezone.utc).isoformat()
+
+        # 取出最终频率与识别结果。
         final_frequency = session.final_frequency
         ocr_result = session.ocr_result
+
         # 按机器、周期和帧编号生成最终图片路径。
         evidence_directory = (
             self.config.evidence_directory / session.machine_id / session.session_id
@@ -677,7 +810,8 @@ class Machine:
             str(evidence_directory / f"{frame.frame_id}.bmp")
             for frame in ocr_result.selected_frames
         )
-        # 将本轮业务字段和选中图片交给存储请求。
+
+        # 组装本轮存储请求。
         request = DatabaseRequest(
             machine_id=session.machine_id,
             session_id=session.session_id,
@@ -691,10 +825,11 @@ class Machine:
             evidence_refs=evidence_refs,
             selected_frames=ocr_result.selected_frames,
         )
+
         # 标记本轮等待入库。
         session.state = SessionState.WAITING_COMMIT_DB
 
-        # 通知界面本轮结果和证据开始入库。
+        # 上报证据入库开始。
         if self.notify_measurement_progress is not None:
             self.notify_measurement_progress(
                 session.machine_id,
@@ -703,13 +838,17 @@ class Machine:
                 ProgressStatus.RUNNING,
             )
 
-        # 将最终图片所有权交给提交请求，Session 不再保留图片。
+        # 释放本轮识别结果引用。
         session.ocr_result = None
 
-        # 提交存储队列，队列满时登记失败原因。
+        # 提交存储请求，入队成功时结束。
         if await self.database.submit(request):
             return
+
+        # 登记存储队列已满。
         session.errors.append("DATABASE_QUEUE_FULL")
+
+        # 上报证据入库失败。
         if self.notify_measurement_progress is not None:
             self.notify_measurement_progress(
                 session.machine_id,
@@ -718,7 +857,7 @@ class Machine:
                 ProgressStatus.FAILED,
             )
 
-        # 打印失败日志并清理本轮档案。
+        # 执行本轮失败清理。
         await self.handle_measurement_failure(session)
 
     def schedule_timeout(self, session: BeltSession, event_type: EventType, timeout_ms: int) -> None:
@@ -730,7 +869,8 @@ class Machine:
             timeout_ms: 等待毫秒数。
 
         Returns:
-            None  # 期限任务已按事件类型登记
+            返回示例：
+                None  # 期限任务已按事件类型登记
         """
         async def publish_timeout() -> None:
             """等待期限并交付携带原周期身份的超时事件。
@@ -739,9 +879,13 @@ class Machine:
                 无外部参数。
 
             Returns:
-                None  # 超时事件已交付，或任务被提前取消
+                返回示例：
+                    None  # 超时事件已交付，或任务被提前取消
             """
+            # 等待期限到期。
             await asyncio.sleep(timeout_ms / 1000)
+
+            # 交付携带原周期身份的超时事件。
             await self.publish_event(MeasurementEvent(
                 event_type, session.machine_id, session.session_id,
             ))
