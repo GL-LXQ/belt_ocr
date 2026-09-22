@@ -394,9 +394,7 @@ class Database:
                     await asyncio.sleep(0)
 
                 # 将本次提交结果返回原周期。
-                await self.publish_event(RuntimeEvent(
-                    event_type, request.machine_id, request.session_id, payload,
-                ))
+                await self.publish_event(RuntimeEvent(event_type, request.machine_id, request.session_id, payload))
             finally:
                 # 移除排队身份并结算本次队列任务。
                 self.queued_records.discard(request.session_id)

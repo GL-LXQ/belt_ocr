@@ -119,15 +119,11 @@ def main() -> None:
             None  # 正常结束；程序故障时以退出码 1 结束
     """
     # 配置日志输出级别与格式。
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
     # 读取配置目录参数，默认使用项目 config 目录。
     argument_parser = argparse.ArgumentParser(description="MVS 相机测量信号演示，频率仪接口待接入")
-    argument_parser.add_argument(
-        "--config", type=Path, default=Path(__file__).resolve().parents[1] / "config",
-    )
+    argument_parser.add_argument("--config", type=Path, default=Path(__file__).resolve().parents[1] / "config")
     arguments = argument_parser.parse_args()
     try:
         # 运行测量演示主流程。

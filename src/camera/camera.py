@@ -286,9 +286,7 @@ class Camera:
 
         try:
             # 将成功采集的整轮结果交回所属机器。
-            await self.publish_event(RuntimeEvent(
-                EventType.CAPTURE_COMPLETED, self.machine_id, session_id, result,
-            ))
+            await self.publish_event(RuntimeEvent(EventType.CAPTURE_COMPLETED, self.machine_id, session_id, result))
         except Exception:
             # 记录结果交付异常并结束后台任务。
             logger.exception("采集结果交付失败 machine_id=%s session_id=%s", self.machine_id, session_id)

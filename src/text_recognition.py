@@ -79,9 +79,7 @@ class TextRecognizer:
                 image_data = encode_image(frame)
             except Exception as error:
                 # 记录编码相机异常及所属周期，再终止本轮识别。
-                logger.exception(
-                    "相机编码失败 camera_serial=%s session_id=%s", camera_serial, session_id,
-                )
+                logger.exception("相机编码失败 camera_serial=%s session_id=%s", camera_serial, session_id)
                 raise ImageEncodingError("相机图片编码失败") from error
 
             # 按单调接收时间换算本帧的 UTC 时间。

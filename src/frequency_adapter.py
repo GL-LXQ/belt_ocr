@@ -12,12 +12,7 @@ from models import FrequencyMeasurement, RuntimeEvent, PublishEvent
 class FrequencyAdapter:
     """持续接收新有效测量，按当前 Session 交付频率事件。"""
 
-    def __init__(
-        self,
-        machine: MachineConfig,
-        config: AppConfig,
-        publish_event: PublishEvent,
-    ) -> None:
+    def __init__(self, machine: MachineConfig, config: AppConfig, publish_event: PublishEvent) -> None:
         """登记频率仪配置、测量事件入口和当前周期编号。
 
         Args:
@@ -79,6 +74,6 @@ class FrequencyAdapter:
             )
 
             # 顺序等待本次读数入队。
-            await self.publish_event(RuntimeEvent(
-                EventType.FREQUENCY_MEASURED, self.machine.machine_id, session_id, measurement,
-            ))
+            await self.publish_event(
+                RuntimeEvent(EventType.FREQUENCY_MEASURED, self.machine.machine_id, session_id, measurement),
+            )

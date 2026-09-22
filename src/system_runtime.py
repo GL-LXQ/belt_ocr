@@ -146,10 +146,7 @@ class SystemRuntime:
             self.initialize_machines(notify_measurement_progress)
 
             # 加载相机驱动，此处按同步方式执行。
-            self.camera_sdk = load_mvs_sdk(
-                self.config.mvs_development_directory,
-                self.config.mvs_dll_directory,
-            )
+            self.camera_sdk = load_mvs_sdk(self.config.mvs_development_directory, self.config.mvs_dll_directory)
 
             # 逐台机器打开相机并绑定到本机采集器。
             for machine in self.machines.values():
@@ -190,7 +187,8 @@ class SystemRuntime:
 
                 # 启动本机事件处理任务。
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
-                    f"机器处理 machine_id={machine_config.machine_id}", machine.listen_events,
+                    f"机器处理 machine_id={machine_config.machine_id}",
+                    machine.listen_events,
                 )))
 
                 # 启动本机频率监听任务。
@@ -500,7 +498,8 @@ class SystemRuntime:
             for machine in self.machines.values():
                 acknowledgement = asyncio.get_running_loop().create_future()
                 await self.publish_event(RuntimeEvent(
-                    EventType.SHUTDOWN, machine.machine_config.machine_id,
+                    EventType.SHUTDOWN,
+                    machine.machine_config.machine_id,
                     acknowledgement=acknowledgement,
                 ))
                 await acknowledgement
@@ -518,9 +517,7 @@ class SystemRuntime:
         # 无故障且已启动后台任务时，在退出期限内完成测量收尾。
         try:
             if self.failure is None and self.worker_tasks:
-                await asyncio.wait_for(
-                    drain_measurements(), self.config.shutdown_timeout_ms / 1000,
-                )
+                await asyncio.wait_for(drain_measurements(), self.config.shutdown_timeout_ms / 1000)
         # 收尾超时只记录日志，继续释放资源。
         except asyncio.TimeoutError:
             logger.warning("退出等待到期，未完成测量将标记失败并释放资源。")

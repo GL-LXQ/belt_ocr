@@ -24,14 +24,10 @@ class RuntimeEvent:
     acknowledgement: asyncio.Future[None] | None = None  # 本次事件的处理回执
 
     # 事件创建时的 UTC 时间。
-    occurred_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    occurred_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # 事件路由入队时的 UTC 时间。
-    received_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    received_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     received_monotonic: float = field(default_factory=time.monotonic)  # 事件路由入队时的单调时间
 
 

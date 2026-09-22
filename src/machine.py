@@ -10,15 +10,7 @@ from uuid import uuid4
 from camera.camera import Camera
 from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
-from enums import (
-    EventType,
-    FrequencyState,
-    MachineState,
-    OCRState,
-    ProgressStage,
-    ProgressStatus,
-    SessionState,
-)
+from enums import EventType, FrequencyState, MachineState, OCRState, ProgressStage, ProgressStatus, SessionState
 from camera.hikrobot_sdk import CameraFrame
 from models import BeltSession, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
@@ -80,9 +72,7 @@ class Machine:
         self.state_changed = state_changed
 
         # 按配置容量创建本机串行事件队列。
-        self.queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue(
-            config.event_queue_capacity
-        )
+        self.queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue(config.event_queue_capacity)
 
         # 初始化唯一周期与机器复位标志。
         self.current_session: BeltSession | None = None
@@ -223,13 +213,22 @@ class Machine:
         # 上报本轮启动，并标记图像采集与频率采集开始。
         if self.notify_measurement_progress is not None:
             self.notify_measurement_progress(
-                session.machine_id, session.session_id, ProgressStage.SESSION_START, ProgressStatus.SUCCESS,
+                session.machine_id,
+                session.session_id,
+                ProgressStage.SESSION_START,
+                ProgressStatus.SUCCESS,
             )
             self.notify_measurement_progress(
-                session.machine_id, session.session_id, ProgressStage.IMAGE_CAPTURE, ProgressStatus.RUNNING,
+                session.machine_id,
+                session.session_id,
+                ProgressStage.IMAGE_CAPTURE,
+                ProgressStatus.RUNNING,
             )
             self.notify_measurement_progress(
-                session.machine_id, session.session_id, ProgressStage.FREQUENCY_COLLECTION, ProgressStatus.RUNNING,
+                session.machine_id,
+                session.session_id,
+                ProgressStage.FREQUENCY_COLLECTION,
+                ProgressStatus.RUNNING,
             )
 
         # 安排本轮运行超时事件。
@@ -262,9 +261,7 @@ class Machine:
             and self.current_session is not None
             and close_event.session_id != self.current_session.session_id
         ):
-            await run_blocking_operation(
-                self.database.save_abnormal_event, "CLOSE_SESSION_MISMATCH", close_event,
-            )
+            await run_blocking_operation(self.database.save_abnormal_event, "CLOSE_SESSION_MISMATCH", close_event)
             return
 
         # 取出本机当前周期。
@@ -371,9 +368,7 @@ class Machine:
 
             # 受理正常关闭信号。
             case EventType.MACHINE_CLOSED:
-                await self.handle_machine_close(
-                    capture_stop_time=event.received_monotonic, close_event=event,
-                )
+                await self.handle_machine_close(capture_stop_time=event.received_monotonic, close_event=event)
                 return
 
             # 退出时中断当前周期。
@@ -390,9 +385,7 @@ class Machine:
 
         # 没有周期身份的频率只写审计，不分配给当前或历史周期。
         if event.event_type == EventType.FREQUENCY_MEASURED and not event.session_id:
-            await run_blocking_operation(
-                self.database.save_abnormal_event, "AMBIGUOUS_MEASUREMENT", event,
-            )
+            await run_blocking_operation(self.database.save_abnormal_event, "AMBIGUOUS_MEASUREMENT", event)
             return
 
         # 取出本机当前周期。
@@ -520,9 +513,7 @@ class Machine:
 
             # 未知事件类型只写审计后结束。
             case _:
-                await run_blocking_operation(
-                    self.database.save_abnormal_event, "UNKNOWN_EVENT_TYPE", event,
-                )
+                await run_blocking_operation(self.database.save_abnormal_event, "UNKNOWN_EVENT_TYPE", event)
                 return
 
         # 统一处理本轮失败或满足条件后的提交。
@@ -557,11 +548,7 @@ class Machine:
                 )
 
             # 记录本轮已保存。
-            logger.info(
-                "已保存 machine_id=%s session_id=%s",
-                session.machine_id,
-                session.session_id,
-            )
+            logger.info("已保存 machine_id=%s session_id=%s", session.machine_id, session.session_id)
 
             # 尝试释放本轮周期。
             self.release_finished_session()
@@ -757,9 +744,7 @@ class Machine:
         """
         # 频率窗口已封闭时只写迟到频率审计。
         if session.frequency_window_sealed:
-            await run_blocking_operation(
-                self.database.save_abnormal_event, "LATE_FREQUENCY", event,
-            )
+            await run_blocking_operation(self.database.save_abnormal_event, "LATE_FREQUENCY", event)
             return
 
         # 按接收顺序追加本轮频率明细。
@@ -803,13 +788,8 @@ class Machine:
         ocr_result = session.ocr_result
 
         # 按机器、周期和帧编号生成最终图片路径。
-        evidence_directory = (
-            self.config.evidence_directory / session.machine_id / session.session_id
-        )
-        evidence_refs = tuple(
-            str(evidence_directory / f"{frame.frame_id}.bmp")
-            for frame in ocr_result.selected_frames
-        )
+        evidence_directory = self.config.evidence_directory / session.machine_id / session.session_id
+        evidence_refs = tuple(str(evidence_directory / f"{frame.frame_id}.bmp") for frame in ocr_result.selected_frames)
 
         # 组装本轮存储请求。
         request = DatabaseRequest(
@@ -886,11 +866,7 @@ class Machine:
             await asyncio.sleep(timeout_ms / 1000)
 
             # 交付携带原周期身份的超时事件。
-            await self.publish_event(RuntimeEvent(
-                event_type, session.machine_id, session.session_id,
-            ))
+            await self.publish_event(RuntimeEvent(event_type, session.machine_id, session.session_id))
 
         # 保存本轮该类型的唯一期限任务。
-        self.deadline_tasks[event_type] = asyncio.create_task(
-            publish_timeout()
-        )
+        self.deadline_tasks[event_type] = asyncio.create_task(publish_timeout())

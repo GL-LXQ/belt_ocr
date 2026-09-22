@@ -67,7 +67,9 @@ class MachineService:
         try:
             # 查询表单中的重复字段，新增时不需要排除任何记录。
             duplicate_field = self.machine_repo.find_duplicate_field(
-                machine_name, camera_serial, frequency_meter_serial
+                machine_name,
+                camera_serial,
+                frequency_meter_serial,
             )
 
             # 已有相同数据时返回重复字段和提示。
@@ -128,7 +130,10 @@ class MachineService:
         try:
             # 查重时排除正在编辑的机器，原样保留自身字段不算重复。
             duplicate_field = self.machine_repo.find_duplicate_field(
-                machine_name, camera_serial, frequency_meter_serial, exclude_id=machine_id
+                machine_name,
+                camera_serial,
+                frequency_meter_serial,
+                exclude_id=machine_id,
             )
 
             # 与其他未删除机器重复时返回字段和提示。

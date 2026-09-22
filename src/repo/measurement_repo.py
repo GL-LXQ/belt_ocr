@@ -113,10 +113,7 @@ class MeasurementRepo:
         """
         # 按周期编号查询记录是否存在。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
-            record = connection.execute(
-                "SELECT 1 FROM measurements WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
+            record = connection.execute("SELECT 1 FROM measurements WHERE session_id = ?", (session_id,)).fetchone()
 
         # 按查询结果返回是否存在。
         return record is not None

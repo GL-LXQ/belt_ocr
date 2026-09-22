@@ -17,9 +17,7 @@ async def run_blocking_operation(operation, *arguments, **keyword_arguments):
             "runtime/measurements.sqlite3"  # 同步函数返回字符串时透传该结果
     """
     # 在线程中启动阻塞操作。
-    task = asyncio.create_task(asyncio.to_thread(
-        operation, *arguments, **keyword_arguments,
-    ))
+    task = asyncio.create_task(asyncio.to_thread(operation, *arguments, **keyword_arguments))
 
     # 登记是否收到过取消请求。
     cancelled = False
