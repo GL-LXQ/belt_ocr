@@ -40,7 +40,7 @@ class Machine:
         database: Database,
         publish_event: PublishEvent,
         notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None,
-        report_failure: Callable[[Exception], None],
+        on_fatal_error: Callable[[Exception], None],
         state_changed: asyncio.Event,
     ) -> None:
         """组装一台机器的唯一当前周期及其处理依赖。
@@ -54,7 +54,7 @@ class Machine:
             database: 共享存储入口。
             publish_event: 业务事件路由入口。
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
-            report_failure: 应用故障入口。
+            on_fatal_error: 致命故障回调，把识别任务异常交给运行时处理。
             state_changed: 周期状态变化通知。
 
         Returns:
@@ -69,7 +69,7 @@ class Machine:
         self.database = database
         self.publish_event = publish_event
         self.notify_measurement_progress = notify_measurement_progress
-        self.report_failure = report_failure
+        self.on_fatal_error = on_fatal_error
         self.state_changed = state_changed
         self.queue: asyncio.Queue[MeasurementEvent] = asyncio.Queue(
             config.event_queue_capacity
@@ -567,7 +567,7 @@ class Machine:
         if not task.cancelled():
             error = task.exception()
             if error is not None:
-                self.report_failure(error)
+                self.on_fatal_error(error)
         # 线程实际结束后，失败周期才允许释放当前空位。
         self.release_finished_session()
 

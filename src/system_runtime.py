@@ -80,7 +80,7 @@ class SystemRuntime:
                 self.config.capture_window_ms,
                 self.config.camera_timeout_ms,
                 self.publish_event,
-                self.report_failure,
+                self.handle_fatal_error,
             )
             frequency_adapter = FrequencyAdapter(machine_config, self.config, self.publish_event)
             self.machines[machine_config.machine_id] = Machine(
@@ -92,7 +92,7 @@ class SystemRuntime:
                 self.database,
                 self.publish_event,
                 notify_measurement_progress,
-                self.report_failure,
+                self.handle_fatal_error,
                 self.state_changed,
             )
 
@@ -293,7 +293,7 @@ class SystemRuntime:
         # 发送状态同步事件并等待处理完成。
         await self.send_signal(EventType.MACHINE_SYNCHRONIZED, machine_id, machine_state)
 
-    def report_failure(self, error: Exception) -> None:
+    def handle_fatal_error(self, error: Exception) -> None:
         """保存故障、关闭信号入口并安排整个应用退出。
 
         Args:
@@ -332,12 +332,12 @@ class SystemRuntime:
             # 退出期间允许取消，其余取消视为后台任务故障。
             if not self.stopping:
                 logger.exception("后台任务意外取消 component=%s", component)
-                self.report_failure(RuntimeError(f"后台任务意外取消：{component}"))
+                self.handle_fatal_error(RuntimeError(f"后台任务意外取消：{component}"))
             raise
         except Exception as error:
             # 记录后台运行异常，再安排整个应用退出。
             logger.exception("后台任务失败 component=%s", component)
-            self.report_failure(error)
+            self.handle_fatal_error(error)
 
     async def wait_for_failure(self) -> None:
         """等待首次故障并向主流程抛出原始异常。
@@ -435,7 +435,7 @@ class SystemRuntime:
         except Exception as error:
             if error is not self.failure:
                 logger.exception("退出测量失败")
-            self.report_failure(error)
+            self.handle_fatal_error(error)
 
         # 停止事件交付并取消业务任务，禁止退出期间启动新的采集。
         self.releasing_resources = True
@@ -453,7 +453,7 @@ class SystemRuntime:
         ), return_exceptions=True)
         for result in camera_results:
             if isinstance(result, Exception):
-                self.report_failure(result)
+                self.handle_fatal_error(result)
 
         # 取消后台工作并等待在途阻塞操作完成。
         background_tasks = []
@@ -477,7 +477,7 @@ class SystemRuntime:
                     try:
                         await machine.handle_measurement_failure(session)
                     except Exception as error:
-                        self.report_failure(error)
+                        self.handle_fatal_error(error)
             # 清空退出后的周期身份与未完成档案。
             machine.current_session = None
             machine.frequency_adapter.active_session_id = None
@@ -498,11 +498,11 @@ class SystemRuntime:
                 await run_blocking_operation(self.camera_sdk.close)
         except Exception as error:
             logger.exception("关闭相机驱动失败")
-            self.report_failure(error)
+            self.handle_fatal_error(error)
         finally:
             try:
                 self.database.close()
             except Exception as error:
                 logger.exception("关闭本地记录库失败")
-                self.report_failure(error)
+                self.handle_fatal_error(error)
             self.state_changed.set()

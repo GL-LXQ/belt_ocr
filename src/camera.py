@@ -95,7 +95,7 @@ class Camera:
         capture_window_ms: int,
         camera_timeout_ms: int,
         publish_event: PublishEvent,
-        report_failure: Callable[[Exception], None],
+        on_fatal_error: Callable[[Exception], None],
     ) -> None:
         """登记机器编号、采集任务与业务事件入口。
 
@@ -104,7 +104,7 @@ class Camera:
             capture_window_ms: 单轮采集窗口毫秒数。
             camera_timeout_ms: 单帧读取超时毫秒数。
             publish_event: 整轮结果交付入口。
-            report_failure: 应用故障入口。
+            on_fatal_error: 致命故障回调，把采集异常交给运行时处理。
 
         Returns:
             None  # 相机适配器初始化完成
@@ -114,7 +114,7 @@ class Camera:
         self.capture_window_ms = capture_window_ms
         self.camera_timeout_ms = camera_timeout_ms
         self.publish_event = publish_event
-        self.report_failure = report_failure
+        self.on_fatal_error = on_fatal_error
         self.sdk_camera: MvsCamera | None = None
         # 分别登记现场采集与结果交付任务。
         self.current_capture: CaptureTask | None = None
@@ -208,7 +208,7 @@ class Camera:
         # 将采集或结果交付异常交给应用停止流程。
         error = task.exception()
         if error is not None:
-            self.report_failure(error)
+            self.on_fatal_error(error)
 
     async def inform_capture_workflow_stop(self) -> None:
         """通知采集线程停止，并等待采集结束。
