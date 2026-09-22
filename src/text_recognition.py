@@ -27,8 +27,10 @@ class TextRecognizer:
             无外部参数。
 
         Returns:
-            None  # 处理锁已创建
+            返回示例：
+                None  # 处理锁已创建
         """
+        # 创建三台机器共用的整轮处理锁。
         self.processing_lock = asyncio.Lock()
 
     def process_session_frames(
@@ -49,25 +51,28 @@ class TextRecognizer:
             encode_image: 将原始帧编码为内存 BMP 的相机接口。
 
         Returns:
-            OCRResult(
-                ordered_lines=("ABC",),  # 最终文字顺序
-                selected_frames=(  # 最终选中的内存图片
-                    CapturedFrame(
-                        session_id="session",  # 测量周期编号
-                        capture_id="capture",  # 采集编号
-                        camera_serial="CAM01",  # 相机序列号
-                        frame_id="capture-1",  # 图片编号
-                        captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
-                        captured_monotonic=1.0,  # 单调接收时间
-                        image_data=b"BM...",  # BMP 文件字节
+            返回示例：
+                OCRResult(
+                    ordered_lines=("ABC",),  # 最终文字顺序
+                    selected_frames=(  # 最终选中的内存图片
+                        CapturedFrame(
+                            session_id="session",  # 测量周期编号
+                            capture_id="capture",  # 采集编号
+                            camera_serial="CAM01",  # 相机序列号
+                            frame_id="capture-1",  # 图片编号
+                            captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
+                            captured_monotonic=1.0,  # 单调接收时间
+                            image_data=b"BM...",  # BMP 文件字节
+                        ),
                     ),
-                ),
-                line_frame_ids=(("capture-1",),),  # 每条文字对应的图片编号
-            )
+                    line_frame_ids=(("capture-1",),),  # 每条文字对应的图片编号
+                )
         """
+        # 本轮没有帧时直接失败。
         if not frames:
             raise ValueError("CAPTURE_NO_FRAMES")
-        # 编码本轮图片，保留身份和接收时间。
+
+        # 逐帧调用相机编码接口，得到内存 BMP 图片。
         captured_frames = []
         for frame in frames:
             try:
@@ -78,7 +83,11 @@ class TextRecognizer:
                     "相机编码失败 camera_serial=%s session_id=%s", camera_serial, session_id,
                 )
                 raise ImageEncodingError("相机图片编码失败") from error
+
+            # 按单调接收时间换算本帧的 UTC 时间。
             captured_at = datetime.now(timezone.utc) - timedelta(seconds=time.monotonic() - frame.received_monotonic)
+
+            # 登记带周期身份和采集编号的图片。
             captured_frames.append(CapturedFrame(
                 session_id=session_id,
                 capture_id=capture_id,
@@ -88,15 +97,23 @@ class TextRecognizer:
                 captured_monotonic=frame.received_monotonic,
                 image_data=image_data,
             ))
-        # 筛选合格图片，无合格图片时结束本轮。
+
+        # 筛选合格图片并释放原始帧引用。
         qualified_frames = self.filter_qualified_frames(tuple(captured_frames))
         captured_frames.clear()
+
+        # 没有合格图片时结束本轮。
         if not qualified_frames:
             raise ValueError("OCR_NO_QUALIFIED_FRAMES")
-        # 调用模型并按输入顺序关联帧身份。
+
+        # 调用模型识别本轮全部合格图片。
         image_results = self.recognize_images([frame.image_data for frame in qualified_frames])
+
+        # 模型结果数量与图片数量不一致时结束本轮。
         if len(image_results) != len(qualified_frames):
             raise ValueError("OCR_RESULT_COUNT_MISMATCH")
+
+        # 按输入顺序把模型结果与图片编号配对。
         frame_results = [
             {
                 "frame_id": frame.frame_id,
@@ -104,12 +121,19 @@ class TextRecognizer:
             }
             for frame, image_result in zip(qualified_frames, image_results)
         ]
-        # 生成最终文字和图片，无有效结果时按整轮失败处理。
+
+        # 生成最终文字和图片。
         result = self.generate_final_text_and_images(frame_results, qualified_frames)
+
+        # 无最终文字时结束本轮。
         if not result.ordered_lines:
             raise ValueError("OCR_NO_TEXT")
+
+        # 无选中图片时结束本轮。
         if not result.selected_frames:
             raise ValueError("OCR_NO_SELECTED_IMAGES")
+
+        # 返回本轮最终结果。
         return result
 
     def filter_qualified_frames(self, frames: tuple[CapturedFrame, ...]) -> tuple[CapturedFrame, ...]:
@@ -119,18 +143,20 @@ class TextRecognizer:
             frames: 按采集顺序排列的内存图片。
 
         Returns:
-            (
-                CapturedFrame(
-                    session_id="session",  # 测量周期编号
-                    capture_id="capture",  # 采集编号
-                    camera_serial="CAM01",  # 相机序列号
-                    frame_id="capture-1",  # 唯一图片编号
-                    captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
-                    captured_monotonic=1.0,  # 单调接收时间
-                    image_data=b"BM...",  # 内存 BMP 字节
-                ),
-            )
+            返回示例：
+                (
+                    CapturedFrame(
+                        session_id="session",  # 测量周期编号
+                        capture_id="capture",  # 采集编号
+                        camera_serial="CAM01",  # 相机序列号
+                        frame_id="capture-1",  # 唯一图片编号
+                        captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
+                        captured_monotonic=1.0,  # 单调接收时间
+                        image_data=b"BM...",  # 内存 BMP 字节
+                    ),
+                )
         """
+        # 原样返回全部图片。
         return frames
 
     def recognize_images(self, images: list[bytes]) -> list[dict]:
@@ -140,13 +166,15 @@ class TextRecognizer:
             images: 按顺序排列的合格图片字节。
 
         Returns:
-            [
-                {
-                    "blocks": [],  # 单张图片的模型原始文字块，结果与输入等长
-                },
-            ]
+            返回示例：
+                [
+                    {
+                        "blocks": [],  # 单张图片的模型原始文字块，结果与输入等长
+                    },
+                ]
             当前抛出 NotImplementedError，不返回占位成功结果。
         """
+        # 报告识别模型尚未实现。
         raise NotImplementedError("OCR_MODEL_NOT_IMPLEMENTED")
 
     def generate_final_text_and_images(self, frame_results: list[dict], frames: tuple[CapturedFrame, ...]) -> OCRResult:
@@ -157,21 +185,23 @@ class TextRecognizer:
             frames: 本轮合格图片，保留原始身份和采集顺序。
 
         Returns:
-            OCRResult(
-                ordered_lines=("ABC",),  # 去重并排序的完整文字
-                selected_frames=(  # 按 frame_id 唯一保存的最终图片
-                    CapturedFrame(
-                        session_id="session",  # 测量周期编号
-                        capture_id="capture",  # 采集编号
-                        camera_serial="CAM01",  # 相机序列号
-                        frame_id="capture-1",  # 图片编号
-                        captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
-                        captured_monotonic=1.0,  # 单调接收时间
-                        image_data=b"BM...",  # BMP 文件字节
+            返回示例：
+                OCRResult(
+                    ordered_lines=("ABC",),  # 去重并排序的完整文字
+                    selected_frames=(  # 按 frame_id 唯一保存的最终图片
+                        CapturedFrame(
+                            session_id="session",  # 测量周期编号
+                            capture_id="capture",  # 采集编号
+                            camera_serial="CAM01",  # 相机序列号
+                            frame_id="capture-1",  # 图片编号
+                            captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
+                            captured_monotonic=1.0,  # 单调接收时间
+                            image_data=b"BM...",  # BMP 文件字节
+                        ),
                     ),
-                ),
-                line_frame_ids=(("capture-1",),),  # 与 ordered_lines 逐项对应的来源图片编号
-            )
+                    line_frame_ids=(("capture-1",),),  # 与 ordered_lines 逐项对应的来源图片编号
+                )
             当前抛出 NotImplementedError，不修改周期或保存图片。
         """
+        # 报告文字与图片终选尚未实现。
         raise NotImplementedError("OCR_FINAL_SELECTION_NOT_IMPLEMENTED")

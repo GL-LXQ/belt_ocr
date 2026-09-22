@@ -41,6 +41,7 @@ class AbnormalEventRepo:
             返回示例：
                 None  # 初始化异常事件表访问对象
         """
+        # 保存运行数据库路径。
         self.database_path = database_path
 
     def insert(self, created_at: float, machine_id: str, session_id: str | None, reason: str, payload_json: str) -> int:

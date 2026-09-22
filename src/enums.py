@@ -75,4 +75,4 @@ class EventType(str, Enum):
     FREQUENCY_MEASURED = "FrequencyMeasured"  # 收到有效频率测量
     CYCLE_TIMEOUT = "CycleTimeout"  # 测量周期超时
     COMMIT_SUCCEEDED = "CommitSucceeded"  # 数据库提交成功
-    COMMIT_FAILED = "CommitFailed"  # 数据库提交失败xian
+    COMMIT_FAILED = "CommitFailed"  # 数据库提交失败

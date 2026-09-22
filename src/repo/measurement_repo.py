@@ -48,6 +48,7 @@ class MeasurementRepo:
             返回示例：
                 None  # 初始化测量表访问对象
         """
+        # 保存业务数据库路径。
         self.database_path = database_path
 
     def write_record(self, request: "DatabaseRequest") -> None:
@@ -70,17 +71,22 @@ class MeasurementRepo:
             json.dumps(request.evidence_refs, ensure_ascii=False),
             json.dumps(request.measurement_frequencies, ensure_ascii=False, sort_keys=True),
         )
-        # 打开业务库连接并在事务中处理本轮提交。
+
+        # 打开业务库连接。
         connection = sqlite3.connect(self.database_path, timeout=1)
         with closing(connection), connection:
-            # 比较同一周期已保存的业务字段，拒绝内容冲突。
+            # 开启本轮写入事务。
             connection.execute("BEGIN IMMEDIATE")
+
+            # 读取同一周期已保存的业务字段。
             existing_record = connection.execute(
                 "SELECT machine_id, start_time, finish_time, ordered_lines, "
                 "final_frequency_hz, evidence_refs, measurement_frequencies "
                 "FROM measurements WHERE session_id = ?",
                 (request.session_id,),
             ).fetchone()
+
+            # 已有记录时比较内容，不一致则拒绝，一致则跳过写入。
             if existing_record is not None:
                 if existing_record != record_values:
                     raise ValueError("同一 Session 的提交内容不一致。")
@@ -105,10 +111,12 @@ class MeasurementRepo:
                 True  # 已存在对应周期的测量记录
                 False  # 未找到对应周期的测量记录
         """
-        # 查询周期编号并关闭本次查询连接。
+        # 按周期编号查询记录是否存在。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
             record = connection.execute(
                 "SELECT 1 FROM measurements WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
+
+        # 按查询结果返回是否存在。
         return record is not None

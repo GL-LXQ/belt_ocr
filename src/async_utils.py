@@ -12,29 +12,38 @@ async def run_blocking_operation(operation, *arguments, **keyword_arguments):
         keyword_arguments: 传给同步函数的关键字参数。
 
     Returns:
-        object: 同步函数返回的原始结果。
         返回示例：
-            None  # 同步函数没有返回数据
+            None  # 同步函数无返回值时透传 None
+            "runtime/measurements.sqlite3"  # 同步函数返回字符串时透传该结果
     """
-    # 在线程中启动阻塞操作，并避免外层取消直接中断资源处理。
+    # 在线程中启动阻塞操作。
     task = asyncio.create_task(asyncio.to_thread(
         operation, *arguments, **keyword_arguments,
     ))
+
+    # 登记是否收到过取消请求。
     cancelled = False
     while True:
         try:
-            # 重复取消只登记状态，线程实际结束后才允许调用方释放资源。
+            # 等待线程结果，取消不会中断线程执行。
             result = await asyncio.shield(task)
             break
         except asyncio.CancelledError:
+            # 线程自身已被取消时直接抛出。
             if task.cancelled():
                 raise
+
+            # 线程仍在运行时记录取消状态并继续等待。
             cancelled = True
         except Exception:
+            # 此前收到过取消时重新登记取消请求。
             if cancelled:
-                # 保留取消请求，同时向调用方传播工作线程的真实异常。
                 asyncio.current_task().cancel()
             raise
+
+    # 线程结束后补抛此前收到的取消。
     if cancelled:
         raise asyncio.CancelledError
+
+    # 透传同步函数的结果。
     return result

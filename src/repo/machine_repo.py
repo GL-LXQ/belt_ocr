@@ -18,6 +18,7 @@ class MachineRepo:
             返回示例：
                 None  # 初始化机器表访问对象
         """
+        # 保存机器信息所在的业务数据库路径。
         self.database_path = database_path
 
     def insert(
@@ -41,7 +42,7 @@ class MachineRepo:
             返回示例：
                 1  # 新增机器记录的数据库自增主键
         """
-        # 打开业务库连接，在事务中插入机器信息并使用表默认时间。
+        # 打开业务库连接，在事务中插入机器信息。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection, connection:
             cursor = connection.execute(
                 "INSERT INTO machine "
@@ -49,6 +50,8 @@ class MachineRepo:
                 "VALUES (?, ?, ?, ?, ?)",
                 (machine_name, camera_serial, frequency_meter_serial, enabled, remark),
             )
+
+            # 返回新增记录的自增主键。
             return cursor.lastrowid
 
     def find_duplicate_field(
@@ -92,13 +95,15 @@ class MachineRepo:
         for field, duplicated in zip(fields, duplicates):
             if duplicated:
                 return field
+
+        # 三个字段都不重复时返回空。
         return None
 
     def list_all(self) -> list[dict]:
         """按编号读取全部未删除机器信息。
 
         Args:
-            无。
+            无外部参数。
 
         Returns:
             返回示例：
@@ -135,7 +140,7 @@ class MachineRepo:
         """按编号读取全部已启用机器信息。
 
         Args:
-            无。
+            无外部参数。
 
         Returns:
             返回示例：
@@ -183,6 +188,8 @@ class MachineRepo:
                 "enabled = ?, remark = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (machine_name, camera_serial, frequency_meter_serial, enabled, remark, machine_id),
             )
+
+            # 返回受影响行数。
             return cursor.rowcount
 
     def soft_delete(self, machine_id: int) -> int:
@@ -201,6 +208,8 @@ class MachineRepo:
                 "UPDATE machine SET is_deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (machine_id,),
             )
+
+            # 返回受影响行数。
             return cursor.rowcount
 
     @staticmethod

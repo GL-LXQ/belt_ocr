@@ -30,6 +30,7 @@ class MachineService:
             返回示例：
                 None  # 完成机器业务服务初始化
         """
+        # 保存机器表访问对象。
         self.machine_repo = machine_repo
 
     def create_machine(
@@ -65,7 +66,9 @@ class MachineService:
         """
         try:
             # 查询表单中的重复字段，新增时不需要排除任何记录。
-            duplicate_field = self.machine_repo.find_duplicate_field(machine_name, camera_serial, frequency_meter_serial)
+            duplicate_field = self.machine_repo.find_duplicate_field(
+                machine_name, camera_serial, frequency_meter_serial
+            )
 
             # 已有相同数据时返回重复字段和提示。
             if duplicate_field:
@@ -79,6 +82,7 @@ class MachineService:
             # 无重复字段时保存机器并取得编号。
             machine_id = self.machine_repo.insert(machine_name, camera_serial, frequency_meter_serial, enabled, remark)
         except sqlite3.Error as error:
+            # 数据库故障转换为业务错误。
             raise MachineServiceError(f"机器保存失败：{error}") from error
 
         # 返回已创建机器的成功结果。
@@ -139,6 +143,7 @@ class MachineService:
             # 无重复字段时更新机器记录。
             self.machine_repo.update(machine_id, machine_name, camera_serial, frequency_meter_serial, enabled, remark)
         except sqlite3.Error as error:
+            # 数据库故障转换为业务错误。
             raise MachineServiceError(f"机器保存失败：{error}") from error
 
         # 返回已更新机器的成功结果。
@@ -158,17 +163,18 @@ class MachineService:
             返回示例：
                 None  # 机器已标记删除，列表不再读取该记录
         """
-        # 标记删除机器并转换数据库异常。
+        # 标记删除机器。
         try:
             self.machine_repo.soft_delete(machine_id)
         except sqlite3.Error as error:
+            # 数据库故障转换为业务错误。
             raise MachineServiceError(f"机器删除失败：{error}") from error
 
     def list_machines(self) -> list[dict]:
         """按编号读取全部机器信息。
 
         Args:
-            无。
+            无外部参数。
 
         Returns:
             返回示例：
@@ -183,17 +189,18 @@ class MachineService:
                     "remark": "",  # 备注，无备注时为空字符串
                 }]
         """
-        # 读取机器列表并将数据库异常转换为业务提示。
+        # 读取全部机器列表。
         try:
             return self.machine_repo.list_all()
         except sqlite3.Error as error:
+            # 数据库故障转换为业务错误。
             raise MachineServiceError(f"机器列表读取失败：{error}") from error
 
     def list_enabled_machines(self) -> list[dict]:
         """按编号读取全部已启用机器信息。
 
         Args:
-            无。
+            无外部参数。
 
         Returns:
             返回示例：
@@ -208,8 +215,9 @@ class MachineService:
                     "remark": "",  # 备注，无备注时为空字符串
                 }]
         """
-        # 读取已启用机器列表并将数据库异常转换为业务提示。
+        # 读取已启用机器列表。
         try:
             return self.machine_repo.list_enabled()
         except sqlite3.Error as error:
+            # 数据库故障转换为业务错误。
             raise MachineServiceError(f"机器列表读取失败：{error}") from error

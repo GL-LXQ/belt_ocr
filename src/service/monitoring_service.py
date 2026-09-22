@@ -1,4 +1,4 @@
-"""在后台线程运行监测服务并向界面发送相机连接结果。"""
+"""在后台线程运行监测服务并向界面发送相机连接和本轮进度结果。"""
 
 import asyncio
 import threading
@@ -26,10 +26,16 @@ class MonitoringService(QThread):
             configuration_directory: 公共 YAML 配置目录。
 
         Returns:
-            None  # 后台线程已准备，尚未启动
+            返回示例：
+                None  # 后台线程已准备，尚未启动
         """
+        # 初始化 Qt 线程基类。
         super().__init__()
+
+        # 保存配置目录。
         self.configuration_directory = configuration_directory
+
+        # 创建跨线程停止通知并初始化故障文案。
         self.stop_requested = threading.Event()
         self.failure_message = ""
 
@@ -37,35 +43,40 @@ class MonitoringService(QThread):
         """运行后台事件循环并保存失败原因。
 
         Args:
-            无。
+            无外部参数。
 
         Returns:
-            None  # 事件循环结束，QThread 随后发送 finished 信号
+            返回示例：
+                None  # 事件循环结束，QThread 随后发送 finished 信号
         """
-        # 在线程中运行监测主流程，将异常交给界面展示。
         try:
+            # 在本线程中运行监测主流程。
             asyncio.run(self.run_monitoring())
         except Exception as error:
+            # 保存失败原因供界面读取。
             self.failure_message = str(error)
 
     async def run_monitoring(self):
         """读取机器、连接相机、等待停止并统一释放资源。
 
         Args:
-            无。
+            无外部参数。
 
         Returns:
-            None  # 监测结束，相机及数据库资源已释放
+            返回示例：
+                None  # 监测结束，相机及数据库资源已释放
         """
-        # 从业务库构建机器配置并创建后台处理器。
+        # 读取公共配置并创建运行时对象。
         config = load_config(self.configuration_directory)
         system_runtime = SystemRuntime(config)
         try:
-            # 连接相机并等待停止通知，不发送模拟启停信号。
+            # 连接相机并接入两个上报信号，不发送模拟启停信号。
             await system_runtime.start(
                 self.camera_state_changed_signal.emit,
                 self.measurement_progress_changed_signal.emit,
             )
+
+            # 轮询停止请求与后台故障，任一出现时结束等待。
             while not self.stop_requested.is_set() and system_runtime.failure is None:
                 await asyncio.sleep(0.1)
         finally:
