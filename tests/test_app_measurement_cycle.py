@@ -12,7 +12,7 @@ from system_runtime import SystemRuntime
 from config_util import AppConfig, MachineConfig
 from enums import EventType, ProgressStage, ProgressStatus
 from frequency_adapter import FrequencyAdapter
-from models import FrequencyMeasurement, MeasurementEvent, OCRResult, PublishEvent
+from models import FrequencyMeasurement, RuntimeEvent, OCRResult, PublishEvent
 from local_test_support import FakeMvsSdk, build_config, create_machine_database
 
 
@@ -55,7 +55,7 @@ class FixedFrequencyAdapter(FrequencyAdapter):
                 continue
             value_hz = next(values_hz)
             self.delivered_values_hz.append(value_hz)
-            await self.publish_event(MeasurementEvent(
+            await self.publish_event(RuntimeEvent(
                 EventType.FREQUENCY_MEASURED,
                 self.machine.machine_id,
                 session_id,

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from async_utils import run_blocking_operation
 from enums import EventType
-from models import CaptureResult, MeasurementEvent, PublishEvent
+from models import CaptureResult, RuntimeEvent, PublishEvent
 from camera.hikrobot_sdk import MvsCamera, MvsError
 
 
@@ -286,7 +286,7 @@ class Camera:
 
         try:
             # 将成功采集的整轮结果交回所属机器。
-            await self.publish_event(MeasurementEvent(
+            await self.publish_event(RuntimeEvent(
                 EventType.CAPTURE_COMPLETED, self.machine_id, session_id, result,
             ))
         except Exception:

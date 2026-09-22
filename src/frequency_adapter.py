@@ -6,7 +6,7 @@ import math
 from itertools import cycle
 
 from config_util import MachineConfig, AppConfig
-from models import FrequencyMeasurement, MeasurementEvent, PublishEvent
+from models import FrequencyMeasurement, RuntimeEvent, PublishEvent
 
 
 class FrequencyAdapter:
@@ -79,6 +79,6 @@ class FrequencyAdapter:
             )
 
             # 顺序等待本次读数入队。
-            await self.publish_event(MeasurementEvent(
+            await self.publish_event(RuntimeEvent(
                 EventType.FREQUENCY_MEASURED, self.machine.machine_id, session_id, measurement,
             ))

@@ -14,7 +14,7 @@ from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
 from machine import Machine
 from enums import EventType, MachineState, ProgressStage, ProgressStatus, SessionState
-from models import MeasurementEvent
+from models import RuntimeEvent
 from async_utils import run_blocking_operation
 from text_recognition import TextRecognizer
 from database import Database
@@ -274,7 +274,7 @@ class SystemRuntime:
 
         # 将信号和回执送入机器队列，关闭事件携带当前活动 Session 编号。
         await self.publish_event(
-            MeasurementEvent(
+            RuntimeEvent(
                 event_type,
                 machine_id,
                 session_id=(
@@ -290,7 +290,7 @@ class SystemRuntime:
         # 等待对应机器确认本次事件处理完成。
         await acknowledgement
 
-    async def publish_event(self, event: MeasurementEvent) -> None:
+    async def publish_event(self, event: RuntimeEvent) -> None:
         """更新事件接收时间，并将事件送入对应机器的有界队列。
 
         Args:
@@ -499,7 +499,7 @@ class SystemRuntime:
             # 向每台机器发送中断事件并等待处理回执。
             for machine in self.machines.values():
                 acknowledgement = asyncio.get_running_loop().create_future()
-                await self.publish_event(MeasurementEvent(
+                await self.publish_event(RuntimeEvent(
                     EventType.SHUTDOWN, machine.machine_config.machine_id,
                     acknowledgement=acknowledgement,
                 ))

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from async_utils import run_blocking_operation
 from config_util import AppConfig
-from models import CapturedFrame, MeasurementEvent, PublishEvent
+from models import CapturedFrame, RuntimeEvent, PublishEvent
 from repo.machine_repo import MachineRepo
 from repo.measurement_repo import MeasurementRepo
 from repo.abnormal_event_repo import AbnormalEventRepo
@@ -394,7 +394,7 @@ class Database:
                     await asyncio.sleep(0)
 
                 # 将本次提交结果返回原周期。
-                await self.publish_event(MeasurementEvent(
+                await self.publish_event(RuntimeEvent(
                     event_type, request.machine_id, request.session_id, payload,
                 ))
             finally:

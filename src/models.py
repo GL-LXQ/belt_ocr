@@ -13,7 +13,7 @@ from enums import OCRState, FrequencyState, SessionState, EventType
 
 
 @dataclass(frozen=True)
-class MeasurementEvent:
+class RuntimeEvent:
     """送入机器事件队列的一条业务事件。"""
 
     event_type: EventType  # 事件类型
@@ -36,7 +36,7 @@ class MeasurementEvent:
 
 
 # 事件路由入口的函数类型，接收事件并异步返回。
-PublishEvent = Callable[[MeasurementEvent], Awaitable[None]]
+PublishEvent = Callable[[RuntimeEvent], Awaitable[None]]
 
 
 @dataclass(frozen=True)

@@ -20,7 +20,7 @@ from enums import (
     SessionState,
 )
 from camera.hikrobot_sdk import CameraFrame
-from models import BeltSession, MeasurementEvent, PublishEvent
+from models import BeltSession, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
 from text_recognition import ImageEncodingError, TextRecognizer
 from database import Database, DatabaseRequest
@@ -80,7 +80,7 @@ class Machine:
         self.state_changed = state_changed
 
         # 按配置容量创建本机串行事件队列。
-        self.queue: asyncio.Queue[MeasurementEvent] = asyncio.Queue(
+        self.queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue(
             config.event_queue_capacity
         )
 
@@ -242,7 +242,7 @@ class Machine:
         self,
         interrupted: bool = False,
         capture_stop_time: float | None = None,
-        close_event: MeasurementEvent | None = None,
+        close_event: RuntimeEvent | None = None,
     ) -> None:
         """结束本轮采集，结算频率并检查完成条件。
 
@@ -352,7 +352,7 @@ class Machine:
         # 检查正常关闭周期的结果，条件满足时提交数据库。
         await self.try_finalize(session)
 
-    async def handle_event(self, event: MeasurementEvent) -> None:
+    async def handle_event(self, event: RuntimeEvent) -> None:
         """按事件类型处理机器和测量周期业务，并检查本轮是否完成。
 
         Args:
@@ -528,7 +528,7 @@ class Machine:
         # 统一处理本轮失败或满足条件后的提交。
         await self.try_finalize(session)
 
-    async def handle_commit_result(self, session: BeltSession, event: MeasurementEvent) -> None:
+    async def handle_commit_result(self, session: BeltSession, event: RuntimeEvent) -> None:
         """处理提交成功或失败回调，更新原测量档案的提交状态。
 
         Args:
@@ -738,13 +738,13 @@ class Machine:
         # 只向仍然有效的周期交付结果。
         if session.state == SessionState.RUNNING:
             try:
-                await self.publish_event(MeasurementEvent(event_type, session.machine_id, session.session_id, payload))
+                await self.publish_event(RuntimeEvent(event_type, session.machine_id, session.session_id, payload))
             except Exception:
                 # 记录结果交付异常并结束后台任务。
                 logger.exception("OCR 结果交付失败 session_id=%s", session.session_id)
                 raise
 
-    async def handle_frequency_measured(self, session: BeltSession, event: MeasurementEvent) -> None:
+    async def handle_frequency_measured(self, session: BeltSession, event: RuntimeEvent) -> None:
         """按接收顺序保存黑盒交付的新有效测量。
 
         Args:
@@ -886,7 +886,7 @@ class Machine:
             await asyncio.sleep(timeout_ms / 1000)
 
             # 交付携带原周期身份的超时事件。
-            await self.publish_event(MeasurementEvent(
+            await self.publish_event(RuntimeEvent(
                 event_type, session.machine_id, session.session_id,
             ))
 
