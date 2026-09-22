@@ -5,7 +5,10 @@ description = "多皮带机并行模拟采集与测量记录"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "pymodbus>=3.15.0",
+    "pyserial>=3.5",
     "pyside6>=6.11.2",
+    "pytest-asyncio>=1.4.0",
     "pyyaml>=6.0.3",
 ]
 

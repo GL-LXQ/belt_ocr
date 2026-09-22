@@ -516,3 +516,6 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### src 按 120 字符规则整理函数定义与调用换行
 
 `src/` 下 27 处按「不超过 120 字符保持单行；超过 120 字符左括号后立即换行，一个参数独占一行」重排：合回单行的有 `async_utils.py` 的线程任务创建、`camera/camera.py`、`database.py`、`machine.py` 两处 `publish_event`、`machine.py` 的事件队列、期限任务、三处 `save_abnormal_event`、两处进度日志与最终图片目录、`frequency_adapter.py` 的 `__init__`、`main.py` 的日志配置与 `--config` 参数、`models.py` 的两个时间字段、`measurement_repo.py` 的周期存在性查询、`system_runtime.py` 的 SDK 加载与退出等待、`text_recognition.py` 的编码异常日志；仍超宽因此改成一个参数独占一行的有 `machine.py` 的三处进度上报、`machine_service.py` 的两处查重调用、`system_runtime.py` 的机器事件任务与停机事件；`frequency_adapter.py` 的频率读数交付因合行后超宽，改为外层单参数独占一行。多行字典字段与 `return` 的多个返回元素按规则保持每项独占一行，未调整。本次只改换行与缩进，逐文件语法树与整理前完全一致，全部行不超过 120 字符。数据流不变：`load_config()` 读 YAML 公共参数 → `SystemRuntime(config)` 只组装共享依赖 → `start()` 同步建图片目录与双库、`initialize_machines()` 读启用机器并逐台建立 `Machine` 与 `Camera`、打开相机并启动机器事件与频率监听任务和共享存储任务 → START 采集图片与频率 → `RuntimeEvent` 按机器编号进入 FIFO 队列由 `listen_events()` 串行处理 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 提交结果回到原周期 → 退出时关闭相机并释放实例锁。全量 pytest：313 项通过、1 项失败，失败项仍是 `test_progress_for_missing_card_is_ignored`，与本次格式整理无关。
+### Modbus RTU DI 通信
+
+Modbus RTU 客户端根据串口配置创建 `AsyncModbusSerialClient`，连接设备后通过 FC02 读取离散输入；读取前确保连接有效，断线时关闭旧客户端并重新连接，读取失败返回 `None`，业务层尚未接入 DI 状态映射或启停处理。
