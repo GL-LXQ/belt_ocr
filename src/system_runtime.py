@@ -34,18 +34,29 @@ class SystemRuntime:
             返回示例：
                 None  # 共享依赖已登记，尚未读取机器和连接相机
         """
+        # 校验并保存运行配置。
         config.validate()
         self.config = config
+
+        # 创建周期状态变化通知。
         self.state_changed = asyncio.Event()
+
+        # 创建共享存储与共享 OCR 处理器。
         self.database = Database(config, self.publish_event)
         self.text_recognizer = TextRecognizer()
+
+        # 登记机器运行对象与后台任务列表。
         self.machines: dict[str, Machine] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
+
+        # 登记启动、停止与资源释放标志。
         self.accepting_signals = False
         self.has_started = False
         self.stopping = False
         self.releasing_resources = False
         self.camera_sdk = None
+
+        # 登记故障记录、故障通知与退出任务引用。
         self.failure: Exception | None = None
         self.failure_event = asyncio.Event()
         self.shutdown_task: asyncio.Task[None] | None = None
@@ -65,16 +76,21 @@ class SystemRuntime:
         """
         # 读取业务库中启用的机器。
         enabled_machines = MachineRepo(self.config.database_path).list_enabled()
+
+        # 没有启用机器时拒绝启动。
         if not enabled_machines:
             raise ValueError("没有启用的机器，请先在机器管理页添加并启用机器。")
 
-        # 为每台机器建立独立的采集器、频率适配器和机器运行对象。
+        # 遍历启用机器，逐台建立运行对象并登记。
         for machine_row in enabled_machines:
+            # 用业务库自增编号的字符串形式作为机器编号，组装机器身份配置。
             machine_config = MachineConfig(
                 machine_id=str(machine_row["id"]),
                 camera_serial=machine_row["camera_serial"],
                 frequency_meter_serial=machine_row["frequency_meter_serial"],
             )
+
+            # 建立本机采集器，接入事件入口与致命故障回调。
             camera = Camera(
                 machine_config.machine_id,
                 self.config.capture_window_ms,
@@ -82,7 +98,11 @@ class SystemRuntime:
                 self.publish_event,
                 self.handle_fatal_error,
             )
+
+            # 建立本机频率接收适配器。
             frequency_adapter = FrequencyAdapter(machine_config, self.config, self.publish_event)
+
+            # 建立本机运行对象并按机器编号登记。
             self.machines[machine_config.machine_id] = Machine(
                 machine_config,
                 self.config,
@@ -116,23 +136,30 @@ class SystemRuntime:
         if self.has_started:
             raise RuntimeError("请为新一次运行创建新的测量应用实例。")
         try:
-            # 初始化图片目录、本地运行库和最终结果库，此处按同步方式执行。
+            # 创建证据图片目录，此处按同步方式执行。
             self.config.evidence_directory.mkdir(parents=True, exist_ok=True)
+
+            # 初始化本地运行库与最终结果库，此处按同步方式执行。
             self.database.initialize()
 
-            # 读取启用机器并逐台建立机器运行对象，没有启用机器时拒绝启动。
+            # 读取启用机器并逐台建立机器运行对象。
             self.initialize_machines(notify_measurement_progress)
 
-            # 加载相机驱动，按配置逐台打开相机，此处按同步方式执行。
+            # 加载相机驱动，此处按同步方式执行。
             self.camera_sdk = load_mvs_sdk(
                 self.config.mvs_development_directory,
                 self.config.mvs_dll_directory,
             )
+
+            # 逐台机器打开相机并绑定到本机采集器。
             for machine in self.machines.values():
                 machine_config = machine.machine_config
-                # 通知界面连接状态，并将相机绑定到本机器。
+
+                # 通知界面本机正在连接。
                 if notify_camera_state is not None:
                     notify_camera_state(machine_config.machine_id, "连接中", "")
+
+                # 按本机序列号和相机参数打开相机。
                 try:
                     machine.camera.sdk_camera = self.camera_sdk.open_camera(
                         machine_config.camera_serial,
@@ -140,41 +167,54 @@ class SystemRuntime:
                         exposure_time_us=machine_config.camera_exposure_time_us,
                         gain=machine_config.camera_gain,
                     )
+                # 打开失败时通知界面失败原因并抛出。
                 except Exception as error:
                     if notify_camera_state is not None:
                         notify_camera_state(machine_config.machine_id, "连接失败", str(error))
                     raise
+
+                # 打开成功时通知界面相机已连接。
                 if notify_camera_state is not None:
                     notify_camera_state(machine_config.machine_id, "相机已连接", "IO、频率仪尚未接入")
 
-            # 设置现场初始状态：运行中或未知时，等一次真实关闭后才受理新的 START。
+            # 按现场初始状态设置各机器的等待复位标志。
             for machine in self.machines.values():
                 machine.waiting_cycle_reset = self.config.initial_machine_state != MachineState.CLOSED
-                # 标记本机启动准备完成，对外状态不再是 INITIALIZING。
+
+                # 标记本机启动准备完成。
                 machine.initialized = True
 
-            # 为每台机器启动事件处理和频率监听任务，任一任务异常都停止应用。
+            # 逐台机器启动事件处理与频率监听后台任务。
             for machine in self.machines.values():
                 machine_config = machine.machine_config
+
+                # 启动本机事件处理任务。
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
                     f"机器处理 machine_id={machine_config.machine_id}", machine.listen_events,
                 )))
+
+                # 启动本机频率监听任务。
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
                     f"频率监听 machine_id={machine_config.machine_id} "
                     f"frequency_meter_serial={machine_config.frequency_meter_serial}",
                     machine.frequency_adapter.listen_measurements,
                 )))
 
-            # 启动测量存储任务，逐条保存各机器提交的图片与测量记录。
+            # 启动共享的测量存储任务。
             self.worker_tasks.append(asyncio.create_task(self.run_worker("测量存储", self.database.consume_storage_queue)))
+
+            # 标记启动完成并开放信号入口。
             self.has_started = True
             self.accepting_signals = True
         except BaseException as error:
-            # 启动失败时记录异常并释放已打开的相机和本地记录库。
+            # 记录启动失败异常。
             logger.exception("测量系统初始化失败")
+
+            # 保存启动故障，供主流程读取。
             if isinstance(error, Exception) and self.failure is None:
                 self.failure = error
-            # 等待启动资源清理完成，保留取消期间发生的原始启动异常。
+
+            # 等待资源清理完成，清理任务被取消时继续等待。
             while True:
                 try:
                     await self.stop()
@@ -185,11 +225,27 @@ class SystemRuntime:
             raise
 
     async def handle_start(self, machine_id: str) -> None:
-        """处理某台皮带机启动，不依赖信号来源。"""
+        """处理某台皮带机启动，不依赖信号来源。
+
+        Args:
+            machine_id: 接收启动信号的机器编号。
+
+        Returns:
+            返回示例：
+                None  # 启动事件已处理完成，不等待采集与识别结果
+        """
         await self.send_signal(EventType.MACHINE_STARTED, machine_id)
 
     async def handle_close(self, machine_id: str) -> None:
-        """处理某台皮带机正常关闭，不等待后台识别和保存。"""
+        """处理某台皮带机正常关闭，不等待后台识别和保存。
+
+        Args:
+            machine_id: 接收关闭信号的机器编号。
+
+        Returns:
+            返回示例：
+                None  # 关闭事件已处理完成，不等待后台识别和保存
+        """
         await self.send_signal(EventType.MACHINE_CLOSED, machine_id)
 
     async def send_signal(self, event_type: EventType, machine_id: str, payload=None) -> None:
@@ -197,7 +253,7 @@ class SystemRuntime:
 
         Args:
             event_type: 事件类型，例如 MachineStarted 或 MachineClosed。
-            machine_id: 接收信号的机器编号，例如 M01。
+            machine_id: 接收信号的机器编号，例如 "1"。
             payload: 随事件传递的业务数据，默认值为 None。
 
         Returns:
@@ -205,9 +261,11 @@ class SystemRuntime:
             返回示例：
                 None  # 无返回数据
         """
-        # 检查信号入口是否开放，以及机器是否已配置。
+        # 信号入口未开放时拒绝本次信号。
         if not self.accepting_signals:
             raise RuntimeError("测量系统当前未接收信号。")
+
+        # 机器未登记时拒绝本次信号。
         if machine_id not in self.machines:
             raise ValueError(f"未配置机器：{machine_id}")
 
@@ -249,8 +307,10 @@ class SystemRuntime:
                 event.acknowledgement.cancel()
             return
 
-        # 查找对应机器，登记并隔离未知机器的事件。
+        # 按事件里的机器编号查找对应机器。
         machine = self.machines.get(event.machine_id)
+
+        # 未知机器的事件写入审计并记录日志后结束分发。
         if machine is None:
             await run_blocking_operation(self.database.save_abnormal_event, "UNKNOWN_MACHINE", event)
             logger.warning("隔离未知机器事件 machine_id=%s", event.machine_id)
@@ -265,6 +325,7 @@ class SystemRuntime:
 
         # 将事件放入对应机器队列，队列满时等待空位。
         await machine.queue.put(event)
+
         # 退出期间释放此前阻塞入队的事件和回执。
         if self.releasing_resources:
             while not machine.queue.empty():
@@ -300,16 +361,19 @@ class SystemRuntime:
             error: 相机或后台任务抛出的异常。
 
         Returns:
-            None  # 故障已记录，资源清理已安排
+            返回示例：
+                None  # 故障已记录，资源清理任务已安排
         """
-        # 保存首次故障供主流程接收，通知所有状态等待方。
+        # 只保存首次故障。
         if self.failure is None:
             self.failure = error
+
+        # 关闭信号入口并通知故障与状态等待方。
         self.accepting_signals = False
         self.failure_event.set()
         self.state_changed.set()
 
-        # 只启动一次资源清理，后续 stop 调用等待同一个退出任务。
+        # 未创建退出任务时启动一次资源清理。
         if self.shutdown_task is None:
             self.shutdown_task = asyncio.create_task(self.release_resources())
 
@@ -321,21 +385,24 @@ class SystemRuntime:
             run_worker: 持续运行的异步任务入口。
 
         Returns:
-            None  # 正常退出，或故障已通知主流程
+            返回示例：
+                None  # 任务正常结束，或故障已交给主流程
         """
         try:
-            # 持续执行任务，正常运行期间不允许任务自行结束。
+            # 持续执行任务入口。
             await run_worker()
+
+            # 非停止流程中任务自行结束时按故障抛出。
             if not self.stopping:
                 raise RuntimeError(f"后台任务意外结束：{component}")
         except asyncio.CancelledError:
-            # 退出期间允许取消，其余取消视为后台任务故障。
+            # 非停止流程中的取消按故障登记。
             if not self.stopping:
                 logger.exception("后台任务意外取消 component=%s", component)
                 self.handle_fatal_error(RuntimeError(f"后台任务意外取消：{component}"))
             raise
         except Exception as error:
-            # 记录后台运行异常，再安排整个应用退出。
+            # 记录后台运行异常并交给致命故障入口。
             logger.exception("后台任务失败 component=%s", component)
             self.handle_fatal_error(error)
 
@@ -346,10 +413,14 @@ class SystemRuntime:
             无外部参数。
 
         Returns:
-            无正常返回值  # 收到故障后抛出异常
+            无正常返回值。
+            返回示例：
+                None  # 等待到故障后抛出该异常，不返回数据
         """
-        # 等待后台故障通知，再交付故障原因。
+        # 等待后台故障通知。
         await self.failure_event.wait()
+
+        # 抛出首次故障。
         raise self.failure
 
     async def wait_until_idle(self, timeout_seconds: float = 30) -> None:
@@ -359,19 +430,29 @@ class SystemRuntime:
             timeout_seconds: 等待测量完成的最长秒数。
 
         Returns:
-            None  # 全部测量已结算；超时或程序故障时抛出异常
+            返回示例：
+                None  # 全部测量已结算；超时或程序故障时抛出异常
         """
+        # 记录本次等待的到期时间。
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         while True:
-            # 检查当前状态，再等待下一次状态更新。
+            # 取出本轮开始前的状态通知。
             self.state_changed.clear()
+
+            # 出现程序故障时立即抛出。
             if self.failure is not None:
                 raise self.failure
+
+            # 所有机器都没有活动周期时结束等待。
             if not any(machine.current_session is not None for machine in self.machines.values()):
                 return
+
+            # 剩余期限不足时按超时抛出。
             remaining_seconds = deadline - asyncio.get_running_loop().time()
             if remaining_seconds <= 0:
                 raise asyncio.TimeoutError("测量任务或现场周期尚未全部结束。")
+
+            # 等待下一次状态变化通知。
             await asyncio.wait_for(self.state_changed.wait(), remaining_seconds)
 
     async def stop(self) -> None:
@@ -381,11 +462,14 @@ class SystemRuntime:
             无外部参数。
 
         Returns:
-            None  # 相机、后台任务和本地记录库已释放
+            返回示例：
+                None  # 相机、后台任务和本地记录库已释放
         """
-        # 复用故障或正常退出创建的清理任务。
+        # 未创建退出任务时启动一次资源清理。
         if self.shutdown_task is None:
             self.shutdown_task = asyncio.create_task(self.release_resources())
+
+        # 等待清理任务完成，不受本次调用取消的影响。
         await asyncio.shield(self.shutdown_task)
 
     async def release_resources(self) -> None:
@@ -395,8 +479,10 @@ class SystemRuntime:
             无外部参数。
 
         Returns:
-            None  # 测量、任务和相机资源已清理，清理故障保存在 failure 中
+            返回示例：
+                None  # 测量、任务和相机资源已清理，清理故障保存在 failure 中
         """
+        # 关闭信号入口并标记进入停止流程。
         self.accepting_signals = False
         self.stopping = True
 
@@ -407,9 +493,10 @@ class SystemRuntime:
                 无外部参数。
 
             Returns:
-                None  # 现有测量和队列已结算
+                返回示例：
+                    None  # 现有测量和队列已结算
             """
-            # 将尚未关闭的现场周期标记为中断。
+            # 向每台机器发送中断事件并等待处理回执。
             for machine in self.machines.values():
                 acknowledgement = asyncio.get_running_loop().create_future()
                 await self.publish_event(MeasurementEvent(
@@ -418,28 +505,35 @@ class SystemRuntime:
                 ))
                 await acknowledgement
 
-            # 等待记录提交和已经入队的业务事件。
+            # 等待各机器周期结算完成。
             await self.wait_until_idle(self.config.shutdown_timeout_ms / 1000)
+
+            # 等待共享存储队列排空。
             await self.database.queue.join()
+
+            # 等待各机器事件队列排空。
             for machine in self.machines.values():
                 await machine.queue.join()
 
-        # 在统一退出期限内完成后台收尾。
+        # 无故障且已启动后台任务时，在退出期限内完成测量收尾。
         try:
             if self.failure is None and self.worker_tasks:
                 await asyncio.wait_for(
                     drain_measurements(), self.config.shutdown_timeout_ms / 1000,
                 )
+        # 收尾超时只记录日志，继续释放资源。
         except asyncio.TimeoutError:
             logger.warning("退出等待到期，未完成测量将标记失败并释放资源。")
+        # 收尾失败时记录异常并登记故障。
         except Exception as error:
             if error is not self.failure:
                 logger.exception("退出测量失败")
             self.handle_fatal_error(error)
 
-        # 停止事件交付并取消业务任务，禁止退出期间启动新的采集。
+        # 标记进入资源释放阶段，停止事件交付。
         self.releasing_resources = True
-        # 排空退出时的事件队列，释放阻塞入队的相机交付任务。
+
+        # 排空各机器事件队列，释放阻塞入队的相机交付任务。
         for machine in self.machines.values():
             while not machine.queue.empty():
                 event = machine.queue.get_nowait()
@@ -447,62 +541,82 @@ class SystemRuntime:
                     event.acknowledgement.cancel()
                 machine.queue.task_done()
 
-        # 停止并排空相机线程，异常不阻止其他相机释放。
+        # 停止全部相机的采集线程。
         camera_results = await asyncio.gather(*(
             machine.camera.stop() for machine in self.machines.values()
         ), return_exceptions=True)
+
+        # 逐条登记相机释放过程中的异常。
         for result in camera_results:
             if isinstance(result, Exception):
                 self.handle_fatal_error(result)
 
-        # 取消后台工作并等待在途阻塞操作完成。
+        # 收集各机器的期限任务与识别任务。
         background_tasks = []
         for machine in self.machines.values():
             background_tasks.extend(machine.deadline_tasks.values())
             if machine.recognition_task is not None:
                 background_tasks.append(machine.recognition_task)
+
+        # 取消全部后台任务。
         all_tasks = background_tasks + self.worker_tasks
         for task in all_tasks:
             task.cancel()
+
+        # 等待被取消的任务结束。
         await asyncio.gather(*all_tasks, return_exceptions=True)
+
+        # 清空已登记的后台任务列表。
         self.worker_tasks.clear()
 
         # 业务任务停止后释放各周期最终图片和剩余事件。
         for machine in self.machines.values():
             session = machine.current_session
+
+            # 退出时未完成的周期按故障或超时登记，并执行失败清理。
             if session is not None:
-                # 标记退出时未完成的周期，只打印日志并执行失败清理。
                 if session.state != SessionState.FAILED:
                     session.errors.append("PROGRAM_FAILED" if self.failure is not None else "SHUTDOWN_TIMEOUT")
                     try:
                         await machine.handle_measurement_failure(session)
                     except Exception as error:
                         self.handle_fatal_error(error)
+
             # 清空退出后的周期身份与未完成档案。
             machine.current_session = None
             machine.frequency_adapter.active_session_id = None
+
             # 清空不再处理的事件，释放事件携带的图片引用。
             while not machine.queue.empty():
                 event = machine.queue.get_nowait()
                 if event.acknowledgement is not None and not event.acknowledgement.done():
                     event.acknowledgement.cancel()
                 machine.queue.task_done()
-        # 清空退出后未执行的存储请求和排队身份。
+
+        # 清空未执行的存储请求。
         while not self.database.queue.empty():
             self.database.queue.get_nowait()
             self.database.queue.task_done()
+
+        # 清空存储队列记录的排队身份。
         self.database.queued_records.clear()
-        # 最后关闭相机与共享 SDK，再释放数据库实例锁。
+
+        # 关闭相机驱动与共享 SDK。
         try:
             if self.camera_sdk is not None:
                 await run_blocking_operation(self.camera_sdk.close)
         except Exception as error:
+            # 记录关闭相机驱动失败并登记故障。
             logger.exception("关闭相机驱动失败")
             self.handle_fatal_error(error)
         finally:
+            # 关闭本地记录库并释放实例锁。
             try:
                 self.database.close()
             except Exception as error:
+                # 记录关闭记录库失败并登记故障。
                 logger.exception("关闭本地记录库失败")
                 self.handle_fatal_error(error)
+
+            # 通知全部状态等待方本次退出已结束。
             self.state_changed.set()
