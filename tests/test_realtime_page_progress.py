@@ -31,8 +31,7 @@ DOT_PENDING_COLOR = "#c5cfda"
 DOT_RUNNING_COLOR = "#2f7cf6"
 DOT_SUCCESS_COLOR = "#18ae59"
 DOT_FAILED_COLOR = "#ef4444"
-CONNECTOR_PENDING_COLOR = "#d9e1ea"
-CONNECTOR_SUCCESS_COLOR = "#18ae59"
+CONNECTOR_COLOR = "#d9e1ea"
 
 # 正常一周期内后台上报的九个阶段状态，顺序与 Machine 的处理流程一致。
 CYCLE_PROGRESS_EVENTS = (
@@ -112,7 +111,7 @@ def read_node_colors(step: StepProgress) -> tuple[list[str], list[str]]:
         返回示例：
             (
                 ["#18ae59", "#2f7cf6", "#c5cfda", "#c5cfda", "#c5cfda"],  # 五个圆点的显示颜色
-                ["#18ae59", "#d9e1ea", "#d9e1ea", "#d9e1ea"],  # 四条连接线的显示颜色
+                ["#d9e1ea", "#d9e1ea", "#d9e1ea", "#d9e1ea"],  # 四条连接线的显示颜色
             )
     """
     # 固定尺寸并完成一次布局，让连接线取到相邻圆点之间的几何位置。
@@ -127,7 +126,7 @@ def read_node_colors(step: StepProgress) -> tuple[list[str], list[str]]:
         rect = dot.geometry()
         dot_colors.append(image.pixelColor(rect.center().x(), rect.center().y() - 9).name())
 
-    # 连接线取中段像素，未着色时读到的是组件背景色。
+    # 连接线取中段像素，未绘制时读到的是组件背景色。
     connector_colors = []
     for connector in step.connectors:
         rect = connector.geometry()
@@ -256,39 +255,26 @@ def test_failed_stage_marks_card_without_touching_other_stages(realtime_page: Re
     assert card.property("tone") == "waiting"
 
 
-def test_connectors_follow_adjacent_stage_state(realtime_page: RealtimePage) -> None:
-    """验证连接线只在相邻两个阶段都成功时显示完成颜色。
+def test_connectors_keep_static_track_color(realtime_page: RealtimePage) -> None:
+    """验证四条连接线是固定颜色的进度轨道，不随阶段状态变化。
 
     Args:
         realtime_page: 已建好一张机器卡片的实时监测页。
 
     Returns:
-        None  # 相邻都成功的连接线为完成色，其余为待完成色
+        None  # 任何阶段状态下连接线都是同一个固定颜色
     """
-    # 推入两个相邻的成功阶段和一次失败阶段。
+    # 未收到阶段信号时，四条连接线已经是固定轨道颜色。
     machine_id = page_machine_id(realtime_page)
     card = realtime_page.cards_by_machine_id[machine_id]
-    for stage, status in (
-        (ProgressStage.SESSION_START, ProgressStatus.SUCCESS),
-        (ProgressStage.IMAGE_CAPTURE, ProgressStatus.SUCCESS),
-        (ProgressStage.FREQUENCY_COLLECTION, ProgressStatus.FAILED),
-    ):
-        realtime_page.update_measurement_progress(machine_id, "session-1", stage.value, status.value)
-
-    # 只有前两个相邻阶段都成功的那条连接线是完成色。
     _, connector_colors = read_node_colors(card.steps)
-    assert connector_colors == [
-        CONNECTOR_SUCCESS_COLOR,
-        CONNECTOR_PENDING_COLOR,
-        CONNECTOR_PENDING_COLOR,
-        CONNECTOR_PENDING_COLOR,
-    ], "连接线未按相邻阶段状态着色，读到的颜色是组件背景色"
+    assert connector_colors == [CONNECTOR_COLOR] * 4, "连接线未绘制固定轨道颜色"
 
-    # 整轮全部成功后四条连接线都是完成色。
+    # 整轮全部成功后，连接线仍保持同一个固定颜色。
     for stage, status in CYCLE_PROGRESS_EVENTS:
-        realtime_page.update_measurement_progress(machine_id, "session-2", stage.value, status.value)
+        realtime_page.update_measurement_progress(machine_id, "session-1", stage.value, status.value)
     _, connector_colors = read_node_colors(card.steps)
-    assert connector_colors == [CONNECTOR_SUCCESS_COLOR] * 4, "全部成功后连接线未显示完成色"
+    assert connector_colors == [CONNECTOR_COLOR] * 4, "连接线颜色被阶段状态改变"
 
 
 def test_progress_for_missing_card_is_ignored(realtime_page: RealtimePage) -> None:

@@ -108,6 +108,8 @@ class StepProgress(QFrame):
             if index < 4:
                 connector = QFrame(self)
                 connector.setFixedHeight(2)
+                # 连接线固定为轨道颜色，不随阶段状态变化。
+                connector.setStyleSheet("background: #D9E1EA; border: none;")
                 connector.lower()
                 self.connectors.append(connector)
 
@@ -121,7 +123,7 @@ class StepProgress(QFrame):
 
         Returns:
             返回示例：
-                None  # 更新步骤圆点及连接线
+                None  # 更新步骤圆点的颜色、图标和步骤文字
         """
         # 根据每个阶段的实际状态设置圆点颜色和图标。
         stage_names = tuple(PROGRESS_STAGE_TITLES)
@@ -142,7 +144,6 @@ class StepProgress(QFrame):
                 f"background: {color}; color: white; border: 2px solid {border}; border-radius: 12px;"
             )
 
-        # 连接线只在相邻阶段均已成功时显示完成颜色。
     def resizeEvent(self, event):
         """让连接线随相邻圆点位置伸缩。
 
