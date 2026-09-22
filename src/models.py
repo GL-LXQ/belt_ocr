@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 from datetime import datetime, timezone
 
-from mvs_sdk import CameraFrame
+from camera.hikrobot_sdk import CameraFrame
 
 from enums import OCRState, FrequencyState, SessionState, EventType
 

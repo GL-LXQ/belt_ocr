@@ -7,7 +7,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from models import CapturedFrame, OCRResult
-from mvs_sdk import CameraFrame
+from camera.hikrobot_sdk import CameraFrame
 
 
 logger = logging.getLogger(__name__)

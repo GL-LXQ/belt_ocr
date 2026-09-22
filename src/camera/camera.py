@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from async_utils import run_blocking_operation
 from enums import EventType
 from models import CaptureResult, MeasurementEvent, PublishEvent
-from mvs_sdk import MvsCamera, MvsError
+from camera.hikrobot_sdk import MvsCamera, MvsError
 
 
 logger = logging.getLogger(__name__)

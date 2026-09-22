@@ -44,7 +44,7 @@ BeltVision 主窗口默认 1600 × 900、最小 1280 × 720，支持标题栏拖
 
 一台工控机管理三台皮带机，每台机器绑定海康 MVS 相机、启停输入和频率来源。一次 START → CLOSE 对应一个 BeltSession。仅将 OCR、频率和图片保存均成功的正常测量写入结果库；失败和中断打印日志，不写异常测量记录。运行库保存异常事件审计并提供进程级实例锁。
 
-后端使用 Python 3.10 及以上，运行时使用标准库和 MVS 官方绑定，pytest 用于测试。后端 Python 文件集中在 `src/`，保持扁平模块结构，采用单进程、每机一个当前周期和串行事件处理、每轮一个相机采集线程、共享串行 OCR 和共享存储队列。
+后端使用 Python 3.10 及以上，运行时使用标准库和 MVS 官方绑定，pytest 用于测试。后端 Python 文件集中在 `src/`，相机采集与海康 SDK 适配放在 `src/camera/` 包，其余保持扁平结构，采用单进程、每机一个当前周期和串行事件处理、每轮一个相机采集线程、共享串行 OCR 和共享存储队列。
 
 ```powershell
 uv run python -X utf8 src/main.py --config config
@@ -55,7 +55,7 @@ uv run python -X utf8 -m pytest -q
 
 #### 1.2.2 数据流动逻辑
 
-入口 `src/main.py` 读取配置文件中的公共参数，`src/system_runtime.py` 构造时只保存配置、创建共享存储与运行状态，`start()` 再按顺序初始化图片目录与双库、按业务库 `machine` 表读取启用机器并逐台建立采集器、频率接收、共享 OCR 和存储任务；采集帧与频率读数按周期汇入对应机器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera.py` 的 `Camera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器运行对象在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，机器故障停止整个应用。
+入口 `src/main.py` 读取配置文件中的公共参数，`src/system_runtime.py` 构造时只保存配置、创建共享存储与运行状态，`start()` 再按顺序初始化图片目录与双库、按业务库 `machine` 表读取启用机器并逐台建立采集器、频率接收、共享 OCR 和存储任务；采集帧与频率读数按周期汇入对应机器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera/camera.py` 的 `Camera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中按顺序执行内存 BMP 编码、筛帧黑盒、字符识别和文字图片终选黑盒，将最终文字、选中内存图片及对应关系返回原周期；CLOSE 封闭频率列表并选取最后收到的有效读数。机器运行对象在正常关闭且 OCR、频率均成功后冻结内容，交给存储队列先保存选中图片、再幂等写入 SQLite，最后释放周期与图片引用，清空 current_session 后才允许下一轮。任一业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，机器故障停止整个应用。
 
 #### 1.2.3 处理阶段与职责
 
@@ -88,8 +88,8 @@ OCRResult 只包含 `ordered_lines`（有序文字）、`selected_frames`（按 
 | `src/main.py` | 演示启停、故障等待和退出码 |
 | `src/system_runtime.py` | 读取启用机器、初始化、信号路由、全局故障与资源释放 |
 | `src/machine.py` | 每机周期状态、启停、频率、整轮 OCR 调度及提交条件 |
-| `src/camera.py` | 创建采集任务、启动单线程收集整轮帧、停止采集并一次性交付结果 |
-| `src/mvs_sdk.py` | SDK 加载、相机打开、取帧、内存 BMP 编码和关闭 |
+| `src/camera/camera.py` | 创建采集任务、启动单线程收集整轮帧、停止采集并一次性交付结果 |
+| `src/camera/hikrobot_sdk.py` | SDK 加载、相机打开、取帧、内存 BMP 编码和关闭 |
 | `src/text_recognition.py` | 共享处理锁、OCR 主流程、筛帧与终选黑盒 |
 | `src/frequency_adapter.py` | 联调频率监听与当前周期归属 |
 | `src/database.py` | 双库初始化、实例锁、事件整理、图片保存与存储队列调度 |
@@ -504,3 +504,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### src 其余文件按注释与 docstring 体例整理
 
 承接上一节，把同样的整理做到 `src/` 下其余全部文件：`async_utils.py`、`enums.py`、`models.py`、`config_util.py`、`frequency_adapter.py`、`main.py`、`text_recognition.py`、`camera.py`、`database.py`、`mvs_sdk.py`、`repo/abnormal_event_repo.py`、`repo/measurement_repo.py`、`repo/machine_repo.py`、`service/machine_service.py`、`service/monitoring_service.py`，全部只动注释和 docstring，未改动任何可执行语句（校验方式：逐文件剔除注释与文档字符串后与整理前版本的 AST 完全一致，19 个 `src` 文件全部通过）。补上的内容：`models.py` 六个数据类和 `config_util.py` 两个配置数据类此前字段没有任何说明，现在每个字段独占一行并带中文说明；`database.py` 的 `DatabaseRequest`、`mvs_sdk.py` 的 `CameraFrame` 与 `MvsCamera` 同样补齐字段说明；各处 `Returns` 统一为带「返回示例」的写法（`mvs_sdk.py` 十处、`camera.py` 九处、`text_recognition.py` 五处、`database.py` 四处、`main.py` 三处、`monitoring_service.py` 三处、`frequency_adapter.py` 两处），`Args` 里「无。」统一写成「无外部参数。」。分段方面，一条注释盖多个操作的地方全部拆开并在独立逻辑之间空行，典型如 `camera.py` 的 `start_capture()`（申请采集锁、检查相机状态、创建异步主流程、登记交付任务、登记采集引用与回调各自成段）、`database.py` 的 `initialize_runtime_database()`（创建目录、打开锁文件、写占位字节、按平台加锁、创建审计表、保持连接各自成段）、`mvs_sdk.py` 的 `open_camera()`（重复打开检查、枚举定位、创建句柄、写入枚举与浮点参数、失败清理、登记返回各自成段）、`main.py` 的 `run_measurement_demo()`（配置读取、任务安排、等待、故障传播、取消与释放各自成段）。删掉的因果与背景措辞包括「停流异常保留此前的采集异常链」「已收到时直接返回，不再取下一张图」「失败时禁止继续使用本相机」「响应阻塞写入期间的取消请求，停止后续结果发布和队列消费」「不安排延迟交付任务」一类句子，只保留说明代码做什么的表述。顺带修正的事实错误：`enums.py` 里 `COMMIT_FAILED` 注释末尾残留的拼音「xian」删除；`measurement_repo.py` 中「比较同一周期已保存的业务字段」这句原本挂在 `BEGIN IMMEDIATE` 上、实际描述的是后面的查询，已移到查询之前；`machine_service.py` 一处 123 字符的 `find_duplicate_field()` 调用按每行一个参数换行；`frequency_adapter.py` 的「向当前 Session 交付」改为「向当前周期交付」，占位实现说明移到 `Args` 之前；`monitoring_service.py` 的模块说明补上「本轮进度结果」（此前只写了相机连接）；`database.py` 中 `save_evidence_image` 与 `serialize_value` 之间的三个连续空行改为两个。行为与数据流完全不变：`load_config()` 读 YAML 公共参数 → `SystemRuntime(config)` 只组装共享依赖 → `start()` 同步建图片目录与双库、`initialize_machines()` 读业务库启用机器并逐台建立 `Machine` 与 `Camera`、`MvsSdk.open_camera()` 逐台打开相机、启动机器事件与频率监听任务和共享存储任务 → START 采集图片与频率 → 事件按机器编号进入 FIFO 队列由 `listen_events` 串行处理 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 提交结果回到原周期，本轮阶段状态另经 `start()` 的进度回调送到 `MonitoringService` 的 Qt 信号 → 退出时关闭相机并释放实例锁。全量 pytest：313 项通过、1 项失败，失败项仍是 `test_progress_for_missing_card_is_ignored`，与本次整理无关。
+
+### 相机模块整理为 src/camera/ 包，mvs_sdk.py 改名 hikrobot_sdk.py
+
+`src/camera.py` 移入 `src/camera/camera.py`，`src/mvs_sdk.py` 改名 `src/camera/hikrobot_sdk.py`，新增 `src/camera/__init__.py` 组成相机包；跨模块导入相应改为 `from camera.camera import Camera` 和 `from camera.hikrobot_sdk import ...`，涉及 `src/camera/camera.py`、`src/machine.py`、`src/models.py`、`src/text_recognition.py`、`src/system_runtime.py` 和 `tests/local_test_support.py` 七个文件。函数名 `load_mvs_sdk`、类名 `MvsSdk`、`MvsCamera`、`MvsError` 保持不变，测试的打补丁目标 `system_runtime.load_mvs_sdk` 指向 system_runtime 命名空间、不受文件改名影响。行为与数据流完全不变：`load_config()` 读 YAML 公共参数 → `SystemRuntime(config)` 只组装共享依赖 → `start()` 同步建图片目录与双库、`initialize_machines()` 读业务库启用机器并逐台建立 `Machine` 与 `Camera`、同步加载海康 SDK 并逐台打开相机、启动机器事件与频率监听任务和共享存储任务 → START 采集图片与频率 → 事件按机器编号进入 FIFO 队列由 `listen_events` 串行处理 → OCR 编码、筛帧、识别、终选 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 提交结果回到原周期，本轮阶段状态另经 `start()` 的进度回调送到 `MonitoringService` 的 Qt 信号 → 退出时关闭相机并释放实例锁。全量 pytest：313 项通过、1 项失败，失败项仍是 `test_progress_for_missing_card_is_ignored`，与本次包整理无关。

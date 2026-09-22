@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from camera import Camera
+from camera.camera import Camera
 from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
 from enums import (
@@ -19,7 +19,7 @@ from enums import (
     ProgressStatus,
     SessionState,
 )
-from mvs_sdk import CameraFrame
+from camera.hikrobot_sdk import CameraFrame
 from models import BeltSession, MeasurementEvent, PublishEvent
 from async_utils import run_blocking_operation
 from text_recognition import ImageEncodingError, TextRecognizer

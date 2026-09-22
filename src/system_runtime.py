@@ -7,8 +7,8 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from camera import Camera
-from mvs_sdk import load_mvs_sdk
+from camera.camera import Camera
+from camera.hikrobot_sdk import load_mvs_sdk
 from config_util import AppConfig, MachineConfig
 from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter

@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from config_util import AppConfig
-from mvs_sdk import CameraFrame
+from camera.hikrobot_sdk import CameraFrame
 from repo.machine_repo import MachineRepo
 
 
