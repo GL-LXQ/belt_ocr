@@ -513,7 +513,7 @@ class SystemRuntime:
 
         # 未创建退出任务时启动一次资源清理。
         if self.shutdown_task is None:
-            self.shutdown_task = asyncio.create_task(self.release_resources())
+            self.shutdown_task = asyncio.create_task(self._shutdown_system_and_release_resources())
 
     async def run_worker(self, component: str, run_worker) -> None:
         """运行后台任务，异常或意外结束时通知应用退出。
@@ -605,7 +605,7 @@ class SystemRuntime:
         """
         # 未创建退出任务时启动一次资源清理。
         if self.shutdown_task is None:
-            self.shutdown_task = asyncio.create_task(self.release_resources())
+            self.shutdown_task = asyncio.create_task(self._shutdown_system_and_release_resources())
 
         # 等待清理任务完成，不受本次调用取消的影响。
         await asyncio.shield(self.shutdown_task)
@@ -640,7 +640,7 @@ class SystemRuntime:
         for machine in self.machines.values():
             await machine.queue.join()
 
-    async def release_resources(self) -> None:
+    async def _shutdown_system_and_release_resources(self) -> None:
         """停止全部测量，释放后台任务、相机和数据库资源。
 
         Args:
