@@ -14,7 +14,7 @@ from enums import EventType, FrequencyState, MachineState, OCRState, ProgressSta
 from camera.hikrobot_sdk import CameraFrame
 from models import BeltSession, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
-from text_recognition import ImageEncodingError, TextRecognizer
+from text_recognition import TextRecognizer
 from database import Database, DatabaseRequest
 
 
@@ -766,7 +766,7 @@ class Machine:
             if session.state != SessionState.RUNNING:
                 return
 
-            # 在线程中执行整轮编码、筛帧、识别和终选。
+            # 在线程中执行原始帧整理、筛帧、识别和终选。
             try:
                 result = await run_blocking_operation(
                     self.text_recognizer.process_session_frames,
@@ -774,12 +774,7 @@ class Machine:
                     session.capture_id,
                     session.camera_serial,
                     frames,
-                    self.camera.sdk_camera.encode_image,
                 )
-            except ImageEncodingError as error:
-                # 标记相机编码故障并抛出原始异常。
-                self.camera.sdk_camera.faulted = True
-                raise error.__cause__
             except Exception as error:
                 # 记录整轮处理失败。
                 logger.exception("OCR 处理失败 session_id=%s", session.session_id)

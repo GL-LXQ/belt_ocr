@@ -1,12 +1,10 @@
-"""按整轮顺序执行图片编码、筛选、识别和文字图片终选。"""
+"""按整轮顺序执行原始帧整理、筛选、识别和文字图片终选。"""
 
 import asyncio
 import logging
 import re
 import time
 from collections import defaultdict
-from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from models import CapturedFrame, OCRResult
@@ -14,10 +12,6 @@ from camera.hikrobot_sdk import CameraFrame
 
 
 logger = logging.getLogger(__name__)
-
-
-class ImageEncodingError(RuntimeError):
-    """标记相机编码失败并保留原始异常。"""
 
 
 def _serial_number_of(candidate: dict) -> int:
@@ -55,16 +49,14 @@ class TextRecognizer:
         capture_id: str,
         camera_serial: str,
         frames: tuple[CameraFrame, ...],
-        encode_image: Callable[[CameraFrame], bytes],
     ) -> OCRResult:
-        """将整轮原始帧顺序处理为最终文字和对应内存图片。
+        """将整轮原始帧顺序处理为最终文字和对应原始图片。
 
         Args:
             session_id: 测量周期编号。
             capture_id: 采集编号。
             camera_serial: 相机序列号。
             frames: 本轮全部原始帧，按接收顺序排列。
-            encode_image: 将原始帧编码为内存 BMP 的相机接口。
 
         Returns:
             返回示例：
@@ -78,7 +70,7 @@ class TextRecognizer:
                             frame_id="capture-1",  # 图片编号
                             captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
                             captured_monotonic=1.0,  # 单调接收时间
-                            image_data=b"BM...",  # BMP 文件字节
+                            image_data=b"...",  # 相机原始图像字节
                         ),
                     ),
                     line_frame_ids=(("capture-1",),),  # 每条文字对应的图片编号
@@ -88,16 +80,9 @@ class TextRecognizer:
         if not frames:
             raise ValueError(f"session_id={session_id} 本轮没有采集到任何帧。")
 
-        # 逐帧调用相机编码接口，得到内存 BMP 图片。
+        # 逐帧整理相机原始图片及其所属周期。
         captured_frames = []
         for frame in frames:
-            try:
-                image_data = encode_image(frame)
-            except Exception as error:
-                # 记录编码相机异常及所属周期，再终止本轮识别。
-                logger.exception("相机编码失败 camera_serial=%s session_id=%s", camera_serial, session_id)
-                raise ImageEncodingError("相机图片编码失败") from error
-
             # 按单调接收时间换算本帧的 UTC 时间。
             captured_at = datetime.now(timezone.utc) - timedelta(seconds=time.monotonic() - frame.received_monotonic)
 
@@ -109,14 +94,14 @@ class TextRecognizer:
                 frame_id=f"{capture_id}-{frame.frame_number}",
                 captured_at=captured_at.isoformat(),
                 captured_monotonic=frame.received_monotonic,
-                image_data=image_data,
+                image_data=frame.data,
             ))
 
         # 筛选合格图片并释放原始帧引用。
         qualified_frames = self.filter_qualified_frames(tuple(captured_frames))
         captured_frames.clear()
 
-        # TODO 初次帧筛选后，发现没有任何合格图片，需要留存所有已编码帧，并标记人工复核。
+        # TODO 初次帧筛选后，发现没有任何合格图片，需要留存所有原始帧，并标记人工复核。
         if not qualified_frames:
             raise ValueError(f"session_id={session_id} 本轮没有合格图片。")
 
@@ -139,7 +124,7 @@ class TextRecognizer:
         # 生成最终文字和图片。
         result = self.generate_final_text_and_images(frame_results, qualified_frames)
 
-        # TODO  无最终文字时应保留初筛前的全部已编码图片，登记人工复核。
+        # TODO 无最终文字时应保留初筛前的全部原始图片，登记人工复核。
         if not result.ordered_lines:
             logger.warning("本轮没有最终文字，人工复核 session_id=%s", session_id)
             raise ValueError(f"session_id={session_id} 本轮没有最终文字。")
@@ -163,7 +148,7 @@ class TextRecognizer:
                         frame_id="capture-1",  # 唯一图片编号
                         captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
                         captured_monotonic=1.0,  # 单调接收时间
-                        image_data=b"BM...",  # 内存 BMP 字节
+                        image_data=b"...",  # 相机原始图像字节
                     ),
                 )
         """
@@ -174,7 +159,7 @@ class TextRecognizer:
         """预留整轮模型识别接口，目前明确报告未实现。
 
         Args:
-            images: 按顺序排列的合格图片字节。
+            images: 按顺序排列的合格相机原始图像字节。
 
         Returns:
             返回示例：
@@ -218,7 +203,7 @@ class TextRecognizer:
                             frame_id="capture-1",  # 图片编号
                             captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
                             captured_monotonic=1.0,  # 单调接收时间
-                            image_data=b"BM...",  # BMP 文件字节
+                            image_data=b"...",  # 相机原始图像字节
                         ),
                     ),
                     line_frame_ids=(("capture-1",),),  # 与文字逐项对应的证据图片编号

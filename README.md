@@ -565,3 +565,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 2026-09-23：缺少最终频率的周期保存为待复核记录
 
 本轮正常关闭时，`handle_machine_close()` 封闭频率读数并在没有有效读数时标记频率失败；`try_finalize()` 不再因此提前清理周期，而是等待 OCR 成功返回最终文字和选中图片，再生成同一存储请求。存储队列先保存最终图片，再写入 `measurements`：有频率时保存频率值、`needs_review=0` 和空原因；无频率时保存 `final_frequency_hz=NULL`、`needs_review=1` 和 `review_reason=FREQUENCY_NO_VALID_MEASUREMENT`。OCR 失败和中断仍按原路径结束本轮，不提交待复核记录；OCR 异常留图复核尚未接入。测量与存储专项 pytest 为 5 项通过，退出与事件队列专项为 8 项通过。
+
+### 2026-09-23：OCR 输入改用相机原始帧
+
+`process_session_frames()` 从采集结果取得 `CameraFrame.data`，直接组装带周期和帧编号的 `CapturedFrame`，再依次交给筛帧、识别和终选；机器调用不再传入 BMP 编码接口。当前证据保存仍按 `.bmp` 路径写入 `CapturedFrame.image_data`，后续需在保存前补齐原始帧到文件图片的转换。

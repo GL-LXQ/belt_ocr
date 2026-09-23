@@ -3,8 +3,73 @@
 import pytest
 
 from camera.hikrobot_sdk import CameraFrame
-from models import OCRResult
+from models import CapturedFrame, OCRResult
 from text_recognition import TextRecognizer
+
+
+def test_process_session_frames_passes_raw_image_data_to_recognition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """将相机原始图像字节交给识别流程并保留在终选图片中。
+
+    Args:
+        monkeypatch: 替换 OCR 模型和终选函数。
+
+    Returns:
+        返回示例：
+            None  # 原始图像字节已通过断言验证
+    """
+    # 准备一帧没有 BMP 文件头的原始图像。
+    frame = CameraFrame("camera", 1, 0, 0, 1.0, 1, 1, 0, 0, b"\x01\x02")
+    recognizer = TextRecognizer()
+    received_images = []
+
+    # 让识别和终选流程返回当前帧。
+    def recognize_raw_images(images: list[bytes]) -> list[dict]:
+        """登记模型收到的图像并返回空文字块。
+
+        Args:
+            images: 本轮传给模型的图像字节。
+
+        Returns:
+            返回示例：
+                [
+                    {
+                        "blocks": [],  # 当前图片的文字块
+                    },
+                ]
+        """
+        received_images.extend(images)
+        return [{"blocks": []}]
+
+    def select_raw_frame(
+        frame_results: list[dict],
+        captured_frames: tuple[CapturedFrame, ...],
+    ) -> OCRResult:
+        """选取本轮第一张原始图片。
+
+        Args:
+            frame_results: 与图片对应的模型结果。
+            captured_frames: 本轮传入终选的原始图片。
+
+        Returns:
+            返回示例：
+                OCRResult(
+                    ordered_lines=("123",),  # 最终文字
+                    normalized_lines=("123",),  # 去空白文字
+                    selected_frames=(captured_frames[0],),  # 选中图片
+                    line_frame_ids=(("capture-1",),),  # 来源图片编号
+                )
+        """
+        return OCRResult(("123",), ("123",), (captured_frames[0],), (("capture-1",),))
+
+    monkeypatch.setattr(recognizer, "recognize_images", recognize_raw_images)
+    monkeypatch.setattr(recognizer, "generate_final_text_and_images", select_raw_frame)
+
+    # 核对模型输入与终选图片都保留相机原始字节。
+    result = recognizer.process_session_frames("session", "capture", "camera", (frame,))
+    assert received_images == [frame.data]
+    assert result.selected_frames[0].image_data == frame.data
 
 
 @pytest.mark.parametrize(
@@ -54,7 +119,5 @@ def test_process_session_frames_rejects_empty_final_result(
 
     # 检查本轮停止处理并记录对应的人工复核日志。
     with pytest.raises(ValueError, match=f"^{error_code}$"):
-        recognizer.process_session_frames(
-            "session", "capture", "camera", (frame,), lambda image: b"BM"
-        )
+        recognizer.process_session_frames("session", "capture", "camera", (frame,))
     assert warning_text in caplog.text

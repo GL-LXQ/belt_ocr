@@ -37,7 +37,7 @@ PublishEvent = Callable[[RuntimeEvent], Awaitable[None]]
 
 @dataclass(frozen=True)
 class CapturedFrame:
-    """一轮采集中编码为内存图片的一帧。"""
+    """一轮采集中保留原始图像字节的一帧。"""
 
     session_id: str  # 本帧所属的测量周期编号
     capture_id: str  # 本轮采集编号，用于生成图片编号
@@ -45,7 +45,7 @@ class CapturedFrame:
     frame_id: str  # 本帧在本轮内的唯一图片编号
     captured_at: str  # 本帧接收时刻换算出的 UTC 时间
     captured_monotonic: float  # 本帧接收时的单调时间
-    image_data: bytes = field(default=b"", repr=False)  # 本帧的内存 BMP 字节
+    image_data: bytes = field(default=b"", repr=False)  # 本帧的相机原始图像字节
 
 
 @dataclass(frozen=True)
