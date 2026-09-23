@@ -34,7 +34,9 @@ class MeasurementRepo:
                 ordered_lines TEXT NOT NULL,
                 final_frequency_hz REAL,
                 measurement_frequencies TEXT NOT NULL DEFAULT '[]',
-                evidence_refs TEXT NOT NULL
+                evidence_refs TEXT NOT NULL,
+                needs_review INTEGER NOT NULL DEFAULT 0,
+                review_reason TEXT
             );
         """)
 
@@ -70,6 +72,8 @@ class MeasurementRepo:
             request.final_frequency_hz,
             json.dumps(request.evidence_refs, ensure_ascii=False),
             json.dumps(request.measurement_frequencies, ensure_ascii=False, sort_keys=True),
+            int(request.needs_review),
+            request.review_reason,
         )
 
         # 打开业务库连接。
@@ -81,7 +85,8 @@ class MeasurementRepo:
             # 读取同一周期已保存的业务字段。
             existing_record = connection.execute(
                 "SELECT machine_id, start_time, finish_time, ordered_lines, "
-                "final_frequency_hz, evidence_refs, measurement_frequencies "
+                "final_frequency_hz, evidence_refs, measurement_frequencies, "
+                "needs_review, review_reason "
                 "FROM measurements WHERE session_id = ?",
                 (request.session_id,),
             ).fetchone()
@@ -96,7 +101,8 @@ class MeasurementRepo:
             connection.execute(
                 "INSERT INTO measurements (session_id, machine_id, start_time, "
                 "finish_time, ordered_lines, final_frequency_hz, evidence_refs, "
-                "measurement_frequencies) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "measurement_frequencies, needs_review, review_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (request.session_id, *record_values),
             )
 

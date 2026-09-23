@@ -557,3 +557,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 数据流：`load_config()` 读 YAML 公共参数 → `SystemRuntime(config)` 只组装共享依赖 → `start()` 建图片目录与双库、`initialize_machines()` 读启用机器并逐台建立 `Machine` 与 `Camera`、加载 SDK 并打开相机、启动机器事件与频率监听任务和共享存储任务 → START 采集图片与频率 → `RuntimeEvent` 按机器编号进入 FIFO 队列由 `listen_events()` 串行处理 → OCR 在共享锁内顺序完成编码、筛帧、识别，`generate_final_text_and_images` 按 20、8、3、2 分类筛出最终文字与来源图片 → CLOSE 选取最后有效频率 → 存储队列先保存图片再写 SQLite → 提交结果回到原周期，本轮阶段状态另经 `start()` 的进度回调送到 `MonitoringService` 的 Qt 信号 → 退出时关闭相机并释放实例锁。
 
 全量 pytest：344 项通过、1 项失败，失败项仍是 `test_progress_for_missing_card_is_ignored`，与本次改动无关。新实现尚无直接测试：`tests/test_app_measurement_cycle.py` 把该函数替换为替身，`tests/test_code_do_not_delete.py` 与 `tests/test_ocr_virtual_cases.py` 用的是旧规则副本，其中「前 20% 投票」「需人工复核」「没有连号支持」等预期属于旧规则。
+
+### 2026-09-23：测量记录增加人工复核字段
+
+新建的 `measurements` 表增加 `needs_review`（默认 0）与可空的 `review_reason`，存储请求携带这两个字段，测量 Repo 在图片保存后的数据库写入及同周期幂等比较中一并处理；`final_frequency_hz` 的请求类型允许缺失值。当前机器结算仍按原流程提交普通测量，默认写入 `needs_review=0`、`review_reason=NULL`，尚未接入缺少频率时的复核记录分支。本次不迁移已有数据库表结构或历史数据。数据库专项 pytest 为 3 项通过；全量 pytest 为 307 项通过、304 项失败，新增的数据库专项用例没有失败。

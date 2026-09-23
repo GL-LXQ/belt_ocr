@@ -98,10 +98,12 @@ class DatabaseRequest:
     start_time: str  # 本轮开始时间，UTC
     finish_time: str  # 本轮结算时间，UTC
     ordered_lines: tuple[str, ...]  # 最终文字顺序
-    final_frequency_hz: float  # 本轮最终频率，单位赫兹
+    final_frequency_hz: float | None  # 本轮最终频率，缺失时为空
     measurement_frequencies: tuple[dict, ...]  # 本轮频率明细
     evidence_refs: tuple[str, ...]  # 最终图片文件路径
     selected_frames: tuple[CapturedFrame, ...] = ()  # 最终选中图片的内存内容
+    needs_review: bool = False  # 本轮结果是否需要人工复核
+    review_reason: str | None = None  # 本轮需要人工复核的原因
 
 
 class Database:

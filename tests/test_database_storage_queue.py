@@ -3,7 +3,10 @@
 import asyncio
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from config_util import AppConfig
 from database import Database, DatabaseRequest
@@ -163,3 +166,45 @@ def test_discard_pending_requests_clears_queue_and_records(tmp_path: Path) -> No
     asyncio.run(submit_then_discard())
 
     assert list_written_session_ids(config.database_path) == []
+
+
+def test_measurement_review_fields_are_saved_and_compared(tmp_path: Path) -> None:
+    """验证普通记录与待复核记录的字段写入及同周期内容比较。
+
+    Args:
+        tmp_path: 测试临时目录。
+
+    Returns:
+        返回示例：
+            None  # 两类记录的复核字段和幂等比较已验证
+    """
+    # 初始化新业务库并写入普通测量记录。
+    config = build_config(tmp_path)
+    database = build_database(config)
+    database.persist_measurement(build_request("normal-session"))
+
+    # 写入缺少频率的待复核记录并重复提交相同内容。
+    review_request = replace(
+        build_request("review-session"),
+        final_frequency_hz=None,
+        measurement_frequencies=(),
+        needs_review=True,
+        review_reason="FREQUENCY_NO_VALID_MEASUREMENT",
+    )
+    database.persist_measurement(review_request)
+    database.persist_measurement(review_request)
+
+    # 核对两类记录的复核标志、原因和最终频率。
+    with closing(sqlite3.connect(config.database_path)) as connection:
+        records = connection.execute(
+            "SELECT session_id, final_frequency_hz, needs_review, review_reason "
+            "FROM measurements ORDER BY session_id"
+        ).fetchall()
+    assert records == [
+        ("normal-session", 42.0, 0, None),
+        ("review-session", None, 1, "FREQUENCY_NO_VALID_MEASUREMENT"),
+    ]
+
+    # 同一周期的复核理由变化时拒绝覆盖已存记录。
+    with pytest.raises(ValueError, match="提交内容不一致"):
+        database.persist_measurement(replace(review_request, review_reason="OTHER_REASON"))
