@@ -62,6 +62,7 @@ class OCRResult:
     """一轮识别与终选后的最终文字和选中图片。"""
 
     ordered_lines: tuple[str, ...]  # 最终文字的顺序列表
+    normalized_lines: tuple[str, ...]  # 最终文字的去空格列表
     selected_frames: tuple[CapturedFrame, ...]  # 最终选中的内存图片
     line_frame_ids: tuple[tuple[str, ...], ...]  # 每条文字对应的图片编号
 

@@ -2,8 +2,11 @@
 
 import asyncio
 import logging
+import re
 import time
+from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from models import CapturedFrame, OCRResult
@@ -15,6 +18,19 @@ logger = logging.getLogger(__name__)
 
 class ImageEncodingError(RuntimeError):
     """标记相机编码失败并保留原始异常。"""
+
+
+def _serial_number_of(candidate: dict) -> int:
+    """取 8 字符候选前七位数字的整数值。
+
+    Args:
+        candidate: 8 字符候选，含去空格后的 normalized_text。
+
+    Returns:
+        返回示例：
+            2926215  # 前七位数字组成的整数
+    """
+    return int(candidate["normalized_text"][:7])
 
 
 class TextRecognizer:
@@ -175,8 +191,16 @@ class TextRecognizer:
         # 报告识别模型尚未实现。
         raise NotImplementedError("OCR_MODEL_NOT_IMPLEMENTED")
 
+    def _serial_number_of(candidate: dict) -> int:
+        """取得 8 字符编号前七位的数字部分。"""
+        return int(candidate["normalized_text"][:7])
+
     def generate_final_text_and_images(self, frame_results: list[dict], frames: tuple[CapturedFrame, ...]) -> OCRResult:
-        """预留文字去重、排序和对应图片选择，目前明确报告未实现。
+        """按字符类别筛选最终文字，并给出每条文字对应的来源图片。
+
+        处理规则：20 字符不做格式过滤，3 和 2 字符要求纯数字，8 字符要求前七位数字加一位字母；
+        20、3、2 字符各输出本类置信度最高的一条，8 字符先去重再按连续编号规则选出。
+        没有候选、格式全部不符或最高置信度低于阈值时记录人工复核日志，不补造该类别结果。
 
         Args:
             frame_results: 每张图片的 frame_id 和模型原始 blocks。
@@ -185,8 +209,9 @@ class TextRecognizer:
         Returns:
             返回示例：
                 OCRResult(
-                    ordered_lines=("ABC",),  # 去重并排序的完整文字
-                    selected_frames=(  # 按 frame_id 唯一保存的最终图片
+                    ordered_lines=("0 03",),  # 按 20、8、3、2 类别顺序排列的最终原始文字
+                    normalized_lines=("003",),  # 与 ordered_lines 逐项对应的去空白文字
+                    selected_frames=(  # 最终选中的内存图片，同一图片只保留一次
                         CapturedFrame(
                             session_id="session",  # 测量周期编号
                             capture_id="capture",  # 采集编号
@@ -199,7 +224,211 @@ class TextRecognizer:
                     ),
                     line_frame_ids=(("capture-1",),),  # 与 ordered_lines 逐项对应的来源图片编号
                 )
-            当前抛出 NotImplementedError，不修改周期或保存图片。
         """
-        # 报告文字与图片终选尚未实现。
-        raise NotImplementedError("OCR_FINAL_SELECTION_NOT_IMPLEMENTED")
+        # 低于该置信度的文字不进入最终结果。
+        minimum_confidence = 0.8
+
+        # 建立帧编号到图片对象的索引。
+        frames_by_id = {frame.frame_id: frame for frame in frames}
+
+        # 收集所有文字，按去空白后的字符数量分入 20、8、3、2 四类。
+        candidates_by_length: defaultdict[int, list[dict]] = defaultdict(list)
+        for frame_result in frame_results:
+            for block in frame_result["blocks"]:
+                for line in block["lines"]:
+                    text = line["text"]
+                    normalized_text = re.sub(r"\s+", "", text)
+                    character_length = len(normalized_text)
+                    if character_length not in (20, 8, 3, 2):
+                        continue
+
+                    # 候选保留原文、去空白文字、置信度和来源图片。
+                    candidates_by_length[character_length].append({
+                        "text": text,
+                        "normalized_text": normalized_text,
+                        "confidence": line["confidence"],
+                        "frame_id": frame_result["frame_id"],
+                    })
+
+        selected_candidates: list[dict] = []
+
+        # 3 字符和 2 字符只接受 0 到 9。
+        text_patterns = {
+            3: r"[0-9]{3}",
+            2: r"[0-9]{2}",
+        }
+
+        # 20、3、2 字符文字各自输出一条。
+        for character_length in (20, 3, 2):
+            candidates = candidates_by_length.get(character_length, [])
+
+            # 当前类别一个候选都没有。
+            if not candidates:
+                logger.warning("%s字符文字没有候选，人工复核", character_length)
+                continue
+
+            # 20 字符不做格式过滤，3、2 字符按数字格式过滤。
+            pattern = text_patterns.get(character_length)
+            if pattern is not None:
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if re.fullmatch(pattern, candidate["normalized_text"])
+                ]
+
+                # 有该位数的文字，但格式全部不符合要求。
+                if not candidates:
+                    logger.warning("%s字符文字没有格式正确的候选，人工复核", character_length)
+                    continue
+
+            # 取本类置信度最高的一条。
+            best_candidate = max(candidates, key=lambda candidate: candidate["confidence"])
+
+            # 最高置信度仍低于阈值。
+            if best_candidate["confidence"] < minimum_confidence:
+                logger.warning("%s字符文字没有可靠候选，人工复核", character_length)
+                continue
+
+            selected_candidates.append(best_candidate)
+
+        # 8 字符编号要求前七位数字加一位字母。
+        eight_candidates = [
+            candidate
+            for candidate in candidates_by_length.get(8, [])
+            if re.fullmatch(r"[0-9]{7}[A-Za-z]", candidate["normalized_text"])
+        ]
+
+        # 相同编号保留置信度最高的一次，并删除低于阈值的候选。
+        reliable_eight_candidates = self._select_reliable_candidates(eight_candidates, minimum_confidence)
+
+        # 没有可靠候选时人工复核。
+        if not reliable_eight_candidates:
+            logger.warning("8字符文字没有可靠候选，人工复核")
+        else:
+            # 有可靠候选时按连续编号规则选出最终编号。
+            selected_candidates.extend(self._select_eight_character_winners(reliable_eight_candidates))
+
+        # 统一按 20、8、3、2 的类别顺序排列。
+        category_order = {
+            20: 0,
+            8: 1,
+            3: 2,
+            2: 3,
+        }
+        selected_candidates.sort(key=lambda candidate: category_order[len(candidate["normalized_text"])])
+
+        # 最终文字保留 OCR 原始内容，包含原有空白。
+        ordered_lines = tuple(candidate["text"] for candidate in selected_candidates)
+
+        # 同时保存去掉所有空白后的文字。
+        normalized_lines = tuple(candidate["normalized_text"] for candidate in selected_candidates)
+
+        # 每条最终文字记录自己采用的来源图片。
+        line_frame_ids = tuple((candidate["frame_id"],) for candidate in selected_candidates)
+
+        # 同一张图片可以证明多条文字，最终图片只保留一次。
+        selected_frame_ids = dict.fromkeys(candidate["frame_id"] for candidate in selected_candidates)
+        selected_frames = tuple(frames_by_id[frame_id] for frame_id in selected_frame_ids)
+
+        return OCRResult(
+            ordered_lines=ordered_lines,
+            normalized_lines=normalized_lines,
+            selected_frames=selected_frames,
+            line_frame_ids=line_frame_ids,
+        )
+
+    def _select_reliable_candidates(self, candidates: list[dict], minimum_confidence: float) -> list[dict]:
+        """对相同的 8 字符文字去重，并删除低于阈值的候选。
+
+        Args:
+            candidates: 格式正确的 8 字符候选。
+            minimum_confidence: 保留的最低置信度。
+
+        Returns:
+            返回示例：
+                [{
+                    "text": "2926215C",  # 原始文字
+                    "normalized_text": "2926215C",  # 去掉空白后的文字
+                    "confidence": 0.95,  # 该行的识别置信度
+                    "frame_id": "capture-1",  # 来源图片编号
+                }]
+        """
+        # 相同文字只保留置信度最高的一次，同分保留先出现的候选。
+        best_candidate_by_text: dict[str, dict] = {}
+        for candidate in candidates:
+            normalized_text = candidate["normalized_text"]
+            current_candidate = best_candidate_by_text.get(normalized_text)
+            if current_candidate is None or candidate["confidence"] > current_candidate["confidence"]:
+                best_candidate_by_text[normalized_text] = candidate
+
+        # 删除低于置信度阈值的候选。
+        return [
+            candidate
+            for candidate in best_candidate_by_text.values()
+            if candidate["confidence"] >= minimum_confidence
+        ]
+
+    def _select_eight_character_winners(self, candidates: list[dict]) -> list[dict]:
+        """从 8 字符可靠候选中选出最终编号。
+
+        优先选择最长连续编号组，没有连号时选择置信度最高的前三条。
+
+        Args:
+            candidates: 已去重并删除低置信度候选的 8 字符候选。
+
+        Returns:
+            返回示例：
+                [{
+                    "text": "2926215C",  # 原始文字
+                    "normalized_text": "2926215C",  # 去掉空白后的文字
+                    "confidence": 0.95,  # 该行的识别置信度
+                    "frame_id": "capture-1",  # 来源图片编号
+                }]
+        """
+        # 按置信度从高到低排列，同分保留先出现的候选。
+        ordered_candidates = sorted(candidates, key=lambda candidate: candidate["confidence"], reverse=True)
+
+        # 只用置信度最高的前五条寻找连号。
+        top_candidates = ordered_candidates[:5]
+
+        # 按最后一位字母分组。
+        candidates_by_suffix: defaultdict[str, list[dict]] = defaultdict(list)
+        for candidate in top_candidates:
+            suffix = candidate["normalized_text"][-1]
+            candidates_by_suffix[suffix].append(candidate)
+
+        # 收集所有长度至少为 2 的连续编号组。
+        consecutive_groups: list[list[dict]] = []
+        for suffix_candidates in candidates_by_suffix.values():
+            ordered_suffix_candidates = sorted(suffix_candidates, key=_serial_number_of)
+            current_group: list[dict] = []
+            for candidate in ordered_suffix_candidates:
+                # 当前编号与上一编号相差 1 时并入当前组。
+                if current_group and _serial_number_of(candidate) == _serial_number_of(current_group[-1]) + 1:
+                    current_group.append(candidate)
+                    continue
+
+                # 断开时收走已有连续组，两个及以上编号才计为一组。
+                if len(current_group) >= 2:
+                    consecutive_groups.append(current_group)
+
+                # 从当前编号重新开始一组。
+                current_group = [candidate]
+
+            # 保存该后缀组末尾的连续段。
+            if len(current_group) >= 2:
+                consecutive_groups.append(current_group)
+
+        # 完全没有连号时使用置信度最高的前三条。
+        if not consecutive_groups:
+            return top_candidates[:3]
+
+        # 连号数量最多的组优先，数量相同时组内最低置信度更高者优先。
+        winning_group = max(
+            consecutive_groups,
+            key=lambda group: (len(group), min(candidate["confidence"] for candidate in group)),
+        )
+
+        # 最终连续编号按数字从小到大输出。
+        winning_group.sort(key=_serial_number_of)
+        return winning_group
