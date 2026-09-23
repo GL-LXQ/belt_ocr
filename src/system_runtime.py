@@ -305,14 +305,26 @@ class SystemRuntime:
                     count=input_count,
                 )
 
-                # 通信失败时按重连间隔等待下一轮读取。
-                if states is None:
-                    await asyncio.sleep(self.config.modbus_reconnect_interval_ms / 1000)
-                    continue
-
                 # 停止流程开始或信号入口关闭时结束监听。
                 if self.stopping or not self.accepting_signals:
                     break
+
+                # 通信失败时记录日志。
+                if states is None:
+                    logger.warning("IO 读取失败，旧 DI 状态已清空")
+
+                    # 清空旧 DI 状态。
+                    self.io_previous_states.clear()
+
+                    # 中断仍未收到 CLOSE 的机器周期。
+                    for machine_id, machine in self.machines.items():
+                        session = machine.current_session
+                        if session is not None and session.capture_stop_time is None:
+                            await self.send_signal(EventType.IO_INTERRUPTED, machine_id)
+
+                    # 按重连间隔等待下一轮读取。
+                    await asyncio.sleep(self.config.modbus_reconnect_interval_ms / 1000)
+                    continue
 
                 # 处理有效状态后按正常轮询间隔等待。
                 await self.handle_io_states(states)
@@ -321,14 +333,14 @@ class SystemRuntime:
             await self.modbus_client.disconnect()
 
     async def handle_io_states(self, states: list[bool]) -> None:
-        """把当前 DI 状态转换为机器同步、启动或关闭处理。
+        """把当前 DI 状态保存为基线或转换为启动和关闭信号。
 
         Args:
             states: 从 Modbus 起始地址返回的零基 DI 状态列表。
 
         Returns:
             返回示例：
-                None  # 当前状态已同步或状态变化已交给现有机器入口
+                None  # 当前状态已保存或状态变化已交给机器入口
         """
         input_count = max(self.config.io_machine_channels[machine_id] for machine_id in self.machines) + 1
 
@@ -337,15 +349,15 @@ class SystemRuntime:
             logger.warning("DI 状态数量不足，期望 %s，实际 %s", input_count, len(states))
             return
 
-        # 按机器绑定通道逐一处理首次状态或状态变化。
-        for machine_id in self.machines:
+        # 按机器绑定通道逐一处理初始状态或状态变化。
+        for machine_id, machine in self.machines.items():
             channel = self.config.io_machine_channels[machine_id]
             current_state = bool(states[channel])
             previous_state = self.io_previous_states.get(channel)
 
-            # 首次有效状态进入现场状态同步。
+            # 首次有效状态只更新机器复位标志。
             if previous_state is None:
-                await self.synchronize_machine(machine_id, MachineState.OPEN if current_state else MachineState.CLOSED)
+                machine.waiting_cycle_reset = current_state
 
             # 后续状态变化进入现有启动或关闭入口。
             elif previous_state != current_state:
@@ -353,10 +365,8 @@ class SystemRuntime:
                     await self.handle_start(machine_id)
                 else:
                     await self.handle_close(machine_id)
-            else:
-                continue
 
-            # 业务入口处理成功后登记本次状态。
+            # 登记本次有效状态。
             self.io_previous_states[channel] = current_state
 
     async def handle_start(self, machine_id: str) -> None:

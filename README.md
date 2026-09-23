@@ -8,6 +8,8 @@ BeltVision 是运行在工控机上的多皮带机视觉监测系统。一台工
 
 IO 模块通过 Modbus RTU 持续读取 DI 状态。首次读取用于同步机器现场状态；之后 `False → True` 视为 START，`True → False` 视为 CLOSE。
 
+IO 读取失败时，系统记录日志并清空旧 DI 状态，以 `IO_INTERRUPTED` 结束仍未收到 CLOSE 的采集周期；已经关闭、正在等待识别或入库的周期继续处理。轮询保持运行，通信恢复后的首份有效 DI 只保存为新基线并更新机器的等待复位标志，不产生事件，后续读数再按边沿变化处理。
+
 START 后创建本轮 Session，同时开始相机采集和频率收集；频率当前为占位实现，按配置的模拟读数循环交付，真实协议待接入。相机在采集窗口内保存原始帧；采集结束后进入共享 OCR 流程。OCR 依次执行：
 
 原始帧 → `filter_qualified_frames()` 筛帧（当前原样返回全部图片）→ `recognize_images()` 文字识别（接口占位，当前抛 `NotImplementedError`）→ `generate_final_text_and_images()` 最终文字与证据图片筛选。识别模型接入前，每轮都以 OCR 失败结束，不生成测量记录。

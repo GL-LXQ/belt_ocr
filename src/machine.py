@@ -422,6 +422,16 @@ class Machine:
                 self.waiting_cycle_reset = event.payload != MachineState.CLOSED
                 return
 
+            # IO 读取中断时结束尚未关闭的周期。
+            case EventType.IO_INTERRUPTED:
+                session = self.current_session
+                if session is not None and session.capture_stop_time is None:
+                    await self.handle_machine_close(interrupted=True, failure_reason="IO_INTERRUPTED")
+
+                # 等待通信恢复后重新确认现场状态。
+                self.waiting_cycle_reset = True
+                return
+
         # 没有周期身份的频率只写审计，不分配给当前或历史周期。
         if event.event_type == EventType.FREQUENCY_MEASURED and not event.session_id:
             await run_blocking_operation(self.database.save_abnormal_event, "AMBIGUOUS_MEASUREMENT", event)

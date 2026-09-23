@@ -672,3 +672,56 @@ async def test_audit_failure_does_not_block_session_cleanup(
     database.save_abnormal_event.assert_called_once()
     assert "记录测量失败事件失败" in caplog.text
     assert machine.current_session is None
+
+
+@pytest.mark.asyncio
+async def test_io_interruption_fails_open_session(tmp_path: Path) -> None:
+    """确认 IO 中断结束仍未收到 CLOSE 的周期并记录失败。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 活动周期已失败收尾并留下 IO_INTERRUPTED 记录
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.capture_stop_time = None
+    session.ocr_state = OCRState.WAITING
+
+    # 交付 IO 中断事件并检查本轮失败收尾。
+    await machine.handle_event(RuntimeEvent(EventType.IO_INTERRUPTED, "1"))
+    assert session.state == SessionState.FAILED
+    assert "IO_INTERRUPTED" in session.errors
+    assert session.capture_stop_time is not None
+    assert machine.current_session is None
+    assert machine.waiting_cycle_reset
+
+    # 核对异常事件中的周期身份和失败原因。
+    events = read_abnormal_events(database)
+    assert [(row[0], row[1], row[2]) for row in events] == [
+        ("1", "session-1", "IO_INTERRUPTED"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_io_interruption_preserves_closed_session(tmp_path: Path) -> None:
+    """确认已收到 CLOSE 的周期继续等待正常结果。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 已关闭周期未被 IO 中断改为失败
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+
+    # 交付 IO 中断事件并检查已关闭周期状态。
+    await machine.handle_event(RuntimeEvent(EventType.IO_INTERRUPTED, "1"))
+    assert session.state == SessionState.RUNNING
+    assert machine.current_session is session
+    assert machine.waiting_cycle_reset
+    assert read_abnormal_events(database) == []
