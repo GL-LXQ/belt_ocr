@@ -12,13 +12,18 @@ from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
 from enums import EventType, FrequencyState, MachineState, OCRState, ProgressStage, ProgressStatus, SessionState
 from camera.hikrobot_sdk import CameraFrame
-from models import BeltSession, RuntimeEvent, PublishEvent
+from models import BeltSession, CapturedFrame, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
 from text_recognition import TextRecognizer
-from database import Database, DatabaseRequest
+from database import Database, save_evidence_image
+from repo.measurement_repo import MeasurementRecord
 
 
 logger = logging.getLogger(__name__)
+
+
+class ImageEncodingError(RuntimeError):
+    """标记证据图片编码阶段的相机故障。"""
 
 
 class Machine:
@@ -43,7 +48,7 @@ class Machine:
             camera: 当前机器的相机适配器。
             frequency_adapter: 当前机器的频率接收适配器。
             text_recognizer: 三台机器共享的 OCR 处理器。
-            database: 共享存储入口。
+            database: 数据库访问对象。
             publish_event: 业务事件路由入口。
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
             on_fatal_error: 致命故障回调，把识别任务异常交给运行时处理。
@@ -435,19 +440,12 @@ class Machine:
             )
             return
 
-        # 处理数据库提交回调与周期超时。
-        match event.event_type:
-            # 提交结果交回本轮档案。
-            case EventType.COMMIT_SUCCEEDED | EventType.COMMIT_FAILED:
-                await self.handle_commit_result(session, event)
-                return
-
-            # 周期超时：未关闭的周期记为超时并进入中断关闭流程。
-            case EventType.CYCLE_TIMEOUT:
-                if session.capture_stop_time is None:
-                    session.errors.append("CYCLE_TIMEOUT")
-                    await self.handle_machine_close(interrupted=True)
-                return
+        # 周期未关闭时处理期限通知。
+        if event.event_type == EventType.CYCLE_TIMEOUT:
+            if session.capture_stop_time is None:
+                session.errors.append("CYCLE_TIMEOUT")
+                await self.handle_machine_close(interrupted=True)
+            return
 
         # 本轮不在处理中时丢弃迟到结果并结束。
         if session.state != SessionState.RUNNING:
@@ -552,55 +550,6 @@ class Machine:
 
         # 统一处理本轮失败或满足条件后的提交。
         await self.try_finalize(session)
-
-    async def handle_commit_result(self, session: BeltSession, event: RuntimeEvent) -> None:
-        """处理提交成功或失败回调，更新原测量档案的提交状态。
-
-        Args:
-            session: 事件所属的测量档案。
-            event: 包含事件类型、机器编号、测量编号和数据的业务事件。
-
-        Returns:
-            返回示例：
-                None  # 更新业务状态，不返回数据
-        """
-        # 本轮不在等待入库时忽略本次回调。
-        if session.state != SessionState.WAITING_COMMIT_DB:
-            return
-
-        # 提交成功时标记已入库。
-        if event.event_type == EventType.COMMIT_SUCCEEDED:
-            session.state = SessionState.COMMITTED
-
-            # 上报证据入库完成。
-            if self.notify_measurement_progress is not None:
-                self.notify_measurement_progress(
-                    session.machine_id,
-                    session.session_id,
-                    ProgressStage.EVIDENCE_STORAGE,
-                    ProgressStatus.SUCCESS,
-                )
-
-            # 记录本轮已保存。
-            logger.info("已保存 machine_id=%s session_id=%s", session.machine_id, session.session_id)
-
-            # 尝试释放本轮周期。
-            self.release_finished_session()
-        # 提交失败时登记原因并执行失败清理。
-        else:
-            session.errors.append(event.payload["error_code"])
-
-            # 上报证据入库失败。
-            if self.notify_measurement_progress is not None:
-                self.notify_measurement_progress(
-                    session.machine_id,
-                    session.session_id,
-                    ProgressStage.EVIDENCE_STORAGE,
-                    ProgressStatus.FAILED,
-                )
-
-            # 执行本轮失败清理。
-            await self.handle_measurement_failure(session)
 
     async def handle_measurement_failure(self, session: BeltSession) -> None:
         """标记本轮失败并清理资源，保留尚未关闭的现场周期身份。
@@ -864,15 +813,13 @@ class Machine:
         else:
             evidence_frames = ocr_result.selected_frames
 
-        # 按机器、周期和帧编号生成证据图片路径。
-        evidence_directory = self.config.evidence_directory / session.machine_id / session.session_id
-        evidence_refs = tuple(
-            str(evidence_directory / f"{frame.frame_id}.jpg")
-            for frame in evidence_frames
+        # 按机器和周期生成本轮证据图片目录。
+        evidence_directory = (
+            self.config.evidence_directory / session.machine_id / session.session_id
         )
 
-        # 组装本轮存储请求。
-        request = DatabaseRequest(
+        # 组装本轮测量记录。
+        record = MeasurementRecord(
             machine_id=session.machine_id,
             session_id=session.session_id,
             start_time=session.start_time,
@@ -882,15 +829,13 @@ class Machine:
             measurement_frequencies=tuple(
                 asdict(measurement) for measurement in session.measurement_frequencies
             ),
-            evidence_refs=evidence_refs,
-            evidence_frames=evidence_frames,
-            encode_image=self.camera.sdk_camera.encode_image,
+            evidence_directory=evidence_directory,
             needs_review=needs_review,
             review_reason=review_reason,
         )
 
-        # 标记本轮等待入库。
-        session.state = SessionState.WAITING_COMMIT_DB
+        # 标记本轮正在保存证据与记录。
+        session.state = SessionState.SAVING_RESULT
 
         # 上报证据入库开始。
         if self.notify_measurement_progress is not None:
@@ -904,24 +849,129 @@ class Machine:
         # 释放本轮识别结果引用。
         session.ocr_result = None
 
-        # 提交存储请求，入队成功时结束。
-        if await self.database.submit(request):
+        # 在线程中依次保存证据图片和测量记录。
+        try:
+            await run_blocking_operation(
+                self.save_evidence_images_and_measurement_record,
+                record,
+                evidence_frames,
+            )
+        except ImageEncodingError:
+            raise
+        except Exception as error:
+            # 登记本轮存储失败。
+            error_code = (
+                "COMMIT_INTEGRITY_CONFLICT"
+                if isinstance(error, ValueError)
+                else "DATABASE_WRITE_FAILED"
+            )
+            session.errors.append(error_code)
+            logger.exception(
+                "保存失败 machine_id=%s session_id=%s",
+                session.machine_id,
+                session.session_id,
+            )
+
+            # 上报证据入库失败。
+            if self.notify_measurement_progress is not None:
+                self.notify_measurement_progress(
+                    session.machine_id,
+                    session.session_id,
+                    ProgressStage.EVIDENCE_STORAGE,
+                    ProgressStatus.FAILED,
+                )
+
+            # 清理本轮失败状态。
+            await self.handle_measurement_failure(session)
             return
 
-        # 登记存储队列已满。
-        session.errors.append("DATABASE_QUEUE_FULL")
+        # 标记本轮已入库。
+        session.state = SessionState.COMMITTED
 
-        # 上报证据入库失败。
+        # 上报证据入库完成。
         if self.notify_measurement_progress is not None:
             self.notify_measurement_progress(
                 session.machine_id,
                 session.session_id,
                 ProgressStage.EVIDENCE_STORAGE,
-                ProgressStatus.FAILED,
+                ProgressStatus.SUCCESS,
             )
 
-        # 执行本轮失败清理。
-        await self.handle_measurement_failure(session)
+        # 记录本轮保存结果。
+        logger.info(
+            "已保存 machine_id=%s session_id=%s",
+            session.machine_id,
+            session.session_id,
+        )
+
+        # 释放已完成的周期。
+        self.release_finished_session()
+
+    def save_evidence_images_and_measurement_record(
+        self,
+        record: MeasurementRecord,
+        evidence_frames: tuple[CapturedFrame, ...],
+    ) -> None:
+        """逐张保存证据图片，再写入本轮测量记录。
+
+        Args:
+            record: 本轮测量的业务字段和证据图片目录。
+            evidence_frames: 本轮需要保存的原始帧。
+
+        Returns:
+            返回示例：
+                None  # 证据图片和测量记录均已保存
+        """
+        # 记录本次新建的图片。
+        created_image_paths = []
+
+        # 记录本轮是否进入数据库写入。
+        database_write_attempted = False
+        try:
+            # 逐帧编码并保存尚不存在的证据图片。
+            for frame in evidence_frames:
+                image_path = record.evidence_directory / f"{frame.frame_id}.jpg"
+                if image_path.exists():
+                    continue
+
+                try:
+                    image_data = self.camera.sdk_camera.encode_image(frame.camera_frame)
+                except Exception as error:
+                    logger.exception(
+                        "相机编码失败 session_id=%s frame_id=%s",
+                        record.session_id,
+                        frame.frame_id,
+                    )
+                    raise ImageEncodingError("相机图片编码失败") from error
+
+                # 原子保存本帧证据图片。
+                created_image_paths.append(image_path)
+                save_evidence_image(image_data, image_path)
+
+            # 图片全部保存后串行写入测量记录。
+            with self.database.measurement_write_lock:
+                database_write_attempted = True
+                self.database.measurement_repo.write_record(record)
+        except Exception:
+            # 数据库写入失败时确认是否已提交。
+            record_not_committed = not database_write_attempted
+            if database_write_attempted:
+                try:
+                    record_exists = self.database.measurement_repo.exists_by_session_id(
+                        record.session_id
+                    )
+                    record_not_committed = not record_exists
+                except Exception:
+                    logger.exception("无法确认提交结果，保留图片 session_id=%s", record.session_id)
+
+            # 只清理本次新建且确认没有入库的图片。
+            if record_not_committed:
+                for image_path in created_image_paths:
+                    try:
+                        image_path.unlink(missing_ok=True)
+                    except OSError:
+                        logger.exception("清理未提交图片失败 path=%s", image_path)
+            raise
 
     def schedule_timeout(self, session: BeltSession, event_type: EventType, timeout_ms: int) -> None:
         """为当前周期安排指定类型的期限通知。

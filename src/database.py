@@ -1,32 +1,18 @@
 """管理本地数据库、机器表、实例锁、异常事件和测量结果写入。"""
 
-from enums import EventType
-import asyncio
 import dataclasses
 import json
-import logging
 import os
 import sqlite3
+import threading
 import time
-from dataclasses import dataclass
-from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 
-from async_utils import run_blocking_operation
 from config_util import AppConfig
-from camera.hikrobot_sdk import CameraFrame
-from models import CapturedFrame, RuntimeEvent, PublishEvent
 from repo.machine_repo import MachineRepo
 from repo.measurement_repo import MeasurementRepo
 from repo.abnormal_event_repo import AbnormalEventRepo
-
-
-logger = logging.getLogger(__name__)
-
-
-class ImageEncodingError(RuntimeError):
-    """标记证据图片编码阶段的相机故障。"""
 
 
 def save_evidence_image(image_data: bytes, image_path: Path) -> None:
@@ -95,48 +81,27 @@ def serialize_value(value):
     return value
 
 
-@dataclass(frozen=True)
-class DatabaseRequest:
-    """一轮测量提交给存储队列的冻结内容。"""
-
-    machine_id: str  # 机器编号
-    session_id: str  # 测量周期编号
-    start_time: str  # 本轮开始时间，UTC
-    finish_time: str  # 本轮结算时间，UTC
-    ordered_lines: tuple[str, ...]  # 最终文字顺序，OCR 待复核时为空
-    final_frequency_hz: float | None  # 本轮最终频率，缺失时为空
-    measurement_frequencies: tuple[dict, ...]  # 本轮频率明细
-    evidence_refs: tuple[str, ...]  # 本轮证据图片文件路径
-    evidence_frames: tuple[CapturedFrame, ...]  # 本轮需要保存的原始帧
-    encode_image: Callable[[CameraFrame], bytes]  # 将证据帧编码为 JPG 的相机接口
-    needs_review: bool = False  # 本轮结果是否需要人工复核
-    review_reason: str | None = None  # 本轮需要人工复核的原因
-
-
 class Database:
-    def __init__(self, config: AppConfig, publish_event: PublishEvent) -> None:
-        """初始化各表访问对象、存储队列和连接状态。
+    def __init__(self, config: AppConfig) -> None:
+        """初始化各表访问对象和连接状态。
 
         Args:
-            config: 数据库路径和存储队列配置。
-            publish_event: 提交结果的异步事件发布函数。
+            config: 数据库路径配置。
 
         Returns:
             返回示例：
                 None  # 数据库管理对象已初始化，尚未打开数据库
         """
-        # 保存存储配置和结果事件发布入口。
+        # 保存数据库配置。
         self.config = config
-        self.publish_event = publish_event
 
         # 创建各表的数据库访问对象。
         self.machine_repo = MachineRepo(config.database_path)
         self.measurement_repo = MeasurementRepo(config.database_path)
         self.abnormal_event_repo = AbnormalEventRepo(config.recovery_path)
 
-        # 创建共享存储队列并登记排队身份。
-        self.queue: asyncio.Queue[DatabaseRequest] = asyncio.Queue(config.storage_queue_capacity)
-        self.queued_records: set[str] = set()
+        # 创建测量记录写入锁。
+        self.measurement_write_lock = threading.Lock()
 
         # 初始化实例锁文件与运行库连接状态。
         self.lock_file = None
@@ -288,176 +253,3 @@ class Database:
             reason,
             json.dumps(payload, ensure_ascii=False),
         )
-
-    async def submit(self, request: DatabaseRequest) -> bool:
-        """将本轮测量结果加入存储队列，不保存待补交记录。
-
-        Args:
-            request: 本轮机器身份、业务字段和证据帧。
-
-        Returns:
-            返回示例：
-                True  # 请求已在队列中或本次入队成功，等待数据库回调
-                False  # 队列已满，本轮提交失败
-        """
-        # 同一记录已排队时直接返回成功。
-        if request.session_id in self.queued_records:
-            return True
-
-        # 将本轮请求加入队列，队列满时返回失败。
-        try:
-            self.queue.put_nowait(request)
-        except asyncio.QueueFull:
-            return False
-
-        # 登记本轮排队身份。
-        self.queued_records.add(request.session_id)
-        return True
-
-    def persist_measurement(self, request: DatabaseRequest) -> None:
-        """保存证据图片后写入测量记录，明确未提交时清理本次新建图片。
-
-        Args:
-            request: 冻结内容、图片和周期身份。
-
-        Returns:
-            返回示例：
-                None  # 图片和测量记录保存成功，失败时抛出原始异常
-        """
-        # 准备本次新建的图片清单和写入标记。
-        created_paths = []
-        database_attempted = False
-        try:
-            # 逐张保存尚不存在的证据图片。
-            for frame, evidence_ref in zip(
-                request.evidence_frames, request.evidence_refs
-            ):
-                image_path = Path(evidence_ref)
-                if not image_path.exists():
-                    created_paths.append(image_path)
-
-                    # 在证据文件落盘前编码本帧。
-                    try:
-                        image_data = request.encode_image(frame.camera_frame)
-                    except Exception as error:
-                        logger.exception(
-                            "相机编码失败 session_id=%s frame_id=%s",
-                            request.session_id,
-                            frame.frame_id,
-                        )
-                        raise ImageEncodingError("相机图片编码失败") from error
-
-                    # 将编码后的 JPG 图片保存到证据路径。
-                    save_evidence_image(image_data, image_path)
-
-            # 全部图片写入成功后才执行数据库事务。
-            database_attempted = True
-            self.measurement_repo.write_record(request)
-        except Exception:
-            # 未开始写入时确定没有提交。
-            definitely_uncommitted = not database_attempted
-
-            # 已开始写入时查询提交结果，查询失败则保留图片。
-            if database_attempted:
-                try:
-                    definitely_uncommitted = not self.measurement_repo.exists_by_session_id(request.session_id)
-                except Exception:
-                    logger.exception("无法确认提交结果，保留图片 session_id=%s", request.session_id)
-
-            # 仅清理本次创建且确认没有入库的图片。
-            if definitely_uncommitted:
-                for image_path in created_paths:
-                    try:
-                        image_path.unlink(missing_ok=True)
-                    except OSError:
-                        logger.exception("清理未提交图片失败 path=%s", image_path)
-
-            # 继续抛出写入阶段的原始异常。
-            raise
-
-    async def consume_storage_queue(self) -> None:
-        """从共享存储队列逐条取出请求，保存图片与测量记录后交付回调，失败不自动重试。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            返回示例：
-                None  # 持续消费队列，直到应用取消存储任务
-        """
-        while True:
-            # 读取本轮冻结请求。
-            request = await self.queue.get()
-
-            # 准备本次提交结果的事件类型与数据。
-            event_type = EventType.COMMIT_SUCCEEDED
-            payload = None
-            try:
-                try:
-                    # 在线程中保存本轮证据与测量结果。
-                    await run_blocking_operation(self.persist_measurement, request)
-                except ImageEncodingError:
-                    # 将相机编码故障交给运行时停止整个应用。
-                    raise
-                except Exception as error:
-                    # 按异常类型确定失败错误码。
-                    event_type = EventType.COMMIT_FAILED
-                    payload = {
-                        "error_code": (
-                            "COMMIT_INTEGRITY_CONFLICT"
-                            if isinstance(error, ValueError)
-                            else "DATABASE_WRITE_FAILED"
-                        ),
-                    }
-
-                    # 记录保存失败且不自动重试。
-                    logger.exception(
-                        "保存失败，不自动重试 machine_id=%s session_id=%s",
-                        request.machine_id,
-                        request.session_id,
-                    )
-
-                    # 让出一次事件循环控制权。
-                    await asyncio.sleep(0)
-
-                # 将本次提交结果返回原周期。
-                await self.publish_event(RuntimeEvent(event_type, request.machine_id, request.session_id, payload))
-            finally:
-                # 移除排队身份并结算本次队列任务。
-                self.queued_records.discard(request.session_id)
-                self.queue.task_done()
-
-                # 释放本次请求的引用。
-                request = None
-
-    async def wait_until_queue_drained(self) -> None:
-        """等待队列中已提交的存储请求全部处理结束。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            返回示例：
-                None  # 已提交的存储请求全部写入结束
-        """
-        # 等待全部已入队请求完成队列结算。
-        await self.queue.join()
-
-    def discard_pending_requests(self) -> None:
-        """丢弃队列中尚未执行的存储请求，并清除对应的排队身份。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            返回示例：
-                None  # 队列已清空，被丢弃的请求不再写入数据库
-        """
-        # 逐条取出尚未消费的请求，清除排队身份并结算队列任务计数。
-        while not self.queue.empty():
-            request = self.queue.get_nowait()
-            self.queued_records.discard(request.session_id)
-            self.queue.task_done()
-
-        # 清除退出后不再有效的排队身份。
-        self.queued_records.clear()

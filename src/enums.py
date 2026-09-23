@@ -20,7 +20,7 @@ class SessionState(str, Enum):
     """定义本次测量任务的处理状态，与机器启停状态分开。"""
 
     RUNNING = "RUNNING"  # 正在采集或等待 OCR 和频率处理完成
-    WAITING_COMMIT_DB = "WAITING_COMMIT_DB"  # 结果完整，等待或正在提交数据库
+    SAVING_RESULT = "SAVING_RESULT"  # 正在保存证据图片和测量记录
     COMMITTED = "COMMITTED"  # 本轮结果已确认提交数据库
     FAILED = "FAILED"  # 本轮处理、中断或数据库提交失败
 
@@ -74,5 +74,3 @@ class EventType(str, Enum):
     OCR_TIMEOUT = "OCRTimeout"  # 文字识别超时
     FREQUENCY_MEASURED = "FrequencyMeasured"  # 收到有效频率测量
     CYCLE_TIMEOUT = "CycleTimeout"  # 测量周期超时
-    COMMIT_SUCCEEDED = "CommitSucceeded"  # 数据库提交成功
-    COMMIT_FAILED = "CommitFailed"  # 数据库提交失败

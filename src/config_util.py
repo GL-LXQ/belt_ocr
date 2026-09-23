@@ -36,7 +36,6 @@ class AppConfig:
     ocr_result_timeout_ms: int = 30000  # 整轮识别期限，毫秒
     max_cycle_open_ms: int = 60000  # 周期关闭期限，毫秒
     event_queue_capacity: int = 128  # 单机事件队列容量
-    storage_queue_capacity: int = 32  # 共享存储队列容量
     shutdown_timeout_ms: int = 10000  # 退出收尾期限，毫秒
     recovery_database_path: Path | None = None  # 运行库路径覆盖值
     initial_machine_state: MachineState = MachineState.CLOSED  # 启动时的现场状态
@@ -86,7 +85,6 @@ class AppConfig:
             "capture_window_ms", "camera_timeout_ms",
             "frequency_interval_ms",
             "ocr_result_timeout_ms", "max_cycle_open_ms", "event_queue_capacity",
-            "storage_queue_capacity",
             "shutdown_timeout_ms",
         )
 
@@ -127,7 +125,6 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
                 "database_path": Path("D:/belt_ocr/runtime/measurements.sqlite3"),  # 业务库绝对路径
                 "recovery_database_path": Path("D:/belt_ocr/runtime/measurements.recovery.sqlite3"),  # 运行库绝对路径
                 "evidence_directory": Path("D:/belt_ocr/runtime/evidence"),  # 图片绝对目录
-                "storage_queue_capacity": 32,  # 存储队列容量
                 "shutdown_timeout_ms": 10000,  # 退出期限，毫秒
                 "mvs_development_directory": Path("D:/app/HIK/MVS/Development"),  # SDK 目录
                 "mvs_dll_directory": None,  # 使用默认动态库目录
@@ -209,7 +206,6 @@ def load_config(configuration_directory: Path) -> AppConfig:
                 ocr_result_timeout_ms=30000,  # 整轮识别期限
                 max_cycle_open_ms=60000,  # 周期关闭期限
                 event_queue_capacity=128,  # 单机事件队列容量
-                storage_queue_capacity=32,  # 存储队列容量
                 shutdown_timeout_ms=10000,  # 退出收尾期限
                 recovery_database_path=None,  # 运行库路径覆盖值
                 initial_machine_state=MachineState.CLOSED,  # 初始现场状态配置

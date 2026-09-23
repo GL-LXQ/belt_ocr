@@ -3,11 +3,24 @@
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from database import DatabaseRequest
+
+@dataclass(frozen=True)
+class MeasurementRecord:
+    """保存一轮测量需要写入数据库的业务字段。"""
+
+    machine_id: str  # 机器编号
+    session_id: str  # 测量周期编号
+    start_time: str  # 本轮开始时间
+    finish_time: str  # 本轮结算时间
+    ordered_lines: tuple[str, ...]  # 最终文字
+    final_frequency_hz: float | None  # 最终频率
+    measurement_frequencies: tuple[dict, ...]  # 频率明细
+    evidence_directory: Path  # 本轮证据图片目录
+    needs_review: bool  # 是否需要人工复核
+    review_reason: str | None  # 人工复核原因
 
 
 class MeasurementRepo:
@@ -34,7 +47,7 @@ class MeasurementRepo:
                 ordered_lines TEXT NOT NULL,
                 final_frequency_hz REAL,
                 measurement_frequencies TEXT NOT NULL DEFAULT '[]',
-                evidence_refs TEXT NOT NULL,
+                evidence_directory TEXT NOT NULL,
                 needs_review INTEGER NOT NULL DEFAULT 0,
                 review_reason TEXT
             );
@@ -53,11 +66,11 @@ class MeasurementRepo:
         # 保存业务数据库路径。
         self.database_path = database_path
 
-    def write_record(self, request: "DatabaseRequest") -> None:
+    def write_record(self, record: MeasurementRecord) -> None:
         """在事务中幂等写入冻结记录及频率明细和最终值。
 
         Args:
-            request: 包含记录身份、业务字段和选中图片的提交请求。
+            record: 本轮测量的业务字段和证据图片目录。
 
         Returns:
             返回示例：
@@ -65,15 +78,19 @@ class MeasurementRepo:
         """
         # 将列表字段编码为对应列的 JSON，整理本轮业务内容。
         record_values = (
-            request.machine_id,
-            request.start_time,
-            request.finish_time,
-            json.dumps(request.ordered_lines, ensure_ascii=False),
-            request.final_frequency_hz,
-            json.dumps(request.evidence_refs, ensure_ascii=False),
-            json.dumps(request.measurement_frequencies, ensure_ascii=False, sort_keys=True),
-            int(request.needs_review),
-            request.review_reason,
+            record.machine_id,
+            record.start_time,
+            record.finish_time,
+            json.dumps(record.ordered_lines, ensure_ascii=False),
+            record.final_frequency_hz,
+            str(record.evidence_directory),
+            json.dumps(
+                record.measurement_frequencies,
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            int(record.needs_review),
+            record.review_reason,
         )
 
         # 打开业务库连接。
@@ -85,10 +102,10 @@ class MeasurementRepo:
             # 读取同一周期已保存的业务字段。
             existing_record = connection.execute(
                 "SELECT machine_id, start_time, finish_time, ordered_lines, "
-                "final_frequency_hz, evidence_refs, measurement_frequencies, "
+                "final_frequency_hz, evidence_directory, measurement_frequencies, "
                 "needs_review, review_reason "
                 "FROM measurements WHERE session_id = ?",
-                (request.session_id,),
+                (record.session_id,),
             ).fetchone()
 
             # 已有记录时比较内容，不一致则拒绝，一致则跳过写入。
@@ -100,10 +117,10 @@ class MeasurementRepo:
             # 将本轮业务字段写入测量表。
             connection.execute(
                 "INSERT INTO measurements (session_id, machine_id, start_time, "
-                "finish_time, ordered_lines, final_frequency_hz, evidence_refs, "
+                "finish_time, ordered_lines, final_frequency_hz, evidence_directory, "
                 "measurement_frequencies, needs_review, review_reason) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (request.session_id, *record_values),
+                (record.session_id, *record_values),
             )
 
     def exists_by_session_id(self, session_id: str) -> bool:

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 class SystemRuntime:
     def __init__(self, config: AppConfig) -> None:
-        """保存运行配置，创建共享存储和运行状态。
+        """保存运行配置，创建数据库和运行状态。
 
         Args:
             config: 数据库路径、采集期限和退出参数。
@@ -42,8 +42,8 @@ class SystemRuntime:
         # 创建周期状态变化通知。
         self.state_changed = asyncio.Event()
 
-        # 创建共享存储与共享 OCR 处理器。
-        self.database = Database(config, self.publish_event)
+        # 创建数据库和共享 OCR 处理器。
+        self.database = Database(config)
         self.text_recognizer = TextRecognizer()
 
         # 登记机器运行对象与后台任务列表。
@@ -223,9 +223,6 @@ class SystemRuntime:
                     f"frequency_meter_serial={machine_config.frequency_meter_serial}",
                     machine.frequency_adapter.listen_measurements,
                 )))
-
-            # 启动共享的测量存储任务。
-            self.worker_tasks.append(asyncio.create_task(self.run_worker("测量存储", self.database.consume_storage_queue)))
 
             # 标记启动完成。
             self.has_started = True
@@ -629,9 +626,6 @@ class SystemRuntime:
         # 等待各机器周期结算完成。
         await self.wait_until_idle(self.config.shutdown_timeout_ms / 1000)
 
-        # 等待共享存储队列排空。
-        await self.database.wait_until_queue_drained()
-
         # 等待各机器事件队列排空。
         for machine in self.machines.values():
             await machine.wait_until_event_queue_drained()
@@ -700,9 +694,6 @@ class SystemRuntime:
         # 清空不再处理的事件，释放事件携带的图片引用。
         for machine in self.machines.values():
             machine.discard_pending_events()
-
-        # 丢弃存储队列中尚未执行的请求。
-        self.database.discard_pending_requests()
 
         # 关闭相机驱动与共享 SDK。
         try:
