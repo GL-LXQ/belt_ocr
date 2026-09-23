@@ -108,7 +108,7 @@ class DatabaseRequest:
     measurement_frequencies: tuple[dict, ...]  # 本轮频率明细
     evidence_refs: tuple[str, ...]  # 本轮证据图片文件路径
     evidence_frames: tuple[CapturedFrame, ...]  # 本轮需要保存的原始帧
-    encode_image: Callable[[CameraFrame], bytes]  # 将证据帧编码为 BMP 的相机接口
+    encode_image: Callable[[CameraFrame], bytes]  # 将证据帧编码为 JPG 的相机接口
     needs_review: bool = False  # 本轮结果是否需要人工复核
     review_reason: str | None = None  # 本轮需要人工复核的原因
 
@@ -347,7 +347,7 @@ class Database:
                         )
                         raise ImageEncodingError("相机图片编码失败") from error
 
-                    # 将编码后的 BMP 图片保存到证据路径。
+                    # 将编码后的 JPG 图片保存到证据路径。
                     save_evidence_image(image_data, image_path)
 
             # 全部图片写入成功后才执行数据库事务。

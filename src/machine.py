@@ -867,7 +867,7 @@ class Machine:
         # 按机器、周期和帧编号生成证据图片路径。
         evidence_directory = self.config.evidence_directory / session.machine_id / session.session_id
         evidence_refs = tuple(
-            str(evidence_directory / f"{frame.frame_id}.bmp")
+            str(evidence_directory / f"{frame.frame_id}.jpg")
             for frame in evidence_frames
         )
 

@@ -150,16 +150,16 @@ class MvsCamera:
         return frame
 
     def encode_image(self, frame: CameraFrame) -> bytes:
-        """通过 MVS SDK 将独立原始帧编码成 BMP 图片。
+        """通过 MVS SDK 将独立原始帧编码成 JPG 图片。
 
         Args:
             frame: 已复制到程序内存的图像及像素格式信息。
 
         Returns:
             返回示例：
-                b"BM..."  # 完整 BMP 文件字节，示例省略图片内容
+                b"\xff\xd8...\xff\xd9"  # 完整 JPG 文件字节，示例省略图片内容
         """
-        # 为当前帧建立输入缓存和 BMP 输出缓存。
+        # 为当前帧建立输入缓存和图片输出缓存。
         source_buffer = (ctypes.c_ubyte * len(frame.data)).from_buffer_copy(frame.data)
         output_capacity = frame.width * frame.height * 4 + 2048
         output_buffer = (ctypes.c_ubyte * output_capacity)()
@@ -172,10 +172,11 @@ class MvsCamera:
         parameters.nWidth = frame.width
         parameters.nHeight = frame.height
 
-        # 设置 BMP 文件输出和 Bayer 插值参数。
+        # 设置 JPG 文件输出、压缩质量和 Bayer 插值参数。
         parameters.pImageBuffer = ctypes.cast(output_buffer, ctypes.POINTER(ctypes.c_ubyte))
         parameters.nBufferSize = output_capacity
-        parameters.enImageType = self.binding.parameters.MV_Image_Bmp
+        parameters.enImageType = self.binding.parameters.MV_Image_Jpeg
+        parameters.nJpgQuality = 85
         parameters.iMethodValue = 1
 
         # 串行执行同一设备的图片编码。
@@ -184,13 +185,13 @@ class MvsCamera:
 
         # 编码失败时抛出异常。
         if return_code != self.binding.errors.MV_OK:
-            raise MvsError(f"图像编码为 BMP 失败（SaveImageEx3(BMP)），错误码：0x{return_code:08X}")
+            raise MvsError(f"图像编码为 JPG 失败（SaveImageEx3(JPEG)），错误码：0x{return_code:08X}")
 
         # 编码返回空内容时抛出异常。
         if parameters.nImageLen == 0:
-            raise MvsError("SaveImageEx3(BMP) 未返回图片内容")
+            raise MvsError("SaveImageEx3(JPEG) 未返回图片内容")
 
-        # 复制编码后的 BMP 文件字节并返回。
+        # 复制编码后的 JPG 文件字节并返回。
         return ctypes.string_at(output_buffer, parameters.nImageLen)
 
     def stop_grabbing(self) -> None:
