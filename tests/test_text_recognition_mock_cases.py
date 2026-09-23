@@ -367,15 +367,15 @@ def test_eight_character_mock_cases(
         assert warning_fragment in caplog.text
 
 
-def test_multiple_frames_and_blocks_preserve_source_mapping() -> None:
-    """多图、多块筛选后每条文字仍对应正确图片。
+def test_multiple_frames_and_blocks_preserve_evidence_mapping() -> None:
+    """多图、多块筛选后每条文字仍对应最终证据图片。
 
     Args:
         无外部参数。
 
     Returns:
         返回示例：
-            None  # 文字顺序、来源编号与图片去重已通过断言验证
+            None  # 文字顺序、证据编号与图片去重已通过断言验证
     """
     # 建立包含空 block、重复编号和四类文字的两张图片。
     frame_results, frames = build_mock_ocr_results([
@@ -403,7 +403,7 @@ def test_multiple_frames_and_blocks_preserve_source_mapping() -> None:
     assert result.line_frame_ids == (
         (frames[1].frame_id,),
         (frames[1].frame_id,),
-        (frames[0].frame_id,),
+        (frames[1].frame_id,),
         (frames[0].frame_id,),
         (frames[1].frame_id,),
     )
@@ -468,15 +468,15 @@ def test_empty_blocks_return_empty_ocr_result(
         assert f"{character_length}字符文字没有" in caplog.text
 
 
-def test_duplicate_eight_character_text_uses_highest_confidence_source() -> None:
-    """跨图重复编号选最高分的文字和对应图片。
+def test_duplicate_eight_character_text_uses_one_evidence_frame() -> None:
+    """跨图重复编号选择最高分候选的图片作为共同证据。
 
     Args:
         无外部参数。
 
     Returns:
         返回示例：
-            None  # 去重后的文字来源已通过断言验证
+            None  # 去重后的证据图片已通过断言验证
     """
     # 在两张图片中放入大小写不同的重复编号。
     frame_results, frames = build_mock_ocr_results([
@@ -484,14 +484,96 @@ def test_duplicate_eight_character_text_uses_highest_confidence_source() -> None
         [[("2926215C", 0.96), ("1234567A", 0.99)]],
     ])
 
-    # 核对重复编号采用第二张图片的高分结果。
+    # 核对入选的两个编号统一采用第二张图片作为证据。
     result = TextRecognizer().generate_final_text_and_images(frame_results, frames)
     assert result.ordered_lines == ("2926215C", "2926216C")
     assert result.line_frame_ids == (
         (frames[1].frame_id,),
-        (frames[0].frame_id,),
+        (frames[1].frame_id,),
     )
-    assert result.selected_frames == (frames[1], frames[0])
+    assert result.selected_frames == (frames[1],)
+
+
+def test_five_eight_character_lines_share_highest_confidence_frame() -> None:
+    """五条入选的 8 位文字只保存最高置信度候选的图片。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 五条文字共用的证据图片已通过断言验证
+    """
+    # 每张图片都包含五条编号，每条编号的最高分分别来自不同图片。
+    serial_texts = (
+        "2926215C", "2926216C", "2926217C", "2926218C", "2926219C"
+    )
+    best_confidences = (0.95, 0.92, 0.99, 0.91, 0.93)
+    frame_blocks = []
+    for best_text_number, best_confidence in enumerate(best_confidences):
+        frame_lines = [
+            (serial_text, best_confidence if text_number == best_text_number else 0.7)
+            for text_number, serial_text in enumerate(serial_texts)
+        ]
+        frame_blocks.append([frame_lines])
+    frame_results, frames = build_mock_ocr_results(frame_blocks)
+
+    # 核对所有编号按升序输出，并共用第三张最高分图片。
+    result = TextRecognizer().generate_final_text_and_images(frame_results, frames)
+    assert result.ordered_lines == (
+        "2926215C", "2926216C", "2926217C", "2926218C", "2926219C"
+    )
+    assert result.line_frame_ids == ((frames[2].frame_id,),) * 5
+    assert result.selected_frames == (frames[2],)
+
+
+def test_eight_evidence_frame_comes_from_final_winning_group() -> None:
+    """8 位证据图片从最终连号组选择，不采用未入选的高分编号。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 连号组证据图片已通过断言验证
+    """
+    # 建立高分孤立编号和分属两张图片的低分连号。
+    frame_results, frames = build_mock_ocr_results([
+        [[("9999999A", 0.99)]],
+        [[("2926215C", 0.90)]],
+        [[("2926216C", 0.92)]],
+    ])
+
+    # 核对最终两条文字共用连号组中得分最高的第三张图片。
+    result = TextRecognizer().generate_final_text_and_images(frame_results, frames)
+    assert result.ordered_lines == ("2926215C", "2926216C")
+    assert result.line_frame_ids == ((frames[2].frame_id,),) * 2
+    assert result.selected_frames == (frames[2],)
+
+
+def test_eight_without_sequence_uses_one_top_confidence_frame() -> None:
+    """没有连号时前三条 8 位文字共用最高分候选的图片。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 无连号分支的共同证据图片已通过断言验证
+    """
+    # 将四条互不连续的编号分别放入四张图片。
+    frame_results, frames = build_mock_ocr_results([
+        [[("1111111A", 0.90)]],
+        [[("3333333B", 0.99)]],
+        [[("5555555C", 0.95)]],
+        [[("7777777D", 0.80)]],
+    ])
+
+    # 核对前三条按置信度排列，并共用第二张图片。
+    result = TextRecognizer().generate_final_text_and_images(frame_results, frames)
+    assert result.ordered_lines == ("3333333B", "5555555C", "1111111A")
+    assert result.line_frame_ids == ((frames[1].frame_id,),) * 3
+    assert result.selected_frames == (frames[1],)
 
 
 @pytest.mark.parametrize(

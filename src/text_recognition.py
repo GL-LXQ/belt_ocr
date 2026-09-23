@@ -196,11 +196,12 @@ class TextRecognizer:
         return int(candidate["normalized_text"][:7])
 
     def generate_final_text_and_images(self, frame_results: list[dict], frames: tuple[CapturedFrame, ...]) -> OCRResult:
-        """按字符类别筛选最终文字，并给出每条文字对应的来源图片。
+        """按字符类别筛选最终文字，并给出每条文字对应的证据图片。
 
         处理规则：先将文字转成大写；20 字符不做格式过滤，3 和 2 字符要求纯数字，
         8 字符要求前七位数字加一位字母；
         20、3、2 字符各输出本类置信度最高的一条，8 字符先去重再按连续编号规则选出。
+        8 字符共用最终入选文字中置信度最高的一张证据图片。
         没有候选、格式全部不符或最高置信度低于阈值时记录人工复核日志，不补造该类别结果。
 
         Args:
@@ -223,7 +224,7 @@ class TextRecognizer:
                             image_data=b"BM...",  # BMP 文件字节
                         ),
                     ),
-                    line_frame_ids=(("capture-1",),),  # 与 ordered_lines 逐项对应的来源图片编号
+                    line_frame_ids=(("capture-1",),),  # 与文字逐项对应的证据图片编号
                 )
         """
         # 低于该置信度的文字不进入最终结果。
@@ -291,6 +292,7 @@ class TextRecognizer:
                 logger.warning("%s字符文字没有可靠候选，人工复核", character_length)
                 continue
 
+            best_candidate["evidence_frame_id"] = best_candidate["frame_id"]
             selected_candidates.append(best_candidate)
 
         # 8 字符编号要求前七位数字加一位字母。
@@ -308,7 +310,16 @@ class TextRecognizer:
             logger.warning("8字符文字没有可靠候选，人工复核")
         else:
             # 有可靠候选时按连续编号规则选出最终编号。
-            selected_candidates.extend(self._select_eight_character_winners(reliable_eight_candidates))
+            eight_winners = self._select_eight_character_winners(reliable_eight_candidates)
+
+            # 选最终编号中置信度最高的图片作为 8 字符类别的共同证据。
+            best_eight_candidate = max(
+                eight_winners, key=lambda candidate: candidate["confidence"]
+            )
+            evidence_frame_id = best_eight_candidate["frame_id"]
+            for candidate in eight_winners:
+                candidate["evidence_frame_id"] = evidence_frame_id
+            selected_candidates.extend(eight_winners)
 
         # 统一按 20、8、3、2 的类别顺序排列。
         category_order = {
@@ -325,11 +336,15 @@ class TextRecognizer:
         # 同时保存去掉所有空白后的文字。
         normalized_lines = tuple(candidate["normalized_text"] for candidate in selected_candidates)
 
-        # 每条最终文字记录自己采用的来源图片。
-        line_frame_ids = tuple((candidate["frame_id"],) for candidate in selected_candidates)
+        # 每条最终文字记录自己采用的证据图片。
+        line_frame_ids = tuple(
+            (candidate["evidence_frame_id"],) for candidate in selected_candidates
+        )
 
-        # 同一张图片可以证明多条文字，最终图片只保留一次。
-        selected_frame_ids = dict.fromkeys(candidate["frame_id"] for candidate in selected_candidates)
+        # 同一张证据图片只保留一次。
+        selected_frame_ids = dict.fromkeys(
+            candidate["evidence_frame_id"] for candidate in selected_candidates
+        )
         selected_frames = tuple(frames_by_id[frame_id] for frame_id in selected_frame_ids)
 
         return OCRResult(

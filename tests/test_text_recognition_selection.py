@@ -48,14 +48,14 @@ def test_short_number_rejects_unicode_digits(
 
 
 def test_uppercases_selected_lines_and_groups_mixed_case_serials() -> None:
-    """四类文字统一大写后按编号连号，并保留各自图片来源。
+    """四类文字统一大写后按编号连号，并关联最终证据图片。
 
     Args:
         无外部参数。
 
     Returns:
         返回示例：
-            None  # 大写、连号和来源图片已通过断言验证
+            None  # 大写、连号和证据图片已通过断言验证
     """
     # 建立两张图片及其识别出的四类候选。
     first_frame = CapturedFrame(
@@ -98,7 +98,7 @@ def test_uppercases_selected_lines_and_groups_mixed_case_serials() -> None:
     assert result.line_frame_ids == (
         (first_frame.frame_id,),
         (first_frame.frame_id,),
-        (second_frame.frame_id,),
+        (first_frame.frame_id,),
         (second_frame.frame_id,),
         (second_frame.frame_id,),
     )
