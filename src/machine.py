@@ -5,6 +5,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from camera.camera import Camera
@@ -924,50 +925,60 @@ class Machine:
         # 记录本次新建的图片。
         created_image_paths = []
 
-        # 记录本轮是否进入数据库写入。
-        database_write_attempted = False
         try:
-            # 逐帧编码并保存尚不存在的证据图片。
-            for frame in evidence_frames:
-                image_path = record.evidence_directory / f"{frame.frame_id}.jpg"
-                if image_path.exists():
-                    continue
-
-                try:
-                    image_data = self.camera.sdk_camera.encode_image(frame.camera_frame)
-                except Exception as error:
-                    logger.exception(
-                        "相机编码失败 session_id=%s frame_id=%s",
-                        record.session_id,
-                        frame.frame_id,
-                    )
-                    raise ImageEncodingError("相机图片编码失败") from error
-
-                # 原子保存本帧证据图片。
-                created_image_paths.append(image_path)
-                save_evidence_image(image_data, image_path)
-
-            # 图片全部保存后写入测量记录。
-            database_write_attempted = True
-            self.database.write_measurement_record(record)
+            # 逐帧编码并保存本轮证据图片。
+            self.encode_and_save_evidence_images(record, evidence_frames, created_image_paths)
         except Exception:
-            # 数据库写入失败时确认是否已提交。
-            record_not_committed = not database_write_attempted
-            if database_write_attempted:
+            # 清理本次新建的证据图片。
+            for image_path in created_image_paths:
                 try:
-                    record_exists = self.database.has_measurement_record(record.session_id)
-                    record_not_committed = not record_exists
-                except Exception:
-                    logger.exception("无法确认提交结果，保留图片 session_id=%s", record.session_id)
-
-            # 只清理本次新建且确认没有入库的图片。
-            if record_not_committed:
-                for image_path in created_image_paths:
-                    try:
-                        image_path.unlink(missing_ok=True)
-                    except OSError:
-                        logger.exception("清理未提交图片失败 path=%s", image_path)
+                    image_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.exception("清理证据图片失败 path=%s", image_path)
             raise
+
+        # 图片全部保存后写入测量记录。
+        self.database.write_measurement_record(record)
+
+    def encode_and_save_evidence_images(
+        self,
+        record: MeasurementRecord,
+        evidence_frames: tuple[CapturedFrame, ...],
+        created_image_paths: list[Path],
+    ) -> None:
+        """逐帧编码并保存本轮尚不存在的证据图片。
+
+        Args:
+            record: 本轮测量的业务字段和证据图片目录。
+            evidence_frames: 本轮需要保存的原始帧。
+            created_image_paths: 记录本次新建的图片路径，供失败时清理。
+
+        Returns:
+            返回示例：
+                None  # 本轮证据图片已保存，新建路径已登记
+        """
+        # 逐帧跳过已有证据图片。
+        for frame in evidence_frames:
+            image_path = record.evidence_directory / f"{frame.frame_id}.jpg"
+            if image_path.exists():
+                continue
+
+            # 将相机原始帧编码为 JPG 图片。
+            try:
+                image_data = self.camera.sdk_camera.encode_image(frame.camera_frame)
+            except Exception as error:
+                logger.exception(
+                    "相机编码失败 session_id=%s frame_id=%s",
+                    record.session_id,
+                    frame.frame_id,
+                )
+                raise ImageEncodingError("相机图片编码失败") from error
+
+            # 登记本次需要新建的图片路径。
+            created_image_paths.append(image_path)
+
+            # 原子保存本帧证据图片。
+            save_evidence_image(image_data, image_path)
 
     def schedule_timeout(self, session: BeltSession, event_type: EventType, timeout_ms: int) -> None:
         """为当前周期安排指定类型的期限通知。

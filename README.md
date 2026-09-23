@@ -89,7 +89,7 @@ OCRResult 包含 `ordered_lines`（保留空白的大写文字）、`normalized_
 
 固定基准数据流：`tests/fixtures/build_ocr_selection_reference.py` 按已确认规则先写入 `ocr_selection_reference_200.json`，四类各记录 50 条同结构 OCR 输入及预期的 `ordered_lines`、`normalized_lines`、`line_frame_ids`、`selected_frame_ids`；`tests/test_text_recognition_reference_200.py` 只读取这份固定文件，绑定内存图片后调用终选函数，并将四项实际结果逐项与预期结果比对。基准覆盖置信度边界、字符错位、符号、Unicode、同分、Top 5、连号组选优和 8 位共用证据图片。
 
-测量表保存周期编号、机器编号、起止时间、`ordered_lines`、本轮唯一的 `evidence_directory`、可空的最终频率、频率明细、`needs_review` 和 `review_reason`，不保存整包 JSON、内容哈希及文字与图片对应关系。同一周期重复提交时直接比较这些业务字段，相同则成功，不同则报错。OCR 内存结果仍保留来源帧关系，不写入数据库。图片保存失败不写数据库；确认没有提交时只清理本次新建图片，已存在的图片不覆盖或删除；提交结果未知时保留图片并记录日志。文件与 SQLite 不构成跨资源原子事务，本次未增加崩溃恢复或孤立图片清理。
+测量表保存周期编号、机器编号、起止时间、`ordered_lines`、本轮唯一的 `evidence_directory`、可空的最终频率、频率明细、`needs_review` 和 `review_reason`，不保存整包 JSON、内容哈希及文字与图片对应关系。同一周期重复提交时直接比较这些业务字段，相同则成功，不同则报错。OCR 内存结果仍保留来源帧关系，不写入数据库。图片编码或保存失败时，只清理本次新建的图片且不写数据库；数据库写入失败时保留已保存的图片。文件与 SQLite 不构成跨资源原子事务，本次未增加崩溃恢复或孤立图片清理。
 
 #### 1.2.5 模块职责
 
@@ -102,7 +102,7 @@ OCRResult 包含 `ordered_lines`（保留空白的大写文字）、`normalized_
 | `src/camera/hikrobot_sdk.py` | SDK 加载、相机打开、取帧、内存 JPG 编码和关闭 |
 | `src/text_recognition.py` | 共享处理锁、OCR 主流程、筛帧与终选黑盒 |
 | `src/frequency_adapter.py` | 联调频率监听与当前周期归属 |
-| `src/database.py` | 双库初始化、实例锁、测量记录幂等写入与查询、事件整理和证据图片原子写入 |
+| `src/database.py` | 双库初始化、实例锁、测量记录幂等写入、事件整理和证据图片原子写入 |
 | `src/repo/` | 机器表与异常事件表的数据访问 |
 | `src/models.py` / `src/enums.py` | 事件、帧、结果和周期状态 |
 | `src/config_util.py` / `src/async_utils.py` | 配置解析、取消期间等待阻塞操作结束 |
@@ -591,3 +591,11 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 2026-09-23：测量记录直接由 Database 保存
 
 `MeasurementRecord`、测量表建表、幂等写入和周期存在性查询已移入 `src/database.py`，删除 `MeasurementRepo`。当前数据流为机器结算时确定本轮证据目录 → 在线程中逐帧编码并保存 JPG → 调用 `Database.write_measurement_record()` 写入 SQLite → 更新本轮状态；写入锁由 `Database` 内部管理。测量表字段与现有数据不变。
+
+### 2026-09-23：拆分证据图片保存步骤
+
+`Machine.try_finalize()` 仍在线程中等待本轮保存完成；`save_evidence_images_and_measurement_record()` 先调用 `encode_and_save_evidence_images()` 逐帧编码并原子保存尚不存在的 JPG，再通过 `Database.write_measurement_record()` 写入 SQLite。新建图片路径继续交给原有失败清理流程，确认未入库时才删除；周期状态与进度仍由 `try_finalize()` 更新。
+
+### 2026-09-23：简化测量记录写入失败处理
+
+机器结算时先逐帧编码并保存证据图片，再写入 SQLite 测量记录。图片编码或保存失败时只清理本次新建的图片；数据库写入失败时保留已保存的图片，由原有结算流程标记本轮失败。删除写入后的提交确认查询。

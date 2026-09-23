@@ -339,15 +339,15 @@ async def test_image_write_failure_skips_database(
 
 
 @pytest.mark.asyncio
-async def test_database_failure_removes_new_images(tmp_path: Path) -> None:
-    """确认数据库写入失败时清理图片并结束本轮。
+async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
+    """确认数据库写入失败时保留图片并结束本轮。
 
     Args:
         tmp_path: pytest 提供的临时目录。
 
     Returns:
         返回示例：
-            None  # 周期失败且新图片已清理
+            None  # 周期失败且已保存的图片保留
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, progress_updates, _ = create_machine(tmp_path, (frame,))
@@ -356,11 +356,11 @@ async def test_database_failure_removes_new_images(tmp_path: Path) -> None:
     )
     await machine.try_finalize(session)
 
-    # 核对本轮失败状态与图片清理结果。
+    # 核对本轮失败状态与已保存的图片。
     assert session.state == SessionState.FAILED
     assert "DATABASE_WRITE_FAILED" in session.errors
     assert machine.current_session is None
-    assert not (tmp_path / "evidence/1/session-1/frame-1.jpg").exists()
+    assert (tmp_path / "evidence/1/session-1/frame-1.jpg").read_bytes() == b"image-one"
     assert progress_updates[-1][2:] == (
         ProgressStage.EVIDENCE_STORAGE,
         ProgressStatus.FAILED,

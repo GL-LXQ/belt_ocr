@@ -279,26 +279,6 @@ class Database:
                         (record.session_id, *record_values),
                     )
 
-    def has_measurement_record(self, session_id: str) -> bool:
-        """查询指定周期是否已有测量记录。
-
-        Args:
-            session_id: 待查询的测量周期编号。
-
-        Returns:
-            返回示例：
-                True  # 已存在对应周期的测量记录
-                False  # 未找到对应周期的测量记录
-        """
-        # 查询指定周期的测量记录。
-        with closing(sqlite3.connect(self.config.database_path, timeout=1)) as connection:
-            record = connection.execute(
-                "SELECT 1 FROM measurements WHERE session_id = ?", (session_id,)
-            ).fetchone()
-
-        # 返回查询结果。
-        return record is not None
-
     def close(self) -> None:
         """关闭运行库连接并释放进程锁。
 
