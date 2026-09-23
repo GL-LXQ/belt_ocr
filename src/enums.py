@@ -12,7 +12,7 @@ class MachineState(str, Enum):
     # 机器正在运行，程序初始读到此状态时等待本轮关闭，不创建半轮测量。
     OPEN = "OPEN"
 
-    # 机器状态尚未确认，暂停接收启动，等待有效关闭或现场状态同步。
+    # 机器状态尚未确认，暂停接收启动，等待首份有效 DI 状态。
     UNKNOWN = "UNKNOWN"
 
 
@@ -67,7 +67,6 @@ class EventType(str, Enum):
     MACHINE_STARTED = "MachineStarted"  # 机器启动
     MACHINE_CLOSED = "MachineClosed"  # 机器正常关闭
     SHUTDOWN = "Shutdown"  # 应用退出
-    MACHINE_SYNCHRONIZED = "MachineSynchronized"  # 机器现场状态同步
     IO_INTERRUPTED = "IOInterrupted"  # IO 读取中断
     CAPTURE_COMPLETED = "CaptureCompleted"  # 整轮采集结果
     OCR_COMPLETED = "OCRCompleted"  # 整轮识别结果

@@ -319,6 +319,7 @@ class SystemRuntime:
                     # 中断仍未收到 CLOSE 的机器周期。
                     for machine_id, machine in self.machines.items():
                         session = machine.current_session
+                        # 中断会写入关闭时间，此判断同时保证一次断线只通知一次。
                         if session is not None and session.capture_stop_time is None:
                             await self.send_signal(EventType.IO_INTERRUPTED, machine_id)
 
@@ -474,26 +475,6 @@ class SystemRuntime:
         # 退出期间释放此前阻塞入队的事件和回执。
         if self.releasing_resources:
             machine.discard_pending_events()
-
-    async def synchronize_machine(self, machine_id: str, observed_state: MachineState | str) -> None:
-        """将现场状态转换为枚举并发送机器同步事件。
-
-        Args:
-            machine_id: 需要同步状态的机器编号。
-            observed_state: 已确认的现场状态，支持 MachineState 或对应字符串。
-
-        Returns:
-            None: 等待对应机器处理同步事件，无返回数据。
-            返回示例：
-                None  # 无返回数据
-        """
-        # 校验现场状态并转换为机器状态枚举。
-        if observed_state not in set(MachineState):
-            raise ValueError("机器状态必须是 CLOSED、OPEN 或 UNKNOWN。")
-        machine_state = MachineState(observed_state)
-
-        # 发送状态同步事件并等待处理完成。
-        await self.send_signal(EventType.MACHINE_SYNCHRONIZED, machine_id, machine_state)
 
     def handle_fatal_error(self, error: Exception) -> None:
         """保存故障、关闭信号入口并安排整个应用退出。

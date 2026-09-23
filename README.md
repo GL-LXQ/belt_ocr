@@ -6,9 +6,9 @@ BeltVision 是运行在工控机上的多皮带机视觉监测系统。一台工
 
 系统启动后，从 `config/config.yaml` 读取公共配置，从 SQLite `machine` 表读取已启用机器，为每台机器建立 `Machine`、`Camera` 和 `FrequencyAdapter`，随后加载海康 MVS SDK 并逐台打开相机、校验 Modbus 串口与各机器的 DI 通道绑定，再启动机器事件处理、频率监听和 IO 轮询等后台任务；Modbus 串口连接在首次轮询读取时建立。当前 `config.yaml` 的 `modbus_serial_port` 与 `io_machine_channels` 尚未填写，校验不通过时启动失败。
 
-IO 模块通过 Modbus RTU 持续读取 DI 状态。首次读取用于同步机器现场状态；之后 `False → True` 视为 START，`True → False` 视为 CLOSE。
+IO 模块通过 Modbus RTU 持续读取 DI 状态。每台机器绑定通道的首份有效读数只建立基线，并用当前电平确认机器是否在等待复位，不产生 START 或 CLOSE；之后的 `False → True` 视为 START，`True → False` 视为 CLOSE。
 
-IO 读取失败时，系统记录日志并清空旧 DI 状态，以 `IO_INTERRUPTED` 结束仍未收到 CLOSE 的采集周期；已经关闭、正在等待识别或入库的周期继续处理。轮询保持运行，通信恢复后的首份有效 DI 只保存为新基线并更新机器的等待复位标志，不产生事件，后续读数再按边沿变化处理。
+IO 读取失败时，系统记录日志并清空旧 DI 状态，以 `IO_INTERRUPTED` 结束仍未收到 CLOSE 的采集周期；已经关闭、正在等待识别或入库的周期继续处理。轮询保持运行，通信恢复后的首份有效读数按上述基线规则处理，断线期间发生的电平变化不再与旧状态比较，也不补发 START 或 CLOSE。
 
 START 后创建本轮 Session，同时开始相机采集和频率收集；频率当前为占位实现，按配置的模拟读数循环交付，真实协议待接入。相机在采集窗口内保存原始帧；采集结束后进入共享 OCR 流程。OCR 依次执行：
 

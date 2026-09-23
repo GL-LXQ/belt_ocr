@@ -11,7 +11,7 @@ from uuid import uuid4
 from camera.camera import Camera
 from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
-from enums import EventType, FrequencyState, MachineState, OCRState, ProgressStage, ProgressStatus, SessionState
+from enums import EventType, FrequencyState, OCRState, ProgressStage, ProgressStatus, SessionState
 from camera.hikrobot_sdk import CameraFrame
 from models import BeltSession, CapturedFrame, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
@@ -415,16 +415,10 @@ class Machine:
                 await self.handle_machine_close(interrupted=True)
                 return
 
-            # 现场状态同步：中断原活动周期，更新机器复位状态。
-            case EventType.MACHINE_SYNCHRONIZED:
-                if self.current_session is not None:
-                    await self.handle_machine_close(interrupted=True)
-                self.waiting_cycle_reset = event.payload != MachineState.CLOSED
-                return
-
             # IO 读取中断时结束尚未关闭的周期。
             case EventType.IO_INTERRUPTED:
                 session = self.current_session
+                # 与 IO 轮询的发送过滤是同一条件，这里再判一次让机器自己守住边界。
                 if session is not None and session.capture_stop_time is None:
                     await self.handle_machine_close(interrupted=True, failure_reason="IO_INTERRUPTED")
 
