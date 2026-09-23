@@ -813,9 +813,14 @@ class Machine:
         else:
             evidence_frames = ocr_result.selected_frames
 
-        # 按机器和周期生成本轮证据图片目录。
+        # 按本轮开始时间生成本地日期目录。
+        local_start_time = datetime.fromisoformat(session.start_time).astimezone()
+        local_start_date = local_start_time.strftime("%Y%m%d")
+
+        # 按日期、机器和周期生成本轮证据图片目录。
         evidence_directory = (
-            self.config.evidence_directory / session.machine_id / session.session_id
+            self.config.evidence_directory / local_start_date
+            / session.machine_id / session.session_id
         )
 
         # 组装本轮测量记录。

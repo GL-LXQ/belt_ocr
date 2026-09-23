@@ -64,7 +64,7 @@ uv run python -X utf8 -m pytest -q
 3. **一次性交付**：CAPTURE_COMPLETED 携带原始帧和统计；机器采集失败在捕获处记录日志并抛出异常，由任务结束回调安排全局退出，不再生成失败采集结果。统计只包含采集耗时、接收帧数和保留帧数。
 4. **OCR**：每台机器最多一个识别任务，三台机器共用处理锁。`process_session_frames` 顺序完成原始帧包装 → `filter_qualified_frames` → `recognize_images` → `generate_final_text_and_images`，不编码图片。初筛无合格帧、模型结果数量不符或没有最终文字时，返回全部原始帧与中文复核原因；模型异常仍发送 OCR_FAILED。锁覆盖整轮处理，无批次队列和消费者。
 5. **关闭与结算**：CLOSE 停止本轮采集，封闭频率接收并选取最后一条有效读数；没有读数时等待 OCR 结果并标记人工复核，周期中断仍按失败清理。关闭后当前周期继续占用本机，直到图片、数据库保存或失败清理全部完成，才接收下一轮。机器运行对象不参与 OCR 中间结果整理。
-6. **提交**：正常关闭且收到 OCR 结果后，成功结果选用最终图片，复核结果选用全部原始帧，按 `evidence_directory / machine_id / session_id / frame_id.jpg` 生成路径；OCR 与频率复核原因同时存在时合并保存。`Machine.try_finalize()` 在线程中逐帧调用相机接口以质量 85 编码 JPG，先原子保存图片、再直接调用 `Database.write_measurement_record()` 写入数据库，完成后更新本轮状态；编码故障触发全局退出，不自动重试。
+6. **提交**：正常关闭且收到 OCR 结果后，成功结果选用最终图片，复核结果选用全部原始帧，按 `evidence_directory / YYYYMMDD / machine_id / session_id / frame_id.jpg` 生成路径；OCR 与频率复核原因同时存在时合并保存。`Machine.try_finalize()` 在线程中逐帧调用相机接口以质量 85 编码 JPG，先原子保存图片、再直接调用 `Database.write_measurement_record()` 写入数据库，完成后更新本轮状态；编码故障触发全局退出，不自动重试。
 7. **失败与退出**：整轮 OCR 超时从 START 计时，包含采集、排队和处理。等待锁的任务取消后不执行模型；已开始的阻塞操作等线程实际结束后再释放锁，迟到结果丢弃。退出时关闭入口、排空事件、停止采集、收尾后台处理，最后关闭相机、SDK 和数据库。退出等待期限不能强制终止已经运行的线程。
 
 #### 1.2.4 三个黑盒与结果契约
@@ -73,7 +73,7 @@ uv run python -X utf8 -m pytest -q
 |---|---|---|
 | `filter_qualified_frames` | 按接收顺序排列的 CapturedFrame 内存图片 | 返回合格图片；当前原样返回，纯黑和截断规则待实现 |
 | `recognize_images` | 合格图片的 CameraFrame 列表 | 返回与输入等长的原始 blocks 列表；当前抛出 OCR_MODEL_NOT_IMPLEMENTED |
-| `generate_final_text_and_images` | 带 frame_id 的识别结果和合格图片 | 返回 OCRResult；按 20、8、3、2 分类做格式过滤、去重、置信度阈值和 8 位连号选择，规则见「文字图片终选规则」 |
+| `generate_final_text_and_images` | 带 frame_id 的识别结果和合格图片 | 返回最终文字、去空白文字、选中图片和文字对应的图片编号；按 20、8、3、2 分类筛选，规则见「文字图片终选规则」 |
 
 三个黑盒不修改 Session、不发送事件、不保存文件、不访问数据库。无采集帧仍按整轮失败处理；初筛无合格帧、模型返回数量不匹配和没有最终文字均返回待复核结果，模型接口直接抛出的异常仍按 OCR 失败处理。
 
@@ -603,3 +603,11 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 2026-09-23：OCR 结果状态改为已完成
 
 OCR 返回普通或待复核结果后统一标记为 `OCRState.COMPLETED`；机器在周期关闭且 OCR 已完成时选择证据帧、保存图片并写入测量记录。OCR 抛错或超时仍按失败结束本轮；频率状态保持原有含义，有有效最终频率时为 `FrequencyState.SUCCESS`。
+
+### 2026-09-23：证据目录增加本地日期层级
+
+机器结算时根据本轮开始时间生成本地 `YYYYMMDD` 日期目录，再按机器编号和周期编号建立证据目录，例如 `evidence/20260923/1/session_id/`。证据帧继续保存为该目录下的 JPG，数据库的 `evidence_directory` 字段保存完整目录路径；跨午夜的周期仍归入开始日期。
+
+### 2026-09-23：OCR 主流程组装最终结果
+
+`process_session_frames()` 顺序整理原始帧、筛选合格帧、调用模型并匹配图片编号，再接收 `generate_final_text_and_images()` 返回的最终文字、去空白文字、选中帧和对应帧编号；主流程统一判断是否需要人工复核并构造 `OCRResult`。后续机器结算仍根据该结果保存证据图片和测量记录。

@@ -151,11 +151,16 @@ class TextRecognizer:
             for frame, image_result in zip(qualified_frames, image_results)
         ]
 
-        # 生成最终文字和图片。
-        result = self.generate_final_text_and_images(frame_results, qualified_frames)
+        # 取得最终文字、证据图片和文字对应的图片编号。
+        (
+            ordered_lines,
+            normalized_lines,
+            selected_frames,
+            line_frame_ids,
+        ) = self.generate_final_text_and_images(frame_results, qualified_frames)
 
         # 没有最终文字时返回全部原始帧供人工复核。
-        if not result.ordered_lines:
+        if not ordered_lines:
             logger.warning("本轮没有最终文字，人工复核 session_id=%s", session_id)
             return OCRResult(
                 ordered_lines=(),
@@ -166,8 +171,13 @@ class TextRecognizer:
                 review_reason="没有最终文字",
             )
 
-        # 返回本轮最终结果。
-        return result
+        # 组装并返回本轮最终结果。
+        return OCRResult(
+            ordered_lines=ordered_lines,
+            normalized_lines=normalized_lines,
+            selected_frames=selected_frames,
+            line_frame_ids=line_frame_ids,
+        )
 
     def filter_qualified_frames(self, frames: tuple[CapturedFrame, ...]) -> tuple[CapturedFrame, ...]:
         """预留纯黑、截断等质量筛选，目前原样返回全部图片。
@@ -225,7 +235,16 @@ class TextRecognizer:
         """取得 8 字符编号前七位的数字部分。"""
         return int(candidate["normalized_text"][:7])
 
-    def generate_final_text_and_images(self, frame_results: list[dict], frames: tuple[CapturedFrame, ...]) -> OCRResult:
+    def generate_final_text_and_images(
+        self,
+        frame_results: list[dict],
+        frames: tuple[CapturedFrame, ...],
+    ) -> tuple[
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[CapturedFrame, ...],
+        tuple[tuple[str, ...], ...],
+    ]:
         """按字符类别筛选最终文字，并给出每条文字对应的证据图片。
 
         处理规则：先将文字转成大写；20 字符不做格式过滤，3 和 2 字符要求纯数字，
@@ -240,10 +259,10 @@ class TextRecognizer:
 
         Returns:
             返回示例：
-                OCRResult(
-                    ordered_lines=("0 03",),  # 按 20、8、3、2 类别顺序排列的大写文字
-                    normalized_lines=("003",),  # 与 ordered_lines 逐项对应的去空白文字
-                    selected_frames=(  # 最终选中的内存图片，同一图片只保留一次
+                (
+                    ("0 03",),  # 按 20、8、3、2 类别顺序排列的大写文字
+                    ("003",),  # 与最终文字逐项对应的去空白文字
+                    (  # 最终选中的内存图片，同一图片只保留一次
                         CapturedFrame(
                             session_id="session",  # 测量周期编号
                             capture_id="capture",  # 采集编号
@@ -265,9 +284,7 @@ class TextRecognizer:
                             ),
                         ),
                     ),
-                    line_frame_ids=(("capture-1",),),  # 与文字逐项对应的证据图片编号
-                    review_frames=(),  # 正常结果没有待复核图片
-                    review_reason=None,  # 正常结果没有复核原因
+                    (("capture-1",),),  # 与文字逐项对应的证据图片编号
                 )
         """
         # 低于该置信度的文字不进入最终结果。
@@ -390,11 +407,12 @@ class TextRecognizer:
         )
         selected_frames = tuple(frames_by_id[frame_id] for frame_id in selected_frame_ids)
 
-        return OCRResult(
-            ordered_lines=ordered_lines,
-            normalized_lines=normalized_lines,
-            selected_frames=selected_frames,
-            line_frame_ids=line_frame_ids,
+        # 返回最终文字及对应的证据图片。
+        return (
+            ordered_lines,
+            normalized_lines,
+            selected_frames,
+            line_frame_ids,
         )
 
     def _select_reliable_candidates(self, candidates: list[dict], minimum_confidence: float) -> list[dict]:

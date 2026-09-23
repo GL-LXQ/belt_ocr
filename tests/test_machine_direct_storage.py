@@ -5,6 +5,7 @@ import json
 import sqlite3
 import threading
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -16,6 +17,10 @@ from database import Database, MeasurementRecord
 from enums import OCRState, ProgressStage, ProgressStatus, SessionState
 from machine import ImageEncodingError, Machine
 from models import BeltSession, CapturedFrame, FrequencyMeasurement, OCRResult
+
+
+TEST_SESSION_START_TIME = datetime(2026, 9, 23, 12).astimezone().isoformat()
+TEST_LOCAL_START_DATE = "20260923"
 
 
 async def publish_event(event: object) -> None:
@@ -148,7 +153,7 @@ def create_machine(
         camera_serial="camera-1",
         frequency_meter_serial="meter-1",
         capture_id="capture-1",
-        start_time="2026-09-23T00:00:00+00:00",
+        start_time=TEST_SESSION_START_TIME,
         capture_start_time=0.0,
         capture_stop_time=1.0,
         ocr_state=OCRState.COMPLETED,
@@ -180,6 +185,11 @@ async def test_finalize_saves_images_before_record(tmp_path: Path) -> None:
     machine, database, session, progress_updates, encoding_threads = create_machine(
         tmp_path, (frame,)
     )
+
+    # 使用早于结算日的本地开始时间检查日期目录。
+    session.start_time = datetime(2024, 9, 22, 12).astimezone().isoformat()
+
+    # 保存本轮有效频率。
     frequency = FrequencyMeasurement("session-1", "meter-1", 50.0)
     session.final_frequency = frequency
     session.measurement_frequencies.append(frequency)
@@ -222,7 +232,8 @@ async def test_finalize_saves_images_before_record(tmp_path: Path) -> None:
         ).fetchone()
     assert json.loads(record[0]) == ["AB123456"]
     assert record[1] == 50.0
-    assert record[2] == str(tmp_path / "evidence/1/session-1")
+    expected_directory = tmp_path / "evidence/20240922/1/session-1"
+    assert record[2] == str(expected_directory)
     assert record[3] == 0
 
 
@@ -245,8 +256,9 @@ async def test_finalize_saves_all_review_frames(tmp_path: Path) -> None:
     await machine.try_finalize(session)
 
     # 核对两张图片和合并后的复核原因。
-    assert (tmp_path / "evidence/1/session-1/frame-1.jpg").read_bytes() == b"image-one"
-    assert (tmp_path / "evidence/1/session-1/frame-2.jpg").read_bytes() == b"image-two"
+    expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
+    assert (expected_directory / "frame-1.jpg").read_bytes() == b"image-one"
+    assert (expected_directory / "frame-2.jpg").read_bytes() == b"image-two"
     with sqlite3.connect(database.config.database_path) as connection:
         record = connection.execute(
             "SELECT ordered_lines, final_frequency_hz, evidence_directory, "
@@ -256,7 +268,7 @@ async def test_finalize_saves_all_review_frames(tmp_path: Path) -> None:
         ).fetchone()
     assert json.loads(record[0]) == []
     assert record[1] is None
-    assert record[2] == str(tmp_path / "evidence/1/session-1")
+    assert record[2] == str(expected_directory)
     assert record[3] == 1
     assert record[4] == "没有最终文字；没有找到最终频率，请人工复核。"
 
@@ -297,7 +309,8 @@ async def test_encoding_failure_removes_new_images(tmp_path: Path) -> None:
         await machine.try_finalize(session)
 
     # 核对新图片与数据库均未留下结果。
-    assert not (tmp_path / "evidence/1/session-1/frame-1.jpg").exists()
+    expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
+    assert not (expected_directory / "frame-1.jpg").exists()
     with sqlite3.connect(database.config.database_path) as connection:
         record_count = connection.execute(
             "SELECT COUNT(*) FROM measurements"
@@ -360,7 +373,8 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
     assert session.state == SessionState.FAILED
     assert "DATABASE_WRITE_FAILED" in session.errors
     assert machine.current_session is None
-    assert (tmp_path / "evidence/1/session-1/frame-1.jpg").read_bytes() == b"image-one"
+    expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
+    assert (expected_directory / "frame-1.jpg").read_bytes() == b"image-one"
     assert progress_updates[-1][2:] == (
         ProgressStage.EVIDENCE_STORAGE,
         ProgressStatus.FAILED,
@@ -392,7 +406,7 @@ def test_database_compares_evidence_directory(tmp_path: Path) -> None:
         ordered_lines=("AB123456",),
         final_frequency_hz=50.0,
         measurement_frequencies=(),
-        evidence_directory=tmp_path / "evidence/1/session-1",
+        evidence_directory=tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1",
         needs_review=False,
         review_reason=None,
     )
