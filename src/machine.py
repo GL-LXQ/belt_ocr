@@ -825,7 +825,7 @@ class Machine:
         session.measurement_frequencies.append(event.payload)
 
     async def try_finalize(self, session: BeltSession) -> None:
-        """检查本轮结果，失败时清理，正常结果冻结后提交数据库。
+        """检查本轮结果，识别成功后提交普通或待复核记录。
 
         Args:
             session: 待检查完成条件的本轮测量档案。
@@ -838,20 +838,13 @@ class Machine:
         if session.state != SessionState.RUNNING:
             return
 
-        # OCR 或频率失败时执行本轮失败清理。
-        if (
-            session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}
-            or session.frequency_state == FrequencyState.FAILED
-        ):
+        # OCR 失败时执行本轮失败清理。
+        if session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}:
             await self.handle_measurement_failure(session)
             return
 
-        # 周期未关闭，或 OCR 与频率未全部成功时继续等待。
-        if (
-            session.capture_stop_time is None
-            or session.ocr_state != OCRState.SUCCESS
-            or session.frequency_state != FrequencyState.SUCCESS
-        ):
+        # 周期未关闭或 OCR 未成功时继续等待。
+        if session.capture_stop_time is None or session.ocr_state != OCRState.SUCCESS:
             return
 
         # 记录本轮结算时间。
@@ -860,6 +853,12 @@ class Machine:
         # 取出最终频率与识别结果。
         final_frequency = session.final_frequency
         ocr_result = session.ocr_result
+
+        # 缺少最终频率时标记人工复核原因。
+        needs_review = final_frequency is None
+        review_reason = None
+        if needs_review:
+            review_reason = "没有找到最终频率，请人工复核。"
 
         # 按机器、周期和帧编号生成最终图片路径。
         evidence_directory = self.config.evidence_directory / session.machine_id / session.session_id
@@ -872,12 +871,14 @@ class Machine:
             start_time=session.start_time,
             finish_time=session.finish_time,
             ordered_lines=tuple(ocr_result.ordered_lines),
-            final_frequency_hz=final_frequency.value_hz,
+            final_frequency_hz=final_frequency.value_hz if final_frequency else None,
             measurement_frequencies=tuple(
                 asdict(measurement) for measurement in session.measurement_frequencies
             ),
             evidence_refs=evidence_refs,
             selected_frames=ocr_result.selected_frames,
+            needs_review=needs_review,
+            review_reason=review_reason,
         )
 
         # 标记本轮等待入库。

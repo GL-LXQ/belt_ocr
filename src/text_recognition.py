@@ -86,7 +86,7 @@ class TextRecognizer:
         """
         # 本轮没有帧时直接失败。
         if not frames:
-            raise ValueError("CAPTURE_NO_FRAMES")
+            raise ValueError(f"session_id={session_id} 本轮没有采集到任何帧。")
 
         # 逐帧调用相机编码接口，得到内存 BMP 图片。
         captured_frames = []
@@ -116,16 +116,16 @@ class TextRecognizer:
         qualified_frames = self.filter_qualified_frames(tuple(captured_frames))
         captured_frames.clear()
 
-        # 没有合格图片时结束本轮。
+        # TODO 初次帧筛选后，发现没有任何合格图片，需要留存所有已编码帧，并标记人工复核。
         if not qualified_frames:
-            raise ValueError("OCR_NO_QUALIFIED_FRAMES")
+            raise ValueError(f"session_id={session_id} 本轮没有合格图片。")
 
         # 调用模型识别本轮全部合格图片。
         image_results = self.recognize_images([frame.image_data for frame in qualified_frames])
 
-        # 模型结果数量与图片数量不一致时结束本轮。
+        # TODO 模型结果数量不一致时保存合格图片，并登记待人工复核记录。
         if len(image_results) != len(qualified_frames):
-            raise ValueError("OCR_RESULT_COUNT_MISMATCH")
+            raise ValueError(f"session_id={session_id} 本轮模型识别结果数量与图片数量不一致。")
 
         # 按输入顺序把模型结果与图片编号配对。
         frame_results = [
@@ -139,15 +139,10 @@ class TextRecognizer:
         # 生成最终文字和图片。
         result = self.generate_final_text_and_images(frame_results, qualified_frames)
 
-        # TODO  无最终文字时应保留全部图片，人工复核并结束本轮。
+        # TODO  无最终文字时应保留初筛前的全部已编码图片，登记人工复核。
         if not result.ordered_lines:
             logger.warning("本轮没有最终文字，人工复核 session_id=%s", session_id)
-            raise ValueError("OCR_NO_TEXT")
-
-        # TODO  无选中图片时应保留全部图片，人工复核并结束本轮。
-        if not result.selected_frames:
-            logger.warning("本轮没有选中图片，人工复核 session_id=%s", session_id)
-            raise ValueError("OCR_NO_SELECTED_IMAGES")
+            raise ValueError(f"session_id={session_id} 本轮没有最终文字。")
 
         # 返回本轮最终结果。
         return result

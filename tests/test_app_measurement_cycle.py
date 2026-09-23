@@ -77,6 +77,7 @@ def stub_text_recognition(system_runtime: SystemRuntime) -> None:
     system_runtime.text_recognizer.recognize_images = lambda images: [{"blocks": []} for _ in images]
     system_runtime.text_recognizer.generate_final_text_and_images = lambda frame_results, frames: OCRResult(
         ordered_lines=("MODEL-1",),
+        normalized_lines=("MODEL-1",),
         selected_frames=(frames[0],),
         line_frame_ids=((frames[0].frame_id,),),
     )
@@ -154,18 +155,29 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
     # 读取测量记录，核对机器身份、最终文字和图片引用。
     with closing(sqlite3.connect(config.database_path)) as connection:
         records = connection.execute(
-            "SELECT machine_id, ordered_lines, final_frequency_hz, evidence_refs "
+            "SELECT machine_id, ordered_lines, final_frequency_hz, evidence_refs, "
+            "needs_review, review_reason "
             "FROM measurements ORDER BY machine_id"
         ).fetchall()
     assert [record[0] for record in records] == ["1", "2"]
 
     # 逐台核对最终文字、最后交付频率、选中图片文件与相机状态。
-    for machine_id, ordered_lines, final_frequency_hz, evidence_refs in records:
+    for record in records:
+        (
+            machine_id,
+            ordered_lines,
+            final_frequency_hz,
+            evidence_refs,
+            needs_review,
+            review_reason,
+        ) = record
         manager = system_runtime.machines[machine_id]
         delivered_values_hz = manager.frequency_adapter.delivered_values_hz
         assert json.loads(ordered_lines) == ["MODEL-1"]
         assert delivered_values_hz
         assert final_frequency_hz == delivered_values_hz[-1]
+        assert needs_review == 0
+        assert review_reason is None
         assert len(json.loads(evidence_refs)) == 1
         assert manager.camera.sdk_camera.received_frame_count > 0
         assert manager.camera.sdk_camera.closed
@@ -187,3 +199,77 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
     assert (ProgressStage.CHARACTER_RECOGNITION, ProgressStatus.SUCCESS) in first_machine_events
     assert (ProgressStage.EVIDENCE_STORAGE, ProgressStatus.RUNNING) in first_machine_events
     assert (ProgressStage.EVIDENCE_STORAGE, ProgressStatus.SUCCESS) in first_machine_events
+
+
+def test_missing_frequency_saves_ocr_result_for_review(tmp_path: Path) -> None:
+    """验证正常关闭但没有频率时仍保存文字和图片，并标记人工复核。
+
+    Args:
+        tmp_path: 测试临时目录。
+
+    Returns:
+        返回示例：
+            None  # 测量记录含最终图片和待复核原因
+    """
+    # 组装不产生频率读数的测试配置。
+    config = build_config(tmp_path, capture_window_ms=200, camera_timeout_ms=20)
+
+    # 登记一台启用机器。
+    create_machine_database(config.database_path, [{
+        "machine_name": "一号皮带机",
+        "camera_serial": "CAM-A",
+        "frequency_meter_serial": "FREQ-A",
+    }])
+    camera_sdk = FakeMvsSdk()
+
+    # 使用测试相机启动本轮测量。
+    with patch("system_runtime.load_mvs_sdk", lambda *arguments: camera_sdk):
+        system_runtime = SystemRuntime(config)
+        stub_text_recognition(system_runtime)
+
+        async def run_review_cycle() -> None:
+            """完成无频率的一轮测量并释放后台资源。
+
+            Args:
+                无外部参数。
+
+            Returns:
+                返回示例：
+                    None  # 待复核记录已保存且后台资源已释放
+            """
+            await system_runtime.start()
+            try:
+                # 启动本轮并在采集窗口内正常关闭。
+                await system_runtime.handle_start("1")
+                await asyncio.sleep(0.03)
+                await system_runtime.handle_close("1")
+
+                # 等待识别和存储完成。
+                await system_runtime.wait_until_idle(10)
+            finally:
+                await system_runtime.stop()
+
+        asyncio.run(run_review_cycle())
+
+    # 核对待复核记录保留了最终文字、图片和缺少频率的原因。
+    with closing(sqlite3.connect(config.database_path)) as connection:
+        record = connection.execute(
+            "SELECT ordered_lines, final_frequency_hz, measurement_frequencies, "
+            "evidence_refs, needs_review, review_reason FROM measurements"
+        ).fetchone()
+    assert record is not None
+    (
+        ordered_lines,
+        final_frequency_hz,
+        measurement_frequencies,
+        evidence_refs,
+        needs_review,
+        review_reason,
+    ) = record
+    assert json.loads(ordered_lines) == ["MODEL-1"]
+    assert final_frequency_hz is None
+    assert json.loads(measurement_frequencies) == []
+    assert needs_review == 1
+    assert review_reason == "FREQUENCY_NO_VALID_MEASUREMENT"
+    assert len(json.loads(evidence_refs)) == 1
+    assert Path(json.loads(evidence_refs)[0]).is_file()
