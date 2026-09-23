@@ -185,7 +185,7 @@ def test_two_machines_finish_cycle_with_evidence_and_records(tmp_path: Path) -> 
     # 证据图片按机器编号与周期编号落盘，内容非空。
     saved_images = list(config.evidence_directory.rglob("*.bmp"))
     assert len(saved_images) == 2
-    assert all(image_path.stat().st_size > 0 for image_path in saved_images)
+    assert all(image_path.read_bytes().startswith(b"BM") for image_path in saved_images)
     assert sdk.closed
     assert not system_runtime.database.lock_acquired
 
@@ -270,6 +270,73 @@ def test_missing_frequency_saves_ocr_result_for_review(tmp_path: Path) -> None:
     assert final_frequency_hz is None
     assert json.loads(measurement_frequencies) == []
     assert needs_review == 1
-    assert review_reason == "FREQUENCY_NO_VALID_MEASUREMENT"
+    assert review_reason == "没有找到最终频率，请人工复核。"
     assert len(json.loads(evidence_refs)) == 1
     assert Path(json.loads(evidence_refs)[0]).is_file()
+
+
+def test_ocr_review_saves_all_raw_frames_as_bmp_with_both_reasons(
+    tmp_path: Path,
+) -> None:
+    """初筛无合格图片且缺少频率时保存全部 BMP 证据和两个原因。
+
+    Args:
+        tmp_path: 测试临时目录。
+
+    Returns:
+        返回示例：
+            None  # 全部证据与复核字段已通过断言验证
+    """
+    # 建立一台没有频率读数的机器及其相机替身。
+    config = build_config(tmp_path, capture_window_ms=200, camera_timeout_ms=20)
+    create_machine_database(config.database_path, [{
+        "machine_name": "一号皮带机",
+        "camera_serial": "CAM-A",
+        "frequency_meter_serial": "FREQ-A",
+    }])
+    camera_sdk = FakeMvsSdk()
+
+    # 让初筛返回空结果，启动并正常关闭本轮周期。
+    with patch("system_runtime.load_mvs_sdk", lambda *arguments: camera_sdk):
+        system_runtime = SystemRuntime(config)
+        system_runtime.text_recognizer.filter_qualified_frames = lambda frames: ()
+
+        async def run_review_cycle() -> None:
+            """完成本轮启停、入库与资源释放。
+
+            Args:
+                无外部参数。
+
+            Returns:
+                返回示例：
+                    None  # 待复核周期已结算并释放资源
+            """
+            await system_runtime.start()
+            try:
+                await system_runtime.handle_start("1")
+                await asyncio.sleep(0.03)
+                await system_runtime.handle_close("1")
+                await system_runtime.wait_until_idle(10)
+            finally:
+                await system_runtime.stop()
+
+        asyncio.run(run_review_cycle())
+
+    # 核对记录只保存证据引用，并同时标记 OCR 与频率原因。
+    with closing(sqlite3.connect(config.database_path)) as connection:
+        record = connection.execute(
+            "SELECT ordered_lines, evidence_refs, needs_review, review_reason "
+            "FROM measurements"
+        ).fetchone()
+    assert record is not None
+    ordered_lines, evidence_refs, needs_review, review_reason = record
+    assert json.loads(ordered_lines) == []
+    assert needs_review == 1
+    assert review_reason == "初筛后没有合格图片；没有找到最终频率，请人工复核。"
+
+    # 核对采集到的每帧都在存储阶段编码并保存为 BMP。
+    saved_paths = [Path(evidence_ref) for evidence_ref in json.loads(evidence_refs)]
+    captured_count = system_runtime.machines["1"].camera.sdk_camera.received_frame_count
+    assert captured_count > 0
+    assert len(saved_paths) == captured_count
+    assert all(image_path.read_bytes().startswith(b"BM") for image_path in saved_paths)

@@ -501,7 +501,7 @@ class Machine:
                 if session.ocr_state != OCRState.RUNNING:
                     return
 
-                # 保存最终识别结果并标记识别成功。
+                # 保存整轮识别结果并标记处理完成。
                 session.ocr_result = event.payload
                 session.ocr_state = OCRState.SUCCESS
 
@@ -820,7 +820,7 @@ class Machine:
         session.measurement_frequencies.append(event.payload)
 
     async def try_finalize(self, session: BeltSession) -> None:
-        """检查本轮结果，识别成功后提交普通或待复核记录。
+        """检查本轮结果，收到 OCR 结果后提交普通或待复核记录。
 
         Args:
             session: 待检查完成条件的本轮测量档案。
@@ -849,15 +849,27 @@ class Machine:
         final_frequency = session.final_frequency
         ocr_result = session.ocr_result
 
-        # 缺少最终频率时标记人工复核原因。
-        needs_review = final_frequency is None
-        review_reason = None
-        if needs_review:
-            review_reason = "没有找到最终频率，请人工复核。"
+        # 汇总 OCR 和频率的人工复核原因。
+        review_reasons = []
+        if ocr_result.review_reason is not None:
+            review_reasons.append(ocr_result.review_reason)
+        if final_frequency is None:
+            review_reasons.append("没有找到最终频率，请人工复核。")
+        needs_review = bool(review_reasons)
+        review_reason = "；".join(review_reasons) if review_reasons else None
 
-        # 按机器、周期和帧编号生成最终图片路径。
+        # 按复核状态选择本轮需要保存的图片。
+        if ocr_result.review_reason is not None:
+            evidence_frames = ocr_result.review_frames
+        else:
+            evidence_frames = ocr_result.selected_frames
+
+        # 按机器、周期和帧编号生成证据图片路径。
         evidence_directory = self.config.evidence_directory / session.machine_id / session.session_id
-        evidence_refs = tuple(str(evidence_directory / f"{frame.frame_id}.bmp") for frame in ocr_result.selected_frames)
+        evidence_refs = tuple(
+            str(evidence_directory / f"{frame.frame_id}.bmp")
+            for frame in evidence_frames
+        )
 
         # 组装本轮存储请求。
         request = DatabaseRequest(
@@ -871,7 +883,8 @@ class Machine:
                 asdict(measurement) for measurement in session.measurement_frequencies
             ),
             evidence_refs=evidence_refs,
-            selected_frames=ocr_result.selected_frames,
+            evidence_frames=evidence_frames,
+            encode_image=self.camera.sdk_camera.encode_image,
             needs_review=needs_review,
             review_reason=review_reason,
         )

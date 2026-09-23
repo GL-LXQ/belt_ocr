@@ -59,12 +59,14 @@ class FrequencyMeasurement:
 
 @dataclass(frozen=True)
 class OCRResult:
-    """一轮识别与终选后的最终文字和选中图片。"""
+    """保存本轮最终文字、证据图片或待复核原始帧。"""
 
     ordered_lines: tuple[str, ...]  # 最终文字的顺序列表
     normalized_lines: tuple[str, ...]  # 最终文字的去空格列表
     selected_frames: tuple[CapturedFrame, ...]  # 最终选中的内存图片
     line_frame_ids: tuple[tuple[str, ...], ...]  # 每条文字对应的证据图片编号
+    review_frames: tuple[CapturedFrame, ...] = ()  # 待复核时保留的全部原始帧
+    review_reason: str | None = None  # 待复核原因
 
 
 @dataclass(frozen=True)

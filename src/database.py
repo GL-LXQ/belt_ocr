@@ -9,11 +9,13 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 
 from async_utils import run_blocking_operation
 from config_util import AppConfig
+from camera.hikrobot_sdk import CameraFrame
 from models import CapturedFrame, RuntimeEvent, PublishEvent
 from repo.machine_repo import MachineRepo
 from repo.measurement_repo import MeasurementRepo
@@ -21,6 +23,10 @@ from repo.abnormal_event_repo import AbnormalEventRepo
 
 
 logger = logging.getLogger(__name__)
+
+
+class ImageEncodingError(RuntimeError):
+    """标记证据图片编码阶段的相机故障。"""
 
 
 def save_evidence_image(image_data: bytes, image_path: Path) -> None:
@@ -97,11 +103,12 @@ class DatabaseRequest:
     session_id: str  # 测量周期编号
     start_time: str  # 本轮开始时间，UTC
     finish_time: str  # 本轮结算时间，UTC
-    ordered_lines: tuple[str, ...]  # 最终文字顺序
+    ordered_lines: tuple[str, ...]  # 最终文字顺序，OCR 待复核时为空
     final_frequency_hz: float | None  # 本轮最终频率，缺失时为空
     measurement_frequencies: tuple[dict, ...]  # 本轮频率明细
-    evidence_refs: tuple[str, ...]  # 最终图片文件路径
-    selected_frames: tuple[CapturedFrame, ...] = ()  # 最终选中图片的内存内容
+    evidence_refs: tuple[str, ...]  # 本轮证据图片文件路径
+    evidence_frames: tuple[CapturedFrame, ...]  # 本轮需要保存的原始帧
+    encode_image: Callable[[CameraFrame], bytes]  # 将证据帧编码为 BMP 的相机接口
     needs_review: bool = False  # 本轮结果是否需要人工复核
     review_reason: str | None = None  # 本轮需要人工复核的原因
 
@@ -283,10 +290,10 @@ class Database:
         )
 
     async def submit(self, request: DatabaseRequest) -> bool:
-        """将正常结果加入存储队列，不保存待补交记录。
+        """将本轮测量结果加入存储队列，不保存待补交记录。
 
         Args:
-            request: 本轮机器身份、业务字段和选中图片。
+            request: 本轮机器身份、业务字段和证据帧。
 
         Returns:
             返回示例：
@@ -308,7 +315,7 @@ class Database:
         return True
 
     def persist_measurement(self, request: DatabaseRequest) -> None:
-        """保存最终图片后写入测量记录，明确未提交时清理本次新建图片。
+        """保存证据图片后写入测量记录，明确未提交时清理本次新建图片。
 
         Args:
             request: 冻结内容、图片和周期身份。
@@ -322,11 +329,26 @@ class Database:
         database_attempted = False
         try:
             # 逐张保存尚不存在的证据图片。
-            for frame, evidence_ref in zip(request.selected_frames, request.evidence_refs):
+            for frame, evidence_ref in zip(
+                request.evidence_frames, request.evidence_refs
+            ):
                 image_path = Path(evidence_ref)
                 if not image_path.exists():
                     created_paths.append(image_path)
-                    save_evidence_image(frame.camera_frame.data, image_path)
+
+                    # 在证据文件落盘前编码本帧。
+                    try:
+                        image_data = request.encode_image(frame.camera_frame)
+                    except Exception as error:
+                        logger.exception(
+                            "相机编码失败 session_id=%s frame_id=%s",
+                            request.session_id,
+                            frame.frame_id,
+                        )
+                        raise ImageEncodingError("相机图片编码失败") from error
+
+                    # 将编码后的 BMP 图片保存到证据路径。
+                    save_evidence_image(image_data, image_path)
 
             # 全部图片写入成功后才执行数据库事务。
             database_attempted = True
@@ -372,8 +394,11 @@ class Database:
             payload = None
             try:
                 try:
-                    # 在线程中写入本轮正常结果。
+                    # 在线程中保存本轮证据与测量结果。
                     await run_blocking_operation(self.persist_measurement, request)
+                except ImageEncodingError:
+                    # 将相机编码故障交给运行时停止整个应用。
+                    raise
                 except Exception as error:
                     # 按异常类型确定失败错误码。
                     event_type = EventType.COMMIT_FAILED

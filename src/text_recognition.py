@@ -62,6 +62,7 @@ class TextRecognizer:
             返回示例：
                 OCRResult(
                     ordered_lines=("ABC",),  # 最终文字顺序
+                    normalized_lines=("ABC",),  # 去空白文字顺序
                     selected_frames=(  # 最终选中的内存图片
                         CapturedFrame(
                             session_id="session",  # 测量周期编号
@@ -85,6 +86,8 @@ class TextRecognizer:
                         ),
                     ),
                     line_frame_ids=(("capture-1",),),  # 每条文字对应的图片编号
+                    review_frames=(),  # 正常结果没有待复核图片
+                    review_reason=None,  # 正常结果没有复核原因
                 )
         """
         # 本轮没有帧时直接失败。
@@ -108,22 +111,36 @@ class TextRecognizer:
                 camera_frame=frame,
             ))
 
-        # 筛选合格图片并释放原始帧引用。
-        qualified_frames = self.filter_qualified_frames(tuple(captured_frames))
-        captured_frames.clear()
+        # 固定本轮全部原始帧，并筛选合格图片。
+        captured_frames = tuple(captured_frames)
+        qualified_frames = self.filter_qualified_frames(captured_frames)
 
-        # TODO 初次帧筛选后，发现没有任何合格图片，需要留存所有原始帧，并标记人工复核。
+        # 初筛没有合格图片时返回全部原始帧供人工复核。
         if not qualified_frames:
-            raise ValueError(f"session_id={session_id} 本轮没有合格图片。")
+            return OCRResult(
+                ordered_lines=(),
+                normalized_lines=(),
+                selected_frames=(),
+                line_frame_ids=(),
+                review_frames=captured_frames,
+                review_reason="初筛后没有合格图片",
+            )
 
         # 调用模型识别本轮全部合格图片。
         image_results = self.recognize_images(
             [frame.camera_frame for frame in qualified_frames]
         )
 
-        # TODO 模型结果数量不一致时留存所有原始帧，并登记待人工复核记录。
+        # 模型结果数量不一致时返回全部原始帧供人工复核。
         if len(image_results) != len(qualified_frames):
-            raise ValueError(f"session_id={session_id} 本轮模型识别结果数量与图片数量不一致。")
+            return OCRResult(
+                ordered_lines=(),
+                normalized_lines=(),
+                selected_frames=(),
+                line_frame_ids=(),
+                review_frames=captured_frames,
+                review_reason="模型识别结果数量与图片数量不一致",
+            )
 
         # 按输入顺序把模型结果与图片编号配对。
         frame_results = [
@@ -137,10 +154,17 @@ class TextRecognizer:
         # 生成最终文字和图片。
         result = self.generate_final_text_and_images(frame_results, qualified_frames)
 
-        # TODO 无最终文字时应留存所有原始帧，登记人工复核。
+        # 没有最终文字时返回全部原始帧供人工复核。
         if not result.ordered_lines:
             logger.warning("本轮没有最终文字，人工复核 session_id=%s", session_id)
-            raise ValueError(f"session_id={session_id} 本轮没有最终文字。")
+            return OCRResult(
+                ordered_lines=(),
+                normalized_lines=(),
+                selected_frames=(),
+                line_frame_ids=(),
+                review_frames=captured_frames,
+                review_reason="没有最终文字",
+            )
 
         # 返回本轮最终结果。
         return result
@@ -242,6 +266,8 @@ class TextRecognizer:
                         ),
                     ),
                     line_frame_ids=(("capture-1",),),  # 与文字逐项对应的证据图片编号
+                    review_frames=(),  # 正常结果没有待复核图片
+                    review_reason=None,  # 正常结果没有复核原因
                 )
         """
         # 低于该置信度的文字不进入最终结果。

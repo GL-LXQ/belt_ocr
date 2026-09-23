@@ -9,8 +9,10 @@ from pathlib import Path
 import pytest
 
 from config_util import AppConfig
-from database import Database, DatabaseRequest
+from camera.hikrobot_sdk import CameraFrame
+from database import Database, DatabaseRequest, ImageEncodingError
 from local_test_support import build_config
+from models import CapturedFrame
 
 
 def build_database(config: AppConfig) -> Database:
@@ -57,7 +59,8 @@ def build_request(session_id: str) -> DatabaseRequest:
                 final_frequency_hz=42.0,  # 本轮最终频率
                 measurement_frequencies=({"value_hz": 42.0},),  # 本轮频率明细
                 evidence_refs=(),  # 最终图片路径
-                selected_frames=(),  # 最终选中图片内容
+                evidence_frames=(),  # 本轮证据图片
+                encode_image=lambda frame: b"BM" + frame.data,  # 证据图片编码入口
             )
     """
     return DatabaseRequest(
@@ -69,6 +72,8 @@ def build_request(session_id: str) -> DatabaseRequest:
         final_frequency_hz=42.0,
         measurement_frequencies=({"value_hz": 42.0},),
         evidence_refs=(),
+        evidence_frames=(),
+        encode_image=lambda frame: b"BM" + frame.data,
     )
 
 
@@ -208,3 +213,52 @@ def test_measurement_review_fields_are_saved_and_compared(tmp_path: Path) -> Non
     # 同一周期的复核理由变化时拒绝覆盖已存记录。
     with pytest.raises(ValueError, match="提交内容不一致"):
         database.persist_measurement(replace(review_request, review_reason="OTHER_REASON"))
+
+
+def test_image_encoding_failure_does_not_save_evidence_or_measurement(
+    tmp_path: Path,
+) -> None:
+    """证据图片编码失败时不保存图片文件和测量记录。
+
+    Args:
+        tmp_path: 测试临时目录。
+
+    Returns:
+        返回示例：
+            None  # 图片文件与测量记录均未生成
+    """
+    # 建立待保存的相机帧和证据路径。
+    config = build_config(tmp_path)
+    database = build_database(config)
+    camera_frame = CameraFrame("camera", 1, 0, 0, 1.0, 2, 2, 17301505, 0, b"raw")
+    captured_frame = CapturedFrame(
+        "session", "capture", "camera", "capture-1", "2026-09-23", 1.0,
+        camera_frame,
+    )
+    evidence_path = config.evidence_directory / "1" / "session" / "capture-1.bmp"
+
+    # 设置失败的编码入口并尝试保存测量。
+    def fail_image_encoding(frame: CameraFrame) -> bytes:
+        """报告相机图片编码失败。
+
+        Args:
+            frame: 本次准备编码的原始帧。
+
+        Returns:
+            返回示例：
+                b"BM..."  # 成功时应返回 BMP 字节，本例抛出异常
+        """
+        raise RuntimeError("编码失败")
+
+    request = replace(
+        build_request("session"),
+        evidence_refs=(str(evidence_path),),
+        evidence_frames=(captured_frame,),
+        encode_image=fail_image_encoding,
+    )
+    with pytest.raises(ImageEncodingError, match="相机图片编码失败"):
+        database.persist_measurement(request)
+
+    # 核对失败后没有证据文件和测量记录。
+    assert not evidence_path.exists()
+    assert list_written_session_ids(config.database_path) == []
