@@ -30,7 +30,7 @@ class OCRState(str, Enum):
 
     WAITING = "WAITING"  # 本 Session 等待最终 OCR 结果
     RUNNING = "RUNNING"  # 本 Session 正在处理 OCR，尚未确定最终结果
-    SUCCESS = "SUCCESS"  # 本 Session 的 OCR 处理已返回正常或待复核结果
+    COMPLETED = "COMPLETED"  # 本 Session 的 OCR 处理已返回正常或待复核结果
     FAILED = "FAILED"  # 本 Session 的 OCR 已确定失败
     TIMED_OUT = "TIMED_OUT"  # 本 Session 未在规定时间内完成 OCR
 

@@ -501,7 +501,7 @@ class Machine:
 
                 # 保存整轮识别结果并标记处理完成。
                 session.ocr_result = event.payload
-                session.ocr_state = OCRState.SUCCESS
+                session.ocr_state = OCRState.COMPLETED
 
                 # 上报字符识别完成。
                 if self.notify_measurement_progress is not None:
@@ -787,8 +787,8 @@ class Machine:
             await self.handle_measurement_failure(session)
             return
 
-        # 周期未关闭或 OCR 未成功时继续等待。
-        if session.capture_stop_time is None or session.ocr_state != OCRState.SUCCESS:
+        # 周期未关闭或 OCR 未完成时继续等待。
+        if session.capture_stop_time is None or session.ocr_state != OCRState.COMPLETED:
             return
 
         # 记录本轮结算时间。

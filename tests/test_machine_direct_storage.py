@@ -151,7 +151,7 @@ def create_machine(
         start_time="2026-09-23T00:00:00+00:00",
         capture_start_time=0.0,
         capture_stop_time=1.0,
-        ocr_state=OCRState.SUCCESS,
+        ocr_state=OCRState.COMPLETED,
         ocr_result=OCRResult(
             ordered_lines=() if review_reason else ("AB123456",),
             normalized_lines=() if review_reason else ("AB123456",),
