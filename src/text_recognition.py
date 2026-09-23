@@ -157,18 +157,23 @@ class TextRecognizer:
             normalized_lines,
             selected_frames,
             line_frame_ids,
+            review_reason,
         ) = self.generate_final_text_and_images(frame_results, qualified_frames)
 
         # 没有最终文字时返回全部原始帧供人工复核。
         if not ordered_lines:
             logger.warning("本轮没有最终文字，人工复核 session_id=%s", session_id)
+            review_reason = (
+                f"{review_reason}；没有最终文字"
+                if review_reason else "没有最终文字"
+            )
             return OCRResult(
                 ordered_lines=(),
                 normalized_lines=(),
                 selected_frames=(),
                 line_frame_ids=(),
                 review_frames=captured_frames,
-                review_reason="没有最终文字",
+                review_reason=review_reason,
             )
 
         # 组装并返回本轮最终结果。
@@ -177,6 +182,8 @@ class TextRecognizer:
             normalized_lines=normalized_lines,
             selected_frames=selected_frames,
             line_frame_ids=line_frame_ids,
+            review_frames=captured_frames if review_reason else (),
+            review_reason=review_reason,
         )
 
     def filter_qualified_frames(self, frames: tuple[CapturedFrame, ...]) -> tuple[CapturedFrame, ...]:
@@ -244,6 +251,7 @@ class TextRecognizer:
         tuple[str, ...],
         tuple[CapturedFrame, ...],
         tuple[tuple[str, ...], ...],
+        str | None,
     ]:
         """按字符类别筛选最终文字，并给出每条文字对应的证据图片。
 
@@ -251,7 +259,7 @@ class TextRecognizer:
         8 字符要求前七位数字加一位字母；
         20、3、2 字符各输出本类置信度最高的一条，8 字符先去重再按连续编号规则选出。
         8 字符共用最终入选文字中置信度最高的一张证据图片。
-        没有候选、格式全部不符或最高置信度低于阈值时记录人工复核日志，不补造该类别结果。
+        没有候选、格式全部不符或最高置信度低于阈值时记录人工复核原因。
 
         Args:
             frame_results: 每张图片的 frame_id 和模型原始 blocks。
@@ -285,6 +293,7 @@ class TextRecognizer:
                         ),
                     ),
                     (("capture-1",),),  # 与文字逐项对应的证据图片编号
+                    "没有可靠的 20 位文字",  # 各类别合并后的复核原因
                 )
         """
         # 低于该置信度的文字不进入最终结果。
@@ -314,6 +323,7 @@ class TextRecognizer:
                     })
 
         selected_candidates: list[dict] = []
+        review_reasons: list[str] = []
 
         # 3 字符和 2 字符只接受 0 到 9。
         text_patterns = {
@@ -328,6 +338,7 @@ class TextRecognizer:
             # 当前类别一个候选都没有。
             if not candidates:
                 logger.warning("%s字符文字没有候选，人工复核", character_length)
+                review_reasons.append(f"没有可靠的 {character_length} 位文字")
                 continue
 
             # 20 字符不做格式过滤，3、2 字符按数字格式过滤。
@@ -342,6 +353,7 @@ class TextRecognizer:
                 # 有该位数的文字，但格式全部不符合要求。
                 if not candidates:
                     logger.warning("%s字符文字没有格式正确的候选，人工复核", character_length)
+                    review_reasons.append(f"没有格式正确的 {character_length} 位文字")
                     continue
 
             # 取本类置信度最高的一条。
@@ -350,6 +362,7 @@ class TextRecognizer:
             # 最高置信度仍低于阈值。
             if best_candidate["confidence"] < minimum_confidence:
                 logger.warning("%s字符文字没有可靠候选，人工复核", character_length)
+                review_reasons.append(f"{character_length} 位文字最高置信度不足")
                 continue
 
             best_candidate["evidence_frame_id"] = best_candidate["frame_id"]
@@ -368,6 +381,7 @@ class TextRecognizer:
         # 没有可靠候选时人工复核。
         if not reliable_eight_candidates:
             logger.warning("8字符文字没有可靠候选，人工复核")
+            review_reasons.append("没有可靠的 8 位文字")
         else:
             # 有可靠候选时按连续编号规则选出最终编号。
             eight_winners = self._select_eight_character_winners(reliable_eight_candidates)
@@ -407,12 +421,16 @@ class TextRecognizer:
         )
         selected_frames = tuple(frames_by_id[frame_id] for frame_id in selected_frame_ids)
 
-        # 返回最终文字及对应的证据图片。
+        # 合并本轮需要人工复核的原因。
+        review_reason = "；".join(review_reasons) or None
+
+        # 返回最终文字、证据图片和复核原因。
         return (
             ordered_lines,
             normalized_lines,
             selected_frames,
             line_frame_ids,
+            review_reason,
         )
 
     def _select_reliable_candidates(self, candidates: list[dict], minimum_confidence: float) -> list[dict]:

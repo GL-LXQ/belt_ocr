@@ -274,6 +274,45 @@ async def test_finalize_saves_all_review_frames(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_finalize_preserves_reliable_text_for_review(tmp_path: Path) -> None:
+    """确认部分文字可靠时保存文字并标记待复核。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 可靠文字和待复核状态已写入测量记录
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(
+        tmp_path, (evidence_frame,), (evidence_frame,), "没有可靠的 20 位文字"
+    )
+    session.ocr_result = OCRResult(
+        ordered_lines=("123",),
+        normalized_lines=("123",),
+        selected_frames=(evidence_frame,),
+        line_frame_ids=((evidence_frame.frame_id,),),
+        review_frames=(evidence_frame,),
+        review_reason="没有可靠的 20 位文字",
+    )
+
+    # 结算后读取测量记录。
+    await machine.try_finalize(session)
+    with sqlite3.connect(database.config.database_path) as connection:
+        record = connection.execute(
+            "SELECT ordered_lines, needs_review, review_reason "
+            "FROM measurements WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+
+    # 核对可靠文字和待复核原因。
+    assert json.loads(record[0]) == ["123"]
+    assert record[1] == 1
+    assert "没有可靠的 20 位文字" in record[2]
+
+
+@pytest.mark.asyncio
 async def test_encoding_failure_removes_new_images(tmp_path: Path) -> None:
     """确认第二张图片编码失败时清理第一张且不写数据库。
 
