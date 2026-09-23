@@ -568,7 +568,7 @@ class RealtimePage(QWidget):
             return
 
         # 将连接结果转换为卡片文字和颜色，频率及测量进度保持未接入。
-        tone = "waiting" if status in ("连接中", "停止中", "连接失败", "监测失败") else "idle"
+        tone = "waiting" if status in ("连接中", "停止中", "连接失败", "相机故障", "监测失败") else "idle"
         card.update_data({
             "title": card.title.text(),
             "tone": tone,
@@ -599,8 +599,14 @@ class RealtimePage(QWidget):
         progress_statuses = card.progress_statuses
         progress_statuses[stage] = status
 
-        # 更新进度节点和卡片当前状态。
+        # 更新本轮进度节点。
         card.steps.update_steps(progress_statuses)
+
+        # 相机故障时保留卡片主状态和故障原因。
+        if self.connection_states.get(machine_id, ("", ""))[0] == "相机故障":
+            return
+
+        # 更新卡片当前测量状态。
         stage_title = PROGRESS_STAGE_TITLES[stage]
         status_title = PROGRESS_STATUS_TITLES[status]
         card.update_data({

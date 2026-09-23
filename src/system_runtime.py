@@ -71,11 +71,13 @@ class SystemRuntime:
     def initialize_machines(
         self,
         notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None = None,
+        notify_camera_state: Callable[[str, str, str], None] | None = None,
     ) -> None:
         """在双库初始化之后读取启用机器，并逐台建立相机、频率适配器和机器运行对象。
 
         Args:
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
+            notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
 
         Returns:
             返回示例：
@@ -121,6 +123,7 @@ class SystemRuntime:
                 notify_measurement_progress,
                 self.handle_fatal_error,
                 self.state_changed,
+                notify_camera_state,
             )
 
     async def start(
@@ -150,7 +153,7 @@ class SystemRuntime:
             self.database.initialize()
 
             # 读取启用机器并逐台建立机器运行对象。
-            self.initialize_machines(notify_measurement_progress)
+            self.initialize_machines(notify_measurement_progress, notify_camera_state)
 
             # 校验当前启用机器的串口和 DI 通道绑定。
             self.validate_io_configuration()

@@ -88,16 +88,15 @@ async def test_camera_connection_failure_preserves_other_machine(
     )
     monkeypatch.setattr("system_runtime.load_mvs_sdk", Mock(return_value=camera_sdk))
     monkeypatch.setattr("system_runtime.ModbusClient", Mock(return_value=modbus_client))
-    camera_states = []
+    camera_state_notification = Mock()
 
     # 启动运行时并核对故障机器与正常机器的连接状态。
     try:
-        await runtime.start(lambda machine_id, state, message: camera_states.append(
-            (machine_id, state, message)
-        ))
+        await runtime.start(camera_state_notification)
         assert runtime.machines["1"].camera.sdk_camera is None
         assert runtime.machines["2"].camera.sdk_camera is healthy_camera
-        assert ("1", "连接失败", "相机未连接") in camera_states
+        camera_state_notification.assert_any_call("1", "连接失败", "相机未连接")
+        runtime.initialize_machines.assert_called_once_with(None, camera_state_notification)
         assert runtime.accepting_signals
         assert runtime.failure is None
     finally:
@@ -107,6 +106,39 @@ async def test_camera_connection_failure_preserves_other_machine(
             worker_task.cancel()
         await asyncio.gather(*runtime.worker_tasks, return_exceptions=True)
         runtime.database.close()
+
+
+def test_initialize_machines_passes_camera_state_notification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """确认运行时把现有相机状态回调保存到每台机器。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+        monkeypatch: pytest 提供的属性替换工具。
+
+    Returns:
+        返回示例：
+            None  # 已建立的机器保存相同的状态通知回调
+    """
+    config = AppConfig(
+        database_path=tmp_path / "measurements.sqlite3",
+        evidence_directory=tmp_path / "evidence",
+        mvs_development_directory=tmp_path,
+    )
+    runtime = SystemRuntime(config)
+    enabled_machine = {
+        "id": 1,
+        "camera_serial": "camera-1",
+        "frequency_meter_serial": "meter-1",
+    }
+    monkeypatch.setattr("system_runtime.MachineRepo.list_enabled", Mock(return_value=[enabled_machine]))
+    camera_state_notification = Mock()
+
+    # 建立机器并核对状态通知回调。
+    runtime.initialize_machines(notify_camera_state=camera_state_notification)
+    assert runtime.machines["1"].notify_camera_state is camera_state_notification
 
 
 @pytest.mark.asyncio

@@ -39,6 +39,7 @@ class Machine:
         notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None,
         on_fatal_error: Callable[[Exception], None],
         state_changed: asyncio.Event,
+        notify_camera_state: Callable[[str, str, str], None] | None = None,
     ) -> None:
         """组装一台机器的唯一当前周期及其处理依赖。
 
@@ -53,6 +54,7 @@ class Machine:
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
             on_fatal_error: 致命故障回调，把识别任务异常交给运行时处理。
             state_changed: 周期状态变化通知。
+            notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
 
         Returns:
             返回示例：
@@ -71,8 +73,11 @@ class Machine:
         self.database = database
         self.publish_event = publish_event
 
-        # 登记进度上报、致命故障回调与状态变化通知。
+        # 登记相机状态与测量进度通知。
+        self.notify_camera_state = notify_camera_state
         self.notify_measurement_progress = notify_measurement_progress
+
+        # 登记致命故障回调与状态变化通知。
         self.on_fatal_error = on_fatal_error
         self.state_changed = state_changed
 
@@ -425,6 +430,10 @@ class Machine:
                 # 等待通信恢复后重新确认现场状态。
                 self.waiting_cycle_reset = True
                 return
+
+        # 相机采集设备故障时通知界面。
+        if event.event_type == EventType.CAPTURE_FAILED and self.notify_camera_state is not None:
+            self.notify_camera_state(self.machine_config.machine_id, "相机故障", event.payload)
 
         # 没有周期身份的频率只写审计，不分配给当前或历史周期。
         if event.event_type == EventType.FREQUENCY_MEASURED and not event.session_id:

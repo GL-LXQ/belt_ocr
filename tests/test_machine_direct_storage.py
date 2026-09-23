@@ -616,6 +616,8 @@ async def test_empty_capture_fails_and_waits_for_close(tmp_path: Path) -> None:
     machine, database, session, progress_updates, _ = create_machine(
         tmp_path, (evidence_frame,)
     )
+    camera_state_notification = Mock()
+    machine.notify_camera_state = camera_state_notification
     session.capture_stop_time = None
     session.ocr_state = OCRState.WAITING
     session.ocr_result = None
@@ -637,6 +639,7 @@ async def test_empty_capture_fails_and_waits_for_close(tmp_path: Path) -> None:
     assert len(events) == 1
     assert events[0][2] == "CAPTURE_EMPTY"
     assert json.loads(events[0][3])["session_errors"] == session.errors
+    camera_state_notification.assert_not_called()
 
     # 收到真实关闭后释放失败周期。
     await machine.handle_machine_close()
@@ -656,6 +659,8 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     """
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, _, progress_updates, _ = create_machine(tmp_path, (evidence_frame,))
+    camera_state_notification = Mock()
+    machine.notify_camera_state = camera_state_notification
     machine.current_session = None
     sdk_camera = SimpleNamespace(
         serial="camera-1",
@@ -703,6 +708,7 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     assert not camera.available
     assert not camera.is_capturing
     machine.on_fatal_error.assert_not_called()
+    camera_state_notification.assert_called_once_with("1", "相机故障", "GetImageBuffer 失败")
     assert progress_updates[-1][2:] == (
         ProgressStage.IMAGE_CAPTURE,
         ProgressStatus.FAILED,
@@ -715,6 +721,40 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     await machine.handle_machine_close()
     await machine.handle_machine_start()
     assert machine.current_session is None
+
+
+@pytest.mark.asyncio
+async def test_late_capture_failure_notifies_without_repeating_session_failure(
+    tmp_path: Path,
+) -> None:
+    """确认迟到的采集故障仍通知相机状态，不重复结算已失败周期。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 相机状态已通知，失败周期和异常记录未重复处理
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, progress_updates, _ = create_machine(tmp_path, (evidence_frame,))
+    camera_state_notification = Mock()
+    machine.notify_camera_state = camera_state_notification
+    session.state = SessionState.FAILED
+    session.errors.append("OCR_TIMEOUT")
+
+    # 将真实采集故障交给已经失败的周期。
+    await machine.handle_event(RuntimeEvent(
+        EventType.CAPTURE_FAILED, "1", session.session_id, "StopGrabbing 失败"
+    ))
+
+    # 核对机器级通知和周期记录均只执行一次。
+    camera_state_notification.assert_called_once_with("1", "相机故障", "StopGrabbing 失败")
+    assert session.errors == ["OCR_TIMEOUT"]
+    assert session.state == SessionState.FAILED
+    assert machine.current_session is session
+    assert read_abnormal_events(database) == []
+    assert progress_updates == []
 
 
 @pytest.mark.asyncio
