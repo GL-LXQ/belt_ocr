@@ -311,26 +311,37 @@ class Database:
             self.lock_file = None
             self.lock_acquired = False
 
-    def save_abnormal_event(self, reason: str, event=None, machine_id: str = "") -> None:
-        """保存异常原因以及对应的事件内容。
+    def save_abnormal_event(
+        self,
+        reason: str,
+        event=None,
+        machine_id: str = "",
+        session_id: str | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        """保存业务事件或 Session 失败的异常记录。
 
         Args:
             reason: 异常原因标识。
-            event: 对应的业务事件，未提供时保存空对象。
+            event: 对应的业务事件，未提供时使用独立字段。
             machine_id: 未提供业务事件时使用的机器编号。
+            session_id: 未提供业务事件时使用的周期编号。
+            payload: 未提供业务事件时保存的附加内容。
 
         Returns:
             返回示例：
                 None  # 异常事件已经写入本地运行库
         """
-        # 序列化事件内容，没有事件时写入空对象。
-        payload = serialize_value(event) if event is not None else {}
+        # 按事件或独立字段整理审计内容。
+        event_payload = serialize_value(event) if event is not None else payload or {}
+        event_machine_id = event.machine_id if event is not None else machine_id
+        event_session_id = event.session_id if event is not None else session_id
 
         # 写入异常事件记录。
         self.abnormal_event_repo.insert(
             time.time(),
-            getattr(event, "machine_id", machine_id),
-            getattr(event, "session_id", None),
+            event_machine_id,
+            event_session_id,
             reason,
-            json.dumps(payload, ensure_ascii=False),
+            json.dumps(event_payload, ensure_ascii=False),
         )

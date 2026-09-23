@@ -281,6 +281,7 @@ class Machine:
         interrupted: bool = False,
         capture_stop_time: float | None = None,
         close_event: RuntimeEvent | None = None,
+        failure_reason: str = "CYCLE_INTERRUPTED",
     ) -> None:
         """结束本轮采集，结算频率并检查完成条件。
 
@@ -288,6 +289,7 @@ class Machine:
             interrupted: False 表示正常 CLOSE；True 表示故障、超时或退出中断。
             capture_stop_time: 关闭信号接收时的单调时间，省略时取当前时间。
             close_event: 触发本次关闭的事件，省略时表示关闭没有事件来源。
+            failure_reason: 中断关闭时记录的失败原因。
 
         Returns:
             返回示例：
@@ -325,8 +327,6 @@ class Machine:
 
         # 中断关闭时标记等待真实关闭复位。
         self.waiting_cycle_reset = interrupted
-        if interrupted:
-            session.errors.append("CYCLE_INTERRUPTED")
 
         # 清空适配器的当前周期，停止向本轮交付频率。
         self.frequency_adapter.active_session_id = None
@@ -382,7 +382,7 @@ class Machine:
 
         # 中断关闭按失败清理并结束。
         if interrupted:
-            await self.handle_measurement_failure(session)
+            await self.handle_measurement_failure(session, failure_reason)
             return
 
         # 检查正常关闭周期的结果，条件满足时提交数据库。
@@ -443,8 +443,10 @@ class Machine:
         # 周期未关闭时处理期限通知。
         if event.event_type == EventType.CYCLE_TIMEOUT:
             if session.capture_stop_time is None:
-                session.errors.append("CYCLE_TIMEOUT")
-                await self.handle_machine_close(interrupted=True)
+                await self.handle_machine_close(
+                    interrupted=True,
+                    failure_reason="此次测量周期超时",
+                )
             return
 
         # 本轮不在处理中时丢弃迟到结果并结束。
@@ -468,6 +470,23 @@ class Machine:
                 # 保留整轮采集统计。
                 capture_result = event.payload
                 session.capture_summary = capture_result.statistics
+
+                # 没有采集帧时标记识别失败。
+                if not capture_result.frames:
+                    session.ocr_state = OCRState.FAILED
+
+                    # 上报图像采集失败。
+                    if self.notify_measurement_progress is not None:
+                        self.notify_measurement_progress(
+                            session.machine_id,
+                            session.session_id,
+                            ProgressStage.IMAGE_CAPTURE,
+                            ProgressStatus.FAILED,
+                        )
+
+                    # 按无采集帧原因结束本轮测量。
+                    await self.handle_measurement_failure(session, "此次相机没有采集到任何帧")
+                    return
 
                 # 上报图像采集完成，并标记字符识别开始。
                 if self.notify_measurement_progress is not None:
@@ -525,9 +544,10 @@ class Machine:
                 if session.ocr_state not in {OCRState.WAITING, OCRState.RUNNING}:
                     return
 
-                # 登记识别超时或识别失败原因。
+                # 登记识别状态和执行异常明细。
                 session.ocr_state = OCRState.TIMED_OUT if event.event_type == EventType.OCR_TIMEOUT else OCRState.FAILED
-                session.errors.append(event.payload or "OCR_TIMEOUT")
+                if event.event_type == EventType.OCR_FAILED:
+                    session.errors.append(event.payload)
 
                 # 上报字符识别失败。
                 if self.notify_measurement_progress is not None:
@@ -551,16 +571,22 @@ class Machine:
         # 统一处理本轮失败或满足条件后的提交。
         await self.try_finalize(session)
 
-    async def handle_measurement_failure(self, session: BeltSession) -> None:
-        """标记本轮失败并清理资源，保留尚未关闭的现场周期身份。
+    async def handle_measurement_failure(
+        self, session: BeltSession, failure_reason: str
+    ) -> None:
+        """登记本轮失败并清理资源，保留尚未关闭的现场周期身份。
 
         Args:
             session: 处理失败、中断或提交失败的测量档案。
+            failure_reason: 本轮失败的原因标识。
 
         Returns:
             返回示例：
-                None  # 已打印失败日志并清理资源，活动周期保留至 CLOSE 或中断
+                None  # 已登记失败并清理资源，活动周期保留至 CLOSE 或中断
         """
+        # 登记本轮失败原因。
+        session.errors.append(failure_reason)
+
         # 标记本轮失败并记录结算时间。
         session.state = SessionState.FAILED
         session.finish_time = datetime.now(timezone.utc).isoformat()
@@ -572,6 +598,23 @@ class Machine:
             session.session_id,
             session.errors,
         )
+
+        # 将本轮失败原因和错误明细写入异常事件表。
+        try:
+            await run_blocking_operation(
+                self.database.save_abnormal_event,
+                failure_reason,
+                machine_id=session.machine_id,
+                session_id=session.session_id,
+                payload={"session_errors": list(session.errors)},
+            )
+        except Exception:
+            # 审计写入失败时记录日志。
+            logger.exception(
+                "记录测量失败事件失败 machine_id=%s session_id=%s",
+                session.machine_id,
+                session.session_id,
+            )
 
         # 取消等待或正在执行的识别任务。
         recognition_task = self.recognition_task
@@ -688,9 +731,8 @@ class Machine:
         # 退出时仍未结算的周期按退出原因执行失败清理。
         session = self.current_session
         if session is not None and session.state != SessionState.FAILED:
-            session.errors.append(shutdown_error_code)
             try:
-                await self.handle_measurement_failure(session)
+                await self.handle_measurement_failure(session, shutdown_error_code)
             except Exception as error:
                 self.on_fatal_error(error)
 
@@ -784,7 +826,11 @@ class Machine:
 
         # OCR 失败时执行本轮失败清理。
         if session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}:
-            await self.handle_measurement_failure(session)
+            failure_reason = (
+                "OCR_TIMEOUT" if session.ocr_state == OCRState.TIMED_OUT
+                else "此次文字识别执行失败"
+            )
+            await self.handle_measurement_failure(session, failure_reason)
             return
 
         # 周期未关闭或 OCR 未完成时继续等待。
@@ -870,7 +916,6 @@ class Machine:
                 if isinstance(error, ValueError)
                 else "DATABASE_WRITE_FAILED"
             )
-            session.errors.append(error_code)
             logger.exception(
                 "保存失败 machine_id=%s session_id=%s",
                 session.machine_id,
@@ -887,7 +932,7 @@ class Machine:
                 )
 
             # 清理本轮失败状态。
-            await self.handle_measurement_failure(session)
+            await self.handle_measurement_failure(session, error_code)
             return
 
         # 标记本轮已入库。

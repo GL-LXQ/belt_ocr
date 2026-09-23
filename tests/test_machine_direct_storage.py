@@ -14,9 +14,16 @@ import pytest
 
 from config_util import AppConfig, MachineConfig
 from database import Database, MeasurementRecord
-from enums import OCRState, ProgressStage, ProgressStatus, SessionState
+from enums import EventType, OCRState, ProgressStage, ProgressStatus, SessionState
 from machine import ImageEncodingError, Machine
-from models import BeltSession, CapturedFrame, FrequencyMeasurement, OCRResult
+from models import (
+    BeltSession,
+    CaptureResult,
+    CapturedFrame,
+    FrequencyMeasurement,
+    OCRResult,
+    RuntimeEvent,
+)
 
 
 TEST_SESSION_START_TIME = datetime(2026, 9, 23, 12).astimezone().isoformat()
@@ -90,6 +97,11 @@ def create_machine(
     )
     database = Database(config)
     database.initialize_result_database()
+
+    # 创建异常事件测试表。
+    with sqlite3.connect(config.recovery_path) as connection:
+        database.abnormal_event_repo.create_table(connection)
+
     encoding_threads = []
 
     def encode_image(camera_frame: object) -> bytes:
@@ -168,6 +180,31 @@ def create_machine(
     )
     machine.current_session = session
     return machine, database, session, progress_updates, encoding_threads
+
+
+def read_abnormal_events(database: Database) -> list[tuple]:
+    """读取测试运行库中的异常事件。
+
+    Args:
+        database: 持有运行库路径的测试数据库。
+
+    Returns:
+        返回示例：
+            [
+                (
+                    "1",  # 机器编号
+                    "session-1",  # 周期编号
+                    "此次相机没有采集到任何帧",  # 异常原因
+                    '{"session_errors": ["此次相机没有采集到任何帧"]}',  # 事件内容
+                ),
+            ]
+    """
+    # 按写入顺序读取异常事件身份、原因和内容。
+    with sqlite3.connect(database.config.recovery_path) as connection:
+        return connection.execute(
+            "SELECT machine_id, session_id, reason, payload_json "
+            "FROM abnormal_events ORDER BY abnormal_event_id"
+        ).fetchall()
 
 
 @pytest.mark.asyncio
@@ -310,6 +347,8 @@ async def test_finalize_preserves_reliable_text_for_review(tmp_path: Path) -> No
     assert json.loads(record[0]) == ["123"]
     assert record[1] == 1
     assert "没有可靠的 20 位文字" in record[2]
+    assert session.state == SessionState.COMMITTED
+    assert read_abnormal_events(database) == []
 
 
 @pytest.mark.asyncio
@@ -459,3 +498,179 @@ def test_database_compares_evidence_directory(tmp_path: Path) -> None:
         database.write_measurement_record(
             replace(record, evidence_directory=tmp_path / "other")
         )
+
+
+def test_abnormal_event_accepts_event_and_session_fields(tmp_path: Path) -> None:
+    """确认异常记录兼容业务事件和独立 Session 字段。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 两种异常记录均已写入现有表
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    _, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
+    event = RuntimeEvent(EventType.OCR_FAILED, "1", "session-1", "模型失败")
+
+    # 保存原有事件格式和 Session 失败格式。
+    database.save_abnormal_event("EVENT_ERROR", event)
+    database.save_abnormal_event(
+        "此次相机没有采集到任何帧",
+        machine_id="1",
+        session_id="session-1",
+        payload={"session_errors": ["此次相机没有采集到任何帧"]},
+    )
+
+    # 核对事件身份、原因和失败明细。
+    events = read_abnormal_events(database)
+    assert [(row[0], row[1], row[2]) for row in events] == [
+        ("1", "session-1", "EVENT_ERROR"),
+        ("1", "session-1", "此次相机没有采集到任何帧"),
+    ]
+    assert json.loads(events[1][3])["session_errors"] == ["此次相机没有采集到任何帧"]
+
+
+@pytest.mark.asyncio
+async def test_empty_capture_fails_and_waits_for_close(tmp_path: Path) -> None:
+    """确认无采集帧时审计失败并保留尚未关闭的周期。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 无帧失败、审计和现场关闭后释放已核对
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, progress_updates, _ = create_machine(
+        tmp_path, (evidence_frame,)
+    )
+    session.capture_stop_time = None
+    session.ocr_state = OCRState.WAITING
+    session.ocr_result = None
+
+    # 交付空采集结果并尝试启动下一轮。
+    capture_result = CaptureResult(frames=(), statistics={"received_frame_count": 0})
+    await machine.handle_event(RuntimeEvent(
+        EventType.CAPTURE_COMPLETED, "1", session.session_id, capture_result
+    ))
+    await machine.handle_machine_start()
+
+    # 核对失败状态、异常记录和当前周期身份。
+    assert session.state == SessionState.FAILED
+    assert session.ocr_state == OCRState.FAILED
+    assert machine.current_session is session
+    assert progress_updates[-1][2:] == (
+        ProgressStage.IMAGE_CAPTURE,
+        ProgressStatus.FAILED,
+    )
+    events = read_abnormal_events(database)
+    assert len(events) == 1
+    assert events[0][2] == "此次相机没有采集到任何帧"
+    assert json.loads(events[0][3])["session_errors"] == session.errors
+
+    # 收到真实关闭后释放失败周期。
+    await machine.handle_machine_close()
+    assert machine.current_session is None
+
+
+@pytest.mark.asyncio
+async def test_ocr_execution_error_fails_and_is_audited(tmp_path: Path) -> None:
+    """确认 OCR 执行异常进入失败收尾并写入异常事件。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # OCR 异常和失败原因已记录
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.capture_stop_time = None
+    session.ocr_state = OCRState.RUNNING
+    session.ocr_result = None
+    machine.text_recognizer = SimpleNamespace(
+        processing_lock=asyncio.Lock(),
+        process_session_frames=Mock(side_effect=RuntimeError("模型执行失败")),
+    )
+    machine.publish_event = machine.handle_event
+
+    # 执行 OCR 并让失败事件进入机器处理流程。
+    await machine.recognize_session(session, (evidence_frame.camera_frame,))
+
+    # 核对执行异常、失败状态和异常事件。
+    assert session.state == SessionState.FAILED
+    assert machine.current_session is session
+    assert "模型执行失败" in session.errors
+    assert "此次文字识别执行失败" in session.errors
+    events = read_abnormal_events(database)
+    assert len(events) == 1
+    assert events[0][2] == "此次文字识别执行失败"
+    assert json.loads(events[0][3])["session_errors"] == session.errors
+
+
+@pytest.mark.asyncio
+async def test_cycle_timeout_fails_and_is_audited(tmp_path: Path) -> None:
+    """确认周期超时进入失败收尾并记录超时原因。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 超时失败和异常事件已核对
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.capture_stop_time = None
+    session.ocr_state = OCRState.WAITING
+    session.ocr_result = None
+
+    # 交付周期超时事件。
+    await machine.handle_event(RuntimeEvent(
+        EventType.CYCLE_TIMEOUT, "1", session.session_id
+    ))
+
+    # 核对周期失败、等待现场复位和超时审计。
+    assert session.state == SessionState.FAILED
+    assert machine.waiting_cycle_reset
+    events = read_abnormal_events(database)
+    assert len(events) == 1
+    assert events[0][2] == "此次测量周期超时"
+    assert json.loads(events[0][3])["session_errors"] == session.errors
+
+
+@pytest.mark.asyncio
+async def test_audit_failure_does_not_block_session_cleanup(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """确认异常事件写入失败时仍完成 Session 失败收尾。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+        caplog: pytest 捕获的日志。
+
+    Returns:
+        返回示例：
+            None  # 审计失败已记录日志且现场关闭后释放周期
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.capture_stop_time = None
+    database.save_abnormal_event = Mock(
+        side_effect=sqlite3.OperationalError("运行库写入失败")
+    )
+
+    # 执行失败收尾并等待现场关闭。
+    await machine.handle_measurement_failure(session, "此次相机没有采集到任何帧")
+    assert session.state == SessionState.FAILED
+    assert machine.current_session is session
+    await machine.handle_machine_close()
+
+    # 核对审计写入只尝试一次且周期已释放。
+    database.save_abnormal_event.assert_called_once()
+    assert "记录测量失败事件失败" in caplog.text
+    assert machine.current_session is None
