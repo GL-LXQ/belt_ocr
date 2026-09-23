@@ -69,6 +69,7 @@ class EventType(str, Enum):
     SHUTDOWN = "Shutdown"  # 应用退出
     IO_INTERRUPTED = "IOInterrupted"  # IO 读取中断
     CAPTURE_COMPLETED = "CaptureCompleted"  # 整轮采集结果
+    CAPTURE_FAILED = "CaptureFailed"  # 相机采集设备故障
     OCR_COMPLETED = "OCRCompleted"  # 整轮识别结果
     OCR_FAILED = "OCRFailed"  # 整轮文字识别失败
     OCR_TIMEOUT = "OCRTimeout"  # 文字识别超时

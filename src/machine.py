@@ -486,7 +486,7 @@ class Machine:
                         )
 
                     # 按无采集帧原因结束本轮测量。
-                    await self.handle_measurement_failure(session, "此次相机没有采集到任何帧")
+                    await self.handle_measurement_failure(session, "CAPTURE_EMPTY")
                     return
 
                 # 上报图像采集完成，并标记字符识别开始。
@@ -511,6 +511,24 @@ class Machine:
                 task = asyncio.create_task(self.recognize_session(session, capture_result.frames))
                 self.recognition_task = task
                 task.add_done_callback(self.handle_recognition_task_finished)
+                return
+
+            # 相机采集设备故障。
+            case EventType.CAPTURE_FAILED:
+                # 上报本轮图像采集失败。
+                if self.notify_measurement_progress is not None:
+                    self.notify_measurement_progress(
+                        session.machine_id,
+                        session.session_id,
+                        ProgressStage.IMAGE_CAPTURE,
+                        ProgressStatus.FAILED,
+                    )
+
+                # 记录设备错误明细。
+                session.errors.append(event.payload)
+
+                # 按相机故障结束本轮测量。
+                await self.handle_measurement_failure(session, "CAPTURE_FAILED")
                 return
 
             # 识别结果到达。

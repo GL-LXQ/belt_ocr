@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from camera.camera import Camera
-from camera.hikrobot_sdk import load_mvs_sdk
+from camera.hikrobot_sdk import MvsError, load_mvs_sdk
 from config_util import AppConfig, MachineConfig
 from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
@@ -190,7 +190,21 @@ class SystemRuntime:
                         exposure_time_us=machine_config.camera_exposure_time_us,
                         gain=machine_config.camera_gain,
                     )
-                # 打开失败时通知界面失败原因并抛出。
+                # 记录单台相机设备连接失败。
+                except MvsError as error:
+                    logger.error(
+                        "相机连接失败 machine_id=%s camera_serial=%s error=%s",
+                        machine_config.machine_id,
+                        machine_config.camera_serial,
+                        error,
+                    )
+                    if notify_camera_state is not None:
+                        notify_camera_state(machine_config.machine_id, "连接失败", str(error))
+
+                    # 继续初始化其他相机。
+                    continue
+
+                # 未知错误仍交给系统启动失败流程。
                 except Exception as error:
                     if notify_camera_state is not None:
                         notify_camera_state(machine_config.machine_id, "连接失败", str(error))
@@ -199,6 +213,10 @@ class SystemRuntime:
                 # 打开成功时通知界面相机已连接。
                 if notify_camera_state is not None:
                     notify_camera_state(machine_config.machine_id, "相机已连接", "IO、频率仪尚未接入")
+
+            # 所有相机连接失败时结束本次启动。
+            if all(machine.camera.sdk_camera is None for machine in self.machines.values()):
+                raise MvsError("所有启用机器的相机均连接失败")
 
             # 按现场初始状态设置各机器的等待复位标志。
             for machine in self.machines.values():

@@ -266,9 +266,13 @@ class Camera:
             返回示例：
                 None  # 整轮结果已交付，采集引用已移除
         """
+        capture_error: MvsError | None = None
         try:
             # 在线程中执行采集，取消时等待实际采集结束。
             result = await run_blocking_operation(capture_task.run_capture)
+        except MvsError as error:
+            # 登记本轮明确的相机采集故障。
+            capture_error = error
         except Exception:
             # 采集线程未记录过的调度异常在此记录。
             if not capture_task.sdk_camera.faulted:
@@ -283,6 +287,16 @@ class Camera:
 
             # 移除本轮采集引用。
             self.current_capture = None
+
+        # 相机采集故障交给所属机器处理。
+        if capture_error is not None:
+            await self.publish_event(RuntimeEvent(
+                EventType.CAPTURE_FAILED,
+                self.machine_id,
+                session_id,
+                str(capture_error),
+            ))
+            return
 
         try:
             # 将成功采集的整轮结果交回所属机器。

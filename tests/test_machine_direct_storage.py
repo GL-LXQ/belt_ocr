@@ -12,7 +12,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from camera.camera import Camera
 from config_util import AppConfig, MachineConfig
+from camera.hikrobot_sdk import MvsError
 from database import Database, MeasurementRecord
 from enums import EventType, OCRState, ProgressStage, ProgressStatus, SessionState
 from machine import ImageEncodingError, Machine
@@ -566,12 +568,145 @@ async def test_empty_capture_fails_and_waits_for_close(tmp_path: Path) -> None:
     ]
     events = read_abnormal_events(database)
     assert len(events) == 1
-    assert events[0][2] == "此次相机没有采集到任何帧"
+    assert events[0][2] == "CAPTURE_EMPTY"
     assert json.loads(events[0][3])["session_errors"] == session.errors
 
     # 收到真实关闭后释放失败周期。
     await machine.handle_machine_close()
     assert machine.current_session is None
+
+
+@pytest.mark.asyncio
+async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path) -> None:
+    """确认相机设备故障只使当前周期失败并阻止本机再启动。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 故障周期已审计，本机没有建立新周期
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, _, progress_updates, _ = create_machine(tmp_path, (evidence_frame,))
+    machine.current_session = None
+    sdk_camera = SimpleNamespace(
+        serial="camera-1",
+        closed=False,
+        faulted=False,
+        received_frame_count=0,
+        capture_lock=threading.Lock(),
+        start_grabbing=Mock(),
+        read_frame=Mock(side_effect=MvsError("GetImageBuffer 失败")),
+        stop_grabbing=Mock(),
+    )
+
+    async def deliver_capture_event(event: RuntimeEvent) -> None:
+        """将相机采集事件放入当前机器队列。
+
+        Args:
+            event: 相机交付的采集事件。
+
+        Returns:
+            返回示例：
+                None  # 采集事件已进入机器队列
+        """
+        await machine.queue.put(event)
+
+    # 将真实相机适配器和测试设备接入机器。
+    camera = Camera("1", 1000, 50, deliver_capture_event, machine.on_fatal_error)
+    camera.sdk_camera = sdk_camera
+    machine.camera = camera
+
+    # 启动采集并处理相机交付的故障事件。
+    await machine.handle_machine_start()
+    session = machine.current_session
+    assert session is not None
+    delivery_task = camera.delivery_task
+    await delivery_task
+    await asyncio.sleep(0)
+    capture_event = await machine.queue.get()
+    await machine.handle_event(capture_event)
+    machine.queue.task_done()
+
+    # 核对本轮失败记录及相机可用状态。
+    assert session.state == SessionState.FAILED
+    assert session.errors == ["GetImageBuffer 失败", "CAPTURE_FAILED"]
+    assert machine.current_session is session
+    assert not camera.available
+    assert not camera.is_capturing
+    machine.on_fatal_error.assert_not_called()
+    assert progress_updates[-1][2:] == (
+        ProgressStage.IMAGE_CAPTURE,
+        ProgressStatus.FAILED,
+    )
+    events = read_abnormal_events(database)
+    assert events[0][2] == "CAPTURE_FAILED"
+    assert json.loads(events[0][3])["session_errors"] == session.errors
+
+    # 现场关闭后尝试重新启动本机周期。
+    await machine.handle_machine_close()
+    await machine.handle_machine_start()
+    assert machine.current_session is None
+
+
+@pytest.mark.asyncio
+async def test_busy_camera_does_not_mark_device_faulted(tmp_path: Path) -> None:
+    """确认采集锁占用只拒绝新周期，不标记相机故障。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 本轮未受理且相机保持可用
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, _, _, _, _ = create_machine(tmp_path, (evidence_frame,))
+    machine.current_session = None
+    capture_lock = threading.Lock()
+    capture_lock.acquire()
+    sdk_camera = SimpleNamespace(closed=False, faulted=False, capture_lock=capture_lock)
+    camera = Camera("1", 1000, 50, AsyncMock(), Mock())
+    camera.sdk_camera = sdk_camera
+    machine.camera = camera
+
+    # 采集锁占用时尝试启动新周期。
+    try:
+        await machine.handle_machine_start()
+        assert machine.current_session is None
+        assert machine.waiting_cycle_reset
+        assert not sdk_camera.faulted
+    finally:
+        capture_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_capture_failure_after_close_releases_session(tmp_path: Path) -> None:
+    """确认 CLOSE 已到达时相机故障仍能直接失败收尾。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 已关闭周期失败并释放，不产生测量记录
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.ocr_state = OCRState.WAITING
+    session.ocr_result = None
+
+    # 交付迟于 CLOSE 的采集故障并核对结果。
+    await machine.handle_event(RuntimeEvent(
+        EventType.CAPTURE_FAILED,
+        "1",
+        session.session_id,
+        "StopGrabbing 失败",
+    ))
+    assert session.state == SessionState.FAILED
+    assert machine.current_session is None
+    assert read_abnormal_events(database)[0][2] == "CAPTURE_FAILED"
 
 
 @pytest.mark.asyncio
