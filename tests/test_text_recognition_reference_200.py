@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from camera.hikrobot_sdk import CameraFrame
 from models import CapturedFrame
 from text_recognition import TextRecognizer
 
@@ -64,7 +65,10 @@ def test_final_selection_matches_recorded_correct_data(
             frame_id=frame_result["frame_id"],
             captured_at="2026-09-23",
             captured_monotonic=float(frame_number),
-            image_data=b"BM" + frame_result["frame_id"].encode("ascii"),
+            camera_frame=CameraFrame(
+                "camera", frame_number, 0, 0, float(frame_number), 1, 1, 0, 0,
+                b"BM" + frame_result["frame_id"].encode("ascii"),
+            ),
         )
         for frame_number, frame_result in enumerate(frame_results, start=1)
     )

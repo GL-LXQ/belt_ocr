@@ -70,7 +70,18 @@ class TextRecognizer:
                             frame_id="capture-1",  # 图片编号
                             captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
                             captured_monotonic=1.0,  # 单调接收时间
-                            image_data=b"...",  # 相机原始图像字节
+                            camera_frame=CameraFrame(
+                                camera_serial="CAM01",  # 相机序列号
+                                frame_number=1,  # SDK 帧编号
+                                device_timestamp=100,  # 设备时间戳
+                                host_timestamp=200,  # 主机时间戳
+                                received_monotonic=1.0,  # 接收单调时间
+                                width=2,  # 图像宽度
+                                height=1,  # 图像高度
+                                pixel_type=17301505,  # 像素格式编号
+                                lost_packet_count=0,  # 丢包数
+                                data=b"\x01\x02",  # 原始图像字节
+                            ),
                         ),
                     ),
                     line_frame_ids=(("capture-1",),),  # 每条文字对应的图片编号
@@ -94,7 +105,7 @@ class TextRecognizer:
                 frame_id=f"{capture_id}-{frame.frame_number}",
                 captured_at=captured_at.isoformat(),
                 captured_monotonic=frame.received_monotonic,
-                image_data=frame.data,
+                camera_frame=frame,
             ))
 
         # 筛选合格图片并释放原始帧引用。
@@ -106,7 +117,9 @@ class TextRecognizer:
             raise ValueError(f"session_id={session_id} 本轮没有合格图片。")
 
         # 调用模型识别本轮全部合格图片。
-        image_results = self.recognize_images([frame.image_data for frame in qualified_frames])
+        image_results = self.recognize_images(
+            [frame.camera_frame for frame in qualified_frames]
+        )
 
         # TODO 模型结果数量不一致时保存合格图片，并登记待人工复核记录。
         if len(image_results) != len(qualified_frames):
@@ -148,18 +161,29 @@ class TextRecognizer:
                         frame_id="capture-1",  # 唯一图片编号
                         captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
                         captured_monotonic=1.0,  # 单调接收时间
-                        image_data=b"...",  # 相机原始图像字节
+                        camera_frame=CameraFrame(
+                            camera_serial="CAM01",  # 相机序列号
+                            frame_number=1,  # SDK 帧编号
+                            device_timestamp=100,  # 设备时间戳
+                            host_timestamp=200,  # 主机时间戳
+                            received_monotonic=1.0,  # 接收单调时间
+                            width=2,  # 图像宽度
+                            height=1,  # 图像高度
+                            pixel_type=17301505,  # 像素格式编号
+                            lost_packet_count=0,  # 丢包数
+                            data=b"\x01\x02",  # 原始图像字节
+                        ),
                     ),
                 )
         """
         # 原样返回全部图片。
         return frames
 
-    def recognize_images(self, images: list[bytes]) -> list[dict]:
+    def recognize_images(self, images: list[CameraFrame]) -> list[dict]:
         """预留整轮模型识别接口，目前明确报告未实现。
 
         Args:
-            images: 按顺序排列的合格相机原始图像字节。
+            images: 按顺序排列的合格相机原始帧。
 
         Returns:
             返回示例：
@@ -203,7 +227,18 @@ class TextRecognizer:
                             frame_id="capture-1",  # 图片编号
                             captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
                             captured_monotonic=1.0,  # 单调接收时间
-                            image_data=b"...",  # 相机原始图像字节
+                            camera_frame=CameraFrame(
+                                camera_serial="CAM01",  # 相机序列号
+                                frame_number=1,  # SDK 帧编号
+                                device_timestamp=100,  # 设备时间戳
+                                host_timestamp=200,  # 主机时间戳
+                                received_monotonic=1.0,  # 接收单调时间
+                                width=2,  # 图像宽度
+                                height=1,  # 图像高度
+                                pixel_type=17301505,  # 像素格式编号
+                                lost_packet_count=0,  # 丢包数
+                                data=b"\x01\x02",  # 原始图像字节
+                            ),
                         ),
                     ),
                     line_frame_ids=(("capture-1",),),  # 与文字逐项对应的证据图片编号

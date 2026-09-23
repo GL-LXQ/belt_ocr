@@ -326,7 +326,7 @@ class Database:
                 image_path = Path(evidence_ref)
                 if not image_path.exists():
                     created_paths.append(image_path)
-                    save_evidence_image(frame.image_data, image_path)
+                    save_evidence_image(frame.camera_frame.data, image_path)
 
             # 全部图片写入成功后才执行数据库事务。
             database_attempted = True

@@ -7,29 +7,29 @@ from models import CapturedFrame, OCRResult
 from text_recognition import TextRecognizer
 
 
-def test_process_session_frames_passes_raw_image_data_to_recognition(
+def test_process_session_frames_passes_camera_frames_to_recognition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """将相机原始图像字节交给识别流程并保留在终选图片中。
+    """将完整相机帧交给识别流程并保留在终选图片中。
 
     Args:
         monkeypatch: 替换 OCR 模型和终选函数。
 
     Returns:
         返回示例：
-            None  # 原始图像字节已通过断言验证
+            None  # 相机帧身份和元数据已通过断言验证
     """
     # 准备一帧没有 BMP 文件头的原始图像。
     frame = CameraFrame("camera", 1, 0, 0, 1.0, 1, 1, 0, 0, b"\x01\x02")
     recognizer = TextRecognizer()
-    received_images = []
+    received_frames = []
 
     # 让识别和终选流程返回当前帧。
-    def recognize_raw_images(images: list[bytes]) -> list[dict]:
-        """登记模型收到的图像并返回空文字块。
+    def recognize_camera_frames(frames: list[CameraFrame]) -> list[dict]:
+        """登记模型收到的相机帧并返回空文字块。
 
         Args:
-            images: 本轮传给模型的图像字节。
+            frames: 本轮传给模型的相机原始帧。
 
         Returns:
             返回示例：
@@ -39,7 +39,7 @@ def test_process_session_frames_passes_raw_image_data_to_recognition(
                     },
                 ]
         """
-        received_images.extend(images)
+        received_frames.extend(frames)
         return [{"blocks": []}]
 
     def select_raw_frame(
@@ -63,13 +63,13 @@ def test_process_session_frames_passes_raw_image_data_to_recognition(
         """
         return OCRResult(("123",), ("123",), (captured_frames[0],), (("capture-1",),))
 
-    monkeypatch.setattr(recognizer, "recognize_images", recognize_raw_images)
+    monkeypatch.setattr(recognizer, "recognize_images", recognize_camera_frames)
     monkeypatch.setattr(recognizer, "generate_final_text_and_images", select_raw_frame)
 
-    # 核对模型输入与终选图片都保留相机原始字节。
+    # 核对模型输入与终选图片都保留完整相机帧。
     result = recognizer.process_session_frames("session", "capture", "camera", (frame,))
-    assert received_images == [frame.data]
-    assert result.selected_frames[0].image_data == frame.data
+    assert received_frames == [frame]
+    assert result.selected_frames[0].camera_frame is frame
 
 
 @pytest.mark.parametrize(

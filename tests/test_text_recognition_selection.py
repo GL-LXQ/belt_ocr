@@ -2,6 +2,7 @@
 
 import pytest
 
+from camera.hikrobot_sdk import CameraFrame
 from models import CapturedFrame
 from text_recognition import TextRecognizer
 
@@ -29,7 +30,8 @@ def test_short_number_rejects_unicode_digits(
     """
     # 建立包含两条候选的单张图片结果。
     frame = CapturedFrame(
-        "session", "capture", "camera", "capture-1", "2026-09-23", 1.0, b"BM"
+        "session", "capture", "camera", "capture-1", "2026-09-23", 1.0,
+        CameraFrame("camera", 1, 0, 0, 1.0, 1, 1, 0, 0, b"BM"),
     )
     frame_results = [{
         "frame_id": frame.frame_id,
@@ -59,10 +61,12 @@ def test_uppercases_selected_lines_and_groups_mixed_case_serials() -> None:
     """
     # 建立两张图片及其识别出的四类候选。
     first_frame = CapturedFrame(
-        "session", "capture", "camera", "capture-1", "2026-09-23", 1.0, b"BM1"
+        "session", "capture", "camera", "capture-1", "2026-09-23", 1.0,
+        CameraFrame("camera", 1, 0, 0, 1.0, 1, 1, 0, 0, b"BM1"),
     )
     second_frame = CapturedFrame(
-        "session", "capture", "camera", "capture-2", "2026-09-23", 2.0, b"BM2"
+        "session", "capture", "camera", "capture-2", "2026-09-23", 2.0,
+        CameraFrame("camera", 2, 0, 0, 2.0, 1, 1, 0, 0, b"BM2"),
     )
     frame_results = [
         {

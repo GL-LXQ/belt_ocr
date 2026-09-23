@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from camera.hikrobot_sdk import CameraFrame
 from models import CapturedFrame
 from text_recognition import TextRecognizer
 
@@ -49,7 +50,18 @@ def build_mock_ocr_results(
                         frame_id="capture-1",  # 图片编号
                         captured_at="2026-09-23",  # 采集时间
                         captured_monotonic=1.0,  # 单调采集时间
-                        image_data=b"BM",  # 图片字节
+                        camera_frame=CameraFrame(
+                            camera_serial="camera",  # 相机序列号
+                            frame_number=1,  # SDK 帧编号
+                            device_timestamp=0,  # 设备时间戳
+                            host_timestamp=0,  # 主机时间戳
+                            received_monotonic=1.0,  # 接收单调时间
+                            width=1,  # 图像宽度
+                            height=1,  # 图像高度
+                            pixel_type=0,  # 像素格式编号
+                            lost_packet_count=0,  # 丢包数
+                            data=b"BM",  # 测试图像字节
+                        ),
                     ),
                 ),
             )
@@ -60,7 +72,9 @@ def build_mock_ocr_results(
         frame_id = f"capture-{frame_number}"
         frames.append(CapturedFrame(
             "session", "capture", "camera", frame_id, "2026-09-23",
-            float(frame_number), b"BM",
+            float(frame_number), CameraFrame(
+                "camera", frame_number, 0, 0, float(frame_number), 1, 1, 0, 0, b"BM"
+            ),
         ))
 
         # 为当前图片建立与样本 JSON 相同的 block 和 line 字段。
@@ -108,7 +122,8 @@ def test_real_ocr_samples_follow_selection_rules(file_name: str) -> None:
     frame_id = result_path.stem
     image_result["frame_id"] = frame_id
     frame = CapturedFrame(
-        "session", "capture", "camera", frame_id, "2026-09-23", 1.0, b"BM"
+        "session", "capture", "camera", frame_id, "2026-09-23", 1.0,
+        CameraFrame("camera", 1, 0, 0, 1.0, 1, 1, 0, 0, b"BM"),
     )
 
     # 核对样本中的 8 位连号、短数字和首份样本的 20 位文字。

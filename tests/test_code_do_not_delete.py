@@ -8,6 +8,7 @@ import pytest
 from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QImage
 
+from camera.hikrobot_sdk import CameraFrame
 from models import CapturedFrame, OCRResult
 
 
@@ -32,7 +33,18 @@ def generate_final_text_and_images(frame_results: list[dict], frames: tuple[Capt
                     frame_id="capture-1",  # 图片编号
                     captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
                     captured_monotonic=1.0,  # 单调接收时间
-                    image_data=b"BM...",  # BMP 文件字节
+                    camera_frame=CameraFrame(
+                        camera_serial="CAM01",  # 相机序列号
+                        frame_number=1,  # SDK 帧编号
+                        device_timestamp=0,  # 设备时间戳
+                        host_timestamp=0,  # 主机时间戳
+                        received_monotonic=1.0,  # 接收单调时间
+                        width=1,  # 图像宽度
+                        height=1,  # 图像高度
+                        pixel_type=0,  # 像素格式编号
+                        lost_packet_count=0,  # 丢包数
+                        data=b"BM",  # 测试图像字节
+                    ),
                 ),
             ),
             line_frame_ids=(("capture-1",),),  # 与 ordered_lines 逐项对应的来源图片编号
@@ -171,7 +183,10 @@ def test_candidate_selection(observations, expected_text, expected_warning, capl
         None  # 文字、图片映射和日志断言通过
     """
     # 创建测试帧，并将候选行装入同一个原始 block。
-    frame = CapturedFrame("session", "capture", "camera", "frame", "2026-09-21", 1.0, b"BM")
+    frame = CapturedFrame(
+        "session", "capture", "camera", "frame", "2026-09-21", 1.0,
+        CameraFrame("camera", 1, 0, 0, 1.0, 1, 1, 0, 0, b"BM"),
+    )
     frame_results = [{
         "frame_id": frame.frame_id,
         "blocks": [{
@@ -228,7 +243,7 @@ def test_statistics_samples():
             "blocks": content["blocks"],
         })
 
-        # 将 JPG 转为内存 BMP，保持与正式 CapturedFrame 的图片契约一致。
+        # 将 JPG 转为内存 BMP，供测试核对图片内容。
         image = QImage(str(statistics_directory / "imgs" / f"{result_path.stem}.jpg"))
         buffer = QBuffer()
         assert buffer.open(QIODevice.OpenModeFlag.WriteOnly)
@@ -242,7 +257,10 @@ def test_statistics_samples():
             frame_id=result_path.stem,
             captured_at="2026-09-21T00:00:00+00:00",
             captured_monotonic=float(len(frames)),
-            image_data=image_data,
+            camera_frame=CameraFrame(
+                "sample-camera", len(frames), 0, 0, float(len(frames)),
+                image.width(), image.height(), 0, 0, image_data,
+            ),
         ))
 
     # 检查样本输出的四类文字、来源关系和图片去重。
@@ -254,7 +272,9 @@ def test_statistics_samples():
     selected_ids = [frame.frame_id for frame in result.selected_frames]
     assert len(selected_ids) == len(set(selected_ids))
     assert set(selected_ids) == {frame_ids[0] for frame_ids in result.line_frame_ids}
-    assert all(frame.image_data.startswith(b"BM") for frame in result.selected_frames)
+    assert all(
+        frame.camera_frame.data.startswith(b"BM") for frame in result.selected_frames
+    )
     for text, frame_ids in zip(result.ordered_lines, result.line_frame_ids):
         source = next(item for item in frame_results if item["frame_id"] == frame_ids[0])
         assert any(text == line["text"] for block in source["blocks"] for line in block["lines"])

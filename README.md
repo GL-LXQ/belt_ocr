@@ -568,4 +568,6 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 
 ### 2026-09-23：OCR 输入改用相机原始帧
 
-`process_session_frames()` 从采集结果取得 `CameraFrame.data`，直接组装带周期和帧编号的 `CapturedFrame`，再依次交给筛帧、识别和终选；机器调用不再传入 BMP 编码接口。当前证据保存仍按 `.bmp` 路径写入 `CapturedFrame.image_data`，后续需在保存前补齐原始帧到文件图片的转换。
+前一步将 `CameraFrame.data` 直接放入 `CapturedFrame.image_data`，使筛帧和识别跳过了 BMP 编码；这一步只保留了原始字节，未保留图像宽、高和像素格式。
+
+`process_session_frames()` 现在将完整 `CameraFrame` 放入 `CapturedFrame.camera_frame`，连同宽、高、像素格式和原始字节交给筛帧与 OCR 接口；存储代码相应从 `camera_frame.data` 读取原始字节。证据文件仍以 `.bmp` 命名，保存前的图片编码将在后续步骤处理。

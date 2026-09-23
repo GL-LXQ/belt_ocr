@@ -8,6 +8,7 @@ import random
 
 import pytest
 
+from camera.hikrobot_sdk import CameraFrame
 from models import CapturedFrame
 from test_code_do_not_delete import generate_final_text_and_images
 
@@ -214,7 +215,10 @@ def test_virtual_ocr_cases(case_name, observations, expected_texts, expected_war
             frame_id=f"frame-{frame_number}",
             captured_at="2026-09-21T00:00:00+00:00",
             captured_monotonic=float(frame_number),
-            image_data=f"virtual-image-{frame_number}".encode(),
+            camera_frame=CameraFrame(
+                "virtual-camera", frame_number, 0, 0, float(frame_number),
+                1, 1, 0, 0, f"virtual-image-{frame_number}".encode(),
+            ),
         )
         for frame_number in range(frame_count)
     )
