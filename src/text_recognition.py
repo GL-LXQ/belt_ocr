@@ -139,12 +139,14 @@ class TextRecognizer:
         # 生成最终文字和图片。
         result = self.generate_final_text_and_images(frame_results, qualified_frames)
 
-        # 无最终文字时结束本轮。
+        # 无最终文字时记录人工复核并结束本轮。
         if not result.ordered_lines:
+            logger.warning("本轮没有最终文字，人工复核 session_id=%s", session_id)
             raise ValueError("OCR_NO_TEXT")
 
-        # 无选中图片时结束本轮。
+        # 无选中图片时记录人工复核并结束本轮。
         if not result.selected_frames:
+            logger.warning("本轮没有选中图片，人工复核 session_id=%s", session_id)
             raise ValueError("OCR_NO_SELECTED_IMAGES")
 
         # 返回本轮最终结果。

@@ -83,6 +83,8 @@ OCRResult 包含 `ordered_lines`（保留空白的大写文字）、`normalized_
 
 数据流：OCR 行文字先统一大写，再去空白并按字符数分桶；2 位和 3 位候选先剔除非 `0–9` 字符，8 位候选按大写尾字母查找连号，再依据置信度选择结果。`ordered_lines` 保留原有空白，`normalized_lines` 去掉空白，两者的字母均为大写；8 位最终文字统一关联该类最高置信度对应的图片，20、3、2 位文字仍关联各自图片，证据图片按编号去重后进入 `OCRResult`，供后续周期提交使用。
 
+整轮结果返回前，若没有最终文字或没有选中图片，先记录带 `session_id` 的人工复核日志，再分别以 `OCR_NO_TEXT` 或 `OCR_NO_SELECTED_IMAGES` 结束本轮；机器收到 `OCR_FAILED`，不会把空结果当作识别成功提交。
+
 验证数据流：`statistics/results` 中的五份 OCR JSON 和测试生成的同结构 mock 数据，均以 `image_path`、`blocks`、`lines` 组织；测试给每份结果绑定 `frame_id` 和内存图片后调用终选函数，逐项核对文字、去空白文字、证据编号、选中图片及人工复核日志。少字、多字与特殊符号按去空白后的实际长度重新分桶，20 位仍不做格式过滤，3 位若识别成两位纯数字则按 2 位类别处理。
 
 固定基准数据流：`tests/fixtures/build_ocr_selection_reference.py` 按已确认规则先写入 `ocr_selection_reference_200.json`，四类各记录 50 条同结构 OCR 输入及预期的 `ordered_lines`、`normalized_lines`、`line_frame_ids`、`selected_frame_ids`；`tests/test_text_recognition_reference_200.py` 只读取这份固定文件，绑定内存图片后调用终选函数，并将四项实际结果逐项与预期结果比对。基准覆盖置信度边界、字符错位、符号、Unicode、同分、Top 5、连号组选优和 8 位共用证据图片。
