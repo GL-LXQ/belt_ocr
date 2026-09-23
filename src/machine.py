@@ -471,11 +471,8 @@ class Machine:
                 capture_result = event.payload
                 session.capture_summary = capture_result.statistics
 
-                # 没有采集帧时标记识别失败。
+                # 没有采集帧时上报图像采集失败。
                 if not capture_result.frames:
-                    session.ocr_state = OCRState.FAILED
-
-                    # 上报图像采集失败。
                     if self.notify_measurement_progress is not None:
                         self.notify_measurement_progress(
                             session.machine_id,

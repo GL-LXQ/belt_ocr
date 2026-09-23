@@ -560,12 +560,10 @@ async def test_empty_capture_fails_and_waits_for_close(tmp_path: Path) -> None:
 
     # 核对失败状态、异常记录和当前周期身份。
     assert session.state == SessionState.FAILED
-    assert session.ocr_state == OCRState.FAILED
     assert machine.current_session is session
-    assert progress_updates[-1][2:] == (
-        ProgressStage.IMAGE_CAPTURE,
-        ProgressStatus.FAILED,
-    )
+    assert [update[2:] for update in progress_updates] == [
+        (ProgressStage.IMAGE_CAPTURE, ProgressStatus.FAILED),
+    ]
     events = read_abnormal_events(database)
     assert len(events) == 1
     assert events[0][2] == "此次相机没有采集到任何帧"
