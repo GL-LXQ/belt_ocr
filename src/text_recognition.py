@@ -198,7 +198,8 @@ class TextRecognizer:
     def generate_final_text_and_images(self, frame_results: list[dict], frames: tuple[CapturedFrame, ...]) -> OCRResult:
         """按字符类别筛选最终文字，并给出每条文字对应的来源图片。
 
-        处理规则：20 字符不做格式过滤，3 和 2 字符要求纯数字，8 字符要求前七位数字加一位字母；
+        处理规则：先将文字转成大写；20 字符不做格式过滤，3 和 2 字符要求纯数字，
+        8 字符要求前七位数字加一位字母；
         20、3、2 字符各输出本类置信度最高的一条，8 字符先去重再按连续编号规则选出。
         没有候选、格式全部不符或最高置信度低于阈值时记录人工复核日志，不补造该类别结果。
 
@@ -209,7 +210,7 @@ class TextRecognizer:
         Returns:
             返回示例：
                 OCRResult(
-                    ordered_lines=("0 03",),  # 按 20、8、3、2 类别顺序排列的最终原始文字
+                    ordered_lines=("0 03",),  # 按 20、8、3、2 类别顺序排列的大写文字
                     normalized_lines=("003",),  # 与 ordered_lines 逐项对应的去空白文字
                     selected_frames=(  # 最终选中的内存图片，同一图片只保留一次
                         CapturedFrame(
@@ -236,13 +237,14 @@ class TextRecognizer:
         for frame_result in frame_results:
             for block in frame_result["blocks"]:
                 for line in block["lines"]:
-                    text = line["text"]
+                    # 统一文字中的字母大小写。
+                    text = line["text"].upper()
                     normalized_text = re.sub(r"\s+", "", text)
                     character_length = len(normalized_text)
                     if character_length not in (20, 8, 3, 2):
                         continue
 
-                    # 候选保留原文、去空白文字、置信度和来源图片。
+                    # 候选保留大写文字、去空白文字、置信度和来源图片。
                     candidates_by_length[character_length].append({
                         "text": text,
                         "normalized_text": normalized_text,
@@ -317,7 +319,7 @@ class TextRecognizer:
         }
         selected_candidates.sort(key=lambda candidate: category_order[len(candidate["normalized_text"])])
 
-        # 最终文字保留 OCR 原始内容，包含原有空白。
+        # 最终文字保留 OCR 原有空白，字母统一大写。
         ordered_lines = tuple(candidate["text"] for candidate in selected_candidates)
 
         # 同时保存去掉所有空白后的文字。
@@ -347,7 +349,7 @@ class TextRecognizer:
         Returns:
             返回示例：
                 [{
-                    "text": "2926215C",  # 原始文字
+                    "text": "2926215C",  # 保留空白的大写文字
                     "normalized_text": "2926215C",  # 去掉空白后的文字
                     "confidence": 0.95,  # 该行的识别置信度
                     "frame_id": "capture-1",  # 来源图片编号
@@ -379,7 +381,7 @@ class TextRecognizer:
         Returns:
             返回示例：
                 [{
-                    "text": "2926215C",  # 原始文字
+                    "text": "2926215C",  # 保留空白的大写文字
                     "normalized_text": "2926215C",  # 去掉空白后的文字
                     "confidence": 0.95,  # 该行的识别置信度
                     "frame_id": "capture-1",  # 来源图片编号
