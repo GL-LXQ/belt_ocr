@@ -12,7 +12,7 @@ from camera.camera import Camera
 from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
 from enums import EventType, FrequencyState, OCRState, ProgressStage, ProgressStatus, SessionState
-from camera.hikrobot_sdk import CameraFrame
+from camera.hikrobot_sdk import CameraFrame, MvsError
 from models import BeltSession, CapturedFrame, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
 from text_recognition import TextRecognizer
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class ImageEncodingError(RuntimeError):
-    """标记证据图片编码阶段的相机故障。"""
+    """标记证据图片编码阶段的未知异常。"""
 
 
 class Machine:
@@ -926,6 +926,22 @@ class Machine:
                 record,
                 evidence_frames,
             )
+        except MvsError as error:
+            # 记录证据图片编码失败明细。
+            session.errors.append(str(error))
+
+            # 上报证据入库失败。
+            if self.notify_measurement_progress is not None:
+                self.notify_measurement_progress(
+                    session.machine_id,
+                    session.session_id,
+                    ProgressStage.EVIDENCE_STORAGE,
+                    ProgressStatus.FAILED,
+                )
+
+            # 按证据图片编码失败结束本轮测量。
+            await self.handle_measurement_failure(session, "EVIDENCE_ENCODING_FAILED")
+            return
         except ImageEncodingError:
             raise
         except Exception as error:
@@ -1035,12 +1051,9 @@ class Machine:
             # 将相机原始帧编码为 JPG 图片。
             try:
                 image_data = self.camera.sdk_camera.encode_image(frame.camera_frame)
+            except MvsError:
+                raise
             except Exception as error:
-                logger.exception(
-                    "相机编码失败 session_id=%s frame_id=%s",
-                    record.session_id,
-                    frame.frame_id,
-                )
                 raise ImageEncodingError("相机图片编码失败") from error
 
             # 登记本次需要新建的图片路径。

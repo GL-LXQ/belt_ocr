@@ -354,8 +354,72 @@ async def test_finalize_preserves_reliable_text_for_review(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_encoding_failure_removes_new_images(tmp_path: Path) -> None:
-    """确认第二张图片编码失败时清理第一张且不写数据库。
+async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -> None:
+    """确认 MVS 证据图片编码失败只结束本轮并保留相机可用状态。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 本轮失败且相机仍可受理下一轮
+    """
+    first_frame = create_frame("session-1", "frame-1", b"image-one")
+    second_frame = create_frame("session-1", "frame-2", b"image-two")
+    machine, database, session, progress_updates, _ = create_machine(tmp_path, (first_frame, second_frame))
+
+    def encode_image(camera_frame: object) -> bytes:
+        """首帧正常编码，第二帧返回 MVS 编码错误。
+
+        Args:
+            camera_frame: 当前相机帧。
+
+        Returns:
+            返回示例：
+                b"image-one"  # 首帧编码结果
+        """
+        if camera_frame.data == b"image-two":
+            raise MvsError("SaveImageEx3 编码失败")
+        return camera_frame.data
+
+    # 使用真实相机可用状态检查本轮失败后的机器状态。
+    sdk_camera = SimpleNamespace(
+        encode_image=encode_image,
+        closed=False,
+        faulted=False,
+        capture_lock=threading.Lock(),
+    )
+    camera = Camera("1", 1000, 50, publish_event, machine.on_fatal_error)
+    camera.sdk_camera = sdk_camera
+    machine.camera = camera
+    machine.initialized = True
+
+    # 执行本轮保存并核对失败审计和证据清理。
+    await machine.try_finalize(session)
+    assert session.state == SessionState.FAILED
+    assert session.errors == ["SaveImageEx3 编码失败", "EVIDENCE_ENCODING_FAILED"]
+    assert machine.current_session is None
+    abnormal_events = read_abnormal_events(database)
+    assert len(abnormal_events) == 1
+    assert abnormal_events[0][2] == "EVIDENCE_ENCODING_FAILED"
+    assert json.loads(abnormal_events[0][3])["session_errors"] == session.errors
+    expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
+    assert not (expected_directory / "frame-1.jpg").exists()
+    with sqlite3.connect(database.config.database_path) as connection:
+        record_count = connection.execute("SELECT COUNT(*) FROM measurements").fetchone()[0]
+    assert record_count == 0
+
+    # 核对相机和机器仍可接收下一轮。
+    assert not sdk_camera.faulted
+    assert camera.available
+    assert machine.acceptance_state == "READY"
+    machine.on_fatal_error.assert_not_called()
+    assert progress_updates[-1][2:] == (ProgressStage.EVIDENCE_STORAGE, ProgressStatus.FAILED)
+
+
+@pytest.mark.asyncio
+async def test_unknown_encoding_failure_removes_new_images(tmp_path: Path) -> None:
+    """确认未知编码异常继续抛出，并清理本轮已保存的图片。
 
     Args:
         tmp_path: pytest 提供的临时目录。
@@ -396,6 +460,9 @@ async def test_encoding_failure_removes_new_images(tmp_path: Path) -> None:
             "SELECT COUNT(*) FROM measurements"
         ).fetchone()[0]
     assert record_count == 0
+    assert session.state != SessionState.FAILED
+    assert read_abnormal_events(database) == []
+    assert "DATABASE_WRITE_FAILED" not in session.errors
 
 
 @pytest.mark.asyncio
