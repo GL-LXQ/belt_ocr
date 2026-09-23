@@ -12,11 +12,10 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from config_util import AppConfig, MachineConfig
-from database import Database
+from database import Database, MeasurementRecord
 from enums import OCRState, ProgressStage, ProgressStatus, SessionState
 from machine import ImageEncodingError, Machine
 from models import BeltSession, CapturedFrame, FrequencyMeasurement, OCRResult
-from repo.measurement_repo import MeasurementRecord
 
 
 async def publish_event(event: object) -> None:
@@ -187,7 +186,7 @@ async def test_finalize_saves_images_before_record(tmp_path: Path) -> None:
     event_loop_thread = threading.get_ident()
 
     # 写入时确认图片已经存在。
-    original_write_record = database.measurement_repo.write_record
+    original_write_record = database.write_measurement_record
 
     def write_record_after_image(record: object) -> None:
         """检查证据图片后写入数据库。
@@ -202,7 +201,7 @@ async def test_finalize_saves_images_before_record(tmp_path: Path) -> None:
         assert (record.evidence_directory / "frame-1.jpg").read_bytes() == b"image-one"
         original_write_record(record)
 
-    database.measurement_repo.write_record = write_record_after_image
+    database.write_measurement_record = write_record_after_image
     await machine.try_finalize(session)
 
     # 核对保存状态、后台线程和数据库内容。
@@ -352,7 +351,7 @@ async def test_database_failure_removes_new_images(tmp_path: Path) -> None:
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, progress_updates, _ = create_machine(tmp_path, (frame,))
-    database.measurement_repo.write_record = Mock(
+    database.write_measurement_record = Mock(
         side_effect=sqlite3.OperationalError("数据库写入失败")
     )
     await machine.try_finalize(session)
@@ -368,7 +367,7 @@ async def test_database_failure_removes_new_images(tmp_path: Path) -> None:
     )
 
 
-def test_repo_compares_evidence_directory(tmp_path: Path) -> None:
+def test_database_compares_evidence_directory(tmp_path: Path) -> None:
     """确认同一周期重复写入只接受相同证据目录。
 
     Args:
@@ -399,11 +398,11 @@ def test_repo_compares_evidence_directory(tmp_path: Path) -> None:
     )
 
     # 重复保存相同记录。
-    database.measurement_repo.write_record(record)
-    database.measurement_repo.write_record(record)
+    database.write_measurement_record(record)
+    database.write_measurement_record(record)
 
     # 拒绝同一周期使用不同证据目录。
     with pytest.raises(ValueError):
-        database.measurement_repo.write_record(
+        database.write_measurement_record(
             replace(record, evidence_directory=tmp_path / "other")
         )

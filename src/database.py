@@ -7,11 +7,11 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 
 from config_util import AppConfig
 from repo.machine_repo import MachineRepo
-from repo.measurement_repo import MeasurementRepo
 from repo.abnormal_event_repo import AbnormalEventRepo
 
 
@@ -81,6 +81,22 @@ def serialize_value(value):
     return value
 
 
+@dataclass(frozen=True)
+class MeasurementRecord:
+    """保存一轮测量需要写入数据库的业务字段。"""
+
+    machine_id: str  # 机器编号
+    session_id: str  # 测量周期编号
+    start_time: str  # 本轮开始时间
+    finish_time: str  # 本轮结算时间
+    ordered_lines: tuple[str, ...]  # 最终文字
+    final_frequency_hz: float | None  # 最终频率
+    measurement_frequencies: tuple[dict, ...]  # 频率明细
+    evidence_directory: Path  # 本轮证据图片目录
+    needs_review: bool  # 是否需要人工复核
+    review_reason: str | None  # 人工复核原因
+
+
 class Database:
     def __init__(self, config: AppConfig) -> None:
         """初始化各表访问对象和连接状态。
@@ -95,13 +111,12 @@ class Database:
         # 保存数据库配置。
         self.config = config
 
-        # 创建各表的数据库访问对象。
+        # 创建机器与异常事件表的访问对象。
         self.machine_repo = MachineRepo(config.database_path)
-        self.measurement_repo = MeasurementRepo(config.database_path)
         self.abnormal_event_repo = AbnormalEventRepo(config.recovery_path)
 
         # 创建测量记录写入锁。
-        self.measurement_write_lock = threading.Lock()
+        self._measurement_write_lock = threading.Lock()
 
         # 初始化实例锁文件与运行库连接状态。
         self.lock_file = None
@@ -196,7 +211,93 @@ class Database:
             self.machine_repo.create_table(connection)
 
             # 创建测量结果表。
-            self.measurement_repo.create_table(connection)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS measurements (
+                    session_id TEXT PRIMARY KEY,
+                    machine_id TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    finish_time TEXT NOT NULL,
+                    ordered_lines TEXT NOT NULL,
+                    final_frequency_hz REAL,
+                    measurement_frequencies TEXT NOT NULL DEFAULT '[]',
+                    evidence_directory TEXT NOT NULL,
+                    needs_review INTEGER NOT NULL DEFAULT 0,
+                    review_reason TEXT
+                );
+            """)
+
+    def write_measurement_record(self, record: MeasurementRecord) -> None:
+        """在事务中幂等写入本轮测量记录。
+
+        Args:
+            record: 本轮测量的业务字段和证据图片目录。
+
+        Returns:
+            返回示例：
+                None  # 记录已写入或已存在相同内容，冲突时抛出异常
+        """
+        # 将业务字段整理为测量表对应的列值。
+        record_values = (
+            record.machine_id,
+            record.start_time,
+            record.finish_time,
+            json.dumps(record.ordered_lines, ensure_ascii=False),
+            record.final_frequency_hz,
+            str(record.evidence_directory),
+            json.dumps(record.measurement_frequencies, ensure_ascii=False, sort_keys=True),
+            int(record.needs_review),
+            record.review_reason,
+        )
+
+        # 串行执行测量记录的数据库事务。
+        with self._measurement_write_lock:
+            with closing(sqlite3.connect(self.config.database_path, timeout=1)) as connection:
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+
+                    # 查询同一周期已保存的业务字段。
+                    existing_record = connection.execute(
+                        "SELECT machine_id, start_time, finish_time, ordered_lines, "
+                        "final_frequency_hz, evidence_directory, measurement_frequencies, "
+                        "needs_review, review_reason "
+                        "FROM measurements WHERE session_id = ?",
+                        (record.session_id,),
+                    ).fetchone()
+
+                    # 已有记录时核对内容，一致则结束写入。
+                    if existing_record is not None:
+                        if existing_record != record_values:
+                            raise ValueError("同一 Session 的提交内容不一致。")
+                        return
+
+                    # 写入本轮测量记录。
+                    connection.execute(
+                        "INSERT INTO measurements (session_id, machine_id, start_time, "
+                        "finish_time, ordered_lines, final_frequency_hz, evidence_directory, "
+                        "measurement_frequencies, needs_review, review_reason) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (record.session_id, *record_values),
+                    )
+
+    def has_measurement_record(self, session_id: str) -> bool:
+        """查询指定周期是否已有测量记录。
+
+        Args:
+            session_id: 待查询的测量周期编号。
+
+        Returns:
+            返回示例：
+                True  # 已存在对应周期的测量记录
+                False  # 未找到对应周期的测量记录
+        """
+        # 查询指定周期的测量记录。
+        with closing(sqlite3.connect(self.config.database_path, timeout=1)) as connection:
+            record = connection.execute(
+                "SELECT 1 FROM measurements WHERE session_id = ?", (session_id,)
+            ).fetchone()
+
+        # 返回查询结果。
+        return record is not None
 
     def close(self) -> None:
         """关闭运行库连接并释放进程锁。

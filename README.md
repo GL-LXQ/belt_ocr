@@ -55,7 +55,7 @@ uv run python -X utf8 -m pytest -q
 
 #### 1.2.2 数据流动逻辑
 
-入口 `src/main.py` 读取配置文件中的公共参数，`src/system_runtime.py` 构造时只保存配置、创建数据库与运行状态，`start()` 再按顺序初始化图片目录与双库、按业务库 `machine` 表读取启用机器并逐台建立采集器和频率接收；采集帧与频率读数按周期汇入对应机器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera/camera.py` 的 `Camera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中包装原始帧并执行筛帧、识别和文字图片终选；正常时返回最终文字与选中帧，待复核时返回全部原始帧和原因；CLOSE 封闭频率列表并选取最后收到的有效读数。机器运行对象在正常关闭且收到 OCR 结果后合并 OCR 与频率的人工复核原因，生成证据路径，在线程中逐帧以质量 85 编码 JPG 并原子保存图片，再直接调用测量 Repo 幂等写入 SQLite；写入完成后更新本轮状态并释放图片引用，清空 current_session 后才允许下一轮。其余业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，机器故障停止整个应用。
+入口 `src/main.py` 读取配置文件中的公共参数，`src/system_runtime.py` 构造时只保存配置、创建数据库与运行状态，`start()` 再按顺序初始化图片目录与双库、按业务库 `machine` 表读取启用机器并逐台建立采集器和频率接收；采集帧与频率读数按周期汇入对应机器，OCR 结果完成后保存图片与 SQLite 测量记录，退出时统一释放资源。每台机器只保留一个 current_session；空闲时 START 创建周期并同时开启相机采集和频率接收，上一轮未结束时的新 START 只记录日志并跳过；`src/camera/camera.py` 的 `Camera.start_capture()` 创建异步采集主流程 capture_and_deliver_result()，通过 run_blocking_operation() 在线程中执行采集，线程在固定窗口内收集全部独立内存帧，窗口到期或 CLOSE 后结束循环并停止取流，允许保留当前读取返回的尾帧，由采集线程直接生成统一的 CaptureResult（全部帧和统计），run_capture() 直接返回结果，异步主流程随后通过事件的 session_id 将整轮结果交付原周期，采集接口和结果不再透传 capture_id，周期保留该编号供 OCR 生成图片编号；不再手动创建线程或通过 completion_future 传递结果；CLOSE 仅等待采集完成，退出等待交付结束。OCR 后台任务等待共享锁，在线程中包装原始帧并执行筛帧、识别和文字图片终选；正常时返回最终文字与选中帧，待复核时返回全部原始帧和原因；CLOSE 封闭频率列表并选取最后收到的有效读数。机器运行对象在正常关闭且收到 OCR 结果后合并 OCR 与频率的人工复核原因，生成证据路径，在线程中逐帧以质量 85 编码 JPG 并原子保存图片，再直接调用 `Database.write_measurement_record()` 幂等写入 SQLite；写入完成后更新本轮状态并释放图片引用，清空 current_session 后才允许下一轮。其余业务失败清理本轮，未关闭周期保留身份直到真实 CLOSE，已关闭周期等待后台任务释放后清空；三台机器可独立测量，机器故障停止整个应用。
 
 #### 1.2.3 处理阶段与职责
 
@@ -64,7 +64,7 @@ uv run python -X utf8 -m pytest -q
 3. **一次性交付**：CAPTURE_COMPLETED 携带原始帧和统计；机器采集失败在捕获处记录日志并抛出异常，由任务结束回调安排全局退出，不再生成失败采集结果。统计只包含采集耗时、接收帧数和保留帧数。
 4. **OCR**：每台机器最多一个识别任务，三台机器共用处理锁。`process_session_frames` 顺序完成原始帧包装 → `filter_qualified_frames` → `recognize_images` → `generate_final_text_and_images`，不编码图片。初筛无合格帧、模型结果数量不符或没有最终文字时，返回全部原始帧与中文复核原因；模型异常仍发送 OCR_FAILED。锁覆盖整轮处理，无批次队列和消费者。
 5. **关闭与结算**：CLOSE 停止本轮采集，封闭频率接收并选取最后一条有效读数；没有读数时等待 OCR 结果并标记人工复核，周期中断仍按失败清理。关闭后当前周期继续占用本机，直到图片、数据库保存或失败清理全部完成，才接收下一轮。机器运行对象不参与 OCR 中间结果整理。
-6. **提交**：正常关闭且收到 OCR 结果后，成功结果选用最终图片，复核结果选用全部原始帧，按 `evidence_directory / machine_id / session_id / frame_id.jpg` 生成路径；OCR 与频率复核原因同时存在时合并保存。`Machine.try_finalize()` 在线程中逐帧调用相机接口以质量 85 编码 JPG，先原子保存图片、再直接调用测量 Repo 写入数据库，完成后更新本轮状态；编码故障触发全局退出，不自动重试。
+6. **提交**：正常关闭且收到 OCR 结果后，成功结果选用最终图片，复核结果选用全部原始帧，按 `evidence_directory / machine_id / session_id / frame_id.jpg` 生成路径；OCR 与频率复核原因同时存在时合并保存。`Machine.try_finalize()` 在线程中逐帧调用相机接口以质量 85 编码 JPG，先原子保存图片、再直接调用 `Database.write_measurement_record()` 写入数据库，完成后更新本轮状态；编码故障触发全局退出，不自动重试。
 7. **失败与退出**：整轮 OCR 超时从 START 计时，包含采集、排队和处理。等待锁的任务取消后不执行模型；已开始的阻塞操作等线程实际结束后再释放锁，迟到结果丢弃。退出时关闭入口、排空事件、停止采集、收尾后台处理，最后关闭相机、SDK 和数据库。退出等待期限不能强制终止已经运行的线程。
 
 #### 1.2.4 三个黑盒与结果契约
@@ -102,8 +102,8 @@ OCRResult 包含 `ordered_lines`（保留空白的大写文字）、`normalized_
 | `src/camera/hikrobot_sdk.py` | SDK 加载、相机打开、取帧、内存 JPG 编码和关闭 |
 | `src/text_recognition.py` | 共享处理锁、OCR 主流程、筛帧与终选黑盒 |
 | `src/frequency_adapter.py` | 联调频率监听与当前周期归属 |
-| `src/database.py` | 双库初始化、实例锁、事件整理和证据图片原子写入 |
-| `src/repo/` | 按表封装建表 SQL、异常事件插入及测量记录幂等写入和查询 |
+| `src/database.py` | 双库初始化、实例锁、测量记录幂等写入与查询、事件整理和证据图片原子写入 |
+| `src/repo/` | 机器表与异常事件表的数据访问 |
 | `src/models.py` / `src/enums.py` | 事件、帧、结果和周期状态 |
 | `src/config_util.py` / `src/async_utils.py` | 配置解析、取消期间等待阻塞操作结束 |
 
@@ -587,3 +587,7 @@ GUI 启动入口通过 `read_configuration_settings()` 读取 `config/` 下 YAML
 ### 2026-09-23：新证据图片改为 JPG
 
 采集和 OCR 继续使用独立的相机原始帧；正常关闭后，机器按最终图片或待复核原始帧生成 `.jpg` 证据路径，存储队列调用 MVS SDK 以质量 85 编码 JPG，先保存图片，再把路径和测量结果写入 SQLite，完成后释放本轮帧引用。已有 BMP 文件及其数据库路径保持原样；此次调整只减少新证据文件的磁盘占用，不改变采集期间的原始帧内存占用。
+
+### 2026-09-23：测量记录直接由 Database 保存
+
+`MeasurementRecord`、测量表建表、幂等写入和周期存在性查询已移入 `src/database.py`，删除 `MeasurementRepo`。当前数据流为机器结算时确定本轮证据目录 → 在线程中逐帧编码并保存 JPG → 调用 `Database.write_measurement_record()` 写入 SQLite → 更新本轮状态；写入锁由 `Database` 内部管理。测量表字段与现有数据不变。

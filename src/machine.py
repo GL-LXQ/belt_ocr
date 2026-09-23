@@ -15,8 +15,7 @@ from camera.hikrobot_sdk import CameraFrame
 from models import BeltSession, CapturedFrame, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
 from text_recognition import TextRecognizer
-from database import Database, save_evidence_image
-from repo.measurement_repo import MeasurementRecord
+from database import Database, MeasurementRecord, save_evidence_image
 
 
 logger = logging.getLogger(__name__)
@@ -948,18 +947,15 @@ class Machine:
                 created_image_paths.append(image_path)
                 save_evidence_image(image_data, image_path)
 
-            # 图片全部保存后串行写入测量记录。
-            with self.database.measurement_write_lock:
-                database_write_attempted = True
-                self.database.measurement_repo.write_record(record)
+            # 图片全部保存后写入测量记录。
+            database_write_attempted = True
+            self.database.write_measurement_record(record)
         except Exception:
             # 数据库写入失败时确认是否已提交。
             record_not_committed = not database_write_attempted
             if database_write_attempted:
                 try:
-                    record_exists = self.database.measurement_repo.exists_by_session_id(
-                        record.session_id
-                    )
+                    record_exists = self.database.has_measurement_record(record.session_id)
                     record_not_committed = not record_exists
                 except Exception:
                     logger.exception("无法确认提交结果，保留图片 session_id=%s", record.session_id)
