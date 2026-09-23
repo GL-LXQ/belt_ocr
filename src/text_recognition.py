@@ -121,7 +121,7 @@ class TextRecognizer:
             [frame.camera_frame for frame in qualified_frames]
         )
 
-        # TODO 模型结果数量不一致时保存合格图片，并登记待人工复核记录。
+        # TODO 模型结果数量不一致时留存所有原始帧，并登记待人工复核记录。
         if len(image_results) != len(qualified_frames):
             raise ValueError(f"session_id={session_id} 本轮模型识别结果数量与图片数量不一致。")
 
@@ -137,7 +137,7 @@ class TextRecognizer:
         # 生成最终文字和图片。
         result = self.generate_final_text_and_images(frame_results, qualified_frames)
 
-        # TODO 无最终文字时应保留初筛前的全部原始图片，登记人工复核。
+        # TODO 无最终文字时应留存所有原始帧，登记人工复核。
         if not result.ordered_lines:
             logger.warning("本轮没有最终文字，人工复核 session_id=%s", session_id)
             raise ValueError(f"session_id={session_id} 本轮没有最终文字。")
