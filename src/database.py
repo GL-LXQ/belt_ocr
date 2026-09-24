@@ -315,29 +315,48 @@ class Database:
 
         Returns:
             返回示例：
-                None  # 运行库连接和实例锁已释放
+                None  # 运行库连接和实例锁已释放，关闭失败时抛出首次异常
         """
+        first_error: Exception | None = None
+
         # 关闭本次运行保持的数据库连接。
         if self.anchor_connection is not None:
-            self.anchor_connection.close()
-            self.anchor_connection = None
+            try:
+                self.anchor_connection.close()
+            except Exception as error:
+                first_error = error
+            else:
+                self.anchor_connection = None
 
-        # 释放进程锁并关闭锁文件。
+        # 释放进程锁。
         if self.lock_file is not None:
-            # Windows 按字节区间解锁。
-            if self.lock_acquired and os.name == "nt":
-                import msvcrt
-                self.lock_file.seek(0)
-                msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            # 其他平台释放文件锁。
-            elif self.lock_acquired:
-                import fcntl
-                fcntl.flock(self.lock_file, fcntl.LOCK_UN)
+            try:
+                if self.lock_acquired and os.name == "nt":
+                    import msvcrt
+                    self.lock_file.seek(0)
+                    msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    self.lock_acquired = False
+                elif self.lock_acquired:
+                    import fcntl
+                    fcntl.flock(self.lock_file, fcntl.LOCK_UN)
+                    self.lock_acquired = False
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
 
             # 关闭锁文件并复位持锁状态。
-            self.lock_file.close()
-            self.lock_file = None
-            self.lock_acquired = False
+            try:
+                self.lock_file.close()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+            else:
+                self.lock_file = None
+                self.lock_acquired = False
+
+        # 所有资源处理后抛出最先发生的关闭异常。
+        if first_error is not None:
+            raise first_error
 
     def save_abnormal_event(
         self,
