@@ -15,9 +15,9 @@ import pytest
 from camera.camera import Camera
 from config_util import AppConfig, MachineConfig
 from camera.hikrobot_sdk import MvsError
-from database import Database, MeasurementRecord
+from database import CommitIntegrityConflictError, Database, MeasurementRecord
 from enums import EventType, OCRState, ProgressStage, ProgressStatus, SessionState
-from machine import ImageEncodingError, Machine
+from machine import EvidenceWriteError, ImageEncodingError, Machine
 from models import (
     BeltSession,
     CaptureResult,
@@ -467,28 +467,26 @@ async def test_unknown_encoding_failure_removes_new_images(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error_type", [OSError, ValueError])
 async def test_image_write_failure_skips_database(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    error_type: type[Exception],
 ) -> None:
-    """确认图片写入失败时不写数据库并结束本轮。
+    """确认图片写入失败时记录本轮并通知全局故障入口。
 
     Args:
         tmp_path: pytest 提供的临时目录。
         monkeypatch: pytest 提供的属性替换工具。
-        error_type: 图片文件操作抛出的异常类型。
 
     Returns:
         返回示例：
-            None  # 本轮失败且数据库没有测量记录
+            None  # 本轮失败、数据库未写入且故障已上报
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    write_error = OSError("图片写入失败")
     monkeypatch.setattr(
         "machine.save_evidence_image",
-        Mock(side_effect=error_type("图片写入失败")),
+        Mock(side_effect=write_error),
     )
     await machine.try_finalize(session)
 
@@ -498,6 +496,10 @@ async def test_image_write_failure_skips_database(
     assert "DATABASE_WRITE_FAILED" not in session.errors
     assert "COMMIT_INTEGRITY_CONFLICT" not in session.errors
     assert read_abnormal_events(database)[0][2] == "EVIDENCE_WRITE_FAILED"
+    machine.on_fatal_error.assert_called_once()
+    fatal_error = machine.on_fatal_error.call_args.args[0]
+    assert isinstance(fatal_error, EvidenceWriteError)
+    assert fatal_error.__cause__ is write_error
     with sqlite3.connect(database.config.database_path) as connection:
         record_count = connection.execute(
             "SELECT COUNT(*) FROM measurements"
@@ -506,15 +508,18 @@ async def test_image_write_failure_skips_database(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
 async def test_unknown_image_write_error_is_not_database_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
 ) -> None:
-    """确认未知图片保存异常继续上抛，不记为数据库写入失败。
+    """确认未知图片保存异常原样上抛，不记为存储失败。
 
     Args:
         tmp_path: pytest 提供的临时目录。
         monkeypatch: pytest 提供的属性替换工具。
+        error_type: 注入图片阶段的未知异常类型。
 
     Returns:
         返回示例：
@@ -522,21 +527,26 @@ async def test_unknown_image_write_error_is_not_database_failure(
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    unknown_error = error_type("未知图片保存错误")
     monkeypatch.setattr(
         "machine.save_evidence_image",
-        Mock(side_effect=RuntimeError("未知图片保存错误")),
+        Mock(side_effect=unknown_error),
     )
 
     # 执行图片保存并核对未知异常保持原样上抛。
-    with pytest.raises(RuntimeError, match="未知图片保存错误"):
+    with pytest.raises(error_type, match="未知图片保存错误") as captured_error:
         await machine.try_finalize(session)
+    assert captured_error.value is unknown_error
     assert "DATABASE_WRITE_FAILED" not in session.errors
+    assert "EVIDENCE_WRITE_FAILED" not in session.errors
+    assert "COMMIT_INTEGRITY_CONFLICT" not in session.errors
     assert read_abnormal_events(database) == []
+    machine.on_fatal_error.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
-    """确认数据库写入失败时保留图片并结束本轮。
+    """确认数据库写入失败时保留图片并通知全局故障入口。
 
     Args:
         tmp_path: pytest 提供的临时目录。
@@ -547,9 +557,8 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, progress_updates, _ = create_machine(tmp_path, (frame,))
-    database.write_measurement_record = Mock(
-        side_effect=sqlite3.OperationalError("数据库写入失败")
-    )
+    write_error = sqlite3.OperationalError("database is locked")
+    database.write_measurement_record = Mock(side_effect=write_error)
     await machine.try_finalize(session)
 
     # 核对本轮失败状态与已保存的图片。
@@ -557,6 +566,7 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
     assert "DATABASE_WRITE_FAILED" in session.errors
     assert "EVIDENCE_WRITE_FAILED" not in session.errors
     assert read_abnormal_events(database)[0][2] == "DATABASE_WRITE_FAILED"
+    machine.on_fatal_error.assert_called_once_with(write_error)
     assert machine.current_session is None
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
     assert (expected_directory / "frame-1.jpg").read_bytes() == b"image-one"
@@ -568,27 +578,80 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_database_conflict_keeps_conflict_reason(tmp_path: Path) -> None:
-    """确认数据库提交内容冲突仍使用原有错误代码。
+    """确认同一 Session 内容冲突不会覆盖原记录并通知全局故障入口。
 
     Args:
         tmp_path: pytest 提供的临时目录。
 
     Returns:
         返回示例：
-            None  # 提交冲突已按原有代码记录
+            None  # 原记录保留且本轮冲突已上报
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
-    database.write_measurement_record = Mock(
-        side_effect=ValueError("同一 Session 的提交内容不一致。")
+    existing_record = MeasurementRecord(
+        machine_id=session.machine_id,
+        session_id=session.session_id,
+        start_time=session.start_time,
+        finish_time="2026-09-23T00:00:01+00:00",
+        ordered_lines=("EXISTING",),
+        final_frequency_hz=50.0,
+        measurement_frequencies=(),
+        evidence_directory=tmp_path / "existing",
+        needs_review=False,
+        review_reason=None,
     )
+    database.write_measurement_record(existing_record)
 
-    # 执行数据库提交并核对原有冲突分类。
+    # 执行数据库提交并核对冲突分类。
     await machine.try_finalize(session)
     assert session.state == SessionState.FAILED
     assert "COMMIT_INTEGRITY_CONFLICT" in session.errors
     assert "DATABASE_WRITE_FAILED" not in session.errors
     assert read_abnormal_events(database)[0][2] == "COMMIT_INTEGRITY_CONFLICT"
+    machine.on_fatal_error.assert_called_once()
+    conflict_error = machine.on_fatal_error.call_args.args[0]
+    assert isinstance(conflict_error, CommitIntegrityConflictError)
+
+    # 核对数据库仍保留首次提交的内容。
+    with sqlite3.connect(database.config.database_path) as connection:
+        saved_record = connection.execute(
+            "SELECT ordered_lines, evidence_directory "
+            "FROM measurements WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+    assert saved_record == (
+        json.dumps(existing_record.ordered_lines),
+        str(existing_record.evidence_directory),
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_database_value_error_is_not_commit_conflict(
+    tmp_path: Path,
+) -> None:
+    """确认普通数据库 ValueError 原样上抛且不记为提交冲突。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 未知异常已上抛，未生成失败分类
+    """
+    frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    unknown_error = ValueError("未知数据库错误")
+    database.write_measurement_record = Mock(side_effect=unknown_error)
+
+    # 执行数据库提交并核对未知异常保持原样上抛。
+    with pytest.raises(ValueError, match="未知数据库错误") as captured_error:
+        await machine.try_finalize(session)
+    assert captured_error.value is unknown_error
+    assert "COMMIT_INTEGRITY_CONFLICT" not in session.errors
+    assert "DATABASE_WRITE_FAILED" not in session.errors
+    assert read_abnormal_events(database) == []
+    machine.on_fatal_error.assert_not_called()
 
 
 def test_database_compares_evidence_directory(tmp_path: Path) -> None:
@@ -626,7 +689,7 @@ def test_database_compares_evidence_directory(tmp_path: Path) -> None:
     database.write_measurement_record(record)
 
     # 拒绝同一周期使用不同证据目录。
-    with pytest.raises(ValueError):
+    with pytest.raises(CommitIntegrityConflictError):
         database.write_measurement_record(
             replace(record, evidence_directory=tmp_path / "other")
         )

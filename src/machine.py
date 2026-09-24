@@ -17,7 +17,12 @@ from camera.hikrobot_sdk import CameraFrame, MvsError
 from models import BeltSession, CapturedFrame, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
 from text_recognition import OCRProcessingError, TextRecognizer
-from database import Database, MeasurementRecord, save_evidence_image
+from database import (
+    CommitIntegrityConflictError,
+    Database,
+    MeasurementRecord,
+    save_evidence_image,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -956,7 +961,7 @@ class Machine:
             # 按证据图片编码失败结束本轮测量。
             await self.handle_measurement_failure(session, "EVIDENCE_ENCODING_FAILED")
             return
-        except EvidenceWriteError:
+        except EvidenceWriteError as error:
             # 记录证据图片写入失败。
             logger.exception(
                 "证据图片写入失败 machine_id=%s session_id=%s",
@@ -975,12 +980,15 @@ class Machine:
 
             # 按证据图片写入失败结束本轮测量。
             await self.handle_measurement_failure(session, "EVIDENCE_WRITE_FAILED")
+
+            # 将证据图片写入故障交给全局退出流程。
+            self.on_fatal_error(error)
             return
-        except (ValueError, sqlite3.Error) as error:
+        except (CommitIntegrityConflictError, sqlite3.Error) as error:
             # 登记数据库提交失败或内容冲突。
             error_code = (
                 "COMMIT_INTEGRITY_CONFLICT"
-                if isinstance(error, ValueError)
+                if isinstance(error, CommitIntegrityConflictError)
                 else "DATABASE_WRITE_FAILED"
             )
             logger.exception(
@@ -1000,6 +1008,9 @@ class Machine:
 
             # 清理本轮失败状态。
             await self.handle_measurement_failure(session, error_code)
+
+            # 将数据库写入故障交给全局退出流程。
+            self.on_fatal_error(error)
             return
 
         # 标记本轮已入库。
@@ -1054,7 +1065,7 @@ class Machine:
                     logger.exception("清理证据图片失败 path=%s", image_path)
 
             # 标记图片阶段的文件操作失败。
-            if isinstance(error, (OSError, ValueError)):
+            if isinstance(error, OSError):
                 raise EvidenceWriteError("证据图片写入失败") from error
             raise
 

@@ -97,6 +97,10 @@ class MeasurementRecord:
     review_reason: str | None  # 人工复核原因
 
 
+class CommitIntegrityConflictError(ValueError):
+    """标记同一 Session 已有记录与本次提交内容冲突。"""
+
+
 class Database:
     def __init__(self, config: AppConfig) -> None:
         """初始化各表访问对象和连接状态。
@@ -273,7 +277,9 @@ class Database:
                             # 已有记录时核对内容，一致则结束写入。
                             if existing_record is not None:
                                 if existing_record != record_values:
-                                    raise ValueError("同一 Session 的提交内容不一致。")
+                                    raise CommitIntegrityConflictError(
+                                        "同一 Session 的提交内容不一致。"
+                                    )
                                 return
 
                             # 写入本轮测量记录。
