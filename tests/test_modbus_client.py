@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pymodbus.exceptions import ModbusException
 
 from modbus_client import ModbusClient
 
@@ -95,3 +96,44 @@ async def test_read_reconnects_after_failed_connection() -> None:
     assert await modbus_client.read_discrete_inputs(0) == [True]
     assert modbus_client._create_client.call_count == 2
     failed_client.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("read_error", "communication_failure"),
+    [
+        (TypeError("timeout 参数错误"), False),
+        (RuntimeError("not connected 程序错误"), False),
+        (OSError("串口连接失效"), True),
+        (ModbusException("协议异常"), True),
+    ],
+)
+async def test_read_uses_exception_type_instead_of_message(
+    read_error: Exception,
+    communication_failure: bool,
+) -> None:
+    """确认读取异常按类型处理，不按异常文本猜测。
+
+    Args:
+        read_error: 本次读取时抛出的异常。
+        communication_failure: 异常是否按本次通信失败处理。
+
+    Returns:
+        返回示例：
+            None  # 通信异常已返回失败，程序异常已原样抛出
+    """
+    # 建立已连接的客户端并设置读取异常。
+    modbus_client = ModbusClient("COM1")
+    modbus_client._client = SimpleNamespace(
+        connected=True,
+        read_discrete_inputs=AsyncMock(side_effect=read_error),
+    )
+    modbus_client._connected = True
+
+    # 按异常类型核对读取结果或原始异常。
+    if communication_failure:
+        assert await modbus_client.read_discrete_inputs(0) is None
+    else:
+        with pytest.raises(type(read_error)) as raised_error:
+            await modbus_client.read_discrete_inputs(0)
+        assert raised_error.value is read_error

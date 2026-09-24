@@ -154,7 +154,7 @@ class ModbusClient:
             return list(result.bits[:count])
         except Exception as error:
             # 连接失效时复位状态并等待下一轮重连。
-            if self._is_connection_error(error):
+            if isinstance(error, OSError):
                 self._connected = False
                 logger.error("读取离散输入时连接失效: %s", error)
                 return None
@@ -190,37 +190,3 @@ class ModbusClient:
 
         # 重新建立连接。
         return await self.connect()
-
-    def _is_connection_error(self, error: Exception) -> bool:
-        """判断异常是否属于连接异常。
-
-        Args:
-            error: 待判断的异常对象。
-
-        Returns:
-            返回示例：
-                True  # 异常类型为连接、超时或操作系统错误，或异常文本含连接类关键字
-                False  # 异常类型和异常文本都不属于连接异常
-        """
-        # 按异常类型直接判定连接、超时和操作系统错误。
-        if isinstance(error, (ConnectionError, TimeoutError, OSError)):
-            return True
-
-        # 取小写异常文本供关键字匹配。
-        error_text = str(error).lower()
-
-        # 登记常见的连接类异常文本关键字。
-        connection_indicators = [
-            "connection",
-            "timeout",
-            "timed out",
-            "refused",
-            "reset",
-            "broken pipe",
-            "no response",
-            "disconnected",
-            "not connected",
-        ]
-
-        # 异常文本命中任一关键字即视为连接异常。
-        return any(indicator in error_text for indicator in connection_indicators)
