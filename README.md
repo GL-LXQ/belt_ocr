@@ -22,7 +22,7 @@ START 后创建本轮 Session，同时开始相机采集和频率收集；频率
 
 原始帧 → `filter_qualified_frames()` 筛帧（当前原样返回全部图片）→ `recognize_images()` 文字识别（接口占位，当前抛 `NotImplementedError`）→ `generate_final_text_and_images()` 最终文字与证据图片筛选。识别模型接入前，每轮都以 OCR 失败结束，不生成测量记录。
 
-独立 OCR 项目的核心代码位于 `src/ocr/`，作为后续接入基础：`BeltOCREngine.process()` 读取图片路径，再调用 `process_image()`；后者也可直接接收内存中的 `numpy.ndarray`，沿用相同的尺寸处理、ROI、预处理、识别、过滤与文字块分组流程。路径入口按配置保存 JSON，内存入口返回 `image_path=None` 且不保存 JSON；当前主流程仍使用 `src/text_recognition.py`，尚未调用该 OCR 包。
+独立 OCR 项目的核心代码与原始配置 `config.yaml` 位于 `src/ocr/`，作为后续接入基础：`BeltOCREngine.process()` 校验并读取图片路径，`process_image(image)` 接收内存中的 `numpy.ndarray`；两者共用尺寸处理、ROI、预处理、识别、过滤与文字块分组流程。路径入口返回真实图片路径并按配置保存 JSON，内存入口返回 `image_path=None` 且不保存 JSON；当前主流程仍使用 `src/text_recognition.py`，尚未调用该 OCR 包。
 
 模型返回后，OCR 先检查结果数量及业务筛选必需的 `blocks`、`lines`、`text` 结构；仅对通过现有格式过滤、实际参与比较的候选检查 `confidence`。接口结果异常抛出 `OCRProcessingError`，按 `OCR_FAILED` 结束当前 Session；未知识别异常由任务完成回调交给 Runtime 的全局故障流程，不生成 `OCR_FAILED`。正常返回但没有可靠业务文字时继续生成待人工复核的结果。
 

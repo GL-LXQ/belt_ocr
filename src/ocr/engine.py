@@ -210,14 +210,42 @@ class BeltOCREngine:
         if image is None:
             raise ValueError(f"OpenCV 无法读取图片: {path}")
 
-        return self.process_image(image, source_path=path)
+        return self._process_image(image, source_path=path)
 
-    def process_image(self, image: np.ndarray, source_path: Path | None = None) -> dict:
+    def process_image(self, image: np.ndarray) -> dict:
         """对内存中的图片运行 OCR 处理。
 
         Args:
             image: 已加载到内存中的图片数组。
-            source_path: 路径入口传入的原始图片路径；内存入口无需提供。
+
+        Returns:
+            返回示例：
+                {
+                    "image_path": None,  # 内存图片没有路径
+                    "blocks": [  # 识别出的文字块
+                        {
+                            "bbox": [10, 20, 30, 40],  # 文字块坐标
+                            "lines": [  # 文字块中的文字行
+                                {
+                                    "text": "示例",  # 文字内容
+                                    "bbox": [10, 20, 30, 40],  # 文字行坐标
+                                    "confidence": 0.9,  # 文字置信度
+                                }
+                            ],
+                        }
+                    ],
+                }
+        """
+        return self._process_image(image)
+
+    def _process_image(
+        self, image: np.ndarray, source_path: Path | None = None
+    ) -> dict:
+        """执行路径入口与内存入口共用的 OCR 处理流程。
+
+        Args:
+            image: 已加载到内存中的图片数组。
+            source_path: 路径入口传入的图片路径；内存入口无需提供。
 
         Returns:
             返回示例：

@@ -1,13 +1,14 @@
 """验证 OCR Engine 的路径和内存图片入口。"""
 
 import json
+from inspect import signature
 from unittest.mock import Mock
 
 import cv2
 import numpy as np
 import pytest
 
-from ocr.config import AppConfig, OutputConfig
+from ocr.config import AppConfig, DebugConfig, OutputConfig, PreprocessConfig
 from ocr.engine import BeltOCREngine
 from ocr.types import OCRLine
 
@@ -28,16 +29,24 @@ def test_path_and_memory_image_share_ocr_results(tmp_path, image_shape) -> None:
     image = np.full(image_shape, 128, dtype=np.uint8)
     image_path = tmp_path / "sample.png"
     output_directory = tmp_path / "output"
+    debug_directory = tmp_path / "debug"
     assert cv2.imwrite(str(image_path), image)
     backend = Mock()
     backend.predict.return_value = [OCRLine("示例", [5, 5, 30, 15], 0.9)]
-    config = AppConfig(output=OutputConfig(output_dir=str(output_directory)))
+    config = AppConfig(
+        preprocess=PreprocessConfig(
+            debug=DebugConfig(save_images=True, output_dir=str(debug_directory))
+        ),
+        output=OutputConfig(output_dir=str(output_directory)),
+    )
     engine = BeltOCREngine(config, backend=backend)
+    assert list(signature(BeltOCREngine.process_image).parameters) == ["self", "image"]
 
     # 先处理内存图片，确认不写 JSON。
     memory_result = engine.process_image(image)
     assert memory_result["image_path"] is None
     assert not output_directory.exists()
+    assert (debug_directory / "memory_image_00_roi_original.png").is_file()
 
     # 再处理相同图片的路径，核对返回结果和原有 JSON 输出。
     path_result = engine.process(str(image_path))
@@ -52,6 +61,7 @@ def test_path_and_memory_image_share_ocr_results(tmp_path, image_shape) -> None:
     output_path = output_directory / "sample.json"
     saved_result = json.loads(output_path.read_text(encoding="utf-8"))
     assert saved_result == path_result
+    assert (debug_directory / "sample_00_roi_original.png").is_file()
 
     # 核对两种入口交给 OCR 后端的图片一致。
     memory_image = backend.predict.call_args_list[0].args[0]
