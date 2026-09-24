@@ -14,6 +14,8 @@ START 后创建本轮 Session，同时开始相机采集和频率收集；频率
 
 原始帧 → `filter_qualified_frames()` 筛帧（当前原样返回全部图片）→ `recognize_images()` 文字识别（接口占位，当前抛 `NotImplementedError`）→ `generate_final_text_and_images()` 最终文字与证据图片筛选。识别模型接入前，每轮都以 OCR 失败结束，不生成测量记录。
 
+模型返回后，OCR 先检查结果数量及业务筛选必需的 `blocks`、`lines`、`text` 结构；仅对通过现有格式过滤、实际参与比较的候选检查 `confidence`。接口结果异常抛出 `OCRProcessingError`，进入 OCR 失败收尾；正常返回但没有可靠业务文字时继续生成待人工复核的结果。
+
 文字按去空白后的 20、8、3、2 位分类处理，最终生成文字、来源图片以及是否需要人工复核的信息。
 
 CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率。待 OCR 完成后，`Machine` 汇总文字、频率和复核状态，将证据帧编码为 JPG，保存到：

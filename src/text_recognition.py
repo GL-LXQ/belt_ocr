@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import re
 import time
 from collections import defaultdict
@@ -12,6 +13,10 @@ from camera.hikrobot_sdk import CameraFrame
 
 
 logger = logging.getLogger(__name__)
+
+
+class OCRProcessingError(Exception):
+    """表示模型没有按约定完成本轮 OCR 处理。"""
 
 
 def _serial_number_of(candidate: dict) -> int:
@@ -131,16 +136,28 @@ class TextRecognizer:
             [frame.camera_frame for frame in qualified_frames]
         )
 
-        # 模型结果数量不一致时返回全部原始帧供人工复核。
+        # 检查模型返回的图片结果数量。
+        if not isinstance(image_results, list):
+            raise OCRProcessingError("模型识别结果不是图片结果列表")
         if len(image_results) != len(qualified_frames):
-            return OCRResult(
-                ordered_lines=(),
-                normalized_lines=(),
-                selected_frames=(),
-                line_frame_ids=(),
-                review_frames=captured_frames,
-                review_reason="模型识别结果数量与图片数量不一致",
-            )
+            raise OCRProcessingError("模型识别结果数量与图片数量不一致")
+
+        # 检查后续筛选需要读取的模型结果结构。
+        for image_result in image_results:
+            if not isinstance(image_result, dict) or not isinstance(
+                image_result.get("blocks"), list
+            ):
+                raise OCRProcessingError("模型单图结果缺少 blocks 列表")
+            for block in image_result["blocks"]:
+                if not isinstance(block, dict) or not isinstance(
+                    block.get("lines"), list
+                ):
+                    raise OCRProcessingError("模型文字块缺少 lines 列表")
+                for line in block["lines"]:
+                    if not isinstance(line, dict) or not isinstance(
+                        line.get("text"), str
+                    ):
+                        raise OCRProcessingError("模型文字行缺少 text 字符串")
 
         # 按输入顺序把模型结果与图片编号配对。
         frame_results = [
@@ -318,7 +335,7 @@ class TextRecognizer:
                     candidates_by_length[character_length].append({
                         "text": text,
                         "normalized_text": normalized_text,
-                        "confidence": line["confidence"],
+                        "confidence": line.get("confidence"),
                         "frame_id": frame_result["frame_id"],
                     })
 
@@ -356,6 +373,17 @@ class TextRecognizer:
                     review_reasons.append(f"没有格式正确的 {character_length} 位文字")
                     continue
 
+            # 检查参与本类比较的候选置信度。
+            for candidate in candidates:
+                confidence = candidate["confidence"]
+                confidence_is_usable = (
+                    not isinstance(confidence, bool)
+                    and isinstance(confidence, (int, float))
+                    and math.isfinite(confidence)
+                )
+                if not confidence_is_usable:
+                    raise OCRProcessingError(f"{character_length} 位文字置信度不是有限数值")
+
             # 取本类置信度最高的一条。
             best_candidate = max(candidates, key=lambda candidate: candidate["confidence"])
 
@@ -374,6 +402,17 @@ class TextRecognizer:
             for candidate in candidates_by_length.get(8, [])
             if re.fullmatch(r"[0-9]{7}[A-Za-z]", candidate["normalized_text"])
         ]
+
+        # 检查参与 8 字符编号比较的候选置信度。
+        for candidate in eight_candidates:
+            confidence = candidate["confidence"]
+            confidence_is_usable = (
+                not isinstance(confidence, bool)
+                and isinstance(confidence, (int, float))
+                and math.isfinite(confidence)
+            )
+            if not confidence_is_usable:
+                raise OCRProcessingError("8 位文字置信度不是有限数值")
 
         # 相同编号保留置信度最高的一次，并删除低于阈值的候选。
         reliable_eight_candidates = self._select_reliable_candidates(eight_candidates, minimum_confidence)

@@ -7,7 +7,7 @@ import pytest
 
 from camera.hikrobot_sdk import CameraFrame
 from models import OCRResult
-from text_recognition import TextRecognizer
+from text_recognition import OCRProcessingError, TextRecognizer
 
 
 RELIABLE_MODEL_LINES = (
@@ -23,6 +23,28 @@ def recognize_model_lines(model_lines: list[dict]) -> OCRResult:
 
     Args:
         model_lines: 一张图片中模型返回的文字及置信度。
+
+    Returns:
+        返回示例：
+            OCRResult(
+                ordered_lines=("123",),  # 最终文字
+                normalized_lines=("123",),  # 去空白后的文字
+                selected_frames=(),  # 选中的证据图片
+                line_frame_ids=(),  # 文字对应的图片编号
+                review_frames=(),  # 待复核的原始图片
+                review_reason=None,  # 待复核原因
+            )
+    """
+    # 将单图文字放入模型结果。
+    model_results = [{"blocks": [{"lines": model_lines}]}]
+    return recognize_model_results(model_results)
+
+
+def recognize_model_results(model_results: object) -> OCRResult:
+    """将给定模型返回值送入整轮 OCR 主流程。
+
+    Args:
+        model_results: 整轮模型返回值。
 
     Returns:
         返回示例：
@@ -51,7 +73,6 @@ def recognize_model_lines(model_lines: list[dict]) -> OCRResult:
 
     # 用指定模型结果运行整轮 OCR。
     recognizer = TextRecognizer()
-    model_results = [{"blocks": [{"lines": model_lines}]}]
     recognizer.recognize_images = Mock(return_value=model_results)
     return recognizer.process_session_frames(
         "session-1", "capture-1", "camera-1", (camera_frame,)
@@ -232,4 +253,109 @@ def test_no_final_text_combines_review_reasons() -> None:
     assert len(result.review_frames) == 1
     assert "没有可靠的 20 位文字" in result.review_reason
     assert "没有可靠的 8 位文字" in result.review_reason
+    assert "没有最终文字" in result.review_reason
+
+
+def test_model_result_count_mismatch_raises_processing_error() -> None:
+    """确认模型结果数量不一致时报告 OCR 处理失败。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 模型结果数量异常已核对
+    """
+    with pytest.raises(OCRProcessingError, match="数量与图片数量不一致"):
+        recognize_model_results([])
+
+
+@pytest.mark.parametrize("model_results", [
+    None,
+    {"blocks": []},
+    [None],
+    [{}],
+    [{"blocks": None}],
+    [{"blocks": [None]}],
+    [{"blocks": [{}]}],
+    [{"blocks": [{"lines": None}]}],
+    [{"blocks": [{"lines": [None]}]}],
+    [{"blocks": [{"lines": [{}]}]}],
+    [{"blocks": [{"lines": [{"text": None}]}]}],
+])
+def test_malformed_model_result_raises_processing_error(model_results: object) -> None:
+    """确认业务筛选必需的模型返回结构缺失时报告 OCR 处理失败。
+
+    Args:
+        model_results: 缺少必需结构的模型返回值。
+
+    Returns:
+        返回示例：
+            None  # 模型返回结构异常已核对
+    """
+    with pytest.raises(OCRProcessingError):
+        recognize_model_results(model_results)
+
+
+@pytest.mark.parametrize("model_line", [
+    {"text": "12345678901234567890"},
+    {"text": "123", "confidence": "0.95"},
+    {"text": "12", "confidence": float("nan")},
+    {"text": "1234567A", "confidence": float("inf")},
+    {"text": "1234567A", "confidence": True},
+])
+def test_compared_candidate_requires_usable_confidence(model_line: dict) -> None:
+    """确认参与置信度比较的候选必须提供有限数值。
+
+    Args:
+        model_line: 格式有效但置信度无效的文字行。
+
+    Returns:
+        返回示例：
+            None  # 置信度异常已核对
+    """
+    with pytest.raises(OCRProcessingError, match="置信度不是有限数值"):
+        recognize_model_lines([model_line])
+
+
+@pytest.mark.parametrize("model_line,review_reason", [
+    ({"text": "ABC"}, "没有格式正确的 3 位文字"),
+    ({"text": "AB", "confidence": "bad"}, "没有格式正确的 2 位文字"),
+    ({"text": "ABCDEFGH", "confidence": float("nan")}, "没有可靠的 8 位文字"),
+])
+def test_filtered_candidate_ignores_unusable_confidence(
+    model_line: dict, review_reason: str
+) -> None:
+    """确认格式过滤掉的候选不会触发置信度异常。
+
+    Args:
+        model_line: 格式不符且置信度异常的文字行。
+        review_reason: 对应类别的人工复核原因。
+
+    Returns:
+        返回示例：
+            None  # 格式复核原因已核对
+    """
+    result = recognize_model_lines([model_line])
+
+    # 核对模型结构有效但业务格式不符时继续人工复核。
+    assert isinstance(result, OCRResult)
+    assert review_reason in result.review_reason
+
+
+def test_empty_blocks_require_review() -> None:
+    """确认没有文字块的模型结果仍进入人工复核。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 空文字块的复核结果已核对
+    """
+    result = recognize_model_results([{"blocks": []}])
+
+    # 核对空文字块保留原始图片并标记复核。
+    assert isinstance(result, OCRResult)
+    assert len(result.review_frames) == 1
     assert "没有最终文字" in result.review_reason
