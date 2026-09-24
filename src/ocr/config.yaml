@@ -1,0 +1,93 @@
+ocr:
+  device: gpu:0
+  detection_model: PP-OCRv6_medium_det
+  recognition_model: PP-OCRv6_medium_rec
+  detection_model_dir: null
+  recognition_model_dir: null
+  engine: null
+  enable_hpi: false
+  recognition_batch_size: 8
+  text_det_limit_side_len: 1000
+  text_det_limit_type: max
+  text_det_thresh: 0.25
+  text_det_box_thresh: 0.45
+  text_det_unclip_ratio: 1.5
+roi:
+  enabled: true
+  x: 8
+  y: 417
+  w: 986
+  h: 127
+  reference_width: 1000
+  reference_height: 750
+  resize_to_reference: true
+  scale_if_size_changes: false
+preprocess:
+  enabled: true
+  steps:
+  - type: tophat
+    enabled: true
+    kernel_size: 21
+    shape: rect
+  - type: contrast_stretch
+    enabled: true
+    low_percentile: 1.0
+    high_percentile: 99.0
+  - type: remove_horizontal_lines
+    enabled: true
+    line_length: 51
+    line_height: 1
+    vertical_dilate: 2
+    strength: 1.0
+  - type: bilateral_filter
+    enabled: true
+    diameter: 5
+    sigma_color: 35.0
+    sigma_space: 15.0
+  - type: contrast_stretch
+    enabled: false
+    low_percentile: 1.0
+    high_percentile: 99.0
+  - type: tophat
+    enabled: true
+    kernel_size: 21
+    shape: rect
+  - type: bilateral_filter
+    enabled: true
+    diameter: 5
+    sigma_color: 35.0
+    sigma_space: 15.0
+  - type: tophat
+    enabled: true
+    kernel_size: 21
+    shape: rect
+
+  debug:
+    save_images: false
+    output_dir: ./debug
+grouping:
+  horizontal_overlap_ratio: 0.3
+  center_x_tolerance_ratio: 0.45
+  max_vertical_gap_ratio: 1.8
+  min_lines_per_block: 1
+filters:
+  min_confidence: 0.0
+  discard_edge_lines: false
+  edge_margin_px: 3
+  edge_sides:
+  - left
+  - right
+  - top
+  - bottom
+  strip_text: true
+output:
+  save_json: true
+  output_dir: ./output
+  ensure_ascii: false
+  indent: 2
+security:
+  allowed_roots: []
+server:
+  host: 127.0.0.1
+  port: 8000
+  log_level: info

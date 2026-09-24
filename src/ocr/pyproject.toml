@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "belt-ocr-service"
+version = "0.3.0"
+description = "Persistent OCR library/service for grouped text lines on industrial belts"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "pydantic>=2.7,<3",
+  "PyYAML>=6,<7",
+  "numpy>=1.26,<3",
+  "opencv-python>=4.9,<5",
+  "paddleocr>=3.7,<4",
+  "requests>=2.31,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+belt-ocr-serve = "belt_ocr.serve:main"
+
+[tool.setuptools.packages.find]
+include = ["belt_ocr*"]
