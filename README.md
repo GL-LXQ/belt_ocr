@@ -14,7 +14,7 @@ START 后创建本轮 Session，同时开始相机采集和频率收集；频率
 
 原始帧 → `filter_qualified_frames()` 筛帧（当前原样返回全部图片）→ `recognize_images()` 文字识别（接口占位，当前抛 `NotImplementedError`）→ `generate_final_text_and_images()` 最终文字与证据图片筛选。识别模型接入前，每轮都以 OCR 失败结束，不生成测量记录。
 
-模型返回后，OCR 先检查结果数量及业务筛选必需的 `blocks`、`lines`、`text` 结构；仅对通过现有格式过滤、实际参与比较的候选检查 `confidence`。接口结果异常抛出 `OCRProcessingError`，进入 OCR 失败收尾；正常返回但没有可靠业务文字时继续生成待人工复核的结果。
+模型返回后，OCR 先检查结果数量及业务筛选必需的 `blocks`、`lines`、`text` 结构；仅对通过现有格式过滤、实际参与比较的候选检查 `confidence`。接口结果异常抛出 `OCRProcessingError`，按 `OCR_FAILED` 结束当前 Session；未知识别异常由任务完成回调交给 Runtime 的全局故障流程，不生成 `OCR_FAILED`。正常返回但没有可靠业务文字时继续生成待人工复核的结果。
 
 文字按去空白后的 20、8、3、2 位分类处理，最终生成文字、来源图片以及是否需要人工复核的信息。
 
@@ -28,7 +28,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 
 证据图片编码阶段遇到明确的 MVS SDK 错误时，清理本轮新建图片，以 `EVIDENCE_ENCODING_FAILED` 将当前 Session 和异常明细写入 `abnormal_events`，不提交测量记录；相机仍可供下一轮采集，其他机器继续运行。未知编码异常继续交给 Runtime 的全局故障流程。
 
-采集完成却没有帧时，图像采集阶段上报失败，OCR 不启动；OCR 执行异常或周期超时也进入 Session 失败收尾。`Machine` 将失败原因写入 Session、标记失败并把机器编号、周期编号和错误明细写入现有 `abnormal_events` 表；随后取消本轮任务，待现场关闭及相关任务结束后释放 Session。人工复核结果仍按正常测量流程保存，异常事件写入失败只记录日志，不阻断 Session 收尾。
+采集完成却没有帧时，图像采集阶段上报失败，OCR 不启动；已知的 OCR 处理错误或周期超时也进入 Session 失败收尾。`Machine` 将失败原因写入 Session、标记失败并把机器编号、周期编号和错误明细写入现有 `abnormal_events` 表；随后取消本轮任务，待现场关闭及相关任务结束后释放 Session。人工复核结果仍按正常测量流程保存，异常事件写入失败只记录日志，不阻断 Session 收尾。
 
 单次取帧没有数据时继续采集；整轮没有帧时以 `CAPTURE_EMPTY` 结束当前 Session。采集阶段发生明确的 MVS 设备异常时，相机先释放本轮采集资源，再向所属机器交付 `CAPTURE_FAILED`，由现有失败流程记录 Session 和 `abnormal_events`；故障相机停止受理新周期，其他机器继续运行。单台相机启动连接失败时保留该机器的不可用状态并继续初始化其他机器；所有相机都连接失败时结束本次启动。设备修复后通过重新启动客户端恢复。
 

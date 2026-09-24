@@ -26,6 +26,7 @@ from models import (
     OCRResult,
     RuntimeEvent,
 )
+from text_recognition import OCRProcessingError
 
 
 TEST_SESSION_START_TIME = datetime(2026, 9, 23, 12).astimezone().isoformat()
@@ -834,7 +835,7 @@ async def test_ocr_execution_error_fails_and_is_audited(tmp_path: Path) -> None:
     session.ocr_result = None
     machine.text_recognizer = SimpleNamespace(
         processing_lock=asyncio.Lock(),
-        process_session_frames=Mock(side_effect=RuntimeError("模型执行失败")),
+        process_session_frames=Mock(side_effect=OCRProcessingError("模型执行失败")),
     )
     machine.publish_event = machine.handle_event
 
@@ -850,6 +851,51 @@ async def test_ocr_execution_error_fails_and_is_audited(tmp_path: Path) -> None:
     assert len(events) == 1
     assert events[0][2] == "此次文字识别执行失败"
     assert json.loads(events[0][3])["session_errors"] == session.errors
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, TypeError])
+async def test_unknown_ocr_error_reaches_fatal_callback(
+    tmp_path: Path, error_type: type[Exception]
+) -> None:
+    """确认未知识别异常通过任务完成回调交给全局故障入口。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+        error_type: 注入识别任务的未知异常类型。
+
+    Returns:
+        返回示例：
+            None  # 未知异常已交给致命故障回调，未生成 OCR 失败事件
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.ocr_state = OCRState.WAITING
+    session.ocr_result = None
+    error = error_type("未知识别错误")
+    machine.text_recognizer = SimpleNamespace(
+        processing_lock=asyncio.Lock(),
+        process_session_frames=Mock(side_effect=error),
+    )
+    machine.publish_event = AsyncMock()
+
+    # 交付采集结果并由机器启动带完成回调的识别任务。
+    capture_result = CaptureResult(frames=(evidence_frame.camera_frame,), statistics={})
+    await machine.handle_event(RuntimeEvent(
+        EventType.CAPTURE_COMPLETED, "1", session.session_id, capture_result
+    ))
+    recognition_task = machine.recognition_task
+    assert recognition_task is not None
+
+    # 等待原始异常离开任务并核对完成回调的交付结果。
+    with pytest.raises(error_type) as captured_error:
+        await recognition_task
+    assert captured_error.value is error
+    machine.on_fatal_error.assert_called_once_with(error)
+    machine.publish_event.assert_not_awaited()
+    assert machine.recognition_task is None
+    assert session.ocr_state == OCRState.RUNNING
+    assert read_abnormal_events(database) == []
 
 
 @pytest.mark.asyncio

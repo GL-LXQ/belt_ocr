@@ -15,7 +15,7 @@ from enums import EventType, FrequencyState, OCRState, ProgressStage, ProgressSt
 from camera.hikrobot_sdk import CameraFrame, MvsError
 from models import BeltSession, CapturedFrame, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
-from text_recognition import TextRecognizer
+from text_recognition import OCRProcessingError, TextRecognizer
 from database import Database, MeasurementRecord, save_evidence_image
 
 
@@ -794,7 +794,7 @@ class Machine:
                     session.camera_serial,
                     frames,
                 )
-            except Exception as error:
+            except OCRProcessingError as error:
                 # 记录整轮处理失败。
                 logger.exception("OCR 处理失败 session_id=%s", session.session_id)
 
