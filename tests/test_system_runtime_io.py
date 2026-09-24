@@ -111,4 +111,4 @@ async def test_io_recovery_only_uses_first_read_as_baseline(
         *expected_events,
     ]
     assert runtime.io_previous_states == {0: later_states[-1]}
-    runtime.modbus_client.disconnect.assert_awaited_once()
+    runtime.modbus_client.disconnect.assert_not_awaited()

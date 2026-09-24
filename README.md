@@ -12,6 +12,8 @@ IO 读取失败时，系统记录日志并清空旧 DI 状态，以 `IO_INTERRUP
 
 首次读取或断线重连时，`ModbusClient` 创建串口客户端并读取其连接状态；未连接时返回失败，IO 监听按重连间隔继续尝试。连接过程出现未知程序异常时，异常直接交给 Runtime 的全局故障流程。
 
+退出时，Runtime 停止 IO 监听后统一关闭 Modbus 串口，再关闭相机 SDK、数据库并释放实例锁。Modbus 关闭失败会登记全局故障，但不阻断后续资源释放；此前已记录的首次故障保持不变。
+
 START 后创建本轮 Session，同时开始相机采集和频率收集；频率当前为占位实现，按配置的模拟读数循环交付，真实协议待接入。相机在采集窗口内保存原始帧；采集结束后进入共享 OCR 流程。OCR 依次执行：
 
 原始帧 → `filter_qualified_frames()` 筛帧（当前原样返回全部图片）→ `recognize_images()` 文字识别（接口占位，当前抛 `NotImplementedError`）→ `generate_final_text_and_images()` 最终文字与证据图片筛选。识别模型接入前，每轮都以 OCR 失败结束，不生成测量记录。

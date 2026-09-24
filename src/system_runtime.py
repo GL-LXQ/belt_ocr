@@ -311,48 +311,47 @@ class SystemRuntime:
 
         Returns:
             返回示例：
-                None  # 停止流程开始后结束监听并释放 Modbus 串口
+                None  # 停止流程开始后结束监听，串口由退出流程关闭
         """
         if self.modbus_client is None:
             raise RuntimeError("Modbus RTU 客户端未初始化。")
 
         # 根据启用机器的最大通道确定连续读取数量。
-        input_count = max(self.config.io_machine_channels[machine_id] for machine_id in self.machines) + 1
-        try:
-            while not self.stopping:
-                # 读取全部启用机器覆盖范围内的 DI 状态。
-                states = await self.modbus_client.read_discrete_inputs(
-                    address=self.config.modbus_input_address,
-                    count=input_count,
-                )
+        input_count = max(
+            self.config.io_machine_channels[machine_id] for machine_id in self.machines
+        ) + 1
+        while not self.stopping:
+            # 读取全部启用机器覆盖范围内的 DI 状态。
+            states = await self.modbus_client.read_discrete_inputs(
+                address=self.config.modbus_input_address,
+                count=input_count,
+            )
 
-                # 停止流程开始或信号入口关闭时结束监听。
-                if self.stopping or not self.accepting_signals:
-                    break
+            # 停止流程开始或信号入口关闭时结束监听。
+            if self.stopping or not self.accepting_signals:
+                break
 
-                # 通信失败时记录日志。
-                if states is None:
-                    logger.warning("IO 读取失败，旧 DI 状态已清空")
+            # 通信失败时记录日志。
+            if states is None:
+                logger.warning("IO 读取失败，旧 DI 状态已清空")
 
-                    # 清空旧 DI 状态。
-                    self.io_previous_states.clear()
+                # 清空旧 DI 状态。
+                self.io_previous_states.clear()
 
-                    # 中断仍未收到 CLOSE 的机器周期。
-                    for machine_id, machine in self.machines.items():
-                        session = machine.current_session
-                        # 中断会写入关闭时间，此判断同时保证一次断线只通知一次。
-                        if session is not None and session.capture_stop_time is None:
-                            await self.send_signal(EventType.IO_INTERRUPTED, machine_id)
+                # 中断仍未收到 CLOSE 的机器周期。
+                for machine_id, machine in self.machines.items():
+                    session = machine.current_session
+                    # 中断会写入关闭时间，此判断同时保证一次断线只通知一次。
+                    if session is not None and session.capture_stop_time is None:
+                        await self.send_signal(EventType.IO_INTERRUPTED, machine_id)
 
-                    # 按重连间隔等待下一轮读取。
-                    await asyncio.sleep(self.config.modbus_reconnect_interval_ms / 1000)
-                    continue
+                # 按重连间隔等待下一轮读取。
+                await asyncio.sleep(self.config.modbus_reconnect_interval_ms / 1000)
+                continue
 
-                # 处理有效状态后按正常轮询间隔等待。
-                await self.handle_io_states(states)
-                await asyncio.sleep(self.config.modbus_poll_interval_ms / 1000)
-        finally:
-            await self.modbus_client.disconnect()
+            # 处理有效状态后按正常轮询间隔等待。
+            await self.handle_io_states(states)
+            await asyncio.sleep(self.config.modbus_poll_interval_ms / 1000)
 
     async def handle_io_states(self, states: list[bool]) -> None:
         """把当前 DI 状态保存为基线或转换为启动和关闭信号。
@@ -698,7 +697,12 @@ class SystemRuntime:
 
         # 任务未启动或已异常退出时仍关闭 Modbus 客户端。
         if self.modbus_client is not None:
-            await self.modbus_client.disconnect()
+            try:
+                await self.modbus_client.disconnect()
+            except Exception as error:
+                # 记录 Modbus 关闭失败并继续释放其他资源。
+                logger.exception("关闭 Modbus 客户端失败")
+                self.handle_fatal_error(error)
 
         # 清空已登记的后台任务列表。
         self.worker_tasks.clear()
