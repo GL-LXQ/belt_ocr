@@ -227,7 +227,7 @@ class Database:
             """)
 
     def write_measurement_record(self, record: MeasurementRecord) -> None:
-        """在事务中幂等写入本轮测量记录。
+        """在事务中幂等写入本轮测量记录，并重试一次写锁竞争。
 
         Args:
             record: 本轮测量的业务字段和证据图片目录。
@@ -251,33 +251,55 @@ class Database:
 
         # 串行执行测量记录的数据库事务。
         with self._measurement_write_lock:
-            with closing(sqlite3.connect(self.config.database_path, timeout=1)) as connection:
-                with connection:
-                    connection.execute("BEGIN IMMEDIATE")
+            for attempt_number in range(2):
+                try:
+                    # 每次尝试都重新连接并执行完整事务。
+                    with closing(
+                        sqlite3.connect(self.config.database_path, timeout=1)
+                    ) as connection:
+                        with connection:
+                            connection.execute("BEGIN IMMEDIATE")
 
-                    # 查询同一周期已保存的业务字段。
-                    existing_record = connection.execute(
-                        "SELECT machine_id, start_time, finish_time, ordered_lines, "
-                        "final_frequency_hz, evidence_directory, measurement_frequencies, "
-                        "needs_review, review_reason "
-                        "FROM measurements WHERE session_id = ?",
-                        (record.session_id,),
-                    ).fetchone()
+                            # 查询同一周期已保存的业务字段。
+                            existing_record = connection.execute(
+                                "SELECT machine_id, start_time, finish_time, "
+                                "ordered_lines, final_frequency_hz, "
+                                "evidence_directory, measurement_frequencies, "
+                                "needs_review, review_reason "
+                                "FROM measurements WHERE session_id = ?",
+                                (record.session_id,),
+                            ).fetchone()
 
-                    # 已有记录时核对内容，一致则结束写入。
-                    if existing_record is not None:
-                        if existing_record != record_values:
-                            raise ValueError("同一 Session 的提交内容不一致。")
-                        return
+                            # 已有记录时核对内容，一致则结束写入。
+                            if existing_record is not None:
+                                if existing_record != record_values:
+                                    raise ValueError("同一 Session 的提交内容不一致。")
+                                return
 
-                    # 写入本轮测量记录。
-                    connection.execute(
-                        "INSERT INTO measurements (session_id, machine_id, start_time, "
-                        "finish_time, ordered_lines, final_frequency_hz, evidence_directory, "
-                        "measurement_frequencies, needs_review, review_reason) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (record.session_id, *record_values),
+                            # 写入本轮测量记录。
+                            connection.execute(
+                                "INSERT INTO measurements (session_id, machine_id, "
+                                "start_time, finish_time, ordered_lines, "
+                                "final_frequency_hz, evidence_directory, "
+                                "measurement_frequencies, needs_review, "
+                                "review_reason) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (record.session_id, *record_values),
+                            )
+                    return
+                except sqlite3.OperationalError as error:
+                    # 识别当前 Python 版本提供的 SQLite 写锁错误信息。
+                    error_name = getattr(error, "sqlite_errorname", None)
+                    write_lock_busy = (
+                        error_name.startswith("SQLITE_BUSY")
+                        if error_name is not None
+                        else str(error).lower() == "database is locked"
                     )
+                    if not write_lock_busy or attempt_number == 1:
+                        raise
+
+                    # 关闭本次连接后等待下一次写入尝试。
+                    time.sleep(0.1)
 
     def close(self) -> None:
         """关闭运行库连接并释放进程锁。

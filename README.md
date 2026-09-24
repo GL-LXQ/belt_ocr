@@ -28,7 +28,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 
 证据图片编码阶段遇到明确的 MVS SDK 错误时，清理本轮新建图片，以 `EVIDENCE_ENCODING_FAILED` 将当前 Session 和异常明细写入 `abnormal_events`，不提交测量记录；相机仍可供下一轮采集，其他机器继续运行。未知编码异常继续交给 Runtime 的全局故障流程。
 
-证据图片文件操作失败时清理本轮新建图片，以 `EVIDENCE_WRITE_FAILED` 结束当前 Session；图片全部保存后，SQLite 提交失败才以 `DATABASE_WRITE_FAILED` 结束本轮，已保存的图片保留。数据库发现同一 Session 内容冲突时仍使用 `COMMIT_INTEGRITY_CONFLICT`；无法确认的保存异常继续向全局故障流程上抛。
+证据图片文件操作失败时清理本轮新建图片，以 `EVIDENCE_WRITE_FAILED` 结束当前 Session；图片全部保存后，测量记录提交遇到 SQLite `SQLITE_BUSY` 时最多尝试两次，两次间隔 100 毫秒。写锁重试耗尽或发生其他 SQLite 提交错误时，以 `DATABASE_WRITE_FAILED` 结束本轮，已保存的图片保留。数据库发现同一 Session 内容冲突时仍使用 `COMMIT_INTEGRITY_CONFLICT`；无法确认的保存异常继续向全局故障流程上抛。
 
 采集完成却没有帧时，图像采集阶段上报失败，OCR 不启动；已知的 OCR 处理错误或周期超时也进入 Session 失败收尾。`Machine` 将失败原因写入 Session、标记失败并把机器编号、周期编号和错误明细写入现有 `abnormal_events` 表；随后取消本轮任务，待现场关闭及相关任务结束后释放 Session。人工复核结果仍按正常测量流程保存，异常事件写入失败只记录日志，不阻断 Session 收尾。
 
