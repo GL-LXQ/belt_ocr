@@ -83,20 +83,15 @@ class ModbusClient:
         Returns:
             返回示例：
                 True  # 串口客户端已建立连接
-                False  # 创建或连接过程异常，或设备未报告已连接
+                False  # 串口客户端未报告已连接
         """
-        try:
-            # 按当前串口配置创建客户端并发起连接。
-            self._client = self._create_client()
-            await self._client.connect()
+        # 复位上次连接状态并创建串口客户端。
+        self._connected = False
+        self._client = self._create_client()
 
-            # 以客户端上报的状态作为本机连接结果。
-            self._connected = bool(self._client.connected)
-        except Exception as error:
-            # 连接过程异常时复位状态并记录失败原因。
-            self._connected = False
-            logger.error("Modbus RTU 连接失败: %s", error)
-            return False
+        # 发起连接并读取客户端上报的连接状态。
+        await self._client.connect()
+        self._connected = bool(self._client.connected)
 
         # 客户端未报告已连接时视为连接失败。
         if not self._connected:
