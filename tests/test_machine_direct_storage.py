@@ -467,15 +467,18 @@ async def test_unknown_encoding_failure_removes_new_images(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [OSError, ValueError])
 async def test_image_write_failure_skips_database(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
 ) -> None:
     """确认图片写入失败时不写数据库并结束本轮。
 
     Args:
         tmp_path: pytest 提供的临时目录。
         monkeypatch: pytest 提供的属性替换工具。
+        error_type: 图片文件操作抛出的异常类型。
 
     Returns:
         返回示例：
@@ -485,18 +488,50 @@ async def test_image_write_failure_skips_database(
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
     monkeypatch.setattr(
         "machine.save_evidence_image",
-        Mock(side_effect=OSError("图片写入失败")),
+        Mock(side_effect=error_type("图片写入失败")),
     )
     await machine.try_finalize(session)
 
     # 核对失败状态和数据库内容。
     assert session.state == SessionState.FAILED
-    assert "DATABASE_WRITE_FAILED" in session.errors
+    assert "EVIDENCE_WRITE_FAILED" in session.errors
+    assert "DATABASE_WRITE_FAILED" not in session.errors
+    assert "COMMIT_INTEGRITY_CONFLICT" not in session.errors
+    assert read_abnormal_events(database)[0][2] == "EVIDENCE_WRITE_FAILED"
     with sqlite3.connect(database.config.database_path) as connection:
         record_count = connection.execute(
             "SELECT COUNT(*) FROM measurements"
         ).fetchone()[0]
     assert record_count == 0
+
+
+@pytest.mark.asyncio
+async def test_unknown_image_write_error_is_not_database_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """确认未知图片保存异常继续上抛，不记为数据库写入失败。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+        monkeypatch: pytest 提供的属性替换工具。
+
+    Returns:
+        返回示例：
+            None  # 未知异常已上抛，未生成数据库失败记录
+    """
+    frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    monkeypatch.setattr(
+        "machine.save_evidence_image",
+        Mock(side_effect=RuntimeError("未知图片保存错误")),
+    )
+
+    # 执行图片保存并核对未知异常保持原样上抛。
+    with pytest.raises(RuntimeError, match="未知图片保存错误"):
+        await machine.try_finalize(session)
+    assert "DATABASE_WRITE_FAILED" not in session.errors
+    assert read_abnormal_events(database) == []
 
 
 @pytest.mark.asyncio
@@ -520,6 +555,8 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
     # 核对本轮失败状态与已保存的图片。
     assert session.state == SessionState.FAILED
     assert "DATABASE_WRITE_FAILED" in session.errors
+    assert "EVIDENCE_WRITE_FAILED" not in session.errors
+    assert read_abnormal_events(database)[0][2] == "DATABASE_WRITE_FAILED"
     assert machine.current_session is None
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
     assert (expected_directory / "frame-1.jpg").read_bytes() == b"image-one"
@@ -527,6 +564,31 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
         ProgressStage.EVIDENCE_STORAGE,
         ProgressStatus.FAILED,
     )
+
+
+@pytest.mark.asyncio
+async def test_database_conflict_keeps_conflict_reason(tmp_path: Path) -> None:
+    """确认数据库提交内容冲突仍使用原有错误代码。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 提交冲突已按原有代码记录
+    """
+    frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    database.write_measurement_record = Mock(
+        side_effect=ValueError("同一 Session 的提交内容不一致。")
+    )
+
+    # 执行数据库提交并核对原有冲突分类。
+    await machine.try_finalize(session)
+    assert session.state == SessionState.FAILED
+    assert "COMMIT_INTEGRITY_CONFLICT" in session.errors
+    assert "DATABASE_WRITE_FAILED" not in session.errors
+    assert read_abnormal_events(database)[0][2] == "COMMIT_INTEGRITY_CONFLICT"
 
 
 def test_database_compares_evidence_directory(tmp_path: Path) -> None:

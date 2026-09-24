@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -24,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 class ImageEncodingError(RuntimeError):
     """标记证据图片编码阶段的未知异常。"""
+
+
+class EvidenceWriteError(RuntimeError):
+    """标记证据图片文件写入失败。"""
 
 
 class Machine:
@@ -951,17 +956,35 @@ class Machine:
             # 按证据图片编码失败结束本轮测量。
             await self.handle_measurement_failure(session, "EVIDENCE_ENCODING_FAILED")
             return
-        except ImageEncodingError:
-            raise
-        except Exception as error:
-            # 登记本轮存储失败。
+        except EvidenceWriteError:
+            # 记录证据图片写入失败。
+            logger.exception(
+                "证据图片写入失败 machine_id=%s session_id=%s",
+                session.machine_id,
+                session.session_id,
+            )
+
+            # 上报证据入库失败。
+            if self.notify_measurement_progress is not None:
+                self.notify_measurement_progress(
+                    session.machine_id,
+                    session.session_id,
+                    ProgressStage.EVIDENCE_STORAGE,
+                    ProgressStatus.FAILED,
+                )
+
+            # 按证据图片写入失败结束本轮测量。
+            await self.handle_measurement_failure(session, "EVIDENCE_WRITE_FAILED")
+            return
+        except (ValueError, sqlite3.Error) as error:
+            # 登记数据库提交失败或内容冲突。
             error_code = (
                 "COMMIT_INTEGRITY_CONFLICT"
                 if isinstance(error, ValueError)
                 else "DATABASE_WRITE_FAILED"
             )
             logger.exception(
-                "保存失败 machine_id=%s session_id=%s",
+                "数据库提交失败 machine_id=%s session_id=%s",
                 session.machine_id,
                 session.session_id,
             )
@@ -1022,13 +1045,17 @@ class Machine:
         try:
             # 逐帧编码并保存本轮证据图片。
             self.encode_and_save_evidence_images(record, evidence_frames, created_image_paths)
-        except Exception:
+        except Exception as error:
             # 清理本次新建的证据图片。
             for image_path in created_image_paths:
                 try:
                     image_path.unlink(missing_ok=True)
                 except OSError:
                     logger.exception("清理证据图片失败 path=%s", image_path)
+
+            # 标记图片阶段的文件操作失败。
+            if isinstance(error, (OSError, ValueError)):
+                raise EvidenceWriteError("证据图片写入失败") from error
             raise
 
         # 图片全部保存后写入测量记录。
