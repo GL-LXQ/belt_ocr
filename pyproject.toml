@@ -5,11 +5,15 @@ description = "多皮带机并行模拟采集与测量记录"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "numpy>=1.26,<3",
+    "opencv-python>=4.9,<5",
+    "paddleocr>=3.7,<4",
+    "pydantic>=2.7,<3",
     "pymodbus>=3.15.0",
     "pyserial>=3.5",
     "pyside6>=6.11.2",
     "pytest-asyncio>=1.4.0",
-    "pyyaml>=6.0.3",
+    "pyyaml==6.0.2",
 ]
 
 [tool.pytest.ini_options]
