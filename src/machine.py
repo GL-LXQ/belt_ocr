@@ -768,7 +768,10 @@ class Machine:
 
         # 退出时仍未结算的周期按退出原因执行失败清理。
         session = self.current_session
-        if session is not None and session.state != SessionState.FAILED:
+        if (
+            session is not None
+            and session.state in {SessionState.RUNNING, SessionState.SAVING_RESULT}
+        ):
             try:
                 await self.handle_measurement_failure(session, shutdown_error_code)
             except Exception as error:

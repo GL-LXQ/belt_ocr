@@ -355,6 +355,70 @@ async def test_finalize_preserves_reliable_text_for_review(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_shutdown_preserves_committed_session(tmp_path: Path) -> None:
+    """确认退出清理不会把已入库且暂留的周期改为失败。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 已入库周期保持成功且没有退出失败事件
+    """
+    # 建立测量周期并保留已结束的采集交付任务引用。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    delivery_task = asyncio.create_task(asyncio.sleep(0))
+    machine.camera.delivery_task = delivery_task
+    machine.camera.stop = AsyncMock()
+    await delivery_task
+
+    # 保存测量记录并确认周期仍由机器持有。
+    await machine.try_finalize(session)
+    assert session.state == SessionState.COMMITTED
+    assert machine.current_session is session
+
+    # 执行退出清理并核对成功状态和异常事件。
+    await machine.release_resources("SHUTDOWN_TIMEOUT")
+    assert session.state == SessionState.COMMITTED
+    assert session.errors == []
+    assert machine.current_session is None
+    assert read_abnormal_events(database) == []
+    with sqlite3.connect(database.config.database_path) as connection:
+        saved_record = connection.execute(
+            "SELECT session_id FROM measurements WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+    assert saved_record == (session.session_id,)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_fails_unfinished_session(tmp_path: Path) -> None:
+    """确认退出清理仍将未完成的周期登记为失败。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 未完成周期已失败并记录退出原因
+    """
+    # 建立未完成的测量周期并提供相机退出入口。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    machine.camera.stop = AsyncMock()
+
+    # 执行退出清理并核对失败状态和异常事件。
+    await machine.release_resources("SHUTDOWN_TIMEOUT")
+    assert session.state == SessionState.FAILED
+    assert session.errors == ["SHUTDOWN_TIMEOUT"]
+    assert machine.current_session is None
+    events = read_abnormal_events(database)
+    assert len(events) == 1
+    assert events[0][2] == "SHUTDOWN_TIMEOUT"
+
+
+@pytest.mark.asyncio
 async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -> None:
     """确认 MVS 证据图片编码失败只结束本轮并保留相机可用状态。
 
