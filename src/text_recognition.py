@@ -7,9 +7,12 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from models import CapturedFrame, OCRResult
-from camera.hikrobot_sdk import CameraFrame
+from camera.hikrobot_sdk import CameraFrame, convert_mono8_frame_to_array
+from ocr.config import load_config as load_ocr_config
+from ocr.engine import BeltOCREngine
 
 
 logger = logging.getLogger(__name__)
@@ -36,17 +39,18 @@ class TextRecognizer:
     """提供共享串行处理锁与无业务状态的 OCR 主流程。"""
 
     def __init__(self) -> None:
-        """创建三台机器共用的整轮处理锁。
+        """创建三台机器共用的整轮处理锁和 OCR Engine 空位。
 
         Args:
             无外部参数。
 
         Returns:
             返回示例：
-                None  # 处理锁已创建
+                None  # 处理锁和 OCR Engine 空位已创建
         """
-        # 创建三台机器共用的整轮处理锁。
+        # 创建三台机器共用的整轮处理锁与 OCR Engine 空位。
         self.processing_lock = asyncio.Lock()
+        self.ocr_engine: BeltOCREngine | None = None
 
     def process_session_frames(
         self,
@@ -238,7 +242,7 @@ class TextRecognizer:
         return frames
 
     def recognize_images(self, images: list[CameraFrame]) -> list[dict]:
-        """预留整轮模型识别接口，目前明确报告未实现。
+        """逐张转换相机帧并用共享 OCR Engine 识别。
 
         Args:
             images: 按顺序排列的合格相机原始帧。
@@ -247,13 +251,39 @@ class TextRecognizer:
             返回示例：
                 [
                     {
-                        "blocks": [],  # 单张图片的模型原始文字块，结果与输入等长
+                        "image_path": None,  # 内存图片没有路径
+                        "blocks": [  # 当前图片的文字块
+                            {
+                                "bbox": [1, 2, 10, 12],  # 文字块坐标
+                                "lines": [  # 文字块中的文字行
+                                    {
+                                        "text": "123",  # 文字内容
+                                        "bbox": [1, 2, 10, 12],  # 文字行坐标
+                                        "confidence": 0.95,  # 识别置信度
+                                    }
+                                ],
+                            }
+                        ],
                     },
                 ]
-            当前抛出 NotImplementedError，不返回占位成功结果。
         """
-        # 报告识别模型尚未实现。
-        raise NotImplementedError("OCR_MODEL_NOT_IMPLEMENTED")
+        # 按输入顺序转换并识别每张相机帧。
+        image_results = []
+        for frame in images:
+            try:
+                image = convert_mono8_frame_to_array(frame)
+            except ValueError as error:
+                raise OCRProcessingError(str(error)) from error
+
+            # 首次识别时加载配置并创建共享 OCR Engine。
+            if self.ocr_engine is None:
+                config_path = Path(__file__).resolve().parent / "ocr" / "config.yaml"
+                self.ocr_engine = BeltOCREngine(load_ocr_config(config_path))
+
+            # 保存当前帧的识别结果。
+            image_results.append(self.ocr_engine.process_image(image))
+
+        return image_results
 
     def _serial_number_of(candidate: dict) -> int:
         """取得 8 字符编号前七位的数字部分。"""

@@ -20,11 +20,11 @@ IO 读取失败时，系统记录日志并清空旧 DI 状态，以 `IO_INTERRUP
 
 START 后创建本轮 Session，同时开始相机采集和频率收集；频率当前为占位实现，按配置的模拟读数循环交付，真实协议待接入。相机在采集窗口内保存原始帧；采集结束后进入共享 OCR 流程。OCR 依次执行：
 
-相机模块保留 `CameraFrame` 的原始字节供 JPG 证据编码使用，并提供 `convert_mono8_frame_to_array()`：确认 Mono8 格式和字节数后，将原始字节按帧尺寸恢复为二维 `uint8` 灰度图；当前采集和 OCR 流程尚未调用此转换函数。
+相机模块保留 `CameraFrame` 的原始字节供 JPG 证据编码使用；文字识别时，`convert_mono8_frame_to_array()` 确认 Mono8 格式和字节数，再按帧尺寸恢复二维 `uint8` 灰度图。
 
-原始帧 → `filter_qualified_frames()` 筛帧（当前原样返回全部图片）→ `recognize_images()` 文字识别（接口占位，当前抛 `NotImplementedError`）→ `generate_final_text_and_images()` 最终文字与证据图片筛选。识别模型接入前，每轮都以 OCR 失败结束，不生成测量记录。
+原始帧 → `filter_qualified_frames()` 筛帧（当前原样返回全部图片）→ `recognize_images()` 逐帧转换 Mono8 图像并调用共享 OCR Engine → `generate_final_text_and_images()` 按现有规则终选文字与证据图片。识别结果按帧顺序返回；明确的帧格式和结果结构错误按本轮 OCR 失败处理，未分类异常交给 Runtime 全局故障流程。
 
-独立 OCR 项目的核心代码与原始配置 `config.yaml` 位于 `src/ocr/`，作为后续接入基础：`BeltOCREngine.process()` 校验并读取图片路径，`process_image(image)` 接收内存中的 `numpy.ndarray`；两者共用尺寸处理、ROI、预处理、识别、过滤与文字块分组流程。路径入口返回真实图片路径并按配置保存 JSON，内存入口返回 `image_path=None` 且不保存 JSON；当前主流程仍使用 `src/text_recognition.py`，尚未调用该 OCR 包。
+独立 OCR 项目的核心代码与原始配置 `config.yaml` 位于 `src/ocr/`：`TextRecognizer` 按自身文件位置加载该配置，在首次真实识别时创建一次 `BeltOCREngine` 并跨图片和测量周期复用。Engine 的路径入口仍按配置保存 JSON；内存入口 `process_image(image)` 返回 `image_path=None` 且不保存 JSON，两种入口共用尺寸处理、ROI、预处理、识别、过滤与文字块分组流程。
 
 模型返回后，OCR 先检查结果数量及业务筛选必需的 `blocks`、`lines`、`text` 结构；仅对通过现有格式过滤、实际参与比较的候选检查 `confidence`。接口结果异常抛出 `OCRProcessingError`，按 `OCR_FAILED` 结束当前 Session；未知识别异常由任务完成回调交给 Runtime 的全局故障流程，不生成 `OCR_FAILED`。正常返回但没有可靠业务文字时继续生成待人工复核的结果。
 

@@ -1,11 +1,15 @@
 """验证 OCR 主流程组装最终文字与证据图片。"""
 
 import time
+from dataclasses import replace
+from pathlib import Path
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
-from camera.hikrobot_sdk import CameraFrame
+import text_recognition
+from camera.hikrobot_sdk import PIXEL_TYPE_MONO8, CameraFrame
 from models import OCRResult
 from text_recognition import OCRProcessingError, TextRecognizer
 
@@ -77,6 +81,161 @@ def recognize_model_results(model_results: object) -> OCRResult:
     return recognizer.process_session_frames(
         "session-1", "capture-1", "camera-1", (camera_frame,)
     )
+
+
+def test_recognize_images_reuses_engine_and_preserves_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """确认配置路径独立于工作目录且所有帧复用同一个 Engine。
+
+    Args:
+        monkeypatch: pytest 提供的替换与工作目录工具。
+        tmp_path: pytest 提供的临时工作目录。
+
+    Returns:
+        返回示例：
+            None  # 模型只创建一次且图片与结果顺序已核对
+    """
+    # 准备三个独立结果和模拟 OCR Engine。
+    expected_results = [
+        {"image_path": None, "blocks": []},
+        {"image_path": None, "blocks": []},
+        {"image_path": None, "blocks": []},
+    ]
+    engine = Mock()
+    engine.process_image.side_effect = expected_results
+    configuration_loader = Mock(wraps=text_recognition.load_ocr_config)
+    engine_factory = Mock(return_value=engine)
+    monkeypatch.setattr(text_recognition, "load_ocr_config", configuration_loader)
+    monkeypatch.setattr(text_recognition, "BeltOCREngine", engine_factory)
+    monkeypatch.chdir(tmp_path)
+
+    # 建立按像素值区分的三张 Mono8 原始帧。
+    first_frame = CameraFrame(
+        camera_serial="camera-1",
+        frame_number=1,
+        device_timestamp=1,
+        host_timestamp=1,
+        received_monotonic=time.monotonic(),
+        width=2,
+        height=2,
+        pixel_type=PIXEL_TYPE_MONO8,
+        lost_packet_count=0,
+        data=bytes([1, 2, 3, 4]),
+    )
+    second_frame = replace(first_frame, frame_number=2, data=bytes([5, 6, 7, 8]))
+    third_frame = replace(first_frame, frame_number=3, data=bytes([9, 10, 11, 12]))
+
+    # 分两次识别并核对每张图片的结果顺序。
+    recognizer = TextRecognizer()
+    first_results = recognizer.recognize_images([first_frame, second_frame])
+    later_results = recognizer.recognize_images([third_frame])
+    assert first_results[0] is expected_results[0]
+    assert first_results[1] is expected_results[1]
+    assert later_results[0] is expected_results[2]
+
+    # 核对首次配置加载位置和 Engine 复用次数。
+    module_directory = Path(text_recognition.__file__).resolve().parent
+    config_path = module_directory / "ocr" / "config.yaml"
+    configuration_loader.assert_called_once_with(config_path)
+    engine_factory.assert_called_once()
+    assert engine_factory.call_args.args[0].roi.enabled
+    assert recognizer.ocr_engine is engine
+
+    # 核对三帧交给 Engine 的二维像素顺序。
+    assert engine.process_image.call_count == 3
+    expected_pixels = (
+        [[1, 2], [3, 4]],
+        [[5, 6], [7, 8]],
+        [[9, 10], [11, 12]],
+    )
+    for call, pixels in zip(engine.process_image.call_args_list, expected_pixels):
+        np.testing.assert_array_equal(call.args[0], pixels)
+        assert call.args[0].dtype == np.uint8
+
+
+def test_process_session_frames_consumes_engine_result() -> None:
+    """确认真实识别入口的 blocks 可直接进入现有文字终选。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 最终文字和证据帧已核对
+    """
+    # 准备一张有效 Mono8 帧和包含四类文字的模型结果。
+    frame = CameraFrame(
+        camera_serial="camera-1",
+        frame_number=1,
+        device_timestamp=1,
+        host_timestamp=1,
+        received_monotonic=time.monotonic(),
+        width=2,
+        height=1,
+        pixel_type=PIXEL_TYPE_MONO8,
+        lost_packet_count=0,
+        data=b"\x01\x02",
+    )
+    engine = Mock()
+    engine.process_image.return_value = {
+        "image_path": None,
+        "blocks": [{"bbox": [0, 0, 2, 1], "lines": list(RELIABLE_MODEL_LINES)}],
+    }
+    recognizer = TextRecognizer()
+    recognizer.ocr_engine = engine
+
+    # 执行整轮识别并核对原有终选结果。
+    result = recognizer.process_session_frames(
+        "session-1", "capture-1", "camera-1", (frame,)
+    )
+    assert result.ordered_lines == tuple(line["text"] for line in RELIABLE_MODEL_LINES)
+    assert result.review_reason is None
+    assert result.line_frame_ids == (("capture-1-1",),) * 4
+    assert len(result.selected_frames) == 1
+    engine.process_image.assert_called_once()
+
+
+def test_recognize_images_keeps_known_and_unknown_error_boundaries() -> None:
+    """确认相机帧错误按 OCR 失败处理，模型程序异常原样上抛。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 已知与未知异常的传播方式已核对
+    """
+    # 准备一张有效帧和模拟 OCR Engine。
+    frame = CameraFrame(
+        camera_serial="camera-1",
+        frame_number=1,
+        device_timestamp=1,
+        host_timestamp=1,
+        received_monotonic=time.monotonic(),
+        width=2,
+        height=1,
+        pixel_type=PIXEL_TYPE_MONO8,
+        lost_packet_count=0,
+        data=b"\x01\x02",
+    )
+    engine = Mock()
+    recognizer = TextRecognizer()
+    recognizer.ocr_engine = engine
+
+    # 非 Mono8 和错误字节长度转为 OCRProcessingError。
+    invalid_frames = (replace(frame, pixel_type=0), replace(frame, data=b"\x01"))
+    for invalid_frame in invalid_frames:
+        with pytest.raises(OCRProcessingError):
+            recognizer.recognize_images([invalid_frame])
+    engine.process_image.assert_not_called()
+
+    # 模型中的未知程序异常保持原始异常对象。
+    error = RuntimeError("未知模型错误")
+    engine.process_image.side_effect = error
+    with pytest.raises(RuntimeError) as captured_error:
+        recognizer.recognize_images([frame])
+    assert captured_error.value is error
 
 
 def test_all_reliable_categories_need_no_review() -> None:
