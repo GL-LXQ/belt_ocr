@@ -3,14 +3,61 @@
 import asyncio
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
 
 from camera.camera import Camera, CaptureTask
-from camera.hikrobot_sdk import MvsError
+from camera.hikrobot_sdk import (
+    PIXEL_TYPE_MONO8,
+    CameraFrame,
+    MvsError,
+    convert_mono8_frame_to_array,
+)
 from enums import EventType
+
+
+def test_mono8_frame_conversion_checks_pixels_and_size() -> None:
+    """确认 Mono8 帧转成灰度图并拒绝错误格式或字节数。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 像素内容、尺寸和异常边界已核对
+    """
+    # 建立包含两行像素的 Mono8 原始帧。
+    frame = CameraFrame(
+        camera_serial="camera-1",
+        frame_number=1,
+        device_timestamp=1,
+        host_timestamp=1,
+        received_monotonic=1.0,
+        width=3,
+        height=2,
+        pixel_type=PIXEL_TYPE_MONO8,
+        lost_packet_count=0,
+        data=bytes([1, 2, 3, 4, 5, 6]),
+    )
+
+    # 核对数组的像素类型、尺寸和顺序。
+    image = convert_mono8_frame_to_array(frame)
+    assert image.dtype == np.uint8
+    assert image.shape == (2, 3)
+    np.testing.assert_array_equal(image, [[1, 2, 3], [4, 5, 6]])
+
+    # 拒绝非 Mono8 像素格式。
+    with pytest.raises(ValueError, match="仅支持 Mono8"):
+        convert_mono8_frame_to_array(replace(frame, pixel_type=0))
+
+    # 拒绝短于或长于图像尺寸的字节数据。
+    for invalid_data in (frame.data[:-1], frame.data + b"\x07"):
+        with pytest.raises(ValueError, match="字节数与尺寸不符"):
+            convert_mono8_frame_to_array(replace(frame, data=invalid_data))
 
 
 def test_single_empty_frame_does_not_end_capture() -> None:

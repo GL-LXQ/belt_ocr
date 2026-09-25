@@ -10,6 +10,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
+
+PIXEL_TYPE_MONO8 = 0x01080001
+
 
 class MvsError(RuntimeError):
     """记录 SDK 操作失败。"""
@@ -29,6 +34,37 @@ class CameraFrame:
     pixel_type: int  # SDK 像素格式编号
     lost_packet_count: int  # SDK 报告的丢包数
     data: bytes  # 复制出的独立图像字节
+
+
+def convert_mono8_frame_to_array(frame: CameraFrame) -> np.ndarray:
+    """将 Mono8 相机帧转换为二维灰度图数组。
+
+    Args:
+        frame: 包含 Mono8 原始字节和图像尺寸的相机帧。
+
+    Returns:
+        返回示例：
+            np.array(
+                [
+                    [1, 2],  # 第一行像素
+                    [3, 4],  # 第二行像素
+                ],
+                dtype=np.uint8,  # 单通道八位像素
+            )
+    """
+    # 确认相机帧使用 Mono8 像素格式。
+    if frame.pixel_type != PIXEL_TYPE_MONO8:
+        raise ValueError(f"仅支持 Mono8 相机帧，收到像素格式: {frame.pixel_type}")
+
+    # 核对原始字节数与图像尺寸。
+    expected_length = frame.width * frame.height
+    if len(frame.data) != expected_length:
+        raise ValueError(
+            f"Mono8 图像字节数与尺寸不符: 收到 {len(frame.data)}，预期 {expected_length}"
+        )
+
+    # 将原始字节恢复为二维灰度图。
+    return np.frombuffer(frame.data, dtype=np.uint8).reshape(frame.height, frame.width)
 
 
 @dataclass
