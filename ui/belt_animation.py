@@ -185,15 +185,23 @@ class BeltAnimationWidget(QWidget):
         self.update()
 
     def _advance_animation(self) -> None:
-        """推进所有已启用的循环动画。
+        """推进循环动画，并在动画启用时请求重绘。
 
         Args:
             无。
 
         Returns:
             返回示例：
-                None  # 动画相位前进并请求重绘
+                None  # 动画相位已推进，空闲时不请求重绘
         """
+        animation_active = (
+            self._machine_state == _MachineState.RUNNING
+            or self.capturing
+            or self.frequency_listening
+        )
+        if not animation_active:
+            return
+
         if self._machine_state == _MachineState.RUNNING:
             self.belt_offset = (self.belt_offset + 2.8) % 80
 

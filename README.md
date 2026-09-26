@@ -75,7 +75,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 → Session 结束
 → 等待下一轮。
 
-GUI 的后台入口由 `MonitoringService`（`QThread`）管理，在实时监测页点击“启动监测”时创建；`SystemRuntime.start()` 接收两个 Qt 信号的 emit 回调，实时监测页据此更新机器卡片的连接状态和测量进度节点，频率值、最近事件和画面区仍为占位。
+GUI 的后台入口由 `MonitoringService`（`QThread`）管理，在实时监测页点击“启动监测”时创建；`SystemRuntime.start()` 接收两个 Qt 信号的 emit 回调，实时监测页据此更新机器卡片的连接状态和测量进度节点。频率值和最近事件仍未正式接入；机器画面区已经使用皮带机动画，但真实 START/CLOSE、采集状态和频率状态还没有接入动画驱动。
 
 ## 三、项目结构
 
