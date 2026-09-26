@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from src.service.machine_service import MachineService, MachineServiceError
 from src.service.monitoring_service import MonitoringService
+from ui.belt_animation import BeltAnimationWidget
 from ui.demo_data import LOG_ROWS
 from ui.theme import create_icon
 
@@ -47,27 +48,6 @@ PROGRESS_STATUS_TITLES = {
     "success": "已完成",
     "failed": "失败",
 }
-
-
-class CapturePreview(QLabel):
-    """暂无实时画面时的灰色占位区域。"""
-
-    def __init__(self):
-        """创建随卡片宽度伸缩的画面占位块。
-
-        Args:
-            无。
-
-        Returns:
-            返回示例：
-                None  # 创建灰色画面占位块
-        """
-        # 设置画面区域的标识、高度范围和伸缩策略。
-        super().__init__()
-        self.setObjectName("capturePreview")
-        self.setMinimumHeight(140)
-        self.setMaximumHeight(240)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
 
 
 class StepProgress(QFrame):
@@ -166,7 +146,7 @@ class StepProgress(QFrame):
 
 
 class MachineCard(QFrame):
-    """展示一台机器的画面占位、状态、频率、进度和事件。"""
+    """展示一台机器的动画、状态、频率、进度和事件。"""
 
     def __init__(self, data: dict):
         """构建机器卡片并填入展示数据。
@@ -203,18 +183,9 @@ class MachineCard(QFrame):
         heading.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(heading)
 
-        # 将画面标识叠放在灰色占位块顶部。
-        self.preview = CapturePreview()
-        preview_layout = QVBoxLayout(self.preview)
-        preview_layout.setContentsMargins(8, 7, 8, 7)
-        preview_caption = QHBoxLayout()
-        caption = QLabel('<span style="color:#C5CFDA">●</span> 暂无画面')
-        caption.setObjectName("previewCaption")
-        preview_caption.addWidget(caption)
-        preview_caption.addStretch()
-        preview_layout.addLayout(preview_caption)
-        preview_layout.addStretch()
-        layout.addWidget(self.preview, 1)
+        # 在卡片画面区域显示皮带机动画。
+        self.belt_animation = BeltAnimationWidget()
+        layout.addWidget(self.belt_animation, 1)
 
         # 并排创建当前状态与实时频率信息面板。
         metrics = QHBoxLayout()
@@ -321,6 +292,19 @@ class MachineCard(QFrame):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
         self.update()
+
+    def set_frequency(self, frequency: float | None) -> None:
+        """更新卡片实时频率文字。
+
+        Args:
+            frequency: 实际频率，None 表示暂时没有频率数据。
+
+        Returns:
+            返回示例：
+                None  # 频率标签显示 --、0.0 Hz 或实际频率
+        """
+        frequency_text = "--" if frequency is None else f"{frequency:.1f} Hz"
+        self.frequency_label.setText(frequency_text)
 
 
 class RealtimePage(QWidget):

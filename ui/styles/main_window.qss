@@ -74,8 +74,7 @@ QLabel[smallText="true"] { color: #73849B; font-size: 11px; }
 QLabel#metricValue { font-size: 18px; font-weight: bold; color: #73849B; }
 QFrame[tone="running"] QLabel#metricValue { color: #18AE59; }
 QFrame[tone="waiting"] QLabel#metricValue { color: #FF9818; }
-QLabel#capturePreview { background: #E9EEF4; border: 1px solid #DCE5EF; border-radius: 6px; }
-QLabel#previewCaption { color: #73849B; background: rgba(255, 255, 255, 190); border-radius: 3px; padding: 3px 5px; font-size: 11px; }
+QWidget#beltAnimation { background: #E9EEF4; border: 1px solid #DCE5EF; border-radius: 6px; }
 QLabel#eventLine { color: #526681; font-size: 12px; }
 
 /* 设置操作按钮和禁用状态。 */
