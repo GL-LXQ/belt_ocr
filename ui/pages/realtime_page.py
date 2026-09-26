@@ -167,7 +167,7 @@ class MachineCard(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 14)
-        layout.setSpacing(5)
+        layout.setSpacing(8)
 
         # 创建机器标题和状态徽标。
         heading = QHBoxLayout()
@@ -187,34 +187,56 @@ class MachineCard(QFrame):
         self.belt_animation = BeltAnimationWidget()
         layout.addWidget(self.belt_animation, 1)
 
-        # 并排创建当前状态与实时频率信息面板。
+        # 创建当前状态、OCR 结果和实时频率三栏。
         metrics = QHBoxLayout()
-        metrics.setSpacing(10)
+        metrics.setSpacing(8)
         self.state_label = QLabel()
+        self.state_label.setWordWrap(True)
+        self.state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.frequency_label = QLabel()
+        self.frequency_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.state_icon = QLabel()
         self.state_icon.setObjectName("stateIcon")
-        self.state_icon.setFixedSize(34, 34)
+        self.state_icon.setFixedSize(50, 50)
         self.state_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.frequency_icon = QLabel()
-        self.frequency_icon.setFixedSize(24, 24)
-        for title, value in (
-            ("当前状态", self.state_label),
-            ("实时频率", self.frequency_label),
-        ):
+        self.frequency_icon.setFixedSize(68, 68)
+        self.frequency_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.frequency_icon.setAccessibleName("实时频率")
+        self.ocr_result_label = QLabel("--")
+        self.ocr_result_label.setObjectName("ocrResult")
+        self.ocr_result_label.setWordWrap(True)
+        self.ocr_result_label.setMinimumHeight(120)
+
+        # 适当增加频率栏宽度，并让 OCR 栏仍明显更宽。
+        metric_items = (
+            (self.state_label, self.state_icon, 4),
+            (self.ocr_result_label, None, 8),
+            (self.frequency_label, self.frequency_icon, 5),
+        )
+        for value, value_icon, stretch in metric_items:
             panel = QFrame()
             panel.setObjectName("metricPanel")
             panel_layout = QVBoxLayout(panel)
-            panel_layout.setContentsMargins(10, 8, 10, 8)
+            is_ocr_value = value is self.ocr_result_label
+            horizontal_margin = 8 if is_ocr_value else 0
+            panel_layout.setContentsMargins(
+                horizontal_margin,
+                6,
+                horizontal_margin,
+                6,
+            )
             panel_layout.setSpacing(4)
-            panel_layout.addWidget(QLabel(title))
-            value.setObjectName("metricValue")
-            value_row = QHBoxLayout()
-            value_row.setSpacing(8)
-            value_row.addWidget(self.state_icon if title == "当前状态" else self.frequency_icon)
-            value_row.addWidget(value, 1)
-            panel_layout.addLayout(value_row)
-            metrics.addWidget(panel, 1)
+            if is_ocr_value:
+                panel_layout.addWidget(value, 1, Qt.AlignmentFlag.AlignTop)
+            else:
+                # 将图标和对应数值作为一组垂直居中显示。
+                panel_layout.addStretch(1)
+                panel_layout.addWidget(value_icon, 0, Qt.AlignmentFlag.AlignHCenter)
+                value.setObjectName("metricValue")
+                panel_layout.addWidget(value, 0, Qt.AlignmentFlag.AlignHCenter)
+                panel_layout.addStretch(1)
+            metrics.addWidget(panel, stretch)
         layout.addLayout(metrics)
 
         # 创建本轮步骤进度区域。
@@ -223,12 +245,11 @@ class MachineCard(QFrame):
         progress_layout = QVBoxLayout(progress_panel)
         progress_layout.setContentsMargins(8, 8, 8, 10)
         progress_layout.setSpacing(6)
-        progress_layout.addWidget(QLabel("本轮进度"))
         self.steps = StepProgress()
         progress_layout.addWidget(self.steps)
         layout.addWidget(progress_panel)
 
-        # 创建最近事件标题、禁用入口和固定数量的事件行。
+        # 创建最近事件标题、禁用入口和两条摘要行。
         events_heading = QHBoxLayout()
         events_heading.addWidget(QLabel("最近事件"))
         events_heading.addStretch()
@@ -239,7 +260,7 @@ class MachineCard(QFrame):
         events_heading.addWidget(self.more_button)
         layout.addLayout(events_heading)
         self.event_labels = []
-        for index in range(4):
+        for index in range(2):
             label = QLabel()
             label.setObjectName("eventLine")
             label.setTextFormat(Qt.TextFormat.RichText)
@@ -268,9 +289,13 @@ class MachineCard(QFrame):
         color = {"running": "normal", "idle": "muted", "waiting": "warning"}[data["tone"]]
         state_icon = {"running": "play", "idle": "pause", "waiting": "hourglass"}[data["tone"]]
         machine_icon = {"running": "alarm", "idle": "fan", "waiting": "warning_mark"}[data["tone"]]
-        self.state_icon.setPixmap(create_icon(state_icon, "white").pixmap(QSize(22, 22)))
+        self.state_icon.setPixmap(
+            create_icon(state_icon, "white").pixmap(QSize(30, 30))
+        )
         self.state_icon.setAccessibleName(data["state"])
-        self.frequency_icon.setPixmap(create_icon("pulse", color).pixmap(QSize(23, 23)))
+        self.frequency_icon.setPixmap(
+            create_icon("pulse", color).pixmap(QSize(64, 64))
+        )
         machine_color = "white" if data["tone"] == "waiting" else "blue" if data["tone"] == "idle" else color
         self.machine_icon.setPixmap(create_icon(machine_icon, machine_color).pixmap(QSize(28, 28)))
         self.machine_icon.setStyleSheet(
@@ -305,6 +330,31 @@ class MachineCard(QFrame):
         """
         frequency_text = "--" if frequency is None else f"{frequency:.1f} Hz"
         self.frequency_label.setText(frequency_text)
+
+    def set_ocr_result(self, lines: tuple[str, ...] | list[str]) -> None:
+        """将 OCR 文字行按原顺序显示在识别结果区域。
+
+        Args:
+            lines: 按展示顺序排列的 OCR 文字行。
+
+        Returns:
+            返回示例：
+                None  # OCR 标签显示换行后的文字或 --
+        """
+        result_text = "\n".join(lines) or "--"
+        self.ocr_result_label.setText(result_text)
+
+    def clear_ocr_result(self) -> None:
+        """清空 OCR 识别结果并显示默认占位文字。
+
+        Args:
+            无。
+
+        Returns:
+            返回示例：
+                None  # OCR 标签恢复显示 --
+        """
+        self.ocr_result_label.setText("--")
 
 
 class RealtimePage(QWidget):

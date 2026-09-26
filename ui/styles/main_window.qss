@@ -71,9 +71,10 @@ QFrame[tone="running"] QLabel#machineBadge { background: #DCF9DF; color: #138B3F
 QFrame[tone="waiting"] QLabel#machineBadge { background: #FFF0D8; color: #F58A09; }
 QFrame#metricPanel { background: #F5F8FB; border: 1px solid #F0F4F8; border-radius: 7px; }
 QLabel[smallText="true"] { color: #73849B; font-size: 11px; }
-QLabel#metricValue { font-size: 18px; font-weight: bold; color: #73849B; }
+QLabel#metricValue { font-size: 14px; font-weight: bold; color: #73849B; }
 QFrame[tone="running"] QLabel#metricValue { color: #18AE59; }
 QFrame[tone="waiting"] QLabel#metricValue { color: #FF9818; }
+QLabel#ocrResult { color: #526681; font-size: 13px; }
 QWidget#beltAnimation { background: #E9EEF4; border: 1px solid #DCE5EF; border-radius: 6px; }
 QLabel#eventLine { color: #526681; font-size: 12px; }
 
@@ -99,7 +100,7 @@ QScrollBar::handle:vertical { background: #D4DEE9; border-radius: 4px; min-heigh
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 
 /* 设置当前状态的圆形图标和卡片内的小标题。 */
-QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #AAB6C2, stop:1 #738393); border-radius: 17px; }
+QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #AAB6C2, stop:1 #738393); border-radius: 25px; }
 QFrame[tone="running"] QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #49CF82, stop:1 #0C9F48); }
 QFrame[tone="waiting"] QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFC267, stop:1 #FF900A); }
 QLabel#machineBadge { border: 1px solid transparent; }

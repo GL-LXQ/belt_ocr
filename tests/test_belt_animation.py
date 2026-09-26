@@ -110,3 +110,28 @@ def test_machine_card_formats_frequency_values(
     card = SimpleNamespace(frequency_label=frequency_label)
     MachineCard.set_frequency(card, frequency)
     frequency_label.setText.assert_called_once_with(expected_text)
+
+
+def test_machine_card_sets_and_clears_ocr_result() -> None:
+    """验证卡片按行显示并清空 OCR 结果。
+
+    Args:
+        无。
+
+    Returns:
+        返回示例：
+            None  # OCR 标签显示换行结果并可恢复默认文字
+    """
+    ocr_result_label = Mock()
+    card = SimpleNamespace(ocr_result_label=ocr_result_label)
+    result_lines = ("2378244 VEGA × 5EPJ1152", "2926 215C", "003")
+
+    MachineCard.set_ocr_result(card, result_lines)
+    ocr_result_label.setText.assert_called_once_with(
+        "2378244 VEGA × 5EPJ1152\n2926 215C\n003"
+    )
+
+    MachineCard.set_ocr_result(card, ())
+    ocr_result_label.setText.assert_called_with("--")
+    MachineCard.clear_ocr_result(card)
+    assert ocr_result_label.setText.call_args_list[-1].args == ("--",)
