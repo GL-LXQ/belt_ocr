@@ -126,12 +126,130 @@ def test_machine_card_sets_and_clears_ocr_result() -> None:
     card = SimpleNamespace(ocr_result_label=ocr_result_label)
     result_lines = ("2378244 VEGA × 5EPJ1152", "2926 215C", "003")
 
-    MachineCard.set_ocr_result(card, result_lines)
+    MachineCard.set_ocr_result(card, result_lines, ("A" * 20, "2926215C", "003"))
     ocr_result_label.setText.assert_called_once_with(
-        "2378244 VEGA × 5EPJ1152\n2926 215C\n003"
+        "20  2378244 VEGA × 5EPJ1152\n8  2926 215C\n3  003\n2  --"
     )
 
-    MachineCard.set_ocr_result(card, ())
-    ocr_result_label.setText.assert_called_with("--")
+    MachineCard.set_ocr_result(card, (), ())
+    ocr_result_label.setText.assert_called_with("20  --\n8  --\n3  --\n2  --")
     MachineCard.clear_ocr_result(card)
-    assert ocr_result_label.setText.call_args_list[-1].args == ("--",)
+    assert ocr_result_label.setText.call_args_list[-1].args == ("20  --\n8  --\n3  --\n2  --",)
+
+
+def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
+    """验证文字分类、周期隔离和刷新恢复。
+
+    Args:
+        qt_application: Qt 应用实例。
+
+    Returns:
+        返回示例：
+            None  # 新周期清空缓存，刷新保留身份且旧文字被隔离
+    """
+    from PySide6.QtCore import Qt
+    from ui.pages.realtime_page import RealtimePage
+
+    # 创建两台机器的真实页面控件。
+    service = Mock()
+    service.list_enabled_machines.return_value = [
+        {"id": 1, "machine_name": "机器 1"},
+        {"id": 2, "machine_name": "机器 2"},
+    ]
+    page = RealtimePage(service)
+    ordered_lines = ("14", "2926 215C", "<b>003</b>", "2926 216C", "2926 217C", "长文字")
+    normalized_lines = ("14", "2926215C", "003", "2926216C", "2926217C", "A" * 20)
+    try:
+        # 正式启动后交付乱序文字，核对分类和纯文本设置。
+        page.update_measurement_progress("1", "first", "session_start", "success")
+        page.update_ocr_result("1", "first", ordered_lines, normalized_lines)
+        expected_text = "20  长文字\n8  2926 215C\n    2926 216C\n    2926 217C\n3  <b>003</b>\n2  14"
+        assert page.cards_by_machine_id["1"].ocr_result_label.text() == expected_text
+        assert page.cards_by_machine_id["1"].ocr_result_label.textFormat() == Qt.TextFormat.PlainText
+        assert page.cards_by_machine_id["2"].ocr_result_label.text() == "20  --\n8  --\n3  --\n2  --"
+
+        # 入库进度、连接状态和刷新均保留已完成文字。
+        page.update_measurement_progress("1", "first", "evidence_storage", "success")
+        page.update_connection_state("1", "已停止", "")
+        page.reload_machines()
+        assert page.cards_by_machine_id["1"].ocr_result_label.text() == expected_text
+        assert page.cards_by_machine_id["1"].progress_session_id == "first"
+
+        # 新周期同时清空缓存和控件，刷新不恢复上一轮文字。
+        page.update_measurement_progress("1", "second", "session_start", "success")
+        assert page.ocr_results_by_machine_id["1"] == ("second", (), ())
+        page.reload_machines()
+        assert page.cards_by_machine_id["1"].progress_session_id == "second"
+        page.update_ocr_result("1", "first", ordered_lines, normalized_lines)
+        page.update_measurement_progress("1", "first", "evidence_storage", "success")
+        assert page.ocr_results_by_machine_id["1"] == ("second", (), ())
+        assert page.cards_by_machine_id["1"].ocr_result_label.text() == "20  --\n8  --\n3  --\n2  --"
+
+        # 第二台机器独立接收本轮结果。
+        page.update_measurement_progress("2", "other", "session_start", "success")
+        page.update_ocr_result("2", "other", ("12",), ("12",))
+        assert page.cards_by_machine_id["2"].ocr_result_label.text().endswith("2  12")
+        assert page.ocr_results_by_machine_id["1"] == ("second", (), ())
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+def test_monitoring_service_delivers_text_from_background_thread(qt_application, monkeypatch) -> None:
+    """验证后台监测通过 Qt 信号向页面交付周期和文字。
+
+    Args:
+        qt_application: Qt 应用实例。
+        monkeypatch: 属性替换工具。
+
+    Returns:
+        返回示例：
+            None  # 后台信号按顺序进入页面并显示最终文字
+    """
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+    from ui.pages.realtime_page import RealtimePage
+    from src.service.monitoring_service import MonitoringService
+
+    # 创建页面和不访问设备的运行时替身。
+    machine_service = Mock()
+    machine_service.list_enabled_machines.return_value = [{"id": 1, "machine_name": "机器 1"}]
+    page = RealtimePage(machine_service)
+    runtime = SimpleNamespace(failure=None, stop=AsyncMock())
+
+    async def start_runtime(camera_notification, progress_notification, ocr_notification) -> None:
+        """从监测线程发送启动和最终文字通知。
+
+        Args:
+            camera_notification: 相机状态回调。
+            progress_notification: 测量进度回调。
+            ocr_notification: 最终文字回调。
+
+        Returns:
+            返回示例：
+                None  # 周期身份和文字已发出
+        """
+        progress_notification("1", "session", "session_start", "success")
+        ocr_notification("1", "session", ("003",), ("003",))
+
+    # 替换设备启动入口并绑定真实 Qt 信号。
+    runtime.start = start_runtime
+    monkeypatch.setattr("src.service.monitoring_service.load_config", Mock())
+    monkeypatch.setattr("src.service.monitoring_service.SystemRuntime", Mock(return_value=runtime))
+    service = MonitoringService(Path("config"))
+    service.stop_requested.set()
+    service.measurement_progress_changed_signal.connect(page.update_measurement_progress)
+    service.ocr_result_changed_signal.connect(page.update_ocr_result)
+    try:
+        # 等待线程结束，再由主线程处理排队信号。
+        service.start()
+        assert service.wait(5000)
+        qt_application.processEvents()
+        assert service.failure_message == ""
+        assert page.ocr_results_by_machine_id["1"] == ("session", ("003",), ("003",))
+        assert page.cards_by_machine_id["1"].ocr_result_label.text() == "20  --\n8  --\n3  003\n2  --"
+        runtime.stop.assert_awaited_once()
+    finally:
+        service.wait()
+        page.close()
+        page.deleteLater()

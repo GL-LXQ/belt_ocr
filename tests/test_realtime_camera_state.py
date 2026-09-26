@@ -30,10 +30,14 @@ def test_camera_fault_remains_visible_after_measurement_progress(
         steps=SimpleNamespace(update_steps=Mock()),
         update_data=Mock(),
         setToolTip=Mock(),
-        progress_session_id=None,
+        progress_session_id="session-1",
         progress_statuses={},
     )
-    page = SimpleNamespace(connection_states={}, cards_by_machine_id={"1": card})
+    page = SimpleNamespace(
+        connection_states={},
+        cards_by_machine_id={"1": card},
+        ocr_results_by_machine_id={"1": ("session-1", (), ())},
+    )
 
     # 显示相机设备故障和原始原因。
     RealtimePage.update_connection_state(page, "1", "相机故障", "GetImageBuffer 失败")

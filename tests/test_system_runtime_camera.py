@@ -96,7 +96,7 @@ async def test_camera_connection_failure_preserves_other_machine(
         assert runtime.machines["1"].camera.sdk_camera is None
         assert runtime.machines["2"].camera.sdk_camera is healthy_camera
         camera_state_notification.assert_any_call("1", "连接失败", "相机未连接")
-        runtime.initialize_machines.assert_called_once_with(None, camera_state_notification)
+        runtime.initialize_machines.assert_called_once_with(None, camera_state_notification, None)
         assert runtime.accepting_signals
         assert runtime.failure is None
     finally:
@@ -137,7 +137,12 @@ def test_initialize_machines_passes_camera_state_notification(
     camera_state_notification = Mock()
 
     # 建立机器并核对状态通知回调。
-    runtime.initialize_machines(notify_camera_state=camera_state_notification)
+    ocr_notification = Mock()
+    runtime.initialize_machines(
+        notify_camera_state=camera_state_notification,
+        notify_ocr_result=ocr_notification,
+    )
+    assert runtime.machines["1"].notify_ocr_result is ocr_notification
     assert runtime.machines["1"].notify_camera_state is camera_state_notification
 
 

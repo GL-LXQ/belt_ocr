@@ -50,6 +50,7 @@ class Machine:
         on_fatal_error: Callable[[Exception], None],
         state_changed: asyncio.Event,
         notify_camera_state: Callable[[str, str, str], None] | None = None,
+        notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
     ) -> None:
         """组装一台机器的唯一当前周期及其处理依赖。
 
@@ -65,6 +66,7 @@ class Machine:
             on_fatal_error: 致命故障回调，把识别任务异常交给运行时处理。
             state_changed: 周期状态变化通知。
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
+            notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、原文字和去空格文字。
 
         Returns:
             返回示例：
@@ -83,9 +85,10 @@ class Machine:
         self.database = database
         self.publish_event = publish_event
 
-        # 登记相机状态与测量进度通知。
+        # 登记相机状态、测量进度和最终文字通知。
         self.notify_camera_state = notify_camera_state
         self.notify_measurement_progress = notify_measurement_progress
+        self.notify_ocr_result = notify_ocr_result
 
         # 登记致命故障回调与状态变化通知。
         self.on_fatal_error = on_fatal_error
@@ -559,6 +562,15 @@ class Machine:
                 # 保存整轮识别结果并标记处理完成。
                 session.ocr_result = event.payload
                 session.ocr_state = OCRState.COMPLETED
+
+                # 向界面交付当前周期的最终文字。
+                if self.notify_ocr_result is not None:
+                    self.notify_ocr_result(
+                        session.machine_id,
+                        session.session_id,
+                        session.ocr_result.ordered_lines,
+                        session.ocr_result.normalized_lines,
+                    )
 
                 # 上报字符识别完成。
                 if self.notify_measurement_progress is not None:

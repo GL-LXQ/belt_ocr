@@ -205,6 +205,8 @@ class MachineCard(QFrame):
         self.frequency_icon.setAccessibleName("实时频率")
         self.ocr_result_label = QLabel("--")
         self.ocr_result_label.setObjectName("ocrResult")
+        self.ocr_result_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.clear_ocr_result()
         self.ocr_result_label.setWordWrap(True)
         self.ocr_result_label.setMinimumHeight(120)
 
@@ -331,30 +333,48 @@ class MachineCard(QFrame):
         frequency_text = "--" if frequency is None else f"{frequency:.1f} Hz"
         self.frequency_label.setText(frequency_text)
 
-    def set_ocr_result(self, lines: tuple[str, ...] | list[str]) -> None:
-        """将 OCR 文字行按原顺序显示在识别结果区域。
+    def set_ocr_result(self, ordered_lines: tuple[str, ...], normalized_lines: tuple[str, ...]) -> None:
+        """按去空格文字长度分类显示原始 OCR 文字。
 
         Args:
-            lines: 按展示顺序排列的 OCR 文字行。
+            ordered_lines: 保留原始格式的最终文字。
+            normalized_lines: 与原始文字逐条对应的去空格文字。
 
         Returns:
             返回示例：
-                None  # OCR 标签显示换行后的文字或 --
+                None  # 按 20、8、3、2 分类显示，每条结果单独换行
         """
-        result_text = "\n".join(lines) or "--"
-        self.ocr_result_label.setText(result_text)
+        # 按固定类别收集对应的原始文字。
+        grouped_lines = {
+            20: [],
+            8: [],
+            3: [],
+            2: [],
+        }
+        for ordered_line, normalized_line in zip(ordered_lines, normalized_lines):
+            character_count = len(normalized_line)
+            if character_count in grouped_lines:
+                grouped_lines[character_count].append(ordered_line)
+
+        # 为每类首行添加类别标识，后续结果单独换行。
+        result_lines = []
+        for character_count, category_lines in grouped_lines.items():
+            display_lines = category_lines or ["--"]
+            result_lines.append(f"{character_count}  {display_lines[0]}")
+            result_lines.extend(f"    {line}" for line in display_lines[1:])
+        self.ocr_result_label.setText("\n".join(result_lines))
 
     def clear_ocr_result(self) -> None:
-        """清空 OCR 识别结果并显示默认占位文字。
+        """将四类 OCR 结果恢复为占位文字。
 
         Args:
             无。
 
         Returns:
             返回示例：
-                None  # OCR 标签恢复显示 --
+                None  # 四个类别均显示 --
         """
-        self.ocr_result_label.setText("--")
+        self.ocr_result_label.setText("20  --\n8  --\n3  --\n2  --")
 
 
 class RealtimePage(QWidget):
@@ -376,6 +396,7 @@ class RealtimePage(QWidget):
         self.monitoring_service = None
         self.closing_requested = False
         self.connection_states = {}
+        self.ocr_results_by_machine_id = {}
         self.cards_by_machine_id = {}
         self.configuration_directory = Path(__file__).resolve().parents[2] / "config"
         outer_layout = QVBoxLayout(self)
@@ -541,6 +562,14 @@ class RealtimePage(QWidget):
             self.machine_cards.append(card)
             machine_id = str(machine["id"])
             self.cards_by_machine_id[machine_id] = card
+
+            # 恢复当前周期身份和已缓存的文字。
+            cached_result = self.ocr_results_by_machine_id.get(machine_id)
+            if cached_result is not None:
+                session_id, ordered_lines, normalized_lines = cached_result
+                card.progress_session_id = session_id
+                card.set_ocr_result(ordered_lines, normalized_lines)
+
             status, reason = self.connection_states.get(machine_id, ("未启动", ""))
             self.update_connection_state(machine_id, status, reason)
 
@@ -553,7 +582,7 @@ class RealtimePage(QWidget):
         Returns:
             None  # 后台启动，按钮等待监测结束后恢复
         """
-        # 重读机器清单，清除上一轮结果并切换按钮状态。
+        # 重读机器清单，重置连接状态并切换按钮状态。
         self.connection_states.clear()
         self.reload_machines()
         self.start_button.setEnabled(False)
@@ -566,6 +595,7 @@ class RealtimePage(QWidget):
         self.monitoring_service = MonitoringService(self.configuration_directory)
         self.monitoring_service.camera_state_changed_signal.connect(self.update_connection_state)
         self.monitoring_service.measurement_progress_changed_signal.connect(self.update_measurement_progress)
+        self.monitoring_service.ocr_result_changed_signal.connect(self.update_ocr_result)
         self.monitoring_service.finished.connect(self.finish_monitoring)
         self.monitoring_service.start()
 
@@ -625,11 +655,23 @@ class RealtimePage(QWidget):
         Returns:
             None  # 对应卡片显示当前周期的阶段状态
         """
-        # 新周期到达时清空上一轮进度，再保存本次阶段状态。
-        card = self.cards_by_machine_id[machine_id]
+        # 正式受理新周期时同步切换缓存身份并清空文字。
+        cached_result = self.ocr_results_by_machine_id.get(machine_id)
+        current_session_id = cached_result[0] if cached_result is not None else None
+        is_session_start = stage == "session_start" and status == "success"
+        if is_session_start and current_session_id != session_id:
+            self.ocr_results_by_machine_id[machine_id] = (session_id, (), ())
+        elif current_session_id != session_id:
+            return
+
+        # 找到对应卡片，新周期清空进度和 OCR 展示。
+        card = self.cards_by_machine_id.get(machine_id)
+        if card is None:
+            return
         if card.progress_session_id != session_id:
             card.progress_session_id = session_id
             card.progress_statuses = {}
+            card.clear_ocr_result()
         progress_statuses = card.progress_statuses
         progress_statuses[stage] = status
 
@@ -651,6 +693,36 @@ class RealtimePage(QWidget):
             "frequency": card.frequency_label.text(),
             "events": (),
         })
+
+    def update_ocr_result(
+        self,
+        machine_id: str,
+        session_id: str,
+        ordered_lines: tuple[str, ...],
+        normalized_lines: tuple[str, ...],
+    ) -> None:
+        """保存当前周期的最终文字并更新对应卡片。
+
+        Args:
+            machine_id: 机器编号。
+            session_id: 文字所属周期编号。
+            ordered_lines: 保留原始格式的最终文字。
+            normalized_lines: 与原始文字对应的去空格文字。
+
+        Returns:
+            返回示例：
+                None  # 当前周期文字已保存并显示，旧周期文字被忽略
+        """
+        # 只接收已正式启动的当前周期文字。
+        cached_result = self.ocr_results_by_machine_id.get(machine_id)
+        if cached_result is None or cached_result[0] != session_id:
+            return
+
+        # 保留轻量文字缓存并更新仍在页面中的卡片。
+        self.ocr_results_by_machine_id[machine_id] = (session_id, ordered_lines, normalized_lines)
+        card = self.cards_by_machine_id.get(machine_id)
+        if card is not None:
+            card.set_ocr_result(ordered_lines, normalized_lines)
 
     def finish_monitoring(self):
         """显示最终停止结果并恢复启动入口。

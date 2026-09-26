@@ -1202,3 +1202,43 @@ async def test_io_interruption_preserves_closed_session(tmp_path: Path) -> None:
     assert machine.current_session is session
     assert machine.waiting_cycle_reset
     assert read_abnormal_events(database) == []
+
+
+@pytest.mark.asyncio
+async def test_ocr_notification_precedes_close_and_survives_release(tmp_path: Path) -> None:
+    """验证有效 OCR 立即通知文字且后续结算不清空通知结果。
+
+    Args:
+        tmp_path: 临时存储目录。
+
+    Returns:
+        返回示例：
+            None  # 文字先于 CLOSE 通知，旧事件被隔离且结果正常释放
+    """
+    frame = create_frame("session-1", "frame-1", b"image")
+    machine, database, session, progress_updates, _ = create_machine(tmp_path, (frame,))
+    result = session.ocr_result
+    session.ocr_result = None
+    session.ocr_state = OCRState.RUNNING
+    session.capture_stop_time = None
+    notification = Mock()
+    machine.notify_ocr_result = notification
+
+    # 旧周期和未知周期不发送文字通知。
+    await machine.handle_event(RuntimeEvent(EventType.OCR_COMPLETED, "1", "old", result))
+    notification.assert_not_called()
+
+    # 当前结果在现场关闭前立即发送，参数仅包含身份和文字。
+    await machine.handle_event(RuntimeEvent(EventType.OCR_COMPLETED, "1", session.session_id, result))
+    notification.assert_called_once_with("1", session.session_id, result.ordered_lines, result.normalized_lines)
+    assert session.capture_stop_time is None
+    assert session.ocr_state == OCRState.COMPLETED
+
+    # 重复结果被忽略，CLOSE 后正常提交并释放周期。
+    await machine.handle_event(RuntimeEvent(EventType.OCR_COMPLETED, "1", session.session_id, result))
+    await machine.handle_machine_close()
+    assert session.state == SessionState.COMMITTED
+    assert session.ocr_result is None
+    assert machine.current_session is None
+    assert notification.call_count == 1
+    database.close()
