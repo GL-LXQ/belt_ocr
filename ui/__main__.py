@@ -10,10 +10,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PySide6.QtWidgets import QApplication
 
-from config_util import read_configuration_settings
+from config_util import AppConfig, read_configuration_settings
 
+from src.service.abnormal_event_service import AbnormalEventService
 from src.service.machine_service import MachineService
 from src.service.measurement_history_service import MeasurementHistoryService
+from src.repo.abnormal_event_repo import AbnormalEventRepo
 from src.repo.machine_repo import MachineRepo
 from src.repo.measurement_record_repo import MeasurementRecordRepo
 from ui.main_window import MainWindow
@@ -43,15 +45,21 @@ def run_desktop_preview() -> int:
         MachineRepo.create_table(connection)
         MeasurementRecordRepo.create_table(connection)
 
-    # 创建机器和历史记录服务。
+    # 创建机器、历史记录和异常事件服务。
     machine_repo = MachineRepo(database_path)
     machine_service = MachineService(machine_repo)
     measurement_history_service = MeasurementHistoryService(
         MeasurementRecordRepo(database_path)
     )
+    recovery_database_path = AppConfig(**settings).recovery_path
+    abnormal_event_service = AbnormalEventService(
+        AbnormalEventRepo(recovery_database_path)
+    )
 
     # 创建并显示桌面主窗口。
-    window = MainWindow(machine_service, measurement_history_service)
+    window = MainWindow(
+        machine_service, measurement_history_service, abnormal_event_service
+    )
     window.show()
 
     # 运行事件循环，等待窗口关闭。

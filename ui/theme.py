@@ -49,6 +49,7 @@ ICON_PATHS = {
     ),
     "realtime": '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4M5 11h3l2-4 4 7 2-3h3"/>',
     "history": '<path d="M3 10a9 9 0 1 1 2 8M3 4v6h6m3-4v6l4 2"/>',
+    "abnormal_events": '<path d="M12 5v9m0 4v1" stroke-width="2.5"/>',
     "images": (
         '<rect x="3" y="3" width="18" height="18" rx="2"/>'
         '<circle cx="8" cy="8" r="1.5"/><path d="m3 17 6-6 4 4 3-3 5 5"/>'

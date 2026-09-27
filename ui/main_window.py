@@ -19,16 +19,19 @@ from PySide6.QtWidgets import (
 
 from src.service.machine_service import MachineService
 from src.service.measurement_history_service import MeasurementHistoryService
+from src.service.abnormal_event_service import AbnormalEventService
 from ui.theme import COLORS, create_icon
 from ui.pages.realtime_page import RealtimePage
 from ui.pages.machines_page import MachinesPage
 from ui.pages.history_page import HistoryPage
+from ui.pages.abnormal_events_page import AbnormalEventsPage
 
 
 # 按导航顺序配置页面标题和说明。
 PAGES = {
     "realtime": ("实时监测", "实时查看皮带机的检测画面、状态和事件"),
     "history": ("历史记录", "查看历史检测记录和测量结果"),
+    "abnormal_events": ("异常事件", "查看测量运行失败的原因和原始事件信息"),
     "images": ("图片管理", "查看和管理检测图片"),
     "settings": ("系统配置", "配置检测系统运行参数"),
     "machines": ("机器管理", "管理检测机器的基本信息，包括相机、频率仪的绑定与启用状态。"),
@@ -189,18 +192,20 @@ class TitleBar(QWidget):
 
 
 class MainWindow(QMainWindow):
-    """提供六个页面的统一桌面容器。"""
+    """提供七个页面的统一桌面容器。"""
 
     def __init__(
         self,
         machine_service: MachineService,
         measurement_history_service: MeasurementHistoryService,
+        abnormal_event_service: AbnormalEventService,
     ):
         """依次初始化窗口、页面、导航、时钟和样式。
 
         Args:
             machine_service: 机器业务服务。
             measurement_history_service: 测量历史服务。
+            abnormal_event_service: 异常事件查询服务。
 
         Returns:
             返回示例：
@@ -210,6 +215,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.machine_service = machine_service
         self.measurement_history_service = measurement_history_service
+        self.abnormal_event_service = abnormal_event_service
         self.nav_buttons = {}
         self.current_page_key = "realtime"
 
@@ -336,7 +342,7 @@ class MainWindow(QMainWindow):
 
         Returns:
             返回示例：
-                QWidget()  # 包含六个导航按钮和服务状态的侧栏
+                QWidget()  # 包含七个导航按钮和服务状态的侧栏
         """
         # 设置侧栏宽度、导航区边距和按钮间距。
         sidebar = QWidget()
@@ -415,9 +421,9 @@ class MainWindow(QMainWindow):
 
         Returns:
             返回示例：
-                QStackedWidget()  # 持有六个页面的容器
+                QStackedWidget()  # 持有七个页面的容器
         """
-        # 创建实时监测页、历史页、机器管理页和其他占位页面。
+        # 创建实时监测页、历史页、异常事件页、机器管理页和占位页面。
         stack = QStackedWidget()
         stack.setObjectName("pageStack")
         for page_key in PAGES:
@@ -426,6 +432,11 @@ class MainWindow(QMainWindow):
             elif page_key == "history":
                 self.history_page = HistoryPage(self.measurement_history_service)
                 stack.addWidget(self.history_page)
+            elif page_key == "abnormal_events":
+                self.abnormal_events_page = AbnormalEventsPage(
+                    self.abnormal_event_service
+                )
+                stack.addWidget(self.abnormal_events_page)
             elif page_key == "machines":
                 stack.addWidget(MachinesPage(self.machine_service))
             else:
@@ -511,7 +522,7 @@ class MainWindow(QMainWindow):
         """同步页面、导航高亮和窗口标题。
 
         Args:
-            page_key: realtime、history、images、settings、machines 或 logs。
+            page_key: PAGES 中的页面标识。
 
         Returns:
             返回示例：
@@ -527,6 +538,10 @@ class MainWindow(QMainWindow):
         # 每次进入历史页时读取一次最新记录。
         if page_key == "history" and previous_page_key != "history":
             self.history_page.refresh_history()
+
+        # 每次进入异常事件页时读取一次最新记录。
+        if page_key == "abnormal_events" and previous_page_key != "abnormal_events":
+            self.abnormal_events_page.refresh_events()
 
         # 同步顶部页面名和系统窗口标题。
         self.title_bar.caption.setText(f"| {title}")

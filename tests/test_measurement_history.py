@@ -18,7 +18,9 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 from config_util import AppConfig
 from database import Database, MeasurementRecord
 from repo.machine_repo import MachineRepo
+from repo.abnormal_event_repo import AbnormalEventRepo
 from repo.measurement_record_repo import MeasurementRecordRepo
+from src.service.abnormal_event_service import AbnormalEventService
 from src.service.measurement_history_service import (
     MeasurementHistoryService,
     MeasurementHistoryServiceError,
@@ -633,7 +635,14 @@ def test_main_window_refreshes_only_when_entering_history(
     """
     database_path = measurement_history_service.measurement_record_repo.database_path
     machine_repo = MachineRepo(database_path)
-    window = MainWindow(MachineService(machine_repo), measurement_history_service)
+    abnormal_event_service = AbnormalEventService(
+        AbnormalEventRepo(database_path.with_suffix(".recovery.sqlite3"))
+    )
+    window = MainWindow(
+        MachineService(machine_repo),
+        measurement_history_service,
+        abnormal_event_service,
+    )
     try:
         window.history_page.refresh_history = Mock(
             wraps=window.history_page.refresh_history
