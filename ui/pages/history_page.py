@@ -23,7 +23,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.service.history_service import HistoryService, HistoryServiceError
+from src.service.measurement_history_service import (
+    MeasurementHistoryService,
+    MeasurementHistoryServiceError,
+)
 from ui.theme import create_icon
 
 
@@ -57,11 +60,11 @@ def format_history_frequency(frequency: float | None) -> str:
 class HistoryPage(QWidget):
     """组织测量历史筛选、表格和只读详情。"""
 
-    def __init__(self, history_service: HistoryService) -> None:
+    def __init__(self, measurement_history_service: MeasurementHistoryService) -> None:
         """建立历史记录页面并连接筛选交互。
 
         Args:
-            history_service: 测量历史读取服务。
+            measurement_history_service: 测量历史读取服务。
 
         Returns:
             返回示例：
@@ -69,7 +72,7 @@ class HistoryPage(QWidget):
         """
         super().__init__()
         self.setObjectName("history")
-        self.history_service = history_service
+        self.measurement_history_service = measurement_history_service
         self.selected_review_status: bool | None = None
 
         # 创建页面标题和说明。
@@ -214,8 +217,8 @@ class HistoryPage(QWidget):
         """
         # 读取有历史记录的机器。
         try:
-            machines = self.history_service.list_record_machines()
-        except HistoryServiceError as error:
+            machines = self.measurement_history_service.list_record_machines()
+        except MeasurementHistoryServiceError as error:
             self.table.setRowCount(0)
             QMessageBox.warning(self, "历史记录读取失败", str(error))
             return
@@ -265,10 +268,10 @@ class HistoryPage(QWidget):
         """
         # 按当前筛选条件读取测量结果。
         try:
-            records = self.history_service.list_records(
+            records = self.measurement_history_service.list_records(
                 self.selected_review_status, self.machine_filter.currentData()
             )
-        except HistoryServiceError as error:
+        except MeasurementHistoryServiceError as error:
             self.table.setRowCount(0)
             QMessageBox.warning(self, "历史记录读取失败", str(error))
             return
@@ -320,8 +323,8 @@ class HistoryPage(QWidget):
         """
         # 按周期编号读取完整记录。
         try:
-            record = self.history_service.get_record(session_id)
-        except HistoryServiceError as error:
+            record = self.measurement_history_service.get_record(session_id)
+        except MeasurementHistoryServiceError as error:
             QMessageBox.warning(self, "历史详情读取失败", str(error))
             return
         if record is None:

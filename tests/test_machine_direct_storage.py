@@ -267,7 +267,7 @@ async def test_finalize_saves_images_before_record(tmp_path: Path) -> None:
         record = connection.execute(
             "SELECT ordered_lines, final_frequency_hz, "
             "evidence_directory, needs_review "
-            "FROM measurements WHERE session_id = ?",
+            "FROM measurement_records WHERE session_id = ?",
             (session.session_id,),
         ).fetchone()
     assert json.loads(record[0]) == ["AB123456"]
@@ -303,7 +303,7 @@ async def test_finalize_saves_all_review_frames(tmp_path: Path) -> None:
         record = connection.execute(
             "SELECT ordered_lines, final_frequency_hz, evidence_directory, "
             "needs_review, review_reason "
-            "FROM measurements WHERE session_id = ?",
+            "FROM measurement_records WHERE session_id = ?",
             (session.session_id,),
         ).fetchone()
     assert json.loads(record[0]) == []
@@ -342,7 +342,7 @@ async def test_finalize_preserves_reliable_text_for_review(tmp_path: Path) -> No
     with sqlite3.connect(database.config.database_path) as connection:
         record = connection.execute(
             "SELECT ordered_lines, needs_review, review_reason "
-            "FROM measurements WHERE session_id = ?",
+            "FROM measurement_records WHERE session_id = ?",
             (session.session_id,),
         ).fetchone()
 
@@ -386,7 +386,7 @@ async def test_shutdown_preserves_committed_session(tmp_path: Path) -> None:
     assert read_abnormal_events(database) == []
     with sqlite3.connect(database.config.database_path) as connection:
         saved_record = connection.execute(
-            "SELECT session_id FROM measurements WHERE session_id = ?",
+            "SELECT session_id FROM measurement_records WHERE session_id = ?",
             (session.session_id,),
         ).fetchone()
     assert saved_record == (session.session_id,)
@@ -471,7 +471,7 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
     assert not (expected_directory / "frame-1.jpg").exists()
     with sqlite3.connect(database.config.database_path) as connection:
-        record_count = connection.execute("SELECT COUNT(*) FROM measurements").fetchone()[0]
+        record_count = connection.execute("SELECT COUNT(*) FROM measurement_records").fetchone()[0]
     assert record_count == 0
 
     # 核对相机和机器仍可接收下一轮。
@@ -522,7 +522,7 @@ async def test_unknown_encoding_failure_removes_new_images(tmp_path: Path) -> No
     assert not (expected_directory / "frame-1.jpg").exists()
     with sqlite3.connect(database.config.database_path) as connection:
         record_count = connection.execute(
-            "SELECT COUNT(*) FROM measurements"
+            "SELECT COUNT(*) FROM measurement_records"
         ).fetchone()[0]
     assert record_count == 0
     assert session.state != SessionState.FAILED
@@ -566,7 +566,7 @@ async def test_image_write_failure_skips_database(
     assert fatal_error.__cause__ is write_error
     with sqlite3.connect(database.config.database_path) as connection:
         record_count = connection.execute(
-            "SELECT COUNT(*) FROM measurements"
+            "SELECT COUNT(*) FROM measurement_records"
         ).fetchone()[0]
     assert record_count == 0
 
@@ -681,7 +681,7 @@ async def test_database_conflict_keeps_conflict_reason(tmp_path: Path) -> None:
     with sqlite3.connect(database.config.database_path) as connection:
         saved_record = connection.execute(
             "SELECT ordered_lines, evidence_directory "
-            "FROM measurements WHERE session_id = ?",
+            "FROM measurement_records WHERE session_id = ?",
             (session.session_id,),
         ).fetchone()
     assert saved_record == (

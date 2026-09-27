@@ -3,27 +3,27 @@
 import json
 import sqlite3
 
-from src.repo.measurement_repo import MeasurementRepo
+from src.repo.measurement_record_repo import MeasurementRecordRepo
 
 
-class HistoryServiceError(Exception):
+class MeasurementHistoryServiceError(Exception):
     """表示测量历史读取或文字解析失败。"""
 
 
-class HistoryService:
+class MeasurementHistoryService:
     """向历史记录页提供机器选项、筛选结果和单条详情。"""
 
-    def __init__(self, measurement_repo: MeasurementRepo) -> None:
+    def __init__(self, measurement_record_repo: MeasurementRecordRepo) -> None:
         """保存测量结果表访问对象。
 
         Args:
-            measurement_repo: 负责测量结果表结构和读取的 Repo。
+            measurement_record_repo: 负责测量结果表结构和读取的 Repo。
 
         Returns:
             返回示例：
                 None  # 历史记录服务已初始化
         """
-        self.measurement_repo = measurement_repo
+        self.measurement_record_repo = measurement_record_repo
 
     def list_record_machines(self) -> list[dict]:
         """读取历史记录中出现过的机器。
@@ -40,9 +40,9 @@ class HistoryService:
         """
         # 读取机器选项并将数据库错误转换为页面错误。
         try:
-            return self.measurement_repo.list_record_machines()
+            return self.measurement_record_repo.list_record_machines()
         except sqlite3.Error as error:
-            raise HistoryServiceError(f"历史机器读取失败：{error}") from error
+            raise MeasurementHistoryServiceError(f"历史机器读取失败：{error}") from error
 
     def list_records(
         self, needs_review: bool | None = None, machine_id: str | None = None
@@ -67,12 +67,14 @@ class HistoryService:
         """
         # 查询测量记录并转换存储格式。
         try:
-            records = self.measurement_repo.list_records(needs_review, machine_id)
+            records = self.measurement_record_repo.list_records(
+                needs_review, machine_id
+            )
             for record in records:
                 self.decode_record_fields(record)
             return records
         except (sqlite3.Error, json.JSONDecodeError) as error:
-            raise HistoryServiceError(f"历史记录读取失败：{error}") from error
+            raise MeasurementHistoryServiceError(f"历史记录读取失败：{error}") from error
 
     def get_record(self, session_id: str) -> dict | None:
         """读取一条测量记录并转换详情字段。
@@ -98,12 +100,12 @@ class HistoryService:
         """
         # 查询详情并转换存储格式。
         try:
-            record = self.measurement_repo.get_record(session_id)
+            record = self.measurement_record_repo.get_record(session_id)
             if record is not None:
                 self.decode_record_fields(record)
             return record
         except (sqlite3.Error, json.JSONDecodeError) as error:
-            raise HistoryServiceError(f"历史详情读取失败：{error}") from error
+            raise MeasurementHistoryServiceError(f"历史详情读取失败：{error}") from error
 
     def decode_record_fields(self, record: dict) -> None:
         """将一条记录中的 JSON 文字和复核标志转成页面字段。

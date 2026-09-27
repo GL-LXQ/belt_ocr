@@ -71,13 +71,13 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 → 取得最终频率
 → Machine 汇总结果
 → JPG 证据图片落盘
-→ Database 写入 measurements
+→ Database 写入 measurement_records
 → Session 结束
 → 等待下一轮。
 
 GUI 由 `MonitoringService`（`QThread`）将 `Machine` 的相机状态、测量进度、OCR 文字和周期关闭通知经 `SystemRuntime` 转为 Qt 信号，再由 `RealtimePage` 按机器编号及当前 Session 更新 `MachineCard`。`SESSION_START/SUCCESS` 清空上一轮 OCR 并展开皮带；图像和频率采集的 RUNNING、SUCCESS、FAILED 控制扫描及波形子动画；周期首次进入关闭处理时收缩皮带，监测结束时停止全部动画。OCR 完成后仍按 20、8、3、2 分类显示，关闭及入库不清空文字。页面只缓存当前周期编号、进度、皮带运行标志和现有 OCR 结果，用于刷新后恢复仍在运行的动画；频率数值和最近事件仍未正式接入。
 
-历史记录页进入时由 `HistoryService` 经 `MeasurementRepo` 从业务库 `measurements` 读取已保存的测量结果，并可按正常、待复核及机器筛选；列表显示 OCR 摘要，查看详情时按 Session ID 读取完整文字、频率、复核原因和证据目录。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
+历史记录页进入时由 `MeasurementHistoryService` 经 `MeasurementRecordRepo` 从业务库 `measurement_records` 读取已保存的测量结果，并可按正常、待复核及机器筛选；列表显示 OCR 摘要，查看详情时按 Session ID 读取完整文字、频率、复核原因和证据目录。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
 
 ## 三、项目结构
 

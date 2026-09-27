@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.service.machine_service import MachineService
-from src.service.history_service import HistoryService
+from src.service.measurement_history_service import MeasurementHistoryService
 from ui.theme import COLORS, create_icon
 from ui.pages.realtime_page import RealtimePage
 from ui.pages.machines_page import MachinesPage
@@ -192,13 +192,15 @@ class MainWindow(QMainWindow):
     """提供六个页面的统一桌面容器。"""
 
     def __init__(
-        self, machine_service: MachineService, history_service: HistoryService
+        self,
+        machine_service: MachineService,
+        measurement_history_service: MeasurementHistoryService,
     ):
         """依次初始化窗口、页面、导航、时钟和样式。
 
         Args:
             machine_service: 机器业务服务。
-            history_service: 测量历史服务。
+            measurement_history_service: 测量历史服务。
 
         Returns:
             返回示例：
@@ -207,7 +209,7 @@ class MainWindow(QMainWindow):
         # 初始化当前页面和导航按钮集合。
         super().__init__()
         self.machine_service = machine_service
-        self.history_service = history_service
+        self.measurement_history_service = measurement_history_service
         self.nav_buttons = {}
         self.current_page_key = "realtime"
 
@@ -422,7 +424,7 @@ class MainWindow(QMainWindow):
             if page_key == "realtime":
                 stack.addWidget(RealtimePage(self.machine_service))
             elif page_key == "history":
-                self.history_page = HistoryPage(self.history_service)
+                self.history_page = HistoryPage(self.measurement_history_service)
                 stack.addWidget(self.history_page)
             elif page_key == "machines":
                 stack.addWidget(MachinesPage(self.machine_service))

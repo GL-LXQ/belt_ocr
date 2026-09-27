@@ -99,7 +99,7 @@ def test_busy_write_succeeds_on_second_attempt(
     sleep_mock.assert_called_once_with(0.1)
     with sqlite3.connect(database.config.database_path) as connection:
         record_count = connection.execute(
-            "SELECT COUNT(*) FROM measurements WHERE session_id = ?",
+            "SELECT COUNT(*) FROM measurement_records WHERE session_id = ?",
             (record.session_id,),
         ).fetchone()[0]
     assert record_count == 1

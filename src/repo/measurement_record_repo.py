@@ -5,7 +5,7 @@ from contextlib import closing
 from pathlib import Path
 
 
-class MeasurementRepo:
+class MeasurementRecordRepo:
     """管理测量结果表结构和历史记录读取。"""
 
     def __init__(self, database_path: Path) -> None:
@@ -33,7 +33,7 @@ class MeasurementRepo:
         """
         # 创建测量结果表。
         connection.execute("""
-            CREATE TABLE IF NOT EXISTS measurements (
+            CREATE TABLE IF NOT EXISTS measurement_records (
                 session_id TEXT PRIMARY KEY,
                 machine_id TEXT NOT NULL,
                 start_time TEXT NOT NULL,
@@ -87,7 +87,7 @@ class MeasurementRepo:
                 "COALESCE(machine.machine_name, record.machine_id) AS machine_name, "
                 "record.finish_time, record.ordered_lines, "
                 "record.final_frequency_hz, record.needs_review "
-                "FROM measurements AS record "
+                "FROM measurement_records AS record "
                 "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id"
                 + where_clause
                 + " ORDER BY record.finish_time DESC, record.session_id DESC",
@@ -114,7 +114,7 @@ class MeasurementRepo:
             rows = connection.execute(
                 "SELECT DISTINCT record.machine_id, "
                 "COALESCE(machine.machine_name, record.machine_id) AS machine_name "
-                "FROM measurements AS record "
+                "FROM measurement_records AS record "
                 "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id "
                 "ORDER BY machine_name, record.machine_id"
             ).fetchall()
@@ -151,7 +151,7 @@ class MeasurementRepo:
                 "record.start_time, record.finish_time, record.ordered_lines, "
                 "record.final_frequency_hz, record.evidence_directory, "
                 "record.needs_review, record.review_reason "
-                "FROM measurements AS record "
+                "FROM measurement_records AS record "
                 "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id "
                 "WHERE record.session_id = ?",
                 (session_id,),

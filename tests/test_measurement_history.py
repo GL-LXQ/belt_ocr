@@ -14,15 +14,18 @@ from PySide6.QtWidgets import QApplication
 from config_util import AppConfig
 from database import Database, MeasurementRecord
 from repo.machine_repo import MachineRepo
-from repo.measurement_repo import MeasurementRepo
-from src.service.history_service import HistoryService, HistoryServiceError
+from repo.measurement_record_repo import MeasurementRecordRepo
+from src.service.measurement_history_service import (
+    MeasurementHistoryService,
+    MeasurementHistoryServiceError,
+)
 from src.service.machine_service import MachineService
 from ui.main_window import MainWindow
 from ui.pages.history_page import HistoryPage
 
 
 @pytest.fixture
-def history_service(tmp_path: Path) -> HistoryService:
+def measurement_history_service(tmp_path: Path) -> MeasurementHistoryService:
     """建立含正常、待复核和历史机器状态的业务库。
 
     Args:
@@ -30,7 +33,7 @@ def history_service(tmp_path: Path) -> HistoryService:
 
     Returns:
         返回示例：
-            HistoryService(...)  # 已保存四条测量记录的读取服务
+            MeasurementHistoryService(...)  # 已保存四条测量记录的读取服务
     """
     # 使用现有数据库入口创建业务表和三台机器。
     config = AppConfig(
@@ -101,7 +104,7 @@ def history_service(tmp_path: Path) -> HistoryService:
     )
     for record in records:
         database.write_measurement_record(record)
-    return HistoryService(MeasurementRepo(config.database_path))
+    return MeasurementHistoryService(MeasurementRecordRepo(config.database_path))
 
 
 @pytest.fixture(scope="module")
@@ -119,37 +122,40 @@ def qt_application() -> QApplication:
     return application or QApplication([])
 
 
-def test_history_service_filters_and_reads_details(
-    history_service: HistoryService,
+def test_measurement_history_service_filters_and_reads_details(
+    measurement_history_service: MeasurementHistoryService,
 ) -> None:
     """验证历史筛选、软删除机器和只读详情字段。
 
     Args:
-        history_service: 已保存测试记录的历史服务。
+        measurement_history_service: 已保存测试记录的历史服务。
 
     Returns:
         返回示例：
-            None  # 筛选结果和详情字段均来自 measurements
+            None  # 筛选结果和详情字段均来自 measurement_records
     """
     # 查询全部、正常、待复核和指定机器的记录。
-    records = history_service.list_records()
+    records = measurement_history_service.list_records()
     assert [record["session_id"] for record in records] == [
         "missing-machine-session", "disabled-machine-session",
         "review-session", "normal-session"
     ]
-    assert [record["session_id"] for record in history_service.list_records(False)] == [
+    normal_records = measurement_history_service.list_records(False)
+    assert [record["session_id"] for record in normal_records] == [
         "missing-machine-session", "disabled-machine-session", "normal-session"
     ]
-    assert [record["session_id"] for record in history_service.list_records(True)] == [
+    review_records = measurement_history_service.list_records(True)
+    assert [record["session_id"] for record in review_records] == [
         "review-session"
     ]
-    assert history_service.list_records(True, "1") == []
-    assert history_service.list_records(True, "2")[0]["session_id"] == "review-session"
-    disabled_records = history_service.list_records(False, "3")
+    assert measurement_history_service.list_records(True, "1") == []
+    machine_records = measurement_history_service.list_records(True, "2")
+    assert machine_records[0]["session_id"] == "review-session"
+    disabled_records = measurement_history_service.list_records(False, "3")
     assert disabled_records[0]["session_id"] == "disabled-machine-session"
 
     # 核对软删除机器和缺少机器信息时的展示名称。
-    machines = history_service.list_record_machines()
+    machines = measurement_history_service.list_record_machines()
     machine_names = {
         machine["machine_id"]: machine["machine_name"] for machine in machines
     }
@@ -162,56 +168,56 @@ def test_history_service_filters_and_reads_details(
     assert records[0]["machine_name"] == "99"
 
     # 读取详情并确认文字、空频率和复核原因。
-    review_record = history_service.get_record("review-session")
-    normal_record = history_service.get_record("normal-session")
+    review_record = measurement_history_service.get_record("review-session")
+    normal_record = measurement_history_service.get_record("normal-session")
     assert review_record["ordered_lines"] == ("待确认文字",)
     assert review_record["final_frequency_hz"] is None
     assert review_record["review_reason"] == "没有可靠的 20 位文字"
     assert normal_record["ordered_lines"] == ("12345678", "003")
     assert normal_record["review_reason"] is None
-    assert history_service.get_record("unknown-session") is None
+    assert measurement_history_service.get_record("unknown-session") is None
 
 
 def test_invalid_ocr_json_is_a_history_read_error(
-    history_service: HistoryService,
+    measurement_history_service: MeasurementHistoryService,
 ) -> None:
     """验证损坏的历史 OCR JSON 按普通读取错误报告。
 
     Args:
-        history_service: 已保存测试记录的历史服务。
+        measurement_history_service: 已保存测试记录的历史服务。
 
     Returns:
         返回示例：
             None  # 损坏的文字 JSON 产生历史读取错误
     """
-    database_path = history_service.measurement_repo.database_path
+    database_path = measurement_history_service.measurement_record_repo.database_path
     with sqlite3.connect(database_path) as connection:
         connection.execute(
-            "UPDATE measurements SET ordered_lines = ? WHERE session_id = ?",
+            "UPDATE measurement_records SET ordered_lines = ? WHERE session_id = ?",
             ("{broken", "normal-session"),
         )
 
-    with pytest.raises(HistoryServiceError, match="历史记录读取失败"):
-        history_service.list_records()
-    with pytest.raises(HistoryServiceError, match="历史详情读取失败"):
-        history_service.get_record("normal-session")
+    with pytest.raises(MeasurementHistoryServiceError, match="历史记录读取失败"):
+        measurement_history_service.list_records()
+    with pytest.raises(MeasurementHistoryServiceError, match="历史详情读取失败"):
+        measurement_history_service.get_record("normal-session")
 
 
 def test_history_page_shows_filters_and_read_only_details(
     qt_application: QApplication,
-    history_service: HistoryService,
+    measurement_history_service: MeasurementHistoryService,
 ) -> None:
     """验证页面列表、筛选、频率占位和详情原因。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
-        history_service: 已保存测试记录的历史服务。
+        measurement_history_service: 已保存测试记录的历史服务。
 
     Returns:
         返回示例：
             None  # 表格与详情显示筛选后的已保存测量记录
     """
-    page = HistoryPage(history_service)
+    page = HistoryPage(measurement_history_service)
     try:
         # 页面进入时读取全部历史记录。
         page.refresh_history()
@@ -252,20 +258,21 @@ def test_history_page_shows_filters_and_read_only_details(
 
 def test_main_window_refreshes_only_when_entering_history(
     qt_application: QApplication,
-    history_service: HistoryService,
+    measurement_history_service: MeasurementHistoryService,
 ) -> None:
     """验证主窗口只在切换进入历史页时请求刷新。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
-        history_service: 已保存测试记录的历史服务。
+        measurement_history_service: 已保存测试记录的历史服务。
 
     Returns:
         返回示例：
             None  # 每次从其他页面进入历史页时恰好刷新一次
     """
-    machine_repo = MachineRepo(history_service.measurement_repo.database_path)
-    window = MainWindow(MachineService(machine_repo), history_service)
+    database_path = measurement_history_service.measurement_record_repo.database_path
+    machine_repo = MachineRepo(database_path)
+    window = MainWindow(MachineService(machine_repo), measurement_history_service)
     try:
         window.history_page.refresh_history = Mock(
             wraps=window.history_page.refresh_history

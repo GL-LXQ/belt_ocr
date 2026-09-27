@@ -13,9 +13,9 @@ from PySide6.QtWidgets import QApplication
 from config_util import read_configuration_settings
 
 from src.service.machine_service import MachineService
-from src.service.history_service import HistoryService
+from src.service.measurement_history_service import MeasurementHistoryService
 from src.repo.machine_repo import MachineRepo
-from src.repo.measurement_repo import MeasurementRepo
+from src.repo.measurement_record_repo import MeasurementRecordRepo
 from ui.main_window import MainWindow
 
 
@@ -41,15 +41,17 @@ def run_desktop_preview() -> int:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
-        MeasurementRepo.create_table(connection)
+        MeasurementRecordRepo.create_table(connection)
 
     # 创建机器和历史记录服务。
     machine_repo = MachineRepo(database_path)
     machine_service = MachineService(machine_repo)
-    history_service = HistoryService(MeasurementRepo(database_path))
+    measurement_history_service = MeasurementHistoryService(
+        MeasurementRecordRepo(database_path)
+    )
 
     # 创建并显示桌面主窗口。
-    window = MainWindow(machine_service, history_service)
+    window = MainWindow(machine_service, measurement_history_service)
     window.show()
 
     # 运行事件循环，等待窗口关闭。
