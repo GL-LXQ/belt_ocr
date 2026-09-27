@@ -236,6 +236,10 @@ class SystemRuntime:
             if all(machine.camera.sdk_camera is None for machine in self.machines.values()):
                 raise MvsError("所有启用机器的相机均连接失败")
 
+            # 在线程中初始化共享 OCR Engine 并等待模型准备完成。
+            await run_blocking_operation(self.text_recognizer.initialize)
+            logger.info("OCR Engine 已准备好")
+
             # 按现场初始状态设置各机器的等待复位标志。
             for machine in self.machines.values():
                 machine.waiting_cycle_reset = self.config.initial_machine_state != MachineState.CLOSED

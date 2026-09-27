@@ -52,6 +52,24 @@ class TextRecognizer:
         self.processing_lock = asyncio.Lock()
         self.ocr_engine: BeltOCREngine | None = None
 
+    def initialize(self) -> None:
+        """加载配置并创建三台机器共用的 OCR Engine。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 共享 OCR Engine 已创建或保持原有实例
+        """
+        # 已有共享 OCR Engine 时保留当前实例。
+        if self.ocr_engine is not None:
+            return
+
+        # 加载独立 OCR 配置并创建共享 Engine。
+        config_path = Path(__file__).resolve().parent / "ocr" / "config.yaml"
+        self.ocr_engine = BeltOCREngine(load_ocr_config(config_path))
+
     def process_session_frames(
         self,
         session_id: str,
@@ -275,10 +293,8 @@ class TextRecognizer:
             except ValueError as error:
                 raise OCRProcessingError(str(error)) from error
 
-            # 首次识别时加载配置并创建共享 OCR Engine。
-            if self.ocr_engine is None:
-                config_path = Path(__file__).resolve().parent / "ocr" / "config.yaml"
-                self.ocr_engine = BeltOCREngine(load_ocr_config(config_path))
+            # 保证独立识别入口也使用同一个共享 OCR Engine。
+            self.initialize()
 
             # 保存当前帧的识别结果。
             image_results.append(self.ocr_engine.process_image(image))

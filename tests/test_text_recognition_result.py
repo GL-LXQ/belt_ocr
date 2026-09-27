@@ -154,6 +154,32 @@ def test_recognize_images_reuses_engine_and_preserves_order(
         assert call.args[0].dtype == np.uint8
 
 
+def test_initialize_reuses_shared_engine_without_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """确认重复初始化只创建一个共享 Engine 且不执行推理。
+
+    Args:
+        monkeypatch: pytest 提供的属性替换工具。
+
+    Returns:
+        返回示例：
+            None  # 两次初始化共用一个 Engine 且没有图片推理
+    """
+    # 用模拟 Engine 记录初始化与推理调用。
+    engine = Mock()
+    engine_factory = Mock(return_value=engine)
+    monkeypatch.setattr(text_recognition, "BeltOCREngine", engine_factory)
+
+    # 重复初始化并核对共享实例。
+    recognizer = TextRecognizer()
+    recognizer.initialize()
+    recognizer.initialize()
+    engine_factory.assert_called_once()
+    assert recognizer.ocr_engine is engine
+    engine.process_image.assert_not_called()
+
+
 def test_process_session_frames_consumes_engine_result() -> None:
     """确认真实识别入口的 blocks 可直接进入现有文字终选。
 
