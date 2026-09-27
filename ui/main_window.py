@@ -31,7 +31,7 @@ from ui.pages.abnormal_events_page import AbnormalEventsPage
 PAGES = {
     "realtime": ("实时监测", "实时查看皮带机的检测画面、状态和事件"),
     "history": ("历史记录", "查看历史检测记录和测量结果"),
-    "abnormal_events": ("异常事件", "查看测量运行失败的原因和原始事件信息"),
+    "abnormal_events": ("异常事件", "查看测量过程中的异常事件和原始信息"),
     "images": ("图片管理", "查看和管理检测图片"),
     "settings": ("系统配置", "配置检测系统运行参数"),
     "machines": ("机器管理", "管理检测机器的基本信息，包括相机、频率仪的绑定与启用状态。"),

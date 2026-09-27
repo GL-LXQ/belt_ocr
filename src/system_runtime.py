@@ -493,7 +493,9 @@ class SystemRuntime:
 
         # 未知机器的事件写入审计并记录日志后结束分发。
         if machine is None:
-            await run_blocking_operation(self.database.save_abnormal_event, "UNKNOWN_MACHINE", event)
+            await run_blocking_operation(
+                self.database.save_abnormal_event, "未知机器", event
+            )
             logger.warning("隔离未知机器事件 machine_id=%s", event.machine_id)
             return
 
@@ -690,12 +692,12 @@ class SystemRuntime:
         for machine in self.machines.values():
             machine.discard_pending_events()
 
-        # 未完成周期按系统当前故障状态取退出原因代码。
-        shutdown_error_code = "PROGRAM_FAILED" if self.failure is not None else "SHUTDOWN_TIMEOUT"
+        # 未完成周期按系统当前故障状态取退出原因描述。
+        shutdown_reason = "程序运行失败" if self.failure is not None else "程序退出超时"
 
         # 逐台机器并行停止采集、取消本机任务并结算未完成周期。
         release_results = await asyncio.gather(*(
-            machine.release_resources(shutdown_error_code) for machine in self.machines.values()
+            machine.release_resources(shutdown_reason) for machine in self.machines.values()
         ), return_exceptions=True)
 
         # 逐条登记机器资源释放过程中的异常。

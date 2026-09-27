@@ -302,7 +302,7 @@ class Machine:
         interrupted: bool = False,
         capture_stop_time: float | None = None,
         close_event: RuntimeEvent | None = None,
-        failure_reason: str = "CYCLE_INTERRUPTED",
+        failure_reason: str = "测量周期中断",
     ) -> None:
         """结束本轮采集，结算频率并检查完成条件。
 
@@ -323,7 +323,11 @@ class Machine:
             and self.current_session is not None
             and close_event.session_id != self.current_session.session_id
         ):
-            await run_blocking_operation(self.database.save_abnormal_event, "CLOSE_SESSION_MISMATCH", close_event)
+            await run_blocking_operation(
+                self.database.save_abnormal_event,
+                "关闭信号与当前 Session 不匹配",
+                close_event,
+            )
             return
 
         # 取出本机当前周期。
@@ -445,7 +449,9 @@ class Machine:
                 session = self.current_session
                 # 与 IO 轮询的发送过滤是同一条件，这里再判一次让机器自己守住边界。
                 if session is not None and session.capture_stop_time is None:
-                    await self.handle_machine_close(interrupted=True, failure_reason="IO_INTERRUPTED")
+                    await self.handle_machine_close(
+                        interrupted=True, failure_reason="IO 通信中断"
+                    )
 
                 # 等待通信恢复后重新确认现场状态。
                 self.waiting_cycle_reset = True
@@ -457,7 +463,11 @@ class Machine:
 
         # 没有周期身份的频率只写审计，不分配给当前或历史周期。
         if event.event_type == EventType.FREQUENCY_MEASURED and not event.session_id:
-            await run_blocking_operation(self.database.save_abnormal_event, "AMBIGUOUS_MEASUREMENT", event)
+            await run_blocking_operation(
+                self.database.save_abnormal_event,
+                "频率读数缺少 Session ID",
+                event,
+            )
             return
 
         # 取出本机当前周期。
@@ -478,7 +488,7 @@ class Machine:
             if session.capture_stop_time is None:
                 await self.handle_machine_close(
                     interrupted=True,
-                    failure_reason="此次测量周期超时",
+                    failure_reason="测量周期超时",
                 )
             return
 
@@ -515,7 +525,7 @@ class Machine:
                         )
 
                     # 按无采集帧原因结束本轮测量。
-                    await self.handle_measurement_failure(session, "CAPTURE_EMPTY")
+                    await self.handle_measurement_failure(session, "本轮未采集到图像")
                     return
 
                 # 上报图像采集完成，并标记字符识别开始。
@@ -557,7 +567,7 @@ class Machine:
                 session.errors.append(event.payload)
 
                 # 按相机故障结束本轮测量。
-                await self.handle_measurement_failure(session, "CAPTURE_FAILED")
+                await self.handle_measurement_failure(session, "相机采集失败")
                 return
 
             # 识别结果到达。
@@ -622,7 +632,9 @@ class Machine:
 
             # 未知事件类型只写审计后结束。
             case _:
-                await run_blocking_operation(self.database.save_abnormal_event, "UNKNOWN_EVENT_TYPE", event)
+                await run_blocking_operation(
+                    self.database.save_abnormal_event, "未知事件类型", event
+                )
                 return
 
         # 统一处理本轮失败或满足条件后的提交。
@@ -635,7 +647,7 @@ class Machine:
 
         Args:
             session: 处理失败、中断或提交失败的测量档案。
-            failure_reason: 本轮失败的原因标识。
+            failure_reason: 本轮失败的原因描述。
 
         Returns:
             返回示例：
@@ -758,11 +770,11 @@ class Machine:
         # 尝试释放本轮周期。
         self.release_finished_session()
 
-    async def release_resources(self, shutdown_error_code: str) -> None:
+    async def release_resources(self, shutdown_reason: str) -> None:
         """停止本机采集，取消本机任务，并结算退出时未完成的周期。
 
         Args:
-            shutdown_error_code: 未完成周期的退出原因代码，取 PROGRAM_FAILED 或 SHUTDOWN_TIMEOUT。
+            shutdown_reason: 未完成周期的退出原因描述。
 
         Returns:
             返回示例：
@@ -792,7 +804,7 @@ class Machine:
             and session.state in {SessionState.RUNNING, SessionState.SAVING_RESULT}
         ):
             try:
-                await self.handle_measurement_failure(session, shutdown_error_code)
+                await self.handle_measurement_failure(session, shutdown_reason)
             except Exception as error:
                 self.on_fatal_error(error)
 
@@ -864,7 +876,9 @@ class Machine:
         """
         # 频率窗口已封闭时只写迟到频率审计。
         if session.frequency_window_sealed:
-            await run_blocking_operation(self.database.save_abnormal_event, "LATE_FREQUENCY", event)
+            await run_blocking_operation(
+                self.database.save_abnormal_event, "迟到的频率读数", event
+            )
             return
 
         # 按接收顺序追加本轮频率明细。
@@ -887,8 +901,8 @@ class Machine:
         # OCR 失败时执行本轮失败清理。
         if session.ocr_state in {OCRState.FAILED, OCRState.TIMED_OUT}:
             failure_reason = (
-                "OCR_TIMEOUT" if session.ocr_state == OCRState.TIMED_OUT
-                else "此次文字识别执行失败"
+                "OCR 识别超时" if session.ocr_state == OCRState.TIMED_OUT
+                else "OCR 识别执行失败"
             )
             await self.handle_measurement_failure(session, failure_reason)
             return
@@ -981,7 +995,7 @@ class Machine:
                 )
 
             # 按证据图片编码失败结束本轮测量。
-            await self.handle_measurement_failure(session, "EVIDENCE_ENCODING_FAILED")
+            await self.handle_measurement_failure(session, "证据图片编码失败")
             return
         except EvidenceWriteError as error:
             # 记录证据图片写入失败。
@@ -1001,17 +1015,17 @@ class Machine:
                 )
 
             # 按证据图片写入失败结束本轮测量。
-            await self.handle_measurement_failure(session, "EVIDENCE_WRITE_FAILED")
+            await self.handle_measurement_failure(session, "证据图片保存失败")
 
             # 将证据图片写入故障交给全局退出流程。
             self.on_fatal_error(error)
             return
         except (CommitIntegrityConflictError, sqlite3.Error) as error:
             # 登记数据库提交失败或内容冲突。
-            error_code = (
-                "COMMIT_INTEGRITY_CONFLICT"
+            failure_reason = (
+                "测量记录提交冲突"
                 if isinstance(error, CommitIntegrityConflictError)
-                else "DATABASE_WRITE_FAILED"
+                else "测量结果入库失败"
             )
             logger.exception(
                 "数据库提交失败 machine_id=%s session_id=%s",
@@ -1029,7 +1043,7 @@ class Machine:
                 )
 
             # 清理本轮失败状态。
-            await self.handle_measurement_failure(session, error_code)
+            await self.handle_measurement_failure(session, failure_reason)
 
             # 将数据库写入故障交给全局退出流程。
             self.on_fatal_error(error)

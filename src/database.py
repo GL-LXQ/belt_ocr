@@ -357,7 +357,7 @@ class Database:
         """保存业务事件或 Session 失败的异常记录。
 
         Args:
-            reason: 异常原因标识。
+            reason: 异常原因描述。
             event: 对应的业务事件，未提供时使用独立字段。
             machine_id: 未提供业务事件时使用的机器编号。
             session_id: 未提供业务事件时使用的周期编号。

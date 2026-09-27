@@ -45,13 +45,18 @@ def run_desktop_preview() -> int:
         MachineRepo.create_table(connection)
         MeasurementRecordRepo.create_table(connection)
 
+    # 从现有配置取得运行库路径并初始化异常事件表。
+    recovery_database_path = AppConfig(**settings).recovery_path
+    recovery_database_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(recovery_database_path)) as connection, connection:
+        AbnormalEventRepo.create_table(connection)
+
     # 创建机器、历史记录和异常事件服务。
     machine_repo = MachineRepo(database_path)
     machine_service = MachineService(machine_repo)
     measurement_history_service = MeasurementHistoryService(
         MeasurementRecordRepo(database_path)
     )
-    recovery_database_path = AppConfig(**settings).recovery_path
     abnormal_event_service = AbnormalEventService(
         AbnormalEventRepo(recovery_database_path)
     )

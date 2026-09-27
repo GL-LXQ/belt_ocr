@@ -70,7 +70,7 @@ class AbnormalEventsPage(QWidget):
         heading = QVBoxLayout()
         title = QLabel("异常事件")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("查看测量运行失败的原因和原始事件信息")
+        subtitle = QLabel("查看测量过程中的异常事件和原始信息")
         subtitle.setObjectName("pageSubtitle")
         heading.addWidget(title)
         heading.addWidget(subtitle)
@@ -156,8 +156,7 @@ class AbnormalEventsPage(QWidget):
             ("created_at", "发生时间"),
             ("machine_id", "机器 ID"),
             ("session_id", "Session ID"),
-            ("reason_label", "异常原因"),
-            ("reason", "原因码"),
+            ("reason", "异常原因"),
         ):
             value_label = QLabel("--")
             value_label.setWordWrap(True)
@@ -229,14 +228,14 @@ class AbnormalEventsPage(QWidget):
             QMessageBox.warning(self, "异常事件读取失败", str(error))
             return
 
-        # 将发生时间、身份、中文原因和摘要填入表格。
+        # 将发生时间、身份、异常原因和摘要填入表格。
         self.table.setRowCount(len(events))
         for row_index, event in enumerate(events):
             values = (
                 format_event_time(event["created_at"]),
                 event["machine_id"] or "--",
                 event["session_id"] or "--",
-                event["reason_label"],
+                event["reason"],
                 event["payload_summary"],
             )
             for column_index, value in enumerate(values):
@@ -273,11 +272,10 @@ class AbnormalEventsPage(QWidget):
             QMessageBox.warning(self, "异常详情读取失败", "该异常记录已不存在。")
             return
 
-        # 显示中文原因、原始原因码和完整原始内容。
+        # 显示异常原因和完整原始内容。
         self.detail_values["created_at"].setText(format_event_time(event["created_at"]))
         self.detail_values["machine_id"].setText(event["machine_id"] or "--")
         self.detail_values["session_id"].setText(event["session_id"] or "--")
-        self.detail_values["reason_label"].setText(event["reason_label"])
         self.detail_values["reason"].setText(event["reason"])
         self.detail_payload.setPlainText(event["payload_json"])
         self.detail_dialog.open()

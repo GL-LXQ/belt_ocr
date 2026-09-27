@@ -379,7 +379,7 @@ async def test_shutdown_preserves_committed_session(tmp_path: Path) -> None:
     assert machine.current_session is session
 
     # 执行退出清理并核对成功状态和异常事件。
-    await machine.release_resources("SHUTDOWN_TIMEOUT")
+    await machine.release_resources("程序退出超时")
     assert session.state == SessionState.COMMITTED
     assert session.errors == []
     assert machine.current_session is None
@@ -409,13 +409,13 @@ async def test_shutdown_fails_unfinished_session(tmp_path: Path) -> None:
     machine.camera.stop = AsyncMock()
 
     # 执行退出清理并核对失败状态和异常事件。
-    await machine.release_resources("SHUTDOWN_TIMEOUT")
+    await machine.release_resources("程序退出超时")
     assert session.state == SessionState.FAILED
-    assert session.errors == ["SHUTDOWN_TIMEOUT"]
+    assert session.errors == ["程序退出超时"]
     assert machine.current_session is None
     events = read_abnormal_events(database)
     assert len(events) == 1
-    assert events[0][2] == "SHUTDOWN_TIMEOUT"
+    assert events[0][2] == "程序退出超时"
 
 
 @pytest.mark.asyncio
@@ -462,11 +462,11 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
     # 执行本轮保存并核对失败审计和证据清理。
     await machine.try_finalize(session)
     assert session.state == SessionState.FAILED
-    assert session.errors == ["SaveImageEx3 编码失败", "EVIDENCE_ENCODING_FAILED"]
+    assert session.errors == ["SaveImageEx3 编码失败", "证据图片编码失败"]
     assert machine.current_session is None
     abnormal_events = read_abnormal_events(database)
     assert len(abnormal_events) == 1
-    assert abnormal_events[0][2] == "EVIDENCE_ENCODING_FAILED"
+    assert abnormal_events[0][2] == "证据图片编码失败"
     assert json.loads(abnormal_events[0][3])["session_errors"] == session.errors
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
     assert not (expected_directory / "frame-1.jpg").exists()
@@ -527,7 +527,7 @@ async def test_unknown_encoding_failure_removes_new_images(tmp_path: Path) -> No
     assert record_count == 0
     assert session.state != SessionState.FAILED
     assert read_abnormal_events(database) == []
-    assert "DATABASE_WRITE_FAILED" not in session.errors
+    assert "测量结果入库失败" not in session.errors
 
 
 @pytest.mark.asyncio
@@ -556,10 +556,10 @@ async def test_image_write_failure_skips_database(
 
     # 核对失败状态和数据库内容。
     assert session.state == SessionState.FAILED
-    assert "EVIDENCE_WRITE_FAILED" in session.errors
-    assert "DATABASE_WRITE_FAILED" not in session.errors
-    assert "COMMIT_INTEGRITY_CONFLICT" not in session.errors
-    assert read_abnormal_events(database)[0][2] == "EVIDENCE_WRITE_FAILED"
+    assert "证据图片保存失败" in session.errors
+    assert "测量结果入库失败" not in session.errors
+    assert "测量记录提交冲突" not in session.errors
+    assert read_abnormal_events(database)[0][2] == "证据图片保存失败"
     machine.on_fatal_error.assert_called_once()
     fatal_error = machine.on_fatal_error.call_args.args[0]
     assert isinstance(fatal_error, EvidenceWriteError)
@@ -601,9 +601,9 @@ async def test_unknown_image_write_error_is_not_database_failure(
     with pytest.raises(error_type, match="未知图片保存错误") as captured_error:
         await machine.try_finalize(session)
     assert captured_error.value is unknown_error
-    assert "DATABASE_WRITE_FAILED" not in session.errors
-    assert "EVIDENCE_WRITE_FAILED" not in session.errors
-    assert "COMMIT_INTEGRITY_CONFLICT" not in session.errors
+    assert "测量结果入库失败" not in session.errors
+    assert "证据图片保存失败" not in session.errors
+    assert "测量记录提交冲突" not in session.errors
     assert read_abnormal_events(database) == []
     machine.on_fatal_error.assert_not_called()
 
@@ -627,9 +627,9 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
 
     # 核对本轮失败状态与已保存的图片。
     assert session.state == SessionState.FAILED
-    assert "DATABASE_WRITE_FAILED" in session.errors
-    assert "EVIDENCE_WRITE_FAILED" not in session.errors
-    assert read_abnormal_events(database)[0][2] == "DATABASE_WRITE_FAILED"
+    assert "测量结果入库失败" in session.errors
+    assert "证据图片保存失败" not in session.errors
+    assert read_abnormal_events(database)[0][2] == "测量结果入库失败"
     machine.on_fatal_error.assert_called_once_with(write_error)
     assert machine.current_session is None
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
@@ -670,9 +670,9 @@ async def test_database_conflict_keeps_conflict_reason(tmp_path: Path) -> None:
     # 执行数据库提交并核对冲突分类。
     await machine.try_finalize(session)
     assert session.state == SessionState.FAILED
-    assert "COMMIT_INTEGRITY_CONFLICT" in session.errors
-    assert "DATABASE_WRITE_FAILED" not in session.errors
-    assert read_abnormal_events(database)[0][2] == "COMMIT_INTEGRITY_CONFLICT"
+    assert "测量记录提交冲突" in session.errors
+    assert "测量结果入库失败" not in session.errors
+    assert read_abnormal_events(database)[0][2] == "测量记录提交冲突"
     machine.on_fatal_error.assert_called_once()
     conflict_error = machine.on_fatal_error.call_args.args[0]
     assert isinstance(conflict_error, CommitIntegrityConflictError)
@@ -712,7 +712,7 @@ async def test_unknown_database_value_error_is_not_commit_conflict(
     with pytest.raises(ValueError, match="未知数据库错误") as captured_error:
         await machine.try_finalize(session)
     assert captured_error.value is unknown_error
-    assert "COMMIT_INTEGRITY_CONFLICT" not in session.errors
+    assert "测量记录提交冲突" not in session.errors
     assert "DATABASE_WRITE_FAILED" not in session.errors
     assert read_abnormal_events(database) == []
     machine.on_fatal_error.assert_not_called()
@@ -827,7 +827,7 @@ async def test_empty_capture_fails_and_waits_for_close(tmp_path: Path) -> None:
     ]
     events = read_abnormal_events(database)
     assert len(events) == 1
-    assert events[0][2] == "CAPTURE_EMPTY"
+    assert events[0][2] == "本轮未采集到图像"
     assert json.loads(events[0][3])["session_errors"] == session.errors
     camera_state_notification.assert_not_called()
 
@@ -934,7 +934,7 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
 
     # 核对本轮失败记录及相机可用状态。
     assert session.state == SessionState.FAILED
-    assert session.errors == ["GetImageBuffer 失败", "CAPTURE_FAILED"]
+    assert session.errors == ["GetImageBuffer 失败", "相机采集失败"]
     assert machine.current_session is session
     assert not camera.available
     assert not camera.is_capturing
@@ -945,7 +945,7 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
         ProgressStatus.FAILED,
     )
     events = read_abnormal_events(database)
-    assert events[0][2] == "CAPTURE_FAILED"
+    assert events[0][2] == "相机采集失败"
     assert json.loads(events[0][3])["session_errors"] == session.errors
 
     # 现场关闭后尝试重新启动本机周期。
@@ -972,7 +972,7 @@ async def test_late_capture_failure_notifies_without_repeating_session_failure(
     camera_state_notification = Mock()
     machine.notify_camera_state = camera_state_notification
     session.state = SessionState.FAILED
-    session.errors.append("OCR_TIMEOUT")
+    session.errors.append("OCR 识别超时")
 
     # 将真实采集故障交给已经失败的周期。
     await machine.handle_event(RuntimeEvent(
@@ -981,7 +981,7 @@ async def test_late_capture_failure_notifies_without_repeating_session_failure(
 
     # 核对机器级通知和周期记录均只执行一次。
     camera_state_notification.assert_called_once_with("1", "相机故障", "StopGrabbing 失败")
-    assert session.errors == ["OCR_TIMEOUT"]
+    assert session.errors == ["OCR 识别超时"]
     assert session.state == SessionState.FAILED
     assert machine.current_session is session
     assert read_abnormal_events(database) == []
@@ -1044,7 +1044,7 @@ async def test_capture_failure_after_close_releases_session(tmp_path: Path) -> N
     ))
     assert session.state == SessionState.FAILED
     assert machine.current_session is None
-    assert read_abnormal_events(database)[0][2] == "CAPTURE_FAILED"
+    assert read_abnormal_events(database)[0][2] == "相机采集失败"
 
 
 @pytest.mark.asyncio
@@ -1076,10 +1076,10 @@ async def test_ocr_execution_error_fails_and_is_audited(tmp_path: Path) -> None:
     assert session.state == SessionState.FAILED
     assert machine.current_session is session
     assert "模型执行失败" in session.errors
-    assert "此次文字识别执行失败" in session.errors
+    assert "OCR 识别执行失败" in session.errors
     events = read_abnormal_events(database)
     assert len(events) == 1
-    assert events[0][2] == "此次文字识别执行失败"
+    assert events[0][2] == "OCR 识别执行失败"
     assert json.loads(events[0][3])["session_errors"] == session.errors
 
 
@@ -1155,7 +1155,7 @@ async def test_cycle_timeout_fails_and_is_audited(tmp_path: Path) -> None:
     assert machine.waiting_cycle_reset
     events = read_abnormal_events(database)
     assert len(events) == 1
-    assert events[0][2] == "此次测量周期超时"
+    assert events[0][2] == "测量周期超时"
     assert json.loads(events[0][3])["session_errors"] == session.errors
 
 
@@ -1211,7 +1211,7 @@ async def test_io_interruption_fails_open_session(tmp_path: Path) -> None:
     # 交付 IO 中断事件并检查本轮失败收尾。
     await machine.handle_event(RuntimeEvent(EventType.IO_INTERRUPTED, "1"))
     assert session.state == SessionState.FAILED
-    assert "IO_INTERRUPTED" in session.errors
+    assert "IO 通信中断" in session.errors
     assert session.capture_stop_time is not None
     assert machine.current_session is None
     assert machine.waiting_cycle_reset
@@ -1219,7 +1219,7 @@ async def test_io_interruption_fails_open_session(tmp_path: Path) -> None:
     # 核对异常事件中的周期身份和失败原因。
     events = read_abnormal_events(database)
     assert [(row[0], row[1], row[2]) for row in events] == [
-        ("1", "session-1", "IO_INTERRUPTED"),
+        ("1", "session-1", "IO 通信中断"),
     ]
 
 

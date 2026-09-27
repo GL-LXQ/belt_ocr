@@ -58,7 +58,7 @@ class AbnormalEventRepo:
             created_at: 事件创建时间，Unix 时间戳。
             machine_id: 所属机器编号。
             session_id: 所属周期编号，无周期时为空。
-            reason: 异常原因标识。
+            reason: 异常原因描述。
             payload_json: 已序列化的事件内容。
 
         Returns:
@@ -111,7 +111,7 @@ class AbnormalEventRepo:
                     "created_at": 1790496570.9,  # 发生时间戳
                     "machine_id": "1",  # 机器编号
                     "session_id": "session-1",  # 周期编号
-                    "reason": "OCR_TIMEOUT",  # 原始原因码
+                    "reason": "OCR 识别超时",  # 异常原因描述
                     "payload_json": "{}",  # 原始事件内容
                 }]
         """
@@ -151,7 +151,7 @@ class AbnormalEventRepo:
                     "created_at": 1790496570.9,  # 发生时间戳
                     "machine_id": "1",  # 机器编号
                     "session_id": "session-1",  # 周期编号
-                    "reason": "OCR_TIMEOUT",  # 原始原因码
+                    "reason": "OCR 识别超时",  # 异常原因描述
                     "payload_json": "{}",  # 原始事件内容
                 }
                 None  # 记录不存在

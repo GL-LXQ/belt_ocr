@@ -79,7 +79,7 @@ GUI 由 `MonitoringService`（`QThread`）将 `Machine` 的相机状态、测量
 
 历史记录页进入时由 `MeasurementHistoryService` 经 `MeasurementRecordRepo` 从业务库 `measurement_records` 读取已保存的测量结果，并可按正常、待复核、已复核及机器筛选；详情保留原始 OCR、频率、复核原因和本轮 JPG 证据图片。待复核记录可确认原文字或按行保存人工修正文字，Repo 只对尚未复核的记录写入 UTC 复核时间和可选的 `reviewed_lines` JSON，原 `ordered_lines`、`needs_review` 与 `review_reason` 保留；已复核详情同时显示原始与最终文字，列表摘要优先显示人工结果。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
 
-异常事件页进入时由 `AbnormalEventsPage` 经 `AbnormalEventService`、`AbnormalEventRepo` 读取运行库中的 `abnormal_events`，按时间倒序显示异常记录，并支持机器筛选、完整 Session ID 搜索和详情查看。数据库仍保存英文 `reason`；页面用现有原因码的中文文案展示异常原因，未映射原因保持原值，详情同时显示中文原因、原始原因码和完整 `payload_json`。
+GUI 启动时先在运行库确保 `abnormal_events` 表存在。异常事件页进入时由 `AbnormalEventsPage` 经 `AbnormalEventService`、`AbnormalEventRepo` 读取该表，按时间倒序显示异常记录，并支持机器筛选、完整 Session ID 搜索和详情查看。后续异常写入使用中文 `reason`，已有记录原样保留；页面直接显示库中的异常原因，详情展示完整 `payload_json`。
 
 开发联调可从仓库根目录运行 `python scripts/simulate_measurement.py normal` 或 `python scripts/simulate_measurement.py review`。正常场景读取 `statistics/imgs` 的 JPG，待复核场景取 `statistics/test_images_without_results` 中按文件名排序的首张 BMP，统一解码为 Mono8 相机帧。脚本通过现有 Camera、TextRecognizer、Machine 的事件队列完成真实 OCR、50.0 Hz 频率结算和 CLOSE，再由 Machine 将证据 JPG 与测量结果写入正式配置的业务库；历史记录页按原有查询和图片展示流程查看新记录。模拟只替代相机取流、图片编码和现场输入，不启动真实 MVS 或 Modbus。
 
