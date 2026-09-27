@@ -75,7 +75,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 → Session 结束
 → 等待下一轮。
 
-GUI 的后台入口由 `MonitoringService`（`QThread`）管理，在实时监测页点击“启动监测”时创建；`SystemRuntime.start()` 接收相机状态、测量进度和 OCR 文字三个 Qt 信号的 emit 回调，实时监测页据此更新机器卡片的连接状态和测量进度节点。Machine 确认 OCR_COMPLETED 属于当前有效 Session 后，立即通过 Runtime 传入的回调、MonitoringService Qt Signal 和 RealtimePage 将最终文字送到对应 MachineCard；卡片按 normalized_lines 长度以 20、8、3、2 顺序分类，逐行用纯文本显示 ordered_lines。页面仅缓存周期编号和两个文字元组；SESSION_START/SUCCESS 切换缓存到新周期并清空文字，刷新重建卡片时恢复缓存身份和文字，CLOSE、入库及 Session 释放后继续保留。频率值和最近事件也仍未正式接入。机器画面区使用皮带机动画，真实 START/CLOSE、采集状态和频率状态还没有接入动画驱动。
+GUI 由 `MonitoringService`（`QThread`）将 `Machine` 的相机状态、测量进度、OCR 文字和周期关闭通知经 `SystemRuntime` 转为 Qt 信号，再由 `RealtimePage` 按机器编号及当前 Session 更新 `MachineCard`。`SESSION_START/SUCCESS` 清空上一轮 OCR 并展开皮带；图像和频率采集的 RUNNING、SUCCESS、FAILED 控制扫描及波形子动画；周期首次进入关闭处理时收缩皮带，监测结束时停止全部动画。OCR 完成后仍按 20、8、3、2 分类显示，关闭及入库不清空文字。页面只缓存当前周期编号、进度、皮带运行标志和现有 OCR 结果，用于刷新后恢复仍在运行的动画；频率数值和最近事件仍未正式接入。
 
 ## 三、项目结构
 

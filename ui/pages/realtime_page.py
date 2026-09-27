@@ -397,6 +397,7 @@ class RealtimePage(QWidget):
         self.closing_requested = False
         self.connection_states = {}
         self.ocr_results_by_machine_id = {}
+        self.measurement_states_by_machine_id = {}
         self.cards_by_machine_id = {}
         self.configuration_directory = Path(__file__).resolve().parents[2] / "config"
         outer_layout = QVBoxLayout(self)
@@ -527,7 +528,7 @@ class RealtimePage(QWidget):
 
         Returns:
             返回示例：
-                None  # 卡片数量与机器记录一致，每行固定排满后换行
+                None  # 卡片已重建并恢复已缓存的显示状态
         """
         # 移除上一次创建的卡片。
         while self.cards_layout.count():
@@ -570,6 +571,25 @@ class RealtimePage(QWidget):
                 card.progress_session_id = session_id
                 card.set_ocr_result(ordered_lines, normalized_lines)
 
+            # 恢复当前周期的进度节点。
+            measurement_state = self.measurement_states_by_machine_id.get(machine_id)
+            if measurement_state is not None:
+                card.progress_session_id = measurement_state["session_id"]
+                card.progress_statuses = measurement_state["progress_statuses"].copy()
+                card.steps.update_steps(card.progress_statuses)
+
+                # 运行中的周期恢复皮带和仍在执行的子动画。
+                if measurement_state["machine_running"]:
+                    card.belt_animation.start_machine()
+
+                    # 没有失败进度时恢复仍在执行的子动画。
+                    progress_statuses = card.progress_statuses
+                    if "failed" not in progress_statuses.values():
+                        if progress_statuses.get("image_capture") == "running":
+                            card.belt_animation.start_capture()
+                        if progress_statuses.get("frequency_collection") == "running":
+                            card.belt_animation.set_frequency_listening(True)
+
             status, reason = self.connection_states.get(machine_id, ("未启动", ""))
             self.update_connection_state(machine_id, status, reason)
 
@@ -590,11 +610,11 @@ class RealtimePage(QWidget):
         for machine_id in self.cards_by_machine_id:
             self.update_connection_state(machine_id, "连接中", "正在初始化监测服务")
 
-        # 在线程中连接相机，通过 Qt 信号更新主线程中的卡片。
-        # 创建后台线程，先接好连接进度和线程结束两个信号，再启动线程。
+        # 创建后台线程并连接页面更新信号。
         self.monitoring_service = MonitoringService(self.configuration_directory)
         self.monitoring_service.camera_state_changed_signal.connect(self.update_connection_state)
         self.monitoring_service.measurement_progress_changed_signal.connect(self.update_measurement_progress)
+        self.monitoring_service.cycle_closed_signal.connect(self.update_cycle_closed)
         self.monitoring_service.ocr_result_changed_signal.connect(self.update_ocr_result)
         self.monitoring_service.finished.connect(self.finish_monitoring)
         self.monitoring_service.start()
@@ -653,30 +673,65 @@ class RealtimePage(QWidget):
             status: 本次更新的 running、success 或 failed 状态。
 
         Returns:
-            None  # 对应卡片显示当前周期的阶段状态
+            返回示例：
+                None  # 当前周期的进度和动画状态已更新
         """
-        # 正式受理新周期时同步切换缓存身份并清空文字。
-        cached_result = self.ocr_results_by_machine_id.get(machine_id)
-        current_session_id = cached_result[0] if cached_result is not None else None
+        # 正式受理新周期时切换页面缓存并清空上一轮文字。
+        measurement_state = self.measurement_states_by_machine_id.get(machine_id)
         is_session_start = stage == "session_start" and status == "success"
-        if is_session_start and current_session_id != session_id:
+        is_new_session = is_session_start and (
+            measurement_state is None or measurement_state["session_id"] != session_id
+        )
+        if is_new_session:
+            measurement_state = {
+                "session_id": session_id,
+                "progress_statuses": {},
+                "machine_running": True,
+            }
+            self.measurement_states_by_machine_id[machine_id] = measurement_state
             self.ocr_results_by_machine_id[machine_id] = (session_id, (), ())
-        elif current_session_id != session_id:
+        elif measurement_state is None or measurement_state["session_id"] != session_id:
             return
 
-        # 找到对应卡片，新周期清空进度和 OCR 展示。
+        # 保存本轮进度，供卡片刷新时恢复。
+        progress_statuses = measurement_state["progress_statuses"]
+        progress_statuses[stage] = status
+        progress_failed = "failed" in progress_statuses.values()
+
+        # 找到对应机器的卡片。
         card = self.cards_by_machine_id.get(machine_id)
         if card is None:
             return
-        if card.progress_session_id != session_id:
+
+        # 新周期清空上一轮的进度和 OCR 展示。
+        if is_new_session:
             card.progress_session_id = session_id
             card.progress_statuses = {}
             card.clear_ocr_result()
-        progress_statuses = card.progress_statuses
-        progress_statuses[stage] = status
+        card.progress_statuses = progress_statuses.copy()
 
         # 更新本轮进度节点。
         card.steps.update_steps(progress_statuses)
+
+        # 按当前周期的启动和运行进度开启动画。
+        if is_new_session:
+            card.belt_animation.start_machine()
+        elif measurement_state["machine_running"] and not progress_failed:
+            if stage == "image_capture" and status == "running":
+                card.belt_animation.start_capture()
+            elif stage == "frequency_collection" and status == "running":
+                card.belt_animation.set_frequency_listening(True)
+
+        # 失败进度结束本轮仍在运行的子动画。
+        if status == "failed":
+            card.belt_animation.stop_capture()
+            card.belt_animation.set_frequency_listening(False)
+
+        # 成功结算后关闭对应子动画。
+        elif stage == "image_capture" and status == "success":
+            card.belt_animation.stop_capture()
+        elif stage == "frequency_collection" and status == "success":
+            card.belt_animation.set_frequency_listening(False)
 
         # 相机故障时保留卡片主状态和故障原因。
         if self.connection_states.get(machine_id, ("", ""))[0] == "相机故障":
@@ -693,6 +748,30 @@ class RealtimePage(QWidget):
             "frequency": card.frequency_label.text(),
             "events": (),
         })
+
+    def update_cycle_closed(self, machine_id: str, session_id: str) -> None:
+        """关闭对应机器当前周期的皮带动画。
+
+        Args:
+            machine_id: 机器编号。
+            session_id: 进入关闭处理的周期编号。
+
+        Returns:
+            返回示例：
+                None  # 当前周期动画已停止，文字结果保持不变
+        """
+        # 旧周期的关闭通知不影响新周期。
+        measurement_state = self.measurement_states_by_machine_id.get(machine_id)
+        if measurement_state is None or measurement_state["session_id"] != session_id:
+            return
+
+        # 将当前周期标记为停止。
+        measurement_state["machine_running"] = False
+
+        # 收起当前卡片的皮带。
+        card = self.cards_by_machine_id.get(machine_id)
+        if card is not None:
+            card.belt_animation.stop_machine()
 
     def update_ocr_result(
         self,
@@ -731,11 +810,20 @@ class RealtimePage(QWidget):
             无。
 
         Returns:
-            None  # 卡片与按钮已反映后台退出结果
+            返回示例：
+                None  # 全部卡片动画停止，操作按钮已恢复
         """
+        # 标记全部周期停止，避免刷新后恢复子动画。
+        for measurement_state in self.measurement_states_by_machine_id.values():
+            measurement_state["machine_running"] = False
+
         # 更新全部卡片，保留具体机器的连接失败原因。
         failure_message = self.monitoring_service.failure_message
         for machine_id in self.cards_by_machine_id:
+            # 停止当前机器的动画。
+            self.cards_by_machine_id[machine_id].belt_animation.stop_machine()
+
+            # 更新当前机器的连接结果。
             status, reason = self.connection_states.get(machine_id, ("未启动", ""))
             if status != "连接失败":
                 status = "监测失败" if failure_message else "已停止"

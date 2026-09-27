@@ -51,6 +51,7 @@ class Machine:
         state_changed: asyncio.Event,
         notify_camera_state: Callable[[str, str, str], None] | None = None,
         notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
+        notify_cycle_closed: Callable[[str, str], None] | None = None,
     ) -> None:
         """组装一台机器的唯一当前周期及其处理依赖。
 
@@ -67,6 +68,7 @@ class Machine:
             state_changed: 周期状态变化通知。
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、原文字和去空格文字。
+            notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
 
         Returns:
             返回示例：
@@ -89,6 +91,7 @@ class Machine:
         self.notify_camera_state = notify_camera_state
         self.notify_measurement_progress = notify_measurement_progress
         self.notify_ocr_result = notify_ocr_result
+        self.notify_cycle_closed = notify_cycle_closed
 
         # 登记致命故障回调与状态变化通知。
         self.on_fatal_error = on_fatal_error
@@ -342,6 +345,10 @@ class Machine:
         session.capture_stop_time = (
             capture_stop_time if capture_stop_time is not None else asyncio.get_running_loop().time()
         )
+
+        # 通知界面本轮周期首次进入关闭处理。
+        if self.notify_cycle_closed is not None:
+            self.notify_cycle_closed(session.machine_id, session.session_id)
 
         # 中断关闭时标记等待真实关闭复位。
         self.waiting_cycle_reset = interrupted

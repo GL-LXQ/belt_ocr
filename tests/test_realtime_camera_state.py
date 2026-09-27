@@ -32,11 +32,19 @@ def test_camera_fault_remains_visible_after_measurement_progress(
         setToolTip=Mock(),
         progress_session_id="session-1",
         progress_statuses={},
+        belt_animation=Mock(),
     )
     page = SimpleNamespace(
         connection_states={},
         cards_by_machine_id={"1": card},
         ocr_results_by_machine_id={"1": ("session-1", (), ())},
+        measurement_states_by_machine_id={
+            "1": {
+                "session_id": "session-1",
+                "progress_statuses": {},
+                "machine_running": True,
+            },
+        },
     )
 
     # 显示相机设备故障和原始原因。
@@ -52,5 +60,6 @@ def test_camera_fault_remains_visible_after_measurement_progress(
     card.update_data.reset_mock()
     RealtimePage.update_measurement_progress(page, "1", "session-1", "image_capture", "failed")
     card.steps.update_steps.assert_called_once_with({"image_capture": "failed"})
+    card.belt_animation.stop_capture.assert_called_once_with()
     card.update_data.assert_not_called()
     assert page.connection_states["1"] == ("相机故障", "GetImageBuffer 失败")

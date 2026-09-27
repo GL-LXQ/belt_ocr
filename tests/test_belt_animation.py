@@ -195,6 +195,207 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
         page.deleteLater()
 
 
+def test_page_animates_only_current_machine_and_session(
+    qt_application: QApplication,
+) -> None:
+    """验证进度和关闭通知只控制对应机器的当前周期。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用实例。
+
+    Returns:
+        返回示例：
+            None  # 失败保留皮带，关闭收起皮带，旧周期通知被忽略
+    """
+    from ui.pages.realtime_page import RealtimePage
+
+    # 创建两台机器的页面并受理第一台机器的周期。
+    service = Mock()
+    service.list_enabled_machines.return_value = [
+        {"id": 1, "machine_name": "机器 1"},
+        {"id": 2, "machine_name": "机器 2"},
+    ]
+    page = RealtimePage(service)
+    try:
+        page.update_measurement_progress("1", "first", "session_start", "success")
+        first_animation = page.cards_by_machine_id["1"].belt_animation
+        second_animation = page.cards_by_machine_id["2"].belt_animation
+        assert first_animation._machine_state.name == "STARTING"
+        assert second_animation._machine_state.name == "STOPPED"
+
+        # 启动子动画后，业务失败只关闭对应子动画。
+        page.update_measurement_progress("1", "first", "image_capture", "running")
+        page.update_measurement_progress(
+            "1", "first", "frequency_collection", "running"
+        )
+        assert first_animation.capturing
+        assert first_animation.frequency_listening
+        page.update_measurement_progress(
+            "1", "first", "character_recognition", "failed"
+        )
+        assert first_animation._machine_state.name == "STARTING"
+        assert not first_animation.capturing
+        assert not first_animation.frequency_listening
+        page.update_measurement_progress("1", "first", "image_capture", "failed")
+        page.update_measurement_progress("1", "first", "frequency_collection", "failed")
+        assert not first_animation.capturing
+        assert not first_animation.frequency_listening
+        assert first_animation._machine_state.name == "STARTING"
+
+        # 当前周期关闭后保留文字，旧周期消息不影响下一轮。
+        page.update_ocr_result("1", "first", ("003",), ("003",))
+        page.update_cycle_closed("1", "first")
+        assert first_animation._machine_state.name == "STOPPING"
+        first_card = page.cards_by_machine_id["1"]
+        assert first_card.ocr_result_label.text().endswith("3  003\n2  --")
+        page.update_measurement_progress("1", "second", "session_start", "success")
+
+        # 成功状态分别结束本轮的扫描和频率波形。
+        page.update_measurement_progress("1", "second", "image_capture", "running")
+        page.update_measurement_progress(
+            "1", "second", "frequency_collection", "running"
+        )
+        page.update_measurement_progress("1", "second", "image_capture", "success")
+        page.update_measurement_progress(
+            "1", "second", "frequency_collection", "success"
+        )
+        assert not first_animation.capturing
+        assert not first_animation.frequency_listening
+
+        # 旧周期和另一台机器的消息都不影响当前皮带。
+        page.update_cycle_closed("1", "first")
+        page.update_measurement_progress("1", "first", "image_capture", "running")
+        assert first_animation._machine_state.name == "STARTING"
+        assert not first_animation.capturing
+        page.update_measurement_progress("2", "other", "session_start", "success")
+        page.update_cycle_closed("2", "other")
+        assert second_animation._machine_state.name == "STOPPING"
+        assert first_animation._machine_state.name == "STARTING"
+        assert first_card.ocr_result_label.text() == "20  --\n8  --\n3  --\n2  --"
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("stage", "animation_attribute"),
+    (
+        ("image_capture", "capturing"),
+        ("frequency_collection", "frequency_listening"),
+    ),
+)
+def test_failed_subprocess_stops_its_animation_without_closing_belt(
+    qt_application: QApplication,
+    stage: str,
+    animation_attribute: str,
+) -> None:
+    """验证采集或频率失败会停止子动画但保留本轮皮带。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用实例。
+        stage: 失败的处理阶段。
+        animation_attribute: 对应子动画的状态属性。
+
+    Returns:
+        返回示例：
+            None  # 对应子动画停止，周期关闭前皮带仍处于启动状态
+    """
+    from ui.pages.realtime_page import RealtimePage
+
+    # 创建单台机器并启动对应子动画。
+    service = Mock()
+    service.list_enabled_machines.return_value = [{"id": 1, "machine_name": "机器 1"}]
+    page = RealtimePage(service)
+    try:
+        page.update_measurement_progress("1", "session", "session_start", "success")
+        page.update_measurement_progress("1", "session", stage, "running")
+        animation = page.cards_by_machine_id["1"].belt_animation
+        assert getattr(animation, animation_attribute)
+
+        # 失败时结束子动画，但等待正式关闭通知收起皮带。
+        page.update_measurement_progress("1", "session", stage, "failed")
+        assert not getattr(animation, animation_attribute)
+        assert animation._machine_state.name == "STARTING"
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+def test_page_refresh_and_monitoring_stop_restore_safe_animation(
+    qt_application: QApplication,
+) -> None:
+    """验证页面刷新只恢复运行周期，服务结束后全部动画停止。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用实例。
+
+    Returns:
+        返回示例：
+            None  # 运行状态可恢复，已关闭周期及服务停止后不恢复子动画
+    """
+    from ui.pages.realtime_page import RealtimePage
+
+    # 创建页面并让两台机器进入不同采集状态。
+    service = Mock()
+    service.list_enabled_machines.return_value = [
+        {"id": 1, "machine_name": "机器 1"},
+        {"id": 2, "machine_name": "机器 2"},
+    ]
+    page = RealtimePage(service)
+    try:
+        for machine_id in ("1", "2"):
+            page.update_measurement_progress(
+                machine_id, "session", "session_start", "success"
+            )
+        page.update_measurement_progress("1", "session", "image_capture", "running")
+        page.update_measurement_progress(
+            "1", "session", "frequency_collection", "running"
+        )
+        page.update_measurement_progress("2", "session", "image_capture", "running")
+        page.update_cycle_closed("2", "session")
+
+        # 重建卡片后只恢复第一台机器的运行和子动画。
+        page.reload_machines()
+        first_animation = page.cards_by_machine_id["1"].belt_animation
+        second_animation = page.cards_by_machine_id["2"].belt_animation
+        assert first_animation._machine_state.name == "STARTING"
+        assert first_animation.capturing
+        assert first_animation.frequency_listening
+        assert second_animation._machine_state.name == "STOPPED"
+        assert not second_animation.capturing
+        assert not second_animation.frequency_listening
+        second_card = page.cards_by_machine_id["2"]
+        assert second_card.progress_statuses["image_capture"] == "running"
+
+        # 失败时只结束子动画，刷新后也不重新启动。
+        page.update_measurement_progress(
+            "1", "session", "character_recognition", "failed"
+        )
+        assert first_animation._machine_state.name == "STARTING"
+        assert not first_animation.capturing
+        assert not first_animation.frequency_listening
+        page.reload_machines()
+        first_animation = page.cards_by_machine_id["1"].belt_animation
+        assert first_animation._machine_state.name == "STARTING"
+        assert not first_animation.capturing
+        assert not first_animation.frequency_listening
+
+        # 服务结束后停止动画，刷新也不再恢复运行状态。
+        page.monitoring_service = SimpleNamespace(
+            failure_message="", deleteLater=Mock()
+        )
+        page.finish_monitoring()
+        assert first_animation._machine_state.name == "STOPPING"
+        assert not first_animation.capturing
+        assert not first_animation.frequency_listening
+        page.reload_machines()
+        restored_animation = page.cards_by_machine_id["1"].belt_animation
+        assert restored_animation._machine_state.name == "STOPPED"
+    finally:
+        page.close()
+        page.deleteLater()
+
+
 def test_monitoring_service_delivers_text_from_background_thread(qt_application, monkeypatch) -> None:
     """验证后台监测通过 Qt 信号向页面交付周期和文字。
 
@@ -217,13 +418,19 @@ def test_monitoring_service_delivers_text_from_background_thread(qt_application,
     page = RealtimePage(machine_service)
     runtime = SimpleNamespace(failure=None, stop=AsyncMock())
 
-    async def start_runtime(camera_notification, progress_notification, ocr_notification) -> None:
+    async def start_runtime(
+        camera_notification,
+        progress_notification,
+        ocr_notification,
+        cycle_closed_notification,
+    ) -> None:
         """从监测线程发送启动和最终文字通知。
 
         Args:
             camera_notification: 相机状态回调。
             progress_notification: 测量进度回调。
             ocr_notification: 最终文字回调。
+            cycle_closed_notification: 周期关闭回调。
 
         Returns:
             返回示例：
@@ -231,6 +438,7 @@ def test_monitoring_service_delivers_text_from_background_thread(qt_application,
         """
         progress_notification("1", "session", "session_start", "success")
         ocr_notification("1", "session", ("003",), ("003",))
+        cycle_closed_notification("1", "session")
 
     # 替换设备启动入口并绑定真实 Qt 信号。
     runtime.start = start_runtime
@@ -239,6 +447,7 @@ def test_monitoring_service_delivers_text_from_background_thread(qt_application,
     service = MonitoringService(Path("config"))
     service.stop_requested.set()
     service.measurement_progress_changed_signal.connect(page.update_measurement_progress)
+    service.cycle_closed_signal.connect(page.update_cycle_closed)
     service.ocr_result_changed_signal.connect(page.update_ocr_result)
     try:
         # 等待线程结束，再由主线程处理排队信号。
@@ -248,6 +457,7 @@ def test_monitoring_service_delivers_text_from_background_thread(qt_application,
         assert service.failure_message == ""
         assert page.ocr_results_by_machine_id["1"] == ("session", ("003",), ("003",))
         assert page.cards_by_machine_id["1"].ocr_result_label.text() == "20  --\n8  --\n3  003\n2  --"
+        assert not page.measurement_states_by_machine_id["1"]["machine_running"]
         runtime.stop.assert_awaited_once()
     finally:
         service.wait()

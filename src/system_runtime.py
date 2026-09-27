@@ -73,6 +73,7 @@ class SystemRuntime:
         notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None = None,
         notify_camera_state: Callable[[str, str, str], None] | None = None,
         notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
+        notify_cycle_closed: Callable[[str, str], None] | None = None,
     ) -> None:
         """在双库初始化之后读取启用机器，并逐台建立相机、频率适配器和机器运行对象。
 
@@ -80,6 +81,7 @@ class SystemRuntime:
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、原文字和去空格文字。
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
+            notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
 
         Returns:
             返回示例：
@@ -127,6 +129,7 @@ class SystemRuntime:
                 self.state_changed,
                 notify_camera_state,
                 notify_ocr_result,
+                notify_cycle_closed,
             )
 
     async def start(
@@ -134,6 +137,7 @@ class SystemRuntime:
         notify_camera_state: Callable[[str, str, str], None] | None = None,
         notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None = None,
         notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
+        notify_cycle_closed: Callable[[str, str], None] | None = None,
     ) -> None:
         """初始化本次运行的机器状态和存储，启动监听与处理任务。
 
@@ -141,6 +145,7 @@ class SystemRuntime:
             notify_camera_state: 可选连接通知函数，接收机器编号、连接状态和失败原因；GUI 由 MonitoringService 的信号提供，无界面时传 None。
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、原文字和去空格文字。
+            notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
 
         Returns:
             None: 完成启动并开放信号入口，无返回数据。
@@ -158,7 +163,12 @@ class SystemRuntime:
             self.database.initialize()
 
             # 读取启用机器并逐台建立机器运行对象。
-            self.initialize_machines(notify_measurement_progress, notify_camera_state, notify_ocr_result)
+            self.initialize_machines(
+                notify_measurement_progress,
+                notify_camera_state,
+                notify_ocr_result,
+                notify_cycle_closed,
+            )
 
             # 校验当前启用机器的串口和 DI 通道绑定。
             self.validate_io_configuration()

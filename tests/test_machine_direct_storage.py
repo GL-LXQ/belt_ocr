@@ -837,6 +837,47 @@ async def test_empty_capture_fails_and_waits_for_close(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interrupted", (False, True))
+async def test_cycle_close_notifies_once_for_current_session(
+    tmp_path: Path, interrupted: bool
+) -> None:
+    """确认正常或中断关闭只通知当前周期一次。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+        interrupted: 本次关闭是否为中断关闭。
+
+    Returns:
+        返回示例：
+            None  # 当前周期通知一次，旧周期及重复关闭均无通知
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.capture_stop_time = None
+    session.ocr_state = OCRState.WAITING
+    session.ocr_result = None
+    notification = Mock()
+    machine.notify_cycle_closed = notification
+
+    # 旧周期关闭不改变当前周期。
+    await machine.handle_machine_close(close_event=RuntimeEvent(
+        EventType.MACHINE_CLOSED, "1", "old-session"
+    ))
+    notification.assert_not_called()
+    assert session.capture_stop_time is None
+
+    # 首次关闭当前周期时发送一次通知。
+    await machine.handle_machine_close(interrupted=interrupted)
+    notification.assert_called_once_with("1", "session-1")
+
+    # 重复关闭和空闲关闭不再发送通知。
+    await machine.handle_machine_close(interrupted=interrupted)
+    machine.current_session = None
+    await machine.handle_machine_close()
+    notification.assert_called_once_with("1", "session-1")
+
+
+@pytest.mark.asyncio
 async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path) -> None:
     """确认相机设备故障只使当前周期失败并阻止本机再启动。
 

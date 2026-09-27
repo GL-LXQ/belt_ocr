@@ -1,4 +1,4 @@
-"""在后台线程运行监测服务并向界面发送相机连接和本轮进度结果。"""
+"""在后台线程运行监测服务并发送相机、进度、文字和周期关闭通知。"""
 
 import asyncio
 import threading
@@ -18,6 +18,9 @@ class MonitoringService(QThread):
 
     # 本轮进度信号，参数依次为机器编号、周期编号、处理阶段和阶段状态。
     measurement_progress_changed_signal = Signal(str, str, str, str)
+
+    # 本轮关闭信号，参数依次为机器编号和周期编号。
+    cycle_closed_signal = Signal(str, str)
 
     # 最终文字信号，参数依次为机器编号、周期编号、原文字和去空格文字。
     ocr_result_changed_signal = Signal(str, str, tuple, tuple)
@@ -73,11 +76,12 @@ class MonitoringService(QThread):
         config = load_config(self.configuration_directory)
         system_runtime = SystemRuntime(config)
         try:
-            # 连接相机并接入状态、进度和文字上报信号，不发送模拟启停信号。
+            # 连接相机并接入状态、进度、文字和周期关闭信号。
             await system_runtime.start(
                 self.camera_state_changed_signal.emit,
                 self.measurement_progress_changed_signal.emit,
                 self.ocr_result_changed_signal.emit,
+                self.cycle_closed_signal.emit,
             )
 
             # 轮询停止请求与后台故障，任一出现时结束等待。
