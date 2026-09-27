@@ -1085,6 +1085,277 @@ async def test_ocr_execution_error_fails_and_is_audited(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_ocr_timeout_starts_after_shared_lock_and_cancels_on_completion(
+    tmp_path: Path,
+) -> None:
+    """确认排队不计入 OCR 期限且正常完成后取消期限。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 等锁时无 OCR 期限，完成后没有迟到超时事件
+    """
+    # 建立可启动周期的机器和阻塞的 OCR 执行入口。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
+    machine.current_session = None
+    machine.config = replace(machine.config, ocr_result_timeout_ms=250)
+    machine.camera.available = True
+    machine.camera.is_capturing = False
+    machine.camera.start_capture = Mock()
+    machine.camera.stop = AsyncMock()
+    machine.camera.delivery_task = asyncio.get_running_loop().create_future()
+    processing_lock = asyncio.Lock()
+    processing_started = threading.Event()
+    processing_release = threading.Event()
+    expected_result = OCRResult(
+        ordered_lines=(),
+        normalized_lines=(),
+        selected_frames=(),
+        line_frame_ids=(),
+        review_frames=(),
+        review_reason=None,
+    )
+
+    def process_frames(
+        session_id: str,
+        capture_id: str,
+        camera_serial: str,
+        frames: tuple[object, ...],
+    ) -> OCRResult:
+        """等待测试放行后返回正常 OCR 结果。
+
+        Args:
+            session_id: 本轮测量周期编号。
+            capture_id: 本轮采集编号。
+            camera_serial: 本轮相机序列号。
+            frames: 本轮原始帧。
+
+        Returns:
+            返回示例：
+                expected_result  # 正常 OCR 结果
+        """
+        processing_started.set()
+        if not processing_release.wait(timeout=5):
+            raise TimeoutError("OCR 执行未被放行")
+        return expected_result
+
+    machine.text_recognizer = SimpleNamespace(
+        processing_lock=processing_lock,
+        process_session_frames=Mock(side_effect=process_frames),
+    )
+    published_events: list[EventType] = []
+
+    async def deliver_event(event: RuntimeEvent) -> None:
+        """记录 OCR 事件并交给当前机器处理。
+
+        Args:
+            event: OCR 任务发布的业务事件。
+
+        Returns:
+            返回示例：
+                None  # OCR 事件已记录并处理
+        """
+        published_events.append(event.event_type)
+        await machine.handle_event(event)
+
+    machine.publish_event = deliver_event
+    await processing_lock.acquire()
+    try:
+        # START 只创建整轮周期期限。
+        await machine.handle_machine_start()
+        session = machine.current_session
+        assert session is not None
+        assert set(machine.deadline_tasks) == {EventType.CYCLE_TIMEOUT}
+
+        # 采集完成后让 OCR 排队超过处理期限。
+        capture_result = CaptureResult(
+            frames=(evidence_frame.camera_frame,), statistics={}
+        )
+        await machine.handle_event(RuntimeEvent(
+            EventType.CAPTURE_COMPLETED, "1", session.session_id, capture_result
+        ))
+        recognition_task = machine.current_recognition_task
+        assert recognition_task is not None
+        await asyncio.sleep(0.3)
+        assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+        assert session.state == SessionState.RUNNING
+        assert not published_events
+        machine.text_recognizer.process_session_frames.assert_not_called()
+
+        # 获得锁并进入实际 OCR 后才登记处理期限。
+        processing_lock.release()
+        assert await asyncio.to_thread(processing_started.wait, 5)
+        assert EventType.OCR_TIMEOUT in machine.deadline_tasks
+        assert session.state == SessionState.RUNNING
+
+        # OCR 在期限内完成后不再发布超时事件。
+        processing_release.set()
+        await recognition_task
+        await asyncio.sleep(0.3)
+        assert published_events == [EventType.OCR_COMPLETED]
+        assert session.ocr_state == OCRState.COMPLETED
+        assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+        assert session.state == SessionState.RUNNING
+    finally:
+        # 放行识别并清理周期任务和测试库。
+        processing_release.set()
+        if processing_lock.locked():
+            processing_lock.release()
+        machine.camera.delivery_task.cancel()
+        machine.camera.delivery_task = None
+        await machine.release_resources("测试结束")
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_ocr_processing_timeout_fails_current_session(tmp_path: Path) -> None:
+    """确认真正 OCR 执行超过期限后沿用失败清理。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # OCR 已超时，当前周期已失败并等待 CLOSE
+    """
+    # 建立等待 OCR 的周期和阻塞的识别入口。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.capture_stop_time = None
+    session.ocr_state = OCRState.WAITING
+    session.ocr_result = None
+    machine.config = replace(machine.config, ocr_result_timeout_ms=40)
+    machine.camera.stop = AsyncMock()
+    processing_started = threading.Event()
+    processing_release = threading.Event()
+    timeout_handled = asyncio.Event()
+
+    def process_frames(
+        session_id: str,
+        capture_id: str,
+        camera_serial: str,
+        frames: tuple[object, ...],
+    ) -> object:
+        """等待测试放行后结束 OCR 执行。
+
+        Args:
+            session_id: 本轮测量周期编号。
+            capture_id: 本轮采集编号。
+            camera_serial: 本轮相机序列号。
+            frames: 本轮原始帧。
+
+        Returns:
+            返回示例：
+                object()  # 超时后应被丢弃的 OCR 结果
+        """
+        processing_started.set()
+        if not processing_release.wait(timeout=5):
+            raise TimeoutError("OCR 执行未被放行")
+        return object()
+
+    machine.text_recognizer = SimpleNamespace(
+        processing_lock=asyncio.Lock(),
+        process_session_frames=Mock(side_effect=process_frames),
+    )
+    published_events: list[EventType] = []
+
+    async def deliver_event(event: RuntimeEvent) -> None:
+        """处理 OCR 事件并通知测试超时已结算。
+
+        Args:
+            event: OCR 任务或期限任务发布的事件。
+
+        Returns:
+            返回示例：
+                None  # 事件已处理，超时事件已通知测试
+        """
+        published_events.append(event.event_type)
+        await machine.handle_event(event)
+        if event.event_type == EventType.OCR_TIMEOUT:
+            timeout_handled.set()
+
+    machine.publish_event = deliver_event
+    try:
+        # 采集完成后启动 OCR 并等待实际执行开始。
+        capture_result = CaptureResult(
+            frames=(evidence_frame.camera_frame,), statistics={}
+        )
+        await machine.handle_event(RuntimeEvent(
+            EventType.CAPTURE_COMPLETED, "1", session.session_id, capture_result
+        ))
+        recognition_task = machine.current_recognition_task
+        assert recognition_task is not None
+        assert await asyncio.to_thread(processing_started.wait, 5)
+        assert EventType.OCR_TIMEOUT in machine.deadline_tasks
+
+        # 保持 OCR 阻塞直到处理期限到期。
+        await asyncio.wait_for(timeout_handled.wait(), timeout=5)
+        assert published_events == [EventType.OCR_TIMEOUT]
+        assert session.ocr_state == OCRState.TIMED_OUT
+        assert session.state == SessionState.FAILED
+        assert machine.current_session is session
+        assert machine.current_recognition_task is None
+
+        # 旧识别完成后不发布迟到结果。
+        processing_release.set()
+        await asyncio.gather(recognition_task, return_exceptions=True)
+        assert published_events == [EventType.OCR_TIMEOUT]
+    finally:
+        # 放行识别并清理当前周期和测试库。
+        processing_release.set()
+        await machine.release_resources("测试结束")
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_session_waiting_for_ocr_lock_skips_timeout_and_inference(
+    tmp_path: Path,
+) -> None:
+    """确认排队期间失效的周期不启动 OCR 期限或推理。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 失效周期没有 OCR 期限、推理和结果事件
+    """
+    # 建立等待共享锁的 OCR 任务。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    processing_lock = asyncio.Lock()
+    await processing_lock.acquire()
+    machine.text_recognizer = SimpleNamespace(
+        processing_lock=processing_lock,
+        process_session_frames=Mock(),
+    )
+    machine.publish_event = AsyncMock()
+    recognition_task = asyncio.create_task(machine.recognize_session(
+        session, (evidence_frame.camera_frame,)
+    ))
+    try:
+        # 周期在等待共享锁期间失效。
+        await asyncio.sleep(0)
+        session.state = SessionState.FAILED
+        processing_lock.release()
+        await recognition_task
+
+        # 核对失效周期没有启动 OCR 期限和识别。
+        assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+        machine.text_recognizer.process_session_frames.assert_not_called()
+        machine.publish_event.assert_not_awaited()
+    finally:
+        # 释放共享锁和测试库。
+        if processing_lock.locked():
+            processing_lock.release()
+        await asyncio.gather(recognition_task, return_exceptions=True)
+        database.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure_event_type",
     (EventType.OCR_TIMEOUT, EventType.OCR_FAILED),

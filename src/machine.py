@@ -297,9 +297,6 @@ class Machine:
         # 安排本轮运行超时事件。
         self.schedule_timeout(session, EventType.CYCLE_TIMEOUT, self.config.max_cycle_open_ms)
 
-        # 安排本轮 OCR 超时事件。
-        self.schedule_timeout(session, EventType.OCR_TIMEOUT, self.config.ocr_result_timeout_ms)
-
     async def handle_machine_close(
         self,
         interrupted: bool = False,
@@ -836,6 +833,13 @@ class Machine:
             # 周期已失效时直接结束。
             if session.state != SessionState.RUNNING:
                 return
+
+            # 获得共享识别锁后启动本轮 OCR 处理期限。
+            self.schedule_timeout(
+                session,
+                EventType.OCR_TIMEOUT,
+                self.config.ocr_result_timeout_ms,
+            )
 
             # 在线程中执行原始帧整理、筛帧、识别和终选。
             try:
