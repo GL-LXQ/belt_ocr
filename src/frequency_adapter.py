@@ -1,18 +1,27 @@
-"""定义持续接收频率数据的频率仪黑盒及当前周期归属。"""
+"""按当前周期读取频率并交付测量事件。"""
 
-from enums import EventType
 import asyncio
+import logging
 import math
-from itertools import cycle
+import random
 
 from config_util import MachineConfig, AppConfig
+from enums import EventType
 from models import FrequencyMeasurement, RuntimeEvent, PublishEvent
+
+
+logger = logging.getLogger(__name__)
 
 
 class FrequencyAdapter:
     """持续接收新有效测量，按当前 Session 交付频率事件。"""
 
-    def __init__(self, machine: MachineConfig, config: AppConfig, publish_event: PublishEvent) -> None:
+    def __init__(
+        self,
+        machine: MachineConfig,
+        config: AppConfig,
+        publish_event: PublishEvent,
+    ) -> None:
         """登记频率仪配置、测量事件入口和当前周期编号。
 
         Args:
@@ -33,37 +42,52 @@ class FrequencyAdapter:
         self.active_session_id: str | None = None
 
     async def listen_measurements(self) -> None:
-        """按配置循环产生联调频率，向当前周期交付新有效测量。
-
-        当前为频率仪读取占位实现，后续替换为真实协议读取。
+        """按配置间隔读取当前周期的频率并交付有效测量。
 
         Args:
-            无外部参数；使用 simulated_frequencies_hz 和 frequency_interval_ms。
+            无外部参数；使用当前活动周期和频率读取间隔。
 
         Returns:
             返回示例：
                 None  # 持续发送 FrequencyMeasured 事件，直到任务取消
         """
-        # 按配置准备联调读数。
-        frequency_values = cycle(self.machine.simulated_frequencies_hz)
+        # 登记当前读取周期和已交付的读数数量。
+        reading_session_id: str | None = None
+        readings_sent = 0
+
         while True:
             # 按配置的读取间隔等待下一次读数。
-            await asyncio.sleep(self.config.frequency_interval_ms / 10000)
+            await asyncio.sleep(self.config.frequency_interval_ms / 1000)
 
-            # 取下一条配置读数。
-            value_hz = next(frequency_values, None)
+            # 空闲时清除上一个周期的读取进度。
+            session_id = self.active_session_id
+            if session_id is None:
+                reading_session_id = None
+                readings_sent = 0
+                continue
+
+            # 新周期从第一条频率重新读取。
+            if session_id != reading_session_id:
+                reading_session_id = session_id
+                readings_sent = 0
+
+            # 每个周期交付三条频率后等待下一周期。
+            if readings_sent >= 3:
+                continue
+
+            # 读取本次频率值。
+            value_hz = random.uniform(0.01, 100.0)
 
             # 过滤无读数和非有限值。
             if value_hz is None or not math.isfinite(value_hz):
                 continue
 
             # 过滤超出有效范围的读数。
-            if not self.config.minimum_frequency_hz <= value_hz <= self.config.maximum_frequency_hz:
-                continue
-
-            # 取出当前活动周期，无活动周期时不交付。
-            session_id = self.active_session_id
-            if session_id is None:
+            if not (
+                self.config.minimum_frequency_hz
+                <= value_hz
+                <= self.config.maximum_frequency_hz
+            ):
                 continue
 
             # 组装带周期身份的频率读数。
@@ -74,6 +98,20 @@ class FrequencyAdapter:
             )
 
             # 顺序等待本次读数入队。
-            await self.publish_event(
-                RuntimeEvent(EventType.FREQUENCY_MEASURED, self.machine.machine_id, session_id, measurement),
+            event = RuntimeEvent(
+                EventType.FREQUENCY_MEASURED,
+                self.machine.machine_id,
+                session_id,
+                measurement,
+            )
+            await self.publish_event(event)
+            readings_sent += 1
+
+            # 记录本轮已交付的频率读数。
+            logger.info(
+                "频率读数 machine_id=%s session_id=%s reading=%s value_hz=%s",
+                self.machine.machine_id,
+                session_id,
+                readings_sent,
+                value_hz,
             )

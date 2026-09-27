@@ -15,7 +15,6 @@ class MachineConfig:
     machine_id: str  # 业务库机器表自增编号的字符串形式
     camera_serial: str  # 绑定的相机序列号
     frequency_meter_serial: str  # 绑定的频率仪序列号
-    simulated_frequencies_hz: tuple[float, ...] = ()  # 联调用的模拟频率读数
     camera_pixel_format: str | None = None  # 相机像素格式，未配置时由相机决定
     camera_exposure_time_us: float | None = None  # 相机曝光时间，单位微秒
     camera_gain: float | None = None  # 相机增益
