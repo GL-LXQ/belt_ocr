@@ -108,9 +108,9 @@ class Machine:
         self.deadline_tasks: dict[EventType, asyncio.Task[None]] = {}
         self.initialized = False
 
-        # 登记当前识别任务和全部未结束的识别任务。
-        self.recognition_task: asyncio.Task | None = None
-        self.recognition_tasks: set[asyncio.Task[None]] = set()
+        # 登记当前 Session 的识别任务和全部未结束的识别任务。
+        self.current_recognition_task: asyncio.Task | None = None
+        self.unfinished_recognition_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def acceptance_state(self) -> str:
@@ -549,10 +549,10 @@ class Machine:
                 # 标记本轮进入识别。
                 session.ocr_state = OCRState.RUNNING
 
-                # 启动整轮识别任务并登记当前任务与退出等待集合。
+                # 启动整轮识别任务并登记当前任务与未结束任务集合。
                 task = asyncio.create_task(self.recognize_session(session, capture_result.frames))
-                self.recognition_task = task
-                self.recognition_tasks.add(task)
+                self.current_recognition_task = task
+                self.unfinished_recognition_tasks.add(task)
                 task.add_done_callback(self.handle_recognition_task_finished)
                 return
 
@@ -690,10 +690,10 @@ class Machine:
             )
 
         # 取消并解绑当前周期的识别任务，保留任务供后台收尾和退出等待。
-        recognition_task = self.recognition_task
-        if recognition_task is not None:
-            self.recognition_task = None
-            recognition_task.cancel()
+        current_recognition_task = self.current_recognition_task
+        if current_recognition_task is not None:
+            self.current_recognition_task = None
+            current_recognition_task.cancel()
 
         # 释放本轮识别结果。
         session.ocr_result = None
@@ -736,7 +736,7 @@ class Machine:
             return
 
         # 当前周期的识别任务未结束时继续等待。
-        if self.recognition_task is not None:
+        if self.current_recognition_task is not None:
             return
 
         # 采集交付任务未结束时继续等待。
@@ -763,8 +763,8 @@ class Machine:
             返回示例：
                 None  # 任务已回收，当前任务所属的结束周期已尝试清理
         """
-        # 从退出等待集合中移除已经完成的识别任务。
-        self.recognition_tasks.discard(task)
+        # 从未结束任务集合中移除已经完成的识别任务。
+        self.unfinished_recognition_tasks.discard(task)
 
         # 任务未被取消时读取异常并交给致命故障入口。
         if not task.cancelled():
@@ -773,8 +773,8 @@ class Machine:
                 self.on_fatal_error(error)
 
         # 仅由当前周期的任务清空当前引用并尝试释放周期。
-        if self.recognition_task is task:
-            self.recognition_task = None
+        if self.current_recognition_task is task:
+            self.current_recognition_task = None
             self.release_finished_session()
 
     async def release_resources(self, shutdown_reason: str) -> None:
@@ -794,7 +794,10 @@ class Machine:
             self.on_fatal_error(error)
 
         # 收集并取消本机全部识别任务与期限任务。
-        machine_tasks = [*self.deadline_tasks.values(), *self.recognition_tasks]
+        machine_tasks = [
+            *self.deadline_tasks.values(),
+            *self.unfinished_recognition_tasks,
+        ]
         self.deadline_tasks.clear()
         for task in machine_tasks:
             task.cancel()

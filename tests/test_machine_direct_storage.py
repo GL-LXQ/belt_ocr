@@ -1161,7 +1161,7 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
         await machine.handle_event(RuntimeEvent(
             EventType.CAPTURE_COMPLETED, "1", old_session.session_id, capture_result
         ))
-        old_task = machine.recognition_task
+        old_task = machine.current_recognition_task
         assert old_task is not None
         assert await asyncio.to_thread(old_started.wait, 5)
         await machine.handle_event(RuntimeEvent(
@@ -1169,8 +1169,8 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
         ))
         assert old_session.state == SessionState.FAILED
         assert machine.current_session is old_session
-        assert machine.recognition_task is None
-        assert old_task in machine.recognition_tasks
+        assert machine.current_recognition_task is None
+        assert old_task in machine.unfinished_recognition_tasks
         assert not old_task.done()
 
         # 真实 CLOSE 释放旧周期，下一次 START 建立新周期。
@@ -1184,9 +1184,9 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
         await machine.handle_event(RuntimeEvent(
             EventType.CAPTURE_COMPLETED, "1", new_session.session_id, capture_result
         ))
-        new_task = machine.recognition_task
+        new_task = machine.current_recognition_task
         assert new_task is not None
-        assert new_task in machine.recognition_tasks
+        assert new_task in machine.unfinished_recognition_tasks
         assert not new_started.is_set()
 
         # 放行旧 OCR 并核对旧回调未清理新周期的任务。
@@ -1194,10 +1194,10 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
         await asyncio.gather(old_task, return_exceptions=True)
         assert await asyncio.to_thread(new_started.wait, 5)
         await asyncio.sleep(0)
-        assert old_task not in machine.recognition_tasks
+        assert old_task not in machine.unfinished_recognition_tasks
         assert machine.current_session is new_session
-        assert machine.recognition_task is new_task
-        assert new_task in machine.recognition_tasks
+        assert machine.current_recognition_task is new_task
+        assert new_task in machine.unfinished_recognition_tasks
         machine.publish_event.assert_not_awaited()
 
         # 旧周期的迟到事件不进入新周期。
@@ -1205,7 +1205,7 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
             EventType.OCR_COMPLETED, "1", old_session.session_id, old_result
         ))
         assert machine.current_session is new_session
-        assert machine.recognition_task is new_task
+        assert machine.current_recognition_task is new_task
         assert new_session.ocr_result is None
     finally:
         # 放行阻塞识别并清理本机任务和测试库。
@@ -1237,8 +1237,8 @@ async def test_old_ocr_unknown_error_remains_fatal_without_clearing_new_task(
     machine, database, new_session, _, _ = create_machine(tmp_path, (evidence_frame,))
     new_session.state = SessionState.FAILED
     new_task = asyncio.create_task(asyncio.Event().wait())
-    machine.recognition_task = new_task
-    machine.recognition_tasks.add(new_task)
+    machine.current_recognition_task = new_task
+    machine.unfinished_recognition_tasks.add(new_task)
     new_task.add_done_callback(machine.handle_recognition_task_finished)
     unknown_error = RuntimeError("旧 OCR 未知异常")
 
@@ -1257,16 +1257,16 @@ async def test_old_ocr_unknown_error_remains_fatal_without_clearing_new_task(
     try:
         # 令旧任务完成并执行其回调。
         old_task = asyncio.create_task(raise_old_error())
-        machine.recognition_tasks.add(old_task)
+        machine.unfinished_recognition_tasks.add(old_task)
         old_task.add_done_callback(machine.handle_recognition_task_finished)
         await asyncio.gather(old_task, return_exceptions=True)
         await asyncio.sleep(0)
 
         # 核对未知异常与新周期隔离。
         machine.on_fatal_error.assert_called_once_with(unknown_error)
-        assert old_task not in machine.recognition_tasks
-        assert new_task in machine.recognition_tasks
-        assert machine.recognition_task is new_task
+        assert old_task not in machine.unfinished_recognition_tasks
+        assert new_task in machine.unfinished_recognition_tasks
+        assert machine.current_recognition_task is new_task
         assert machine.current_session is new_session
     finally:
         # 取消新任务并关闭测试库。
@@ -1310,7 +1310,7 @@ async def test_shutdown_waits_for_detached_ocr_task(tmp_path: Path) -> None:
 
     # 启动已解绑的旧任务并发起退出。
     old_task = asyncio.create_task(run_blocking_operation(finish_old_ocr))
-    machine.recognition_tasks.add(old_task)
+    machine.unfinished_recognition_tasks.add(old_task)
     old_task.add_done_callback(machine.handle_recognition_task_finished)
     shutdown_task: asyncio.Task[None] | None = None
     try:
@@ -1325,7 +1325,7 @@ async def test_shutdown_waits_for_detached_ocr_task(tmp_path: Path) -> None:
         await shutdown_task
         await asyncio.sleep(0)
         assert old_task.done()
-        assert not machine.recognition_tasks
+        assert not machine.unfinished_recognition_tasks
     finally:
         # 放行可能尚未结束的线程并关闭测试库。
         operation_finished.set()
@@ -1366,16 +1366,16 @@ async def test_unknown_ocr_error_reaches_fatal_callback(
     await machine.handle_event(RuntimeEvent(
         EventType.CAPTURE_COMPLETED, "1", session.session_id, capture_result
     ))
-    recognition_task = machine.recognition_task
-    assert recognition_task is not None
+    current_recognition_task = machine.current_recognition_task
+    assert current_recognition_task is not None
 
     # 等待原始异常离开任务并核对完成回调的交付结果。
     with pytest.raises(error_type) as captured_error:
-        await recognition_task
+        await current_recognition_task
     assert captured_error.value is error
     machine.on_fatal_error.assert_called_once_with(error)
     machine.publish_event.assert_not_awaited()
-    assert machine.recognition_task is None
+    assert machine.current_recognition_task is None
     assert session.ocr_state == OCRState.RUNNING
     assert read_abnormal_events(database) == []
 

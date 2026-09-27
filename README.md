@@ -36,7 +36,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 
 日期取本轮开始时间的本地日期，`evidence_directory` 当前为 `runtime/evidence`。
 
-随后通过 `Database` 写入 SQLite 测量记录，并释放本轮 Session，机器重新等待下一次 START。正常轮与待复核轮都写入记录，待复核轮保存全部原始帧并置 `needs_review=1`；OCR 抛错、超时、无采集帧和周期中断只清理本轮，不写记录。OCR 失败或超时后若现场尚未 CLOSE，失败 Session 保留至真实 CLOSE；CLOSE 后不再等待旧 OCR 任务即可释放，旧任务沿用共享识别锁独立收尾，迟到结果不会进入新 Session，退出时仍等待全部 OCR 任务。
+随后通过 `Database` 写入 SQLite 测量记录，并释放本轮 Session，机器重新等待下一次 START。正常轮与待复核轮都写入记录，待复核轮保存全部原始帧并置 `needs_review=1`；OCR 抛错、超时、无采集帧和周期中断只清理本轮，不写记录。OCR 失败或超时后若现场尚未 CLOSE，失败 Session 保留至真实 CLOSE；`current_recognition_task` 仅表示当前 Session 的任务，`unfinished_recognition_tasks` 保存全部未结束任务，因此 CLOSE 后不再等待旧 OCR 任务即可释放，旧任务沿用共享识别锁独立收尾，迟到结果不会进入新 Session，退出时仍等待全部 OCR 任务。
 
 退出时，`SystemRuntime` 停止相机并等待本机任务结束；`Machine` 仅将尚未完成的 Session 标记为失败、记录退出原因，再清空当前周期。已写入数据库的 Session 即使因任务引用暂时留在机器中，也保持 `COMMITTED` 状态，不写入退出失败事件。
 
