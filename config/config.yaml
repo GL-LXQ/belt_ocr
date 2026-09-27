@@ -19,7 +19,7 @@ camera:
 
 # 从 START 起计算的整轮识别期限。
 ocr:
-  ocr_result_timeout_ms: 5000  # 整轮识别期限，毫秒，包含采集、排队与处理
+  ocr_result_timeout_ms: 30000  # 整轮识别期限，毫秒，包含采集、排队与处理
 
 # 频率读取间隔与有效频率范围。
 frequency:

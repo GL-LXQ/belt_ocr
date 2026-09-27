@@ -1,4 +1,4 @@
-"""验证机器结算时直接保存证据图片和测量记录。"""
+"""验证机器测量结果保存与 OCR 任务生命周期。"""
 
 import asyncio
 import json
@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from async_utils import run_blocking_operation
 from camera.camera import Camera
 from config_util import AppConfig, MachineConfig
 from camera.hikrobot_sdk import MvsError
@@ -1081,6 +1082,257 @@ async def test_ocr_execution_error_fails_and_is_audited(tmp_path: Path) -> None:
     assert len(events) == 1
     assert events[0][2] == "OCR 识别执行失败"
     assert json.loads(events[0][3])["session_errors"] == session.errors
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_event_type",
+    (EventType.OCR_TIMEOUT, EventType.OCR_FAILED),
+)
+async def test_ocr_failure_close_releases_session_while_old_task_finishes(
+    tmp_path: Path,
+    failure_event_type: EventType,
+) -> None:
+    """确认旧 OCR 收尾时释放失败周期并保留新周期的任务引用。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+        failure_event_type: 本次触发的 OCR 失败事件类型。
+
+    Returns:
+        返回示例：
+            None  # 失败周期已释放，新周期与任务引用保持有效
+    """
+    # 建立等待 OCR 的旧周期和两轮可控的阻塞识别。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, old_session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    old_session.capture_stop_time = None
+    old_session.ocr_state = OCRState.WAITING
+    old_session.ocr_result = None
+    old_started = threading.Event()
+    old_release = threading.Event()
+    new_started = threading.Event()
+    new_release = threading.Event()
+    old_result = object()
+    new_result = object()
+
+    def process_frames(
+        session_id: str,
+        capture_id: str,
+        camera_serial: str,
+        frames: tuple[object, ...],
+    ) -> object:
+        """按周期等待测试放行后返回对应 OCR 结果。
+
+        Args:
+            session_id: 本次识别所属的周期编号。
+            capture_id: 本次识别的采集编号。
+            camera_serial: 本次识别的相机序列号。
+            frames: 本次识别的原始帧。
+
+        Returns:
+            返回示例：
+                old_result  # 旧周期放行后的识别结果
+        """
+        if session_id == old_session.session_id:
+            old_started.set()
+            if not old_release.wait(timeout=5):
+                raise TimeoutError("旧 OCR 未被放行")
+            return old_result
+
+        new_started.set()
+        if not new_release.wait(timeout=5):
+            raise TimeoutError("新 OCR 未被放行")
+        return new_result
+
+    machine.text_recognizer = SimpleNamespace(
+        processing_lock=asyncio.Lock(),
+        process_session_frames=Mock(side_effect=process_frames),
+    )
+    machine.publish_event = AsyncMock()
+    machine.camera.available = True
+    machine.camera.is_capturing = False
+    machine.camera.start_capture = Mock()
+    machine.camera.stop = AsyncMock()
+    capture_result = CaptureResult(frames=(evidence_frame.camera_frame,), statistics={})
+
+    try:
+        # 启动旧 OCR 并在底层识别仍运行时触发超时。
+        await machine.handle_event(RuntimeEvent(
+            EventType.CAPTURE_COMPLETED, "1", old_session.session_id, capture_result
+        ))
+        old_task = machine.recognition_task
+        assert old_task is not None
+        assert await asyncio.to_thread(old_started.wait, 5)
+        await machine.handle_event(RuntimeEvent(
+            failure_event_type, "1", old_session.session_id, "模型执行失败"
+        ))
+        assert old_session.state == SessionState.FAILED
+        assert machine.current_session is old_session
+        assert machine.recognition_task is None
+        assert old_task in machine.recognition_tasks
+        assert not old_task.done()
+
+        # 真实 CLOSE 释放旧周期，下一次 START 建立新周期。
+        await machine.handle_machine_close()
+        assert machine.current_session is None
+        machine.camera.delivery_task = asyncio.get_running_loop().create_future()
+        await machine.handle_machine_start()
+        new_session = machine.current_session
+        assert new_session is not None
+        assert new_session is not old_session
+        await machine.handle_event(RuntimeEvent(
+            EventType.CAPTURE_COMPLETED, "1", new_session.session_id, capture_result
+        ))
+        new_task = machine.recognition_task
+        assert new_task is not None
+        assert new_task in machine.recognition_tasks
+        assert not new_started.is_set()
+
+        # 放行旧 OCR 并核对旧回调未清理新周期的任务。
+        old_release.set()
+        await asyncio.gather(old_task, return_exceptions=True)
+        assert await asyncio.to_thread(new_started.wait, 5)
+        await asyncio.sleep(0)
+        assert old_task not in machine.recognition_tasks
+        assert machine.current_session is new_session
+        assert machine.recognition_task is new_task
+        assert new_task in machine.recognition_tasks
+        machine.publish_event.assert_not_awaited()
+
+        # 旧周期的迟到事件不进入新周期。
+        await machine.handle_event(RuntimeEvent(
+            EventType.OCR_COMPLETED, "1", old_session.session_id, old_result
+        ))
+        assert machine.current_session is new_session
+        assert machine.recognition_task is new_task
+        assert new_session.ocr_result is None
+    finally:
+        # 放行阻塞识别并清理本机任务和测试库。
+        old_release.set()
+        new_release.set()
+        delivery_task = machine.camera.delivery_task
+        if delivery_task is not None:
+            delivery_task.cancel()
+            machine.camera.delivery_task = None
+        await machine.release_resources("测试结束")
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_old_ocr_unknown_error_remains_fatal_without_clearing_new_task(
+    tmp_path: Path,
+) -> None:
+    """确认旧 OCR 的未知异常上报故障且不清理新任务引用。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 未知异常已上报，新周期和任务引用保持有效
+    """
+    # 建立已关闭的新周期和仍在执行的新 OCR 任务。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, new_session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    new_session.state = SessionState.FAILED
+    new_task = asyncio.create_task(asyncio.Event().wait())
+    machine.recognition_task = new_task
+    machine.recognition_tasks.add(new_task)
+    new_task.add_done_callback(machine.handle_recognition_task_finished)
+    unknown_error = RuntimeError("旧 OCR 未知异常")
+
+    async def raise_old_error() -> None:
+        """让已解绑的旧 OCR 任务以未知异常结束。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 任务实际抛出旧 OCR 的未知异常
+        """
+        raise unknown_error
+
+    try:
+        # 令旧任务完成并执行其回调。
+        old_task = asyncio.create_task(raise_old_error())
+        machine.recognition_tasks.add(old_task)
+        old_task.add_done_callback(machine.handle_recognition_task_finished)
+        await asyncio.gather(old_task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        # 核对未知异常与新周期隔离。
+        machine.on_fatal_error.assert_called_once_with(unknown_error)
+        assert old_task not in machine.recognition_tasks
+        assert new_task in machine.recognition_tasks
+        assert machine.recognition_task is new_task
+        assert machine.current_session is new_session
+    finally:
+        # 取消新任务并关闭测试库。
+        new_task.cancel()
+        await asyncio.gather(new_task, return_exceptions=True)
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_detached_ocr_task(tmp_path: Path) -> None:
+    """确认退出流程等待已解绑但仍在运行的 OCR 底层线程。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 旧 OCR 收尾完成后退出流程才结束
+    """
+    # 建立没有活动周期但仍有旧 OCR 任务的机器。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
+    machine.current_session = None
+    machine.camera.stop = AsyncMock()
+    operation_started = threading.Event()
+    operation_finished = threading.Event()
+
+    def finish_old_ocr() -> None:
+        """等待测试放行后结束旧 OCR 底层线程。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 旧 OCR 底层线程已结束
+        """
+        operation_started.set()
+        if not operation_finished.wait(timeout=5):
+            raise TimeoutError("旧 OCR 底层线程未被放行")
+
+    # 启动已解绑的旧任务并发起退出。
+    old_task = asyncio.create_task(run_blocking_operation(finish_old_ocr))
+    machine.recognition_tasks.add(old_task)
+    old_task.add_done_callback(machine.handle_recognition_task_finished)
+    shutdown_task: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(operation_started.wait, 5)
+        shutdown_task = asyncio.create_task(machine.release_resources("测试结束"))
+        await asyncio.sleep(0)
+        machine.camera.stop.assert_awaited_once()
+        assert not shutdown_task.done()
+
+        # 放行旧 OCR 后核对退出完成与任务回收。
+        operation_finished.set()
+        await shutdown_task
+        await asyncio.sleep(0)
+        assert old_task.done()
+        assert not machine.recognition_tasks
+    finally:
+        # 放行可能尚未结束的线程并关闭测试库。
+        operation_finished.set()
+        if shutdown_task is not None:
+            await asyncio.gather(shutdown_task, return_exceptions=True)
+        await asyncio.gather(old_task, return_exceptions=True)
+        database.close()
 
 
 @pytest.mark.asyncio

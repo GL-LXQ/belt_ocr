@@ -104,10 +104,13 @@ class Machine:
         self.current_session: BeltSession | None = None
         self.waiting_cycle_reset = False
 
-        # 初始化期限任务表、启动准备标志和识别任务引用。
+        # 初始化期限任务表和启动准备标志。
         self.deadline_tasks: dict[EventType, asyncio.Task[None]] = {}
         self.initialized = False
+
+        # 登记当前识别任务和全部未结束的识别任务。
         self.recognition_task: asyncio.Task | None = None
+        self.recognition_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def acceptance_state(self) -> str:
@@ -546,9 +549,10 @@ class Machine:
                 # 标记本轮进入识别。
                 session.ocr_state = OCRState.RUNNING
 
-                # 启动整轮识别任务并登记完成回调。
+                # 启动整轮识别任务并登记当前任务与退出等待集合。
                 task = asyncio.create_task(self.recognize_session(session, capture_result.frames))
                 self.recognition_task = task
+                self.recognition_tasks.add(task)
                 task.add_done_callback(self.handle_recognition_task_finished)
                 return
 
@@ -685,9 +689,10 @@ class Machine:
                 session.session_id,
             )
 
-        # 取消等待或正在执行的识别任务。
+        # 取消并解绑当前周期的识别任务，保留任务供后台收尾和退出等待。
         recognition_task = self.recognition_task
         if recognition_task is not None:
+            self.recognition_task = None
             recognition_task.cancel()
 
         # 释放本轮识别结果。
@@ -712,7 +717,7 @@ class Machine:
         self.release_finished_session()
 
     def release_finished_session(self) -> None:
-        """在周期关闭且后台资源释放后清空唯一的当前周期。
+        """在周期关闭且当前任务与相机交付结束后清空当前周期。
 
         Args:
             无外部参数。
@@ -730,7 +735,7 @@ class Machine:
         if session.state not in {SessionState.COMMITTED, SessionState.FAILED}:
             return
 
-        # 识别任务未结束时继续等待。
+        # 当前周期的识别任务未结束时继续等待。
         if self.recognition_task is not None:
             return
 
@@ -749,17 +754,17 @@ class Machine:
         self.state_changed.set()
 
     def handle_recognition_task_finished(self, task: asyncio.Task) -> None:
-        """释放本轮识别任务，报告交付异常并尝试结束当前周期。
+        """回收识别任务，报告未知异常并清理所属的当前周期。
 
         Args:
             task: 已结束或取消的整轮识别任务。
 
         Returns:
             返回示例：
-                None  # 任务引用已释放，已关闭的结束周期已清理
+                None  # 任务已回收，当前任务所属的结束周期已尝试清理
         """
-        # 释放本轮识别任务引用。
-        self.recognition_task = None
+        # 从退出等待集合中移除已经完成的识别任务。
+        self.recognition_tasks.discard(task)
 
         # 任务未被取消时读取异常并交给致命故障入口。
         if not task.cancelled():
@@ -767,8 +772,10 @@ class Machine:
             if error is not None:
                 self.on_fatal_error(error)
 
-        # 尝试释放本轮周期。
-        self.release_finished_session()
+        # 仅由当前周期的任务清空当前引用并尝试释放周期。
+        if self.recognition_task is task:
+            self.recognition_task = None
+            self.release_finished_session()
 
     async def release_resources(self, shutdown_reason: str) -> None:
         """停止本机采集，取消本机任务，并结算退出时未完成的周期。
@@ -786,10 +793,8 @@ class Machine:
         except Exception as error:
             self.on_fatal_error(error)
 
-        # 收集并取消本机识别任务与全部期限任务。
-        machine_tasks = [*self.deadline_tasks.values()]
-        if self.recognition_task is not None:
-            machine_tasks.append(self.recognition_task)
+        # 收集并取消本机全部识别任务与期限任务。
+        machine_tasks = [*self.deadline_tasks.values(), *self.recognition_tasks]
         self.deadline_tasks.clear()
         for task in machine_tasks:
             task.cancel()
