@@ -1,9 +1,10 @@
 """展示已保存的测量历史和只读详情。"""
 
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -11,12 +12,14 @@ from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -164,7 +167,7 @@ class HistoryPage(QWidget):
         self.detail_dialog.setWindowFlag(
             Qt.WindowType.WindowContextHelpButtonHint, False
         )
-        self.detail_dialog.resize(640, 590)
+        self.detail_dialog.resize(640, 680)
         detail_layout = QVBoxLayout(self.detail_dialog)
         fields = QFormLayout()
         self.detail_values: dict[str, QLabel] = {}
@@ -198,6 +201,17 @@ class HistoryPage(QWidget):
         self.review_reason_value.setTextInteractionFlags(selectable_text)
         detail_layout.addWidget(self.review_reason_title)
         detail_layout.addWidget(self.review_reason_value)
+
+        # 创建可滚动的证据图片缩略图区域。
+        detail_layout.addWidget(QLabel("证据图片："))
+        self.evidence_scroll = QScrollArea()
+        self.evidence_scroll.setWidgetResizable(True)
+        self.evidence_scroll.setFixedHeight(180)
+        self.evidence_content = QWidget()
+        self.evidence_grid = QGridLayout(self.evidence_content)
+        self.evidence_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.evidence_scroll.setWidget(self.evidence_content)
+        detail_layout.addWidget(self.evidence_scroll)
 
         # 在弹窗底部放置关闭入口。
         close_button = QPushButton("关闭")
@@ -351,4 +365,113 @@ class HistoryPage(QWidget):
         self.review_reason_value.setVisible(review_status)
         reason_text = (record["review_reason"] or "--") if review_status else ""
         self.review_reason_value.setText(reason_text)
+
+        # 读取本轮证据目录并显示可用图片。
+        self.populate_evidence_images(record["evidence_directory"])
         self.detail_dialog.open()
+
+    def populate_evidence_images(self, evidence_directory: str) -> None:
+        """读取本轮 JPG 证据并更新详情缩略图。
+
+        Args:
+            evidence_directory: 测量记录保存的本轮证据目录。
+
+        Returns:
+            返回示例：
+                None  # 缩略图或图片占位文字已显示
+        """
+        # 清除上一条记录的缩略图和占位文字。
+        while self.evidence_grid.count():
+            layout_item = self.evidence_grid.takeAt(0)
+            widget = layout_item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        # 读取记录目录当前层的 JPG 文件。
+        directory = Path(evidence_directory) if evidence_directory else None
+        image_paths = (
+            sorted(directory.glob("*.jpg"))
+            if directory is not None and directory.is_dir()
+            else []
+        )
+        readable_image_count = 0
+        for image_path in image_paths:
+            image = QPixmap(str(image_path))
+            if image.isNull():
+                continue
+
+            # 为可读取的图片创建可点击缩略图。
+            thumbnail = QPushButton()
+            thumbnail.setObjectName("evidenceThumbnail")
+            thumbnail.setToolTip(image_path.name)
+            thumbnail.setAccessibleName(image_path.name)
+            thumbnail_image = image.scaled(
+                QSize(140, 100),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            thumbnail.setIcon(QIcon(thumbnail_image))
+            thumbnail.setIconSize(QSize(140, 100))
+            thumbnail.setFixedSize(160, 120)
+            thumbnail.clicked.connect(
+                lambda checked=False, path=image_path: self.show_evidence_image(path)
+            )
+            self.evidence_grid.addWidget(
+                thumbnail, readable_image_count // 3, readable_image_count % 3
+            )
+            readable_image_count += 1
+
+        # 在没有可显示图片时给出对应提示。
+        if readable_image_count == 0:
+            message = "证据图片读取失败" if image_paths else "暂无证据图片"
+            self.evidence_grid.addWidget(QLabel(message), 0, 0)
+
+        self.evidence_scroll.verticalScrollBar().setValue(0)
+
+    def show_evidence_image(self, image_path: Path) -> None:
+        """打开一张证据图片的大图查看窗口。
+
+        Args:
+            image_path: 已选证据图片的完整路径。
+
+        Returns:
+            返回示例：
+                None  # 大图窗口已关闭
+        """
+        # 创建适配当前屏幕大小的临时查看窗口。
+        image_dialog = QDialog(self.detail_dialog)
+        image_dialog.setWindowTitle(image_path.name)
+        screen_size = image_dialog.screen().availableGeometry().size()
+        image_dialog.resize(
+            min(900, screen_size.width() - 80),
+            min(650, screen_size.height() - 80),
+        )
+        image_layout = QVBoxLayout(image_dialog)
+        image_label = QLabel()
+        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # 将图片等比例缩放到查看窗口的可用区域。
+        image = QPixmap(str(image_path))
+        if image.isNull():
+            image_label.setText("图片读取失败")
+        else:
+            available_size = QSize(
+                image_dialog.width() - 40,
+                image_dialog.height() - 90,
+            )
+            image_label.setPixmap(
+                image.scaled(
+                    available_size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        image_layout.addWidget(image_label, 1)
+
+        # 添加关闭按钮并显示大图窗口。
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(image_dialog.accept)
+        image_layout.addWidget(close_button, alignment=Qt.AlignmentFlag.AlignRight)
+        image_dialog.exec()
+        image_dialog.deleteLater()
