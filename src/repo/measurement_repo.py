@@ -1,0 +1,159 @@
+"""查询测量历史并创建测量结果表。"""
+
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+
+
+class MeasurementRepo:
+    """管理测量结果表结构和历史记录读取。"""
+
+    def __init__(self, database_path: Path) -> None:
+        """保存测量结果所在的业务数据库路径。
+
+        Args:
+            database_path: 业务数据库文件路径。
+
+        Returns:
+            返回示例：
+                None  # 测量结果表访问对象已初始化
+        """
+        self.database_path = database_path
+
+    @staticmethod
+    def create_table(connection: sqlite3.Connection) -> None:
+        """在现有连接中创建测量结果表。
+
+        Args:
+            connection: 业务数据库初始化连接。
+
+        Returns:
+            返回示例：
+                None  # 测量结果表已就绪
+        """
+        # 创建测量结果表。
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS measurements (
+                session_id TEXT PRIMARY KEY,
+                machine_id TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                finish_time TEXT NOT NULL,
+                ordered_lines TEXT NOT NULL,
+                final_frequency_hz REAL,
+                measurement_frequencies TEXT NOT NULL DEFAULT '[]',
+                evidence_directory TEXT NOT NULL,
+                needs_review INTEGER NOT NULL DEFAULT 0,
+                review_reason TEXT
+            );
+        """)
+
+    def list_records(
+        self, needs_review: bool | None = None, machine_id: str | None = None
+    ) -> list[dict]:
+        """按复核状态和机器编号读取测量历史。
+
+        Args:
+            needs_review: None 表示全部，布尔值表示对应复核状态。
+            machine_id: None 表示全部机器，否则筛选指定机器。
+
+        Returns:
+            返回示例：
+                [{
+                    "session_id": "session-1",  # 测量周期编号
+                    "machine_id": "1",  # 机器编号
+                    "machine_name": "皮带机 1",  # 机器名称或编号
+                    "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
+                    "ordered_lines": '["ABC"]',  # OCR 文字 JSON
+                    "final_frequency_hz": 50.0,  # 最终频率
+                    "needs_review": 0,  # 是否待复核
+                }]
+        """
+        # 按已选择的筛选条件生成参数化查询。
+        conditions = []
+        parameters = []
+        if needs_review is not None:
+            conditions.append("record.needs_review = ?")
+            parameters.append(int(needs_review))
+        if machine_id is not None:
+            conditions.append("record.machine_id = ?")
+            parameters.append(machine_id)
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+        # 读取测量结果和对应机器名称。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT record.session_id, record.machine_id, "
+                "COALESCE(machine.machine_name, record.machine_id) AS machine_name, "
+                "record.finish_time, record.ordered_lines, "
+                "record.final_frequency_hz, record.needs_review "
+                "FROM measurements AS record "
+                "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id"
+                + where_clause
+                + " ORDER BY record.finish_time DESC, record.session_id DESC",
+                parameters,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_record_machines(self) -> list[dict]:
+        """读取所有出现过测量记录的机器。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                [{
+                    "machine_id": "1",  # 机器编号
+                    "machine_name": "皮带机 1",  # 机器名称或编号
+                }]
+        """
+        # 从全部历史记录中读取机器，包括停用和软删除机器。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT DISTINCT record.machine_id, "
+                "COALESCE(machine.machine_name, record.machine_id) AS machine_name "
+                "FROM measurements AS record "
+                "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id "
+                "ORDER BY machine_name, record.machine_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_record(self, session_id: str) -> dict | None:
+        """按周期编号读取一条测量记录的完整查看字段。
+
+        Args:
+            session_id: 待查看的测量周期编号。
+
+        Returns:
+            返回示例：
+                {
+                    "session_id": "session-1",  # 测量周期编号
+                    "machine_id": "1",  # 机器编号
+                    "machine_name": "皮带机 1",  # 机器名称或编号
+                    "start_time": "2026-09-27T07:59:00+00:00",  # 开始时间
+                    "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
+                    "ordered_lines": '["ABC"]',  # OCR 文字 JSON
+                    "final_frequency_hz": 50.0,  # 最终频率
+                    "evidence_directory": "runtime/evidence/1",  # 证据目录
+                    "needs_review": 0,  # 是否待复核
+                    "review_reason": None,  # 复核原因
+                }
+                None  # 周期编号没有对应记录
+        """
+        # 按周期编号读取测量详情及对应机器名称。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT record.session_id, record.machine_id, "
+                "COALESCE(machine.machine_name, record.machine_id) AS machine_name, "
+                "record.start_time, record.finish_time, record.ordered_lines, "
+                "record.final_frequency_hz, record.evidence_directory, "
+                "record.needs_review, record.review_reason "
+                "FROM measurements AS record "
+                "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id "
+                "WHERE record.session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None

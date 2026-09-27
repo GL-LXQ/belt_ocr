@@ -122,6 +122,23 @@ QCheckBox#machineEnabled { font-size: 14px; color: @text; spacing: 10px; }
 QCheckBox#machineEnabled::indicator { width: 20px; height: 20px; }
 QLabel#machineStatus { background: #EEF2F7; color: #60748E; border-radius: 14px; }
 QLabel#machineStatus[enabledStatus="true"] { background: #DCF8E9; color: #0AAF5B; }
+
+/* 设置历史记录筛选和只读表格。 */
+QWidget#history QPushButton[historyFilter="true"] {
+    background: @white; color: @text; border: 1px solid #CFDAE8;
+    border-radius: 5px; padding: 7px 18px;
+}
+QWidget#history QPushButton[historyFilter="true"]:checked {
+    background: @blue; color: @white; border-color: @blue;
+}
+QWidget#history QComboBox {
+    background: @white; color: @text; border: 1px solid #CFDAE8;
+    border-radius: 5px; padding: 5px 10px;
+}
+QTableWidget#historyTable { color: @text; border-radius: 8px; font-size: 13px; }
+QTableWidget#historyTable::item { border-bottom: 1px solid #EDF1F6; padding: 0 8px; }
+QDialog#historyDetail { background: @white; color: @text; }
+
 /* 通过按钮角色共用机器页操作样式。 */
 QPushButton[buttonRole="primary"] {
     background: @blue; color: @white; border: 1px solid @blue; border-radius: 6px;

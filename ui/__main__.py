@@ -13,7 +13,9 @@ from PySide6.QtWidgets import QApplication
 from config_util import read_configuration_settings
 
 from src.service.machine_service import MachineService
+from src.service.history_service import HistoryService
 from src.repo.machine_repo import MachineRepo
+from src.repo.measurement_repo import MeasurementRepo
 from ui.main_window import MainWindow
 
 
@@ -32,19 +34,22 @@ def run_desktop_preview() -> int:
     application.setApplicationName("BeltVision")
     application.setApplicationVersion("1.0.0")
 
-    # 从项目配置读取业务库路径并初始化机器表。
+    # 从项目配置读取业务库路径并初始化机器与测量结果表。
     configuration_directory = Path(__file__).resolve().parents[1] / "config"
     settings = read_configuration_settings(configuration_directory)
     database_path = settings["database_path"]
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(database_path)) as connection, connection:
         MachineRepo.create_table(connection)
-    # 创建数据访问对象和机器业务服务。
+        MeasurementRepo.create_table(connection)
+
+    # 创建机器和历史记录服务。
     machine_repo = MachineRepo(database_path)
     machine_service = MachineService(machine_repo)
+    history_service = HistoryService(MeasurementRepo(database_path))
 
     # 创建并显示桌面主窗口。
-    window = MainWindow(machine_service)
+    window = MainWindow(machine_service, history_service)
     window.show()
 
     # 运行事件循环，等待窗口关闭。

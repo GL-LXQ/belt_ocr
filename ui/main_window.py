@@ -18,9 +18,11 @@ from PySide6.QtWidgets import (
 )
 
 from src.service.machine_service import MachineService
+from src.service.history_service import HistoryService
 from ui.theme import COLORS, create_icon
 from ui.pages.realtime_page import RealtimePage
 from ui.pages.machines_page import MachinesPage
+from ui.pages.history_page import HistoryPage
 
 
 # 按导航顺序配置页面标题和说明。
@@ -189,11 +191,14 @@ class TitleBar(QWidget):
 class MainWindow(QMainWindow):
     """提供六个页面的统一桌面容器。"""
 
-    def __init__(self, machine_service: MachineService):
+    def __init__(
+        self, machine_service: MachineService, history_service: HistoryService
+    ):
         """依次初始化窗口、页面、导航、时钟和样式。
 
         Args:
             machine_service: 机器业务服务。
+            history_service: 测量历史服务。
 
         Returns:
             返回示例：
@@ -202,6 +207,7 @@ class MainWindow(QMainWindow):
         # 初始化当前页面和导航按钮集合。
         super().__init__()
         self.machine_service = machine_service
+        self.history_service = history_service
         self.nav_buttons = {}
         self.current_page_key = "realtime"
 
@@ -409,12 +415,15 @@ class MainWindow(QMainWindow):
             返回示例：
                 QStackedWidget()  # 持有六个页面的容器
         """
-        # 创建实时监测页、机器管理页和其他占位页面。
+        # 创建实时监测页、历史页、机器管理页和其他占位页面。
         stack = QStackedWidget()
         stack.setObjectName("pageStack")
         for page_key in PAGES:
             if page_key == "realtime":
                 stack.addWidget(RealtimePage(self.machine_service))
+            elif page_key == "history":
+                self.history_page = HistoryPage(self.history_service)
+                stack.addWidget(self.history_page)
             elif page_key == "machines":
                 stack.addWidget(MachinesPage(self.machine_service))
             else:
@@ -507,10 +516,15 @@ class MainWindow(QMainWindow):
                 None  # 更新当前页面且复用原有页面实例
         """
         # 切换页面栈，并同步当前页面标识和导航选中状态。
+        previous_page_key = self.current_page_key
         title = PAGES[page_key][0]
         self.current_page_key = page_key
         self.page_stack.setCurrentIndex(list(PAGES).index(page_key))
         self.nav_buttons[page_key].setChecked(True)
+
+        # 每次进入历史页时读取一次最新记录。
+        if page_key == "history" and previous_page_key != "history":
+            self.history_page.refresh_history()
 
         # 同步顶部页面名和系统窗口标题。
         self.title_bar.caption.setText(f"| {title}")

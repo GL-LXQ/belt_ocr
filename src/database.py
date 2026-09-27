@@ -12,6 +12,7 @@ from pathlib import Path
 
 from config_util import AppConfig
 from repo.machine_repo import MachineRepo
+from repo.measurement_repo import MeasurementRepo
 from repo.abnormal_event_repo import AbnormalEventRepo
 
 
@@ -215,20 +216,7 @@ class Database:
             self.machine_repo.create_table(connection)
 
             # 创建测量结果表。
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS measurements (
-                    session_id TEXT PRIMARY KEY,
-                    machine_id TEXT NOT NULL,
-                    start_time TEXT NOT NULL,
-                    finish_time TEXT NOT NULL,
-                    ordered_lines TEXT NOT NULL,
-                    final_frequency_hz REAL,
-                    measurement_frequencies TEXT NOT NULL DEFAULT '[]',
-                    evidence_directory TEXT NOT NULL,
-                    needs_review INTEGER NOT NULL DEFAULT 0,
-                    review_reason TEXT
-                );
-            """)
+            MeasurementRepo.create_table(connection)
 
     def write_measurement_record(self, record: MeasurementRecord) -> None:
         """在事务中幂等写入本轮测量记录，并重试一次写锁竞争。
