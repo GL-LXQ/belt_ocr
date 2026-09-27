@@ -1,7 +1,9 @@
-"""验证测量历史的查询、筛选和只读页面。"""
+"""验证测量历史的查询、筛选、证据和人工复核。"""
 
+import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -11,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from config_util import AppConfig
 from database import Database, MeasurementRecord
@@ -20,6 +22,7 @@ from repo.measurement_record_repo import MeasurementRecordRepo
 from src.service.measurement_history_service import (
     MeasurementHistoryService,
     MeasurementHistoryServiceError,
+    MeasurementReviewAlreadyCompletedError,
 )
 from src.service.machine_service import MachineService
 from ui.main_window import MainWindow
@@ -142,18 +145,19 @@ def test_measurement_history_service_filters_and_reads_details(
         "missing-machine-session", "disabled-machine-session",
         "review-session", "normal-session"
     ]
-    normal_records = measurement_history_service.list_records(False)
+    normal_records = measurement_history_service.list_records("normal")
     assert [record["session_id"] for record in normal_records] == [
         "missing-machine-session", "disabled-machine-session", "normal-session"
     ]
-    review_records = measurement_history_service.list_records(True)
+    review_records = measurement_history_service.list_records("pending")
     assert [record["session_id"] for record in review_records] == [
         "review-session"
     ]
-    assert measurement_history_service.list_records(True, "1") == []
-    machine_records = measurement_history_service.list_records(True, "2")
+    assert measurement_history_service.list_records("reviewed") == []
+    assert measurement_history_service.list_records("pending", "1") == []
+    machine_records = measurement_history_service.list_records("pending", "2")
     assert machine_records[0]["session_id"] == "review-session"
-    disabled_records = measurement_history_service.list_records(False, "3")
+    disabled_records = measurement_history_service.list_records("normal", "3")
     assert disabled_records[0]["session_id"] == "disabled-machine-session"
 
     # 核对软删除机器和缺少机器信息时的展示名称。
@@ -178,6 +182,127 @@ def test_measurement_history_service_filters_and_reads_details(
     assert normal_record["ordered_lines"] == ("12345678", "003")
     assert normal_record["review_reason"] is None
     assert measurement_history_service.get_record("unknown-session") is None
+
+
+def test_existing_measurement_table_adds_review_columns_without_losing_records(
+    tmp_path: Path,
+) -> None:
+    """验证旧开发库补列后保留已有测量记录。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 旧记录仍在且两个复核字段可重复初始化
+    """
+    database_path = tmp_path / "existing.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE measurement_records (session_id TEXT PRIMARY KEY, "
+            "ordered_lines TEXT NOT NULL, needs_review INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO measurement_records VALUES (?, ?, ?)",
+            ("existing-session", '["原始文字"]', 1),
+        )
+
+        # 重复初始化时仅补齐缺失字段。
+        MeasurementRecordRepo.create_table(connection)
+        MeasurementRecordRepo.create_table(connection)
+        table_columns = connection.execute("PRAGMA table_info(measurement_records)")
+        columns = {column[1] for column in table_columns}
+        saved_record = connection.execute(
+            "SELECT session_id, ordered_lines, needs_review, "
+            "reviewed_at, reviewed_lines "
+            "FROM measurement_records"
+        ).fetchone()
+
+    assert {"reviewed_at", "reviewed_lines"} <= columns
+    assert saved_record == ("existing-session", '["原始文字"]', 1, None, None)
+
+
+def test_confirm_original_ocr_preserves_original_record_and_prevents_repeat(
+    measurement_history_service: MeasurementHistoryService,
+) -> None:
+    """验证确认原文字只写复核时间且同一记录不能再复核。
+
+    Args:
+        measurement_history_service: 已保存测试记录的历史服务。
+
+    Returns:
+        返回示例：
+            None  # 原文字和复核原因保留，重复复核已拒绝
+    """
+    measurement_history_service.complete_review("review-session")
+    record = measurement_history_service.get_record("review-session")
+    reviewed_time = datetime.fromisoformat(record["reviewed_at"])
+    assert reviewed_time.tzinfo == timezone.utc
+    assert record["ordered_lines"] == ("待确认文字",)
+    assert record["reviewed_lines"] is None
+    assert record["needs_review"] is True
+    assert record["review_reason"] == "没有可靠的 20 位文字"
+    assert measurement_history_service.list_records("pending") == []
+    reviewed_records = measurement_history_service.list_records("reviewed", "2")
+    assert reviewed_records[0]["session_id"] == "review-session"
+    assert measurement_history_service.list_records("normal", "2") == []
+
+    # 从数据库再次确认原始字段没有被复核写入覆盖。
+    database_path = measurement_history_service.measurement_record_repo.database_path
+    with sqlite3.connect(database_path) as connection:
+        saved_record = connection.execute(
+            "SELECT ordered_lines, needs_review, review_reason, reviewed_lines "
+            "FROM measurement_records WHERE session_id = ?",
+            ("review-session",),
+        ).fetchone()
+    assert saved_record == ('["待确认文字"]', 1, "没有可靠的 20 位文字", None)
+    with pytest.raises(MeasurementReviewAlreadyCompletedError, match="该记录已完成复核"):
+        measurement_history_service.complete_review("review-session", "再次修改")
+    with pytest.raises(MeasurementReviewAlreadyCompletedError):
+        measurement_history_service.complete_review("normal-session")
+    normal_record = measurement_history_service.get_record("normal-session")
+    assert normal_record["reviewed_at"] is None
+
+
+def test_edited_review_saves_lines_and_rejects_empty_input(
+    measurement_history_service: MeasurementHistoryService,
+) -> None:
+    """验证人工文字按行保存且空输入不完成复核。
+
+    Args:
+        measurement_history_service: 已保存测试记录的历史服务。
+
+    Returns:
+        返回示例：
+            None  # 有效文字保存为 JSON，原始 OCR 保留
+    """
+    with pytest.raises(MeasurementHistoryServiceError, match="至少需要一条有效文字"):
+        measurement_history_service.complete_review("review-session", " \n\t ")
+    pending_record = measurement_history_service.get_record("review-session")
+    assert pending_record["reviewed_at"] is None
+
+    # 保存去空白后的两条人工文字。
+    measurement_history_service.complete_review("review-session", " 修正一 \n\n 修正二  ")
+    record = measurement_history_service.get_record("review-session")
+    assert record["ordered_lines"] == ("待确认文字",)
+    assert record["reviewed_lines"] == ("修正一", "修正二")
+    assert record["needs_review"] is True
+    assert record["review_reason"] == "没有可靠的 20 位文字"
+    assert datetime.fromisoformat(record["reviewed_at"]).tzinfo == timezone.utc
+    reviewed_records = measurement_history_service.list_records("reviewed")
+    assert reviewed_records[0]["reviewed_lines"] == (
+        "修正一", "修正二"
+    )
+
+    database_path = measurement_history_service.measurement_record_repo.database_path
+    with sqlite3.connect(database_path) as connection:
+        saved_record = connection.execute(
+            "SELECT ordered_lines, reviewed_lines FROM measurement_records "
+            "WHERE session_id = ?",
+            ("review-session",),
+        ).fetchone()
+    assert saved_record[0] == '["待确认文字"]'
+    assert json.loads(saved_record[1]) == ["修正一", "修正二"]
 
 
 def test_invalid_ocr_json_is_a_history_read_error(
@@ -230,7 +355,7 @@ def test_history_page_shows_filters_and_read_only_details(
         assert page.table.item(2, 4).background().color().name() == "#fff0d8"
 
         # 组合状态和机器筛选，仅保留软删除机器的待复核记录。
-        page.status_buttons[True].click()
+        page.status_buttons["pending"].click()
         page.machine_filter.setCurrentIndex(page.machine_filter.findData("2"))
         assert page.table.rowCount() == 1
         assert page.table.item(0, 1).text() == "二号皮带"
@@ -240,11 +365,14 @@ def test_history_page_shows_filters_and_read_only_details(
         assert page.detail_ocr_text.toPlainText() == "待确认文字"
         assert page.review_reason_value.text() == "没有可靠的 20 位文字"
         assert page.detail_ocr_text.isReadOnly()
+        assert page.review_editor.toPlainText() == "待确认文字"
+        assert not page.confirm_review_button.isHidden()
+        assert not page.save_review_button.isHidden()
         page.detail_dialog.close()
 
         # 正常记录使用绿色状态且不显示复核原因。
         page.machine_filter.setCurrentIndex(0)
-        page.status_buttons[False].click()
+        page.status_buttons["normal"].click()
         assert page.table.rowCount() == 3
         assert page.table.item(2, 4).text() == "正常"
         assert page.table.item(2, 4).background().color().name() == "#dcf8e9"
@@ -252,6 +380,104 @@ def test_history_page_shows_filters_and_read_only_details(
         assert page.detail_ocr_text.toPlainText() == "12345678\n003"
         assert page.detail_values["frequency"].text() == "50.0 Hz"
         assert page.review_reason_title.isHidden()
+        assert page.review_editor.isHidden()
+        assert page.confirm_review_button.isHidden()
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("edited_text", "expected_result"),
+    ((None, "待确认文字"), (" 人工修正一 \n\n 人工修正二 ", "人工修正一\n人工修正二")),
+)
+def test_history_page_completes_review_and_shows_original_and_final_results(
+    qt_application: QApplication,
+    measurement_history_service: MeasurementHistoryService,
+    edited_text: str | None,
+    expected_result: str,
+) -> None:
+    """验证两种复核按钮均刷新列表且已复核详情只读。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_history_service: 已保存测试记录的历史服务。
+        edited_text: 可选的人工编辑内容。
+        expected_result: 预期的最终显示文字。
+
+    Returns:
+        返回示例：
+            None  # 详情显示原始文字、人工结果和本地复核时间
+    """
+    page = HistoryPage(measurement_history_service)
+    try:
+        # 从待复核列表打开详情并完成当前记录。
+        page.refresh_history()
+        page.status_buttons["pending"].click()
+        assert page.table.rowCount() == 1
+        page.table.cellWidget(0, 5).click()
+        if edited_text is None:
+            page.confirm_review_button.click()
+        else:
+            page.review_editor.setPlainText(edited_text)
+            page.save_review_button.click()
+        assert page.table.rowCount() == 0
+
+        # 从已复核列表核对摘要、状态和只读详情。
+        page.status_buttons["reviewed"].click()
+        assert page.table.rowCount() == 1
+        assert page.table.item(0, 2).text() == expected_result.replace("\n", "；")
+        assert page.table.item(0, 4).text() == "已复核"
+        assert page.table.item(0, 4).background().color().name() == "#e2eeff"
+        page.table.cellWidget(0, 5).click()
+        assert page.detail_values["status"].text() == "已复核"
+        assert page.detail_ocr_text.toPlainText() == "待确认文字"
+        assert page.final_result_text.toPlainText() == expected_result
+        assert page.final_result_text.isReadOnly()
+        assert page.reviewed_at_value.text()
+        assert page.review_reason_value.text() == "没有可靠的 20 位文字"
+        assert page.review_editor.isHidden()
+        assert page.confirm_review_button.isHidden()
+        assert page.save_review_button.isHidden()
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_stale_history_detail_cannot_review_record_twice(
+    qt_application: QApplication,
+    measurement_history_service: MeasurementHistoryService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证旧详情重复提交时提示并切换为已复核只读详情。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_history_service: 已保存测试记录的历史服务。
+        monkeypatch: pytest 提供的对象替换工具。
+
+    Returns:
+        返回示例：
+            None  # 第二次提交没有覆盖第一次复核结果
+    """
+    warning_message = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warning_message)
+    page = HistoryPage(measurement_history_service)
+    try:
+        # 打开旧详情后由另一操作先完成复核。
+        page.show_record_detail("review-session")
+        measurement_history_service.complete_review("review-session")
+        page.review_editor.setPlainText("不应覆盖原结果")
+        page.save_review_button.click()
+
+        # 重复操作只提示并显示已复核状态。
+        assert warning_message.call_args.args[2] == "该记录已完成复核。"
+        assert page.detail_values["status"].text() == "已复核"
+        assert page.review_editor.isHidden()
+        reviewed_record = measurement_history_service.get_record("review-session")
+        assert reviewed_record["reviewed_lines"] is None
     finally:
         page.detail_dialog.close()
         page.close()

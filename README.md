@@ -77,7 +77,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 
 GUI 由 `MonitoringService`（`QThread`）将 `Machine` 的相机状态、测量进度、OCR 文字和周期关闭通知经 `SystemRuntime` 转为 Qt 信号，再由 `RealtimePage` 按机器编号及当前 Session 更新 `MachineCard`。`SESSION_START/SUCCESS` 清空上一轮 OCR 并展开皮带；图像和频率采集的 RUNNING、SUCCESS、FAILED 控制扫描及波形子动画；周期首次进入关闭处理时收缩皮带，监测结束时停止全部动画。OCR 完成后仍按 20、8、3、2 分类显示，关闭及入库不清空文字。页面只缓存当前周期编号、进度、皮带运行标志和现有 OCR 结果，用于刷新后恢复仍在运行的动画；频率数值和最近事件仍未正式接入。
 
-历史记录页进入时由 `MeasurementHistoryService` 经 `MeasurementRecordRepo` 从业务库 `measurement_records` 读取已保存的测量结果，并可按正常、待复核及机器筛选；列表显示 OCR 摘要，查看详情时按 Session ID 读取完整文字、频率、复核原因和证据目录，再从该目录读取本轮 JPG 证据图片，显示缩略图并支持点击查看大图。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
+历史记录页进入时由 `MeasurementHistoryService` 经 `MeasurementRecordRepo` 从业务库 `measurement_records` 读取已保存的测量结果，并可按正常、待复核、已复核及机器筛选；详情保留原始 OCR、频率、复核原因和本轮 JPG 证据图片。待复核记录可确认原文字或按行保存人工修正文字，Repo 只对尚未复核的记录写入 UTC 复核时间和可选的 `reviewed_lines` JSON，原 `ordered_lines`、`needs_review` 与 `review_reason` 保留；已复核详情同时显示原始与最终文字，列表摘要优先显示人工结果。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
 
 开发联调可从仓库根目录运行 `python scripts/simulate_measurement.py normal` 或 `python scripts/simulate_measurement.py review`。正常场景读取 `statistics/imgs` 的 JPG，待复核场景取 `statistics/test_images_without_results` 中按文件名排序的首张 BMP，统一解码为 Mono8 相机帧。脚本通过现有 Camera、TextRecognizer、Machine 的事件队列完成真实 OCR、50.0 Hz 频率结算和 CLOSE，再由 Machine 将证据 JPG 与测量结果写入正式配置的业务库；历史记录页按原有查询和图片展示流程查看新记录。模拟只替代相机取流、图片编码和现场输入，不启动真实 MVS 或 Modbus。
 

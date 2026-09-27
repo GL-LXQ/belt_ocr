@@ -1,4 +1,4 @@
-"""查询测量历史并创建测量结果表。"""
+"""查询和复核测量历史，并创建测量结果表。"""
 
 import sqlite3
 from contextlib import closing
@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 class MeasurementRecordRepo:
-    """管理测量结果表结构和历史记录读取。"""
+    """管理测量结果表结构、历史记录读取和人工复核写入。"""
 
     def __init__(self, database_path: Path) -> None:
         """保存测量结果所在的业务数据库路径。
@@ -22,14 +22,14 @@ class MeasurementRecordRepo:
 
     @staticmethod
     def create_table(connection: sqlite3.Connection) -> None:
-        """在现有连接中创建测量结果表。
+        """在现有连接中创建测量结果表并补齐复核字段。
 
         Args:
             connection: 业务数据库初始化连接。
 
         Returns:
             返回示例：
-                None  # 测量结果表已就绪
+                None  # 测量结果表及人工复核字段已就绪
         """
         # 创建测量结果表。
         connection.execute("""
@@ -43,17 +43,31 @@ class MeasurementRecordRepo:
                 measurement_frequencies TEXT NOT NULL DEFAULT '[]',
                 evidence_directory TEXT NOT NULL,
                 needs_review INTEGER NOT NULL DEFAULT 0,
-                review_reason TEXT
+                review_reason TEXT,
+                reviewed_at TEXT,
+                reviewed_lines TEXT
             );
         """)
 
+        # 为已有开发库补齐人工复核字段。
+        columns = connection.execute("PRAGMA table_info(measurement_records)")
+        existing_columns = {column[1] for column in columns}
+        if "reviewed_at" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE measurement_records ADD COLUMN reviewed_at TEXT"
+            )
+        if "reviewed_lines" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE measurement_records ADD COLUMN reviewed_lines TEXT"
+            )
+
     def list_records(
-        self, needs_review: bool | None = None, machine_id: str | None = None
+        self, review_status: str | None = None, machine_id: str | None = None
     ) -> list[dict]:
         """按复核状态和机器编号读取测量历史。
 
         Args:
-            needs_review: None 表示全部，布尔值表示对应复核状态。
+            review_status: None 表示全部，normal、pending、reviewed 表示查询状态。
             machine_id: None 表示全部机器，否则筛选指定机器。
 
         Returns:
@@ -65,15 +79,22 @@ class MeasurementRecordRepo:
                     "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
                     "ordered_lines": '["ABC"]',  # OCR 文字 JSON
                     "final_frequency_hz": 50.0,  # 最终频率
-                    "needs_review": 0,  # 是否待复核
+                    "needs_review": 0,  # 是否需要人工复核
+                    "reviewed_at": None,  # 人工复核时间
+                    "reviewed_lines": None,  # 人工修改文字 JSON
                 }]
         """
         # 按已选择的筛选条件生成参数化查询。
         conditions = []
         parameters = []
-        if needs_review is not None:
-            conditions.append("record.needs_review = ?")
-            parameters.append(int(needs_review))
+        if review_status == "normal":
+            conditions.append("record.needs_review = 0")
+        elif review_status == "pending":
+            conditions.append("record.needs_review = 1 AND record.reviewed_at IS NULL")
+        elif review_status == "reviewed":
+            conditions.append(
+                "record.needs_review = 1 AND record.reviewed_at IS NOT NULL"
+            )
         if machine_id is not None:
             conditions.append("record.machine_id = ?")
             parameters.append(machine_id)
@@ -86,7 +107,8 @@ class MeasurementRecordRepo:
                 "SELECT record.session_id, record.machine_id, "
                 "COALESCE(machine.machine_name, record.machine_id) AS machine_name, "
                 "record.finish_time, record.ordered_lines, "
-                "record.final_frequency_hz, record.needs_review "
+                "record.final_frequency_hz, record.needs_review, "
+                "record.reviewed_at, record.reviewed_lines "
                 "FROM measurement_records AS record "
                 "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id"
                 + where_clause
@@ -137,8 +159,10 @@ class MeasurementRecordRepo:
                     "ordered_lines": '["ABC"]',  # OCR 文字 JSON
                     "final_frequency_hz": 50.0,  # 最终频率
                     "evidence_directory": "runtime/evidence/1",  # 证据目录
-                    "needs_review": 0,  # 是否待复核
+                    "needs_review": 0,  # 是否需要人工复核
                     "review_reason": None,  # 复核原因
+                    "reviewed_at": None,  # 人工复核时间
+                    "reviewed_lines": None,  # 人工修改文字 JSON
                 }
                 None  # 周期编号没有对应记录
         """
@@ -150,10 +174,38 @@ class MeasurementRecordRepo:
                 "COALESCE(machine.machine_name, record.machine_id) AS machine_name, "
                 "record.start_time, record.finish_time, record.ordered_lines, "
                 "record.final_frequency_hz, record.evidence_directory, "
-                "record.needs_review, record.review_reason "
+                "record.needs_review, record.review_reason, "
+                "record.reviewed_at, record.reviewed_lines "
                 "FROM measurement_records AS record "
                 "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id "
                 "WHERE record.session_id = ?",
                 (session_id,),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def complete_review(
+        self, session_id: str, reviewed_at: str, reviewed_lines: str | None
+    ) -> bool:
+        """只对尚未复核的测量记录写入人工结论。
+
+        Args:
+            session_id: 待复核的测量周期编号。
+            reviewed_at: UTC ISO 格式的复核时间。
+            reviewed_lines: 人工文字 JSON；确认原结果时为 None。
+
+        Returns:
+            返回示例：
+                True  # 本次完成了人工复核
+                False  # 记录已复核或不属于待复核记录
+        """
+        # 在一次条件更新中写入复核时间和人工文字。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
+            with connection:
+                cursor = connection.execute(
+                    "UPDATE measurement_records "
+                    "SET reviewed_at = ?, reviewed_lines = ? "
+                    "WHERE session_id = ? AND needs_review = 1 "
+                    "AND reviewed_at IS NULL",
+                    (reviewed_at, reviewed_lines, session_id),
+                )
+                return cursor.rowcount == 1

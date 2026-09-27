@@ -1,17 +1,22 @@
-"""读取测量历史并转换页面使用的记录字段。"""
+"""读取测量历史并处理人工复核。"""
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 
 from src.repo.measurement_record_repo import MeasurementRecordRepo
 
 
 class MeasurementHistoryServiceError(Exception):
-    """表示测量历史读取或文字解析失败。"""
+    """表示测量历史读取、复核写入或文字解析失败。"""
+
+
+class MeasurementReviewAlreadyCompletedError(MeasurementHistoryServiceError):
+    """表示这条记录已经完成复核或不属于待复核记录。"""
 
 
 class MeasurementHistoryService:
-    """向历史记录页提供机器选项、筛选结果和单条详情。"""
+    """向历史记录页提供查询结果和人工复核操作。"""
 
     def __init__(self, measurement_record_repo: MeasurementRecordRepo) -> None:
         """保存测量结果表访问对象。
@@ -45,12 +50,12 @@ class MeasurementHistoryService:
             raise MeasurementHistoryServiceError(f"历史机器读取失败：{error}") from error
 
     def list_records(
-        self, needs_review: bool | None = None, machine_id: str | None = None
+        self, review_status: str | None = None, machine_id: str | None = None
     ) -> list[dict]:
         """读取筛选结果并转换文字与复核字段。
 
         Args:
-            needs_review: None 表示全部，布尔值表示对应复核状态。
+            review_status: None 表示全部，normal、pending、reviewed 表示查询状态。
             machine_id: None 表示全部机器，否则筛选指定机器。
 
         Returns:
@@ -62,13 +67,15 @@ class MeasurementHistoryService:
                     "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
                     "ordered_lines": ("ABC",),  # 完整 OCR 文字
                     "final_frequency_hz": 50.0,  # 最终频率
-                    "needs_review": False,  # 是否待复核
+                    "needs_review": False,  # 是否需要人工复核
+                    "reviewed_at": None,  # 人工复核时间
+                    "reviewed_lines": None,  # 人工修改后的文字
                 }]
         """
         # 查询测量记录并转换存储格式。
         try:
             records = self.measurement_record_repo.list_records(
-                needs_review, machine_id
+                review_status, machine_id
             )
             for record in records:
                 self.decode_record_fields(record)
@@ -95,6 +102,8 @@ class MeasurementHistoryService:
                     "evidence_directory": "runtime/evidence/1",  # 证据目录
                     "needs_review": False,  # 是否待复核
                     "review_reason": None,  # 复核原因
+                    "reviewed_at": None,  # 人工复核时间
+                    "reviewed_lines": None,  # 人工修改后的文字
                 }
                 None  # 周期编号没有对应记录
         """
@@ -107,6 +116,38 @@ class MeasurementHistoryService:
         except (sqlite3.Error, json.JSONDecodeError) as error:
             raise MeasurementHistoryServiceError(f"历史详情读取失败：{error}") from error
 
+    def complete_review(self, session_id: str, edited_text: str | None = None) -> None:
+        """确认原始文字或保存人工文字并完成一条记录的复核。
+
+        Args:
+            session_id: 待复核的测量周期编号。
+            edited_text: 人工编辑的多行文字；None 表示确认原始文字。
+
+        Returns:
+            返回示例：
+                None  # 已写入复核时间和可选人工结果
+        """
+        # 整理人工编辑内容，确认原结果时保持人工文字为空。
+        reviewed_lines = None
+        if edited_text is not None:
+            lines = tuple(
+                line.strip() for line in edited_text.splitlines() if line.strip()
+            )
+            if not lines:
+                raise MeasurementHistoryServiceError("人工复核结果至少需要一条有效文字。")
+            reviewed_lines = json.dumps(lines, ensure_ascii=False)
+
+        # 使用统一 UTC 时间提交复核并报告重复操作。
+        reviewed_at = datetime.now(timezone.utc).isoformat()
+        try:
+            updated = self.measurement_record_repo.complete_review(
+                session_id, reviewed_at, reviewed_lines
+            )
+        except sqlite3.Error as error:
+            raise MeasurementHistoryServiceError(f"人工复核保存失败：{error}") from error
+        if not updated:
+            raise MeasurementReviewAlreadyCompletedError("该记录已完成复核。")
+
     def decode_record_fields(self, record: dict) -> None:
         """将一条记录中的 JSON 文字和复核标志转成页面字段。
 
@@ -115,7 +156,9 @@ class MeasurementHistoryService:
 
         Returns:
             返回示例：
-                None  # 记录中的 ordered_lines 和 needs_review 已原地转换
+                None  # 记录中的文字列表和 needs_review 已原地转换
         """
         record["ordered_lines"] = tuple(json.loads(record["ordered_lines"]))
+        if record["reviewed_lines"] is not None:
+            record["reviewed_lines"] = tuple(json.loads(record["reviewed_lines"]))
         record["needs_review"] = bool(record["needs_review"])

@@ -1,4 +1,4 @@
-"""展示已保存的测量历史和只读详情。"""
+"""展示已保存的测量历史并处理人工复核。"""
 
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
 from src.service.measurement_history_service import (
     MeasurementHistoryService,
     MeasurementHistoryServiceError,
+    MeasurementReviewAlreadyCompletedError,
 )
 from ui.theme import create_icon
 
@@ -61,7 +63,7 @@ def format_history_frequency(frequency: float | None) -> str:
 
 
 class HistoryPage(QWidget):
-    """组织测量历史筛选、表格和只读详情。"""
+    """组织测量历史筛选、表格、详情和人工复核。"""
 
     def __init__(self, measurement_history_service: MeasurementHistoryService) -> None:
         """建立历史记录页面并连接筛选交互。
@@ -76,7 +78,7 @@ class HistoryPage(QWidget):
         super().__init__()
         self.setObjectName("history")
         self.measurement_history_service = measurement_history_service
-        self.selected_review_status: bool | None = None
+        self.selected_review_status: str | None = None
 
         # 创建页面标题和说明。
         layout = QVBoxLayout(self)
@@ -89,7 +91,7 @@ class HistoryPage(QWidget):
         heading = QVBoxLayout()
         title = QLabel("历史记录")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("查看已保存的正常和待复核测量结果")
+        subtitle = QLabel("查看已保存的测量结果并处理待复核记录")
         subtitle.setObjectName("pageSubtitle")
         heading.addWidget(title)
         heading.addWidget(subtitle)
@@ -100,10 +102,15 @@ class HistoryPage(QWidget):
         # 建立状态按钮和机器筛选框。
         filters = QHBoxLayout()
         filters.setSpacing(8)
-        self.status_buttons: dict[bool | None, QPushButton] = {}
+        self.status_buttons: dict[str | None, QPushButton] = {}
         status_group = QButtonGroup(self)
         status_group.setExclusive(True)
-        for review_status, caption in ((None, "全部"), (False, "正常"), (True, "待复核")):
+        for review_status, caption in (
+            (None, "全部"),
+            ("normal", "正常"),
+            ("pending", "待复核"),
+            ("reviewed", "已复核"),
+        ):
             button = QPushButton(caption)
             button.setCheckable(True)
             button.setProperty("historyFilter", True)
@@ -147,18 +154,18 @@ class HistoryPage(QWidget):
         content_layout.addWidget(self.table)
         layout.addWidget(content, 1)
 
-        # 创建共用的只读详情弹窗。
+        # 创建共用的详情弹窗。
         self.build_detail_dialog()
 
     def build_detail_dialog(self) -> None:
-        """创建历史记录的共用只读详情弹窗。
+        """创建历史记录的共用详情弹窗。
 
         Args:
             无外部参数。
 
         Returns:
             返回示例：
-                None  # 详情字段和关闭按钮已建立
+                None  # 详情字段、人工复核控件和关闭按钮已建立
         """
         # 创建弹窗和基本字段展示区。
         self.detail_dialog = QDialog(self)
@@ -167,7 +174,7 @@ class HistoryPage(QWidget):
         self.detail_dialog.setWindowFlag(
             Qt.WindowType.WindowContextHelpButtonHint, False
         )
-        self.detail_dialog.resize(640, 680)
+        self.detail_dialog.resize(640, 780)
         detail_layout = QVBoxLayout(self.detail_dialog)
         fields = QFormLayout()
         self.detail_values: dict[str, QLabel] = {}
@@ -184,15 +191,20 @@ class HistoryPage(QWidget):
             value_label = QLabel("--")
             value_label.setWordWrap(True)
             value_label.setTextInteractionFlags(selectable_text)
+            if field_name == "evidence_directory":
+                value_label.setSizePolicy(
+                    QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+                )
             fields.addRow(caption + "：", value_label)
             self.detail_values[field_name] = value_label
         detail_layout.addLayout(fields)
 
-        # 创建可滚动的完整 OCR 文字展示区。
-        detail_layout.addWidget(QLabel("OCR 完整结果："))
+        # 创建可滚动的原始 OCR 文字展示区。
+        detail_layout.addWidget(QLabel("原始 OCR 结果："))
         self.detail_ocr_text = QPlainTextEdit()
         self.detail_ocr_text.setReadOnly(True)
-        detail_layout.addWidget(self.detail_ocr_text, 1)
+        self.detail_ocr_text.setFixedHeight(100)
+        detail_layout.addWidget(self.detail_ocr_text)
 
         # 创建只供待复核记录显示的原因区域。
         self.review_reason_title = QLabel("复核原因：")
@@ -202,22 +214,54 @@ class HistoryPage(QWidget):
         detail_layout.addWidget(self.review_reason_title)
         detail_layout.addWidget(self.review_reason_value)
 
+        # 创建已复核记录的时间和最终文字展示区。
+        self.reviewed_at_title = QLabel("复核时间：")
+        self.reviewed_at_value = QLabel()
+        detail_layout.addWidget(self.reviewed_at_title)
+        detail_layout.addWidget(self.reviewed_at_value)
+        self.final_result_title = QLabel("人工最终结果：")
+        self.final_result_text = QPlainTextEdit()
+        self.final_result_text.setReadOnly(True)
+        self.final_result_text.setFixedHeight(100)
+        detail_layout.addWidget(self.final_result_title)
+        detail_layout.addWidget(self.final_result_text)
+
         # 创建可滚动的证据图片缩略图区域。
         detail_layout.addWidget(QLabel("证据图片："))
         self.evidence_scroll = QScrollArea()
         self.evidence_scroll.setWidgetResizable(True)
-        self.evidence_scroll.setFixedHeight(180)
+        self.evidence_scroll.setFixedHeight(150)
         self.evidence_content = QWidget()
         self.evidence_grid = QGridLayout(self.evidence_content)
         self.evidence_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.evidence_scroll.setWidget(self.evidence_content)
         detail_layout.addWidget(self.evidence_scroll)
 
+        # 创建待复核记录的文字编辑区和完成按钮。
+        self.review_editor_title = QLabel("人工复核结果（每条一行）：")
+        self.review_editor = QPlainTextEdit()
+        self.review_editor.setFixedHeight(100)
+        detail_layout.addWidget(self.review_editor_title)
+        detail_layout.addWidget(self.review_editor)
+        actions = QHBoxLayout()
+        self.confirm_review_button = QPushButton("确认无误")
+        self.confirm_review_button.clicked.connect(
+            lambda: self.complete_record_review(False)
+        )
+        self.save_review_button = QPushButton("保存并完成复核")
+        self.save_review_button.clicked.connect(
+            lambda: self.complete_record_review(True)
+        )
+        actions.addWidget(self.confirm_review_button)
+        actions.addWidget(self.save_review_button)
+        actions.addStretch()
+
         # 在弹窗底部放置关闭入口。
         close_button = QPushButton("关闭")
         close_button.setProperty("buttonRole", "secondary")
         close_button.clicked.connect(self.detail_dialog.close)
-        detail_layout.addWidget(close_button, alignment=Qt.AlignmentFlag.AlignRight)
+        actions.addWidget(close_button)
+        detail_layout.addLayout(actions)
 
     def refresh_history(self) -> None:
         """进入历史页时更新机器选项和当前筛选结果。
@@ -257,17 +301,17 @@ class HistoryPage(QWidget):
         # 读取当前状态和机器条件下的记录。
         self.reload_records()
 
-    def select_status(self, needs_review: bool | None) -> None:
-        """切换正常或待复核筛选并重新读取记录。
+    def select_status(self, review_status: str | None) -> None:
+        """切换历史状态筛选并重新读取记录。
 
         Args:
-            needs_review: None 表示全部，布尔值表示对应复核状态。
+            review_status: None 表示全部，字符串表示对应查询状态。
 
         Returns:
             返回示例：
                 None  # 列表已按所选状态刷新
         """
-        self.selected_review_status = needs_review
+        self.selected_review_status = review_status
         self.reload_records()
 
     def reload_records(self) -> None:
@@ -293,10 +337,12 @@ class HistoryPage(QWidget):
         # 将每条记录填入六列表格。
         self.table.setRowCount(len(records))
         for row_index, record in enumerate(records):
-            ordered_lines = record["ordered_lines"]
-            summary_lines = (line.replace("\n", " ") for line in ordered_lines[:2])
+            final_lines = record["reviewed_lines"]
+            if final_lines is None:
+                final_lines = record["ordered_lines"]
+            summary_lines = (line.replace("\n", " ") for line in final_lines[:2])
             summary = "；".join(summary_lines) or "--"
-            if len(ordered_lines) > 2 or len(summary) > 60:
+            if len(final_lines) > 2 or len(summary) > 60:
                 summary = summary[:59] + "…"
             values = (
                 format_history_time(record["finish_time"]),
@@ -308,15 +354,20 @@ class HistoryPage(QWidget):
                 item = QTableWidgetItem(value)
                 self.table.setItem(row_index, column, item)
 
-            # 用不同底色标出正常和待复核状态。
-            review_status = record["needs_review"]
-            status_item = QTableWidgetItem("待复核" if review_status else "正常")
+            # 用不同底色标出正常、待复核和已复核状态。
+            if not record["needs_review"]:
+                status_text, foreground, background = "正常", "#138B3F", "#DCF8E9"
+            elif record["reviewed_at"] is None:
+                status_text, foreground, background = "待复核", "#B96600", "#FFF0D8"
+            else:
+                status_text, foreground, background = "已复核", "#2462A8", "#E2EEFF"
+            status_item = QTableWidgetItem(status_text)
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            status_item.setForeground(QColor("#B96600" if review_status else "#138B3F"))
-            status_item.setBackground(QColor("#FFF0D8" if review_status else "#DCF8E9"))
+            status_item.setForeground(QColor(foreground))
+            status_item.setBackground(QColor(background))
             self.table.setItem(row_index, 4, status_item)
 
-            # 为当前记录建立只读详情入口。
+            # 为当前记录建立详情入口。
             button = QPushButton("查看")
             button.setProperty("buttonRole", "text")
             session_id = record["session_id"]
@@ -326,7 +377,7 @@ class HistoryPage(QWidget):
             self.table.setCellWidget(row_index, 5, button)
 
     def show_record_detail(self, session_id: str) -> None:
-        """读取一条测量记录并打开只读详情弹窗。
+        """读取一条测量记录并打开对应状态的详情弹窗。
 
         Args:
             session_id: 待查看的测量周期编号。
@@ -346,29 +397,80 @@ class HistoryPage(QWidget):
             return
 
         # 填入机器、时间、状态、频率和证据目录。
-        review_status = record["needs_review"]
+        needs_review = record["needs_review"]
+        reviewed_at = record["reviewed_at"]
+        pending_review = needs_review and reviewed_at is None
+        completed_review = needs_review and reviewed_at is not None
         self.detail_values["machine"].setText(record["machine_name"])
         self.detail_values["session_id"].setText(record["session_id"])
         start_time = format_history_time(record["start_time"])
         finish_time = format_history_time(record["finish_time"])
         self.detail_values["start_time"].setText(start_time)
         self.detail_values["finish_time"].setText(finish_time)
-        self.detail_values["status"].setText("待复核" if review_status else "正常")
+        status_text = "已复核" if completed_review else "待复核" if pending_review else "正常"
+        self.detail_values["status"].setText(status_text)
         self.detail_values["frequency"].setText(
             format_history_frequency(record["final_frequency_hz"])
         )
         self.detail_values["evidence_directory"].setText(record["evidence_directory"])
 
-        # 显示完整 OCR 文字和待复核原因。
+        # 显示原始 OCR 文字和需要复核的原因。
         self.detail_ocr_text.setPlainText("\n".join(record["ordered_lines"]) or "--")
-        self.review_reason_title.setVisible(review_status)
-        self.review_reason_value.setVisible(review_status)
-        reason_text = (record["review_reason"] or "--") if review_status else ""
+        self.review_reason_title.setVisible(needs_review)
+        self.review_reason_value.setVisible(needs_review)
+        reason_text = (record["review_reason"] or "--") if needs_review else ""
         self.review_reason_value.setText(reason_text)
+
+        # 为已复核记录显示复核时间和人工最终结果。
+        final_lines = record["reviewed_lines"]
+        if final_lines is None:
+            final_lines = record["ordered_lines"]
+        self.reviewed_at_title.setVisible(completed_review)
+        self.reviewed_at_value.setVisible(completed_review)
+        self.reviewed_at_value.setText(
+            format_history_time(reviewed_at) if completed_review else ""
+        )
+        self.final_result_title.setVisible(completed_review)
+        self.final_result_text.setVisible(completed_review)
+        self.final_result_text.setPlainText("\n".join(final_lines) or "--")
+
+        # 为待复核记录预填原始文字并显示操作入口。
+        self.review_editor_title.setVisible(pending_review)
+        self.review_editor.setVisible(pending_review)
+        self.review_editor.setPlainText("\n".join(record["ordered_lines"]))
+        self.confirm_review_button.setVisible(pending_review)
+        self.save_review_button.setVisible(pending_review)
 
         # 读取本轮证据目录并显示可用图片。
         self.populate_evidence_images(record["evidence_directory"])
         self.detail_dialog.open()
+
+    def complete_record_review(self, use_edited_text: bool) -> None:
+        """提交当前详情中的人工复核并刷新历史列表。
+
+        Args:
+            use_edited_text: True 保存编辑文字，False 确认原始文字。
+
+        Returns:
+            返回示例：
+                None  # 复核已保存并刷新列表，失败时显示提示
+        """
+        # 将当前详情的周期编号和可选编辑文字交给服务。
+        session_id = self.detail_values["session_id"].text()
+        edited_text = self.review_editor.toPlainText() if use_edited_text else None
+        try:
+            self.measurement_history_service.complete_review(session_id, edited_text)
+        except MeasurementReviewAlreadyCompletedError as error:
+            QMessageBox.warning(self, "人工复核未完成", str(error))
+            self.show_record_detail(session_id)
+            return
+        except MeasurementHistoryServiceError as error:
+            QMessageBox.warning(self, "人工复核未完成", str(error))
+            return
+
+        # 关闭详情并刷新当前状态及机器筛选下的列表。
+        self.detail_dialog.close()
+        self.reload_records()
 
     def populate_evidence_images(self, evidence_directory: str) -> None:
         """读取本轮 JPG 证据并更新详情缩略图。
