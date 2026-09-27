@@ -35,8 +35,8 @@ machine:
 
 # Modbus RTU 串口参数与机器到 DI 通道的绑定关系。
 io:
-  modbus_serial_port: null  # Modbus RTU 串口号，未配置时启动失败
-  modbus_baudrate: 9600  # 波特率
+  modbus_serial_port: COM7  # Modbus RTU 串口号
+  modbus_baudrate: 115200  # 波特率
   modbus_parity: N  # 校验方式
   modbus_stopbits: 1  # 停止位数量
   modbus_bytesize: 8  # 数据位数量
@@ -45,4 +45,4 @@ io:
   modbus_input_address: 0  # DI 起始地址
   modbus_poll_interval_ms: 50  # DI 轮询间隔，毫秒
   modbus_reconnect_interval_ms: 1000  # 通信失败后的重连等待间隔，毫秒
-  io_machine_channels: {}  # 机器编号到 DI 通道索引的映射，键为机器编号字符串
+  io_machine_channels: {"1": 0}  # 机器编号到 DI 通道索引的映射，键为机器编号字符串
