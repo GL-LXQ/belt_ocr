@@ -1,30 +1,22 @@
 """实时监测页面、机器卡片和步骤进度组件。"""
 
-from html import escape
-
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QCheckBox,
     QFrame,
     QGridLayout,
-    QHeaderView,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from src.controller.controller import AppController
 from ui.belt_animation import BeltAnimationWidget
-from ui.demo_data import LOG_ROWS
 from ui.theme import create_icon
 
 
@@ -144,13 +136,13 @@ class StepProgress(QFrame):
 
 
 class MachineCard(QFrame):
-    """展示一台机器的动画、状态、频率、进度和事件。"""
+    """展示一台机器的动画、状态、频率和进度。"""
 
     def __init__(self, data: dict):
         """构建机器卡片并填入展示数据。
 
         Args:
-            data: 卡片展示数据，包含标题、状态、频率、进度和事件。
+            data: 卡片展示数据，包含标题、状态、频率和进度。
 
         Returns:
             返回示例：
@@ -249,30 +241,13 @@ class MachineCard(QFrame):
         progress_layout.addWidget(self.steps)
         layout.addWidget(progress_panel)
 
-        # 创建最近事件标题、禁用入口和两条摘要行。
-        events_heading = QHBoxLayout()
-        events_heading.addWidget(QLabel("最近事件"))
-        events_heading.addStretch()
-        self.more_button = QPushButton("更多 ›")
-        self.more_button.setObjectName("moreEvents")
-        self.more_button.setEnabled(False)
-        self.more_button.setToolTip("暂未接入")
-        events_heading.addWidget(self.more_button)
-        layout.addLayout(events_heading)
-        self.event_labels = []
-        for index in range(2):
-            label = QLabel()
-            label.setObjectName("eventLine")
-            label.setTextFormat(Qt.TextFormat.RichText)
-            layout.addWidget(label)
-            self.event_labels.append(label)
         self.update_data(data)
 
     def update_data(self, data: dict):
         """将机器展示数据应用到已有控件。
 
         Args:
-            data: 包含标题、状态、频率、进度和事件的卡片展示数据。
+            data: 包含标题、状态、频率和进度的卡片展示数据。
 
         Returns:
             返回示例：
@@ -302,17 +277,6 @@ class MachineCard(QFrame):
             "background: #FFA43A; border-radius: 14px;" if data["tone"] == "waiting" else ""
         )
 
-        # 更新最近事件。
-        for label in self.event_labels:
-            label.clear()
-        for index, (label, (timestamp, message)) in enumerate(zip(self.event_labels, data["events"])):
-            time_color = "#2F7CF6" if index % 2 == 0 else "#18AE59"
-            event_color = "#FF9818" if data["tone"] == "waiting" and index % 2 == 0 else "#2F7CF6"
-            label.setText(
-                f'<span style="color:{time_color}">●</span> '
-                f'<span style="color:#73849B">{escape(timestamp)}</span>　'
-                f'<span style="color:{event_color}">●</span>　{escape(message)}'
-            )
         for widget in (self, *self.findChildren(QWidget)):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
@@ -376,7 +340,7 @@ class MachineCard(QFrame):
 
 
 class RealtimePage(QWidget):
-    """组织机器卡片、系统日志和监测状态展示。"""
+    """组织机器卡片和监测状态展示。"""
 
     def __init__(self, controller: AppController):
         """初始化布局、机器卡片和本地交互。
@@ -450,49 +414,10 @@ class RealtimePage(QWidget):
         self.empty_hint = None
         layout.addLayout(cards_layout, 1)
 
-        # 创建日志工具栏和只读表格。
-        log_panel = QFrame()
-        log_panel.setObjectName("logPanel")
-        log_layout = QVBoxLayout(log_panel)
-        log_layout.setContentsMargins(12, 8, 12, 10)
-        log_heading = QHBoxLayout()
-        log_icon = QLabel()
-        log_icon.setPixmap(create_icon("logs", "text").pixmap(QSize(19, 19)))
-        log_heading.addWidget(log_icon)
-        log_title = QLabel("系统日志")
-        log_title.setObjectName("logTitle")
-        log_heading.addWidget(log_title)
-        log_heading.addStretch()
-        self.auto_scroll = QCheckBox("自动滚动")
-        self.auto_scroll.setChecked(True)
-        self.clear_button = QPushButton("清空日志")
-        self.clear_button.setObjectName("clearLogs")
-        log_heading.addWidget(self.auto_scroll)
-        log_heading.addWidget(self.clear_button)
-        log_layout.addLayout(log_heading)
-        self.log_table = QTableWidget(0, 4)
-        self.log_table.setHorizontalHeaderLabels(("时间", "级别", "来源", "内容"))
-        self.log_table.verticalHeader().hide()
-        self.log_table.verticalHeader().setDefaultSectionSize(24)
-        self.log_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.log_table.horizontalHeader().setStretchLastSection(True)
-        self.log_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.log_table.setColumnWidth(0, 110)
-        self.log_table.setColumnWidth(1, 90)
-        self.log_table.setColumnWidth(2, 125)
-        self.log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.log_table.horizontalHeader().setFixedHeight(24)
-        self.log_table.setFixedHeight(126)
-        log_layout.addWidget(self.log_table)
-        layout.addWidget(log_panel)
-
-        # 绑定页面按钮和滚动交互。
+        # 绑定页面操作按钮。
         self.start_button.clicked.connect(self.start_monitoring)
         self.stop_button.clicked.connect(self.stop_monitoring)
         self.refresh_button.clicked.connect(self.reload_machines)
-        self.clear_button.clicked.connect(lambda: self.log_table.setRowCount(0))
-        self.auto_scroll.toggled.connect(lambda checked: self.log_table.scrollToBottom() if checked else None)
 
         # 连接 Controller 的实时状态通知。
         self.controller.camera_state_changed_signal.connect(
@@ -505,8 +430,7 @@ class RealtimePage(QWidget):
         self.controller.ocr_result_changed_signal.connect(self.update_ocr_result)
         self.controller.monitoring_finished_signal.connect(self.finish_monitoring)
 
-        # 填入演示日志并读取机器。
-        self.fill_demo_logs()
+        # 读取机器并建立卡片。
         self.reload_machines()
 
     def reload_machines(self):
@@ -567,7 +491,6 @@ class RealtimePage(QWidget):
                 "status": "未启动",
                 "state": "未启动监测",
                 "frequency": "--",
-                "events": (),
             })
             self.cards_layout.addWidget(card, index // CARDS_PER_ROW, index % CARDS_PER_ROW)
             self.machine_cards.append(card)
@@ -668,7 +591,6 @@ class RealtimePage(QWidget):
             "status": status,
             "state": "等待启停信号接入" if status == "相机已连接" else status,
             "frequency": "--",
-            "events": (("连接", reason),) if reason else (),
         })
         card.setToolTip(reason)
 
@@ -755,7 +677,6 @@ class RealtimePage(QWidget):
             "status": "测量失败" if status == "failed" else "测量中",
             "state": f"{stage_title}{status_title}",
             "frequency": card.frequency_label.text(),
-            "events": (),
         })
 
     def update_cycle_closed(self, machine_id: str, session_id: str) -> None:
@@ -843,42 +764,4 @@ class RealtimePage(QWidget):
         self.stop_button.setEnabled(False)
         if failure_message and not self.closing_requested:
             QMessageBox.warning(self, "监测已停止", failure_message)
-
-    def fill_demo_logs(self):
-        """清空日志表格并按时间顺序填入固定演示日志。
-
-        Args:
-            无。
-
-        Returns:
-            返回示例：
-                None  # 日志表格显示演示日志
-        """
-        # 清空旧日志，并按时间顺序填入固定日志。
-        self.log_table.setRowCount(0)
-        for values in LOG_ROWS:
-            self.append_log(values)
-
-    def append_log(self, values: tuple):
-        """追加一条展示日志并按选项滚动。
-
-        Args:
-            values: 按时间、级别、来源、内容排列的四项文字。
-
-        Returns:
-            返回示例：
-                None  # 追加日志行并更新滚动位置
-        """
-        # 在表格末尾添加日志字段并设置级别颜色。
-        row = self.log_table.rowCount()
-        self.log_table.insertRow(row)
-        for column, value in enumerate(values):
-            item = QTableWidgetItem(value)
-            if column == 1:
-                item.setForeground(QColor("#16A653"))
-            self.log_table.setItem(row, column, item)
-
-        # 根据自动滚动选项显示最新行。
-        if self.auto_scroll.isChecked():
-            self.log_table.scrollToBottom()
 

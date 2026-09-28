@@ -10,7 +10,7 @@ import pytest
 def test_camera_fault_remains_visible_after_measurement_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """确认测量进度更新节点时保留相机故障文字和原因。
+    """确认测量进度更新节点时保留相机故障状态和提示。
 
     Args:
         monkeypatch: pytest 提供的属性替换工具。
@@ -53,7 +53,6 @@ def test_camera_fault_remains_visible_after_measurement_progress(
     assert card_data["tone"] == "waiting"
     assert card_data["status"] == "相机故障"
     assert card_data["state"] == "相机故障"
-    assert card_data["events"] == (("连接", "GetImageBuffer 失败"),)
     card.setToolTip.assert_called_once_with("GetImageBuffer 失败")
 
     # 更新测量失败进度并核对故障卡片未被覆盖。

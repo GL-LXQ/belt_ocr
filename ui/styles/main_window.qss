@@ -59,7 +59,7 @@ QToolTip { background: @white; color: @text; border: 1px solid @border; padding:
 
 /* 设置实时监测页、卡片和状态面板。 */
 QWidget#monitorContent, QWidget#realtime QScrollArea { background: @background; }
-QFrame#machineCard, QFrame#logPanel {
+QFrame#machineCard {
     background: @white; border: 1px solid @border; border-radius: 8px;
 }
 QFrame#machineCard { border-top: 3px solid @blue; }
@@ -76,21 +76,19 @@ QFrame[tone="running"] QLabel#metricValue { color: #18AE59; }
 QFrame[tone="waiting"] QLabel#metricValue { color: #FF9818; }
 QLabel#ocrResult { color: #526681; font-size: 13px; }
 QWidget#beltAnimation { background: #E9EEF4; border: 1px solid #DCE5EF; border-radius: 6px; }
-QLabel#eventLine { color: #526681; font-size: 12px; }
 
 /* 设置操作按钮和禁用状态。 */
 QPushButton#startAll, QPushButton#stopAll { border: none; border-radius: 6px; color: white; font-weight: bold; }
+QPushButton#startAll { background: #12783B; }
+QPushButton#startAll:hover:enabled { background: #0D632F; }
 QPushButton#startAll:disabled { background: #79C79A; color: #F5FFF8; }
 QPushButton#stopAll:disabled { background: #ED9296; color: #FFF7F7; }
-QPushButton#refreshDemo, QPushButton#clearLogs {
+QPushButton#refreshDemo {
     background: white; border: 1px solid #DCE5EF; border-radius: 5px; padding: 5px 16px; color: #445671;
 }
-QPushButton#refreshDemo:hover, QPushButton#clearLogs:hover { background: #EFF5FF; }
-QPushButton#moreEvents { border: none; background: transparent; padding: 0; font-size: 12px; }
-QPushButton#moreEvents:disabled { color: #9AB4DC; }
+QPushButton#refreshDemo:hover { background: #EFF5FF; }
 
-/* 设置日志表格、表头和滚动条。 */
-QLabel#logTitle { font-size: 15px; font-weight: bold; }
+/* 设置表格、表头和滚动条。 */
 QTableWidget { background: white; border: 1px solid #E5EBF3; gridline-color: #EDF1F6; color: #526681; font-size: 12px; }
 QHeaderView::section { background: #F3F7FA; color: #526681; border: none; padding: 4px 10px; text-align: left; }
 QTableWidget::item:selected { background: #E8F1FF; color: #234A7B; }
