@@ -17,9 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.service.machine_service import MachineService
-from src.service.measurement_history_service import MeasurementHistoryService
-from src.service.abnormal_event_service import AbnormalEventService
+from src.controller.controller import AppController
 from ui.theme import COLORS, create_icon
 from ui.pages.realtime_page import RealtimePage
 from ui.pages.machines_page import MachinesPage
@@ -194,18 +192,11 @@ class TitleBar(QWidget):
 class MainWindow(QMainWindow):
     """提供七个页面的统一桌面容器。"""
 
-    def __init__(
-        self,
-        machine_service: MachineService,
-        measurement_history_service: MeasurementHistoryService,
-        abnormal_event_service: AbnormalEventService,
-    ):
+    def __init__(self, controller: AppController):
         """依次初始化窗口、页面、导航、时钟和样式。
 
         Args:
-            machine_service: 机器业务服务。
-            measurement_history_service: 测量历史服务。
-            abnormal_event_service: 异常事件查询服务。
+            controller: 界面业务控制器。
 
         Returns:
             返回示例：
@@ -213,9 +204,7 @@ class MainWindow(QMainWindow):
         """
         # 初始化当前页面和导航按钮集合。
         super().__init__()
-        self.machine_service = machine_service
-        self.measurement_history_service = measurement_history_service
-        self.abnormal_event_service = abnormal_event_service
+        self.controller = controller
         self.nav_buttons = {}
         self.current_page_key = "realtime"
 
@@ -239,14 +228,13 @@ class MainWindow(QMainWindow):
             None  # 后台运行时延迟关闭，否则接受关闭事件
         """
         # 后台运行期间保留窗口，等待线程结束后再次关闭。
-        page = self.page_stack.widget(0)
-        service = page.monitoring_service
-        if service is not None and service.isRunning():
+        if self.controller.is_monitoring_running().data:
             event.ignore()
+            page = self.page_stack.widget(0)
             if not page.closing_requested:
                 page.closing_requested = True
-                service.finished.connect(self.close)
-                page.stop_monitoring()
+                self.controller.monitoring_finished_signal.connect(self.close)
+                self.controller.stop_monitoring()
             return
         super().closeEvent(event)
 
@@ -428,17 +416,15 @@ class MainWindow(QMainWindow):
         stack.setObjectName("pageStack")
         for page_key in PAGES:
             if page_key == "realtime":
-                stack.addWidget(RealtimePage(self.machine_service))
+                stack.addWidget(RealtimePage(self.controller))
             elif page_key == "history":
-                self.history_page = HistoryPage(self.measurement_history_service)
+                self.history_page = HistoryPage(self.controller)
                 stack.addWidget(self.history_page)
             elif page_key == "abnormal_events":
-                self.abnormal_events_page = AbnormalEventsPage(
-                    self.abnormal_event_service
-                )
+                self.abnormal_events_page = AbnormalEventsPage(self.controller)
                 stack.addWidget(self.abnormal_events_page)
             elif page_key == "machines":
-                stack.addWidget(MachinesPage(self.machine_service))
+                stack.addWidget(MachinesPage(self.controller))
             else:
                 stack.addWidget(self.create_placeholder_page(page_key))
         return stack

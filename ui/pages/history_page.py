@@ -27,11 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.service.measurement_history_service import (
-    MeasurementHistoryService,
-    MeasurementHistoryServiceError,
-    MeasurementReviewAlreadyCompletedError,
-)
+from src.controller.controller import AppController
 from ui.theme import create_icon
 
 
@@ -65,11 +61,11 @@ def format_history_frequency(frequency: float | None) -> str:
 class HistoryPage(QWidget):
     """组织测量历史筛选、表格、详情和人工复核。"""
 
-    def __init__(self, measurement_history_service: MeasurementHistoryService) -> None:
+    def __init__(self, controller: AppController) -> None:
         """建立历史记录页面并连接筛选交互。
 
         Args:
-            measurement_history_service: 测量历史读取服务。
+            controller: 界面业务控制器。
 
         Returns:
             返回示例：
@@ -77,7 +73,7 @@ class HistoryPage(QWidget):
         """
         super().__init__()
         self.setObjectName("history")
-        self.measurement_history_service = measurement_history_service
+        self.controller = controller
         self.selected_review_status: str | None = None
 
         # 创建页面标题和说明。
@@ -274,12 +270,12 @@ class HistoryPage(QWidget):
                 None  # 机器选项与历史列表已刷新，读取失败时显示提示
         """
         # 读取有历史记录的机器。
-        try:
-            machines = self.measurement_history_service.list_record_machines()
-        except MeasurementHistoryServiceError as error:
+        result = self.controller.list_record_machines()
+        if not result.success:
             self.table.setRowCount(0)
-            QMessageBox.warning(self, "历史记录读取失败", str(error))
+            QMessageBox.warning(self, "历史记录读取失败", result.message)
             return
+        machines = result.data
 
         # 更新机器选项并保留仍然存在的筛选值。
         selected_machine_id = self.machine_filter.currentData()
@@ -325,14 +321,14 @@ class HistoryPage(QWidget):
                 None  # 表格显示符合筛选条件的测量记录
         """
         # 按当前筛选条件读取测量结果。
-        try:
-            records = self.measurement_history_service.list_records(
-                self.selected_review_status, self.machine_filter.currentData()
-            )
-        except MeasurementHistoryServiceError as error:
+        result = self.controller.list_measurement_records(
+            self.selected_review_status, self.machine_filter.currentData()
+        )
+        if not result.success:
             self.table.setRowCount(0)
-            QMessageBox.warning(self, "历史记录读取失败", str(error))
+            QMessageBox.warning(self, "历史记录读取失败", result.message)
             return
+        records = result.data
 
         # 将每条记录填入六列表格。
         self.table.setRowCount(len(records))
@@ -387,11 +383,11 @@ class HistoryPage(QWidget):
                 None  # 对应详情已显示，读取失败时显示提示
         """
         # 按周期编号读取完整记录。
-        try:
-            record = self.measurement_history_service.get_record(session_id)
-        except MeasurementHistoryServiceError as error:
-            QMessageBox.warning(self, "历史详情读取失败", str(error))
+        result = self.controller.get_measurement_record(session_id)
+        if not result.success:
+            QMessageBox.warning(self, "历史详情读取失败", result.message)
             return
+        record = result.data
         if record is None:
             QMessageBox.warning(self, "历史详情读取失败", "该测量记录已不存在。")
             return
@@ -455,17 +451,12 @@ class HistoryPage(QWidget):
             返回示例：
                 None  # 复核已保存并刷新列表，失败时显示提示
         """
-        # 将当前详情的周期编号和可选编辑文字交给服务。
+        # 将当前详情的周期编号和可选编辑文字交给 Controller。
         session_id = self.detail_values["session_id"].text()
         edited_text = self.review_editor.toPlainText() if use_edited_text else None
-        try:
-            self.measurement_history_service.complete_review(session_id, edited_text)
-        except MeasurementReviewAlreadyCompletedError as error:
-            QMessageBox.warning(self, "人工复核未完成", str(error))
-            self.show_record_detail(session_id)
-            return
-        except MeasurementHistoryServiceError as error:
-            QMessageBox.warning(self, "人工复核未完成", str(error))
+        result = self.controller.complete_measurement_review(session_id, edited_text)
+        if not result.success:
+            QMessageBox.warning(self, "人工复核未完成", result.message)
             return
 
         # 关闭详情并刷新当前状态及机器筛选下的列表。

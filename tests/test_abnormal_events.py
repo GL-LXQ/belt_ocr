@@ -13,6 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QLabel
 
 from repo.abnormal_event_repo import AbnormalEventRepo
+from src.controller.controller import AppController
 from src.service.abnormal_event_service import AbnormalEventService
 import ui.__main__ as desktop_entry
 from ui.main_window import PAGES
@@ -112,9 +113,11 @@ def test_desktop_startup_initializes_empty_recovery_database(
     ).list_events() == []
 
     # 打开新库对应的异常页面，确认空列表可以正常显示。
-    page = AbnormalEventsPage(
-        AbnormalEventService(AbnormalEventRepo(recovery_database_path))
+    abnormal_event_service = AbnormalEventService(
+        AbnormalEventRepo(recovery_database_path)
     )
+    controller = AppController(Mock(), Mock(), abnormal_event_service, Path("config"))
+    page = AbnormalEventsPage(controller)
     try:
         page.refresh_events()
         assert page.table.rowCount() == 0
@@ -209,7 +212,8 @@ def test_page_filters_and_shows_full_payload(
         返回示例：
             None  # 页面展示目标异常与完整 payload
     """
-    page = AbnormalEventsPage(abnormal_event_service)
+    controller = AppController(Mock(), Mock(), abnormal_event_service, Path("config"))
+    page = AbnormalEventsPage(controller)
     try:
         # 首次刷新按发生时间倒序展示全部异常。
         subtitle = "查看测量过程中的异常事件和原始信息"

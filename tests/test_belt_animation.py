@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,6 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from src.controller.controller import AppController
 from ui.belt_animation import BeltAnimationWidget
 from ui.pages.realtime_page import MachineCard
 
@@ -156,7 +158,7 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
         {"id": 1, "machine_name": "机器 1"},
         {"id": 2, "machine_name": "机器 2"},
     ]
-    page = RealtimePage(service)
+    page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
     ordered_lines = ("14", "2926 215C", "<b>003</b>", "2926 216C", "2926 217C", "长文字")
     normalized_lines = ("14", "2926215C", "003", "2926216C", "2926217C", "A" * 20)
     try:
@@ -215,7 +217,7 @@ def test_page_animates_only_current_machine_and_session(
         {"id": 1, "machine_name": "机器 1"},
         {"id": 2, "machine_name": "机器 2"},
     ]
-    page = RealtimePage(service)
+    page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
     try:
         page.update_measurement_progress("1", "first", "session_start", "success")
         first_animation = page.cards_by_machine_id["1"].belt_animation
@@ -305,7 +307,7 @@ def test_failed_subprocess_stops_its_animation_without_closing_belt(
     # 创建单台机器并启动对应子动画。
     service = Mock()
     service.list_enabled_machines.return_value = [{"id": 1, "machine_name": "机器 1"}]
-    page = RealtimePage(service)
+    page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
     try:
         page.update_measurement_progress("1", "session", "session_start", "success")
         page.update_measurement_progress("1", "session", stage, "running")
@@ -341,7 +343,7 @@ def test_page_refresh_and_monitoring_stop_restore_safe_animation(
         {"id": 1, "machine_name": "机器 1"},
         {"id": 2, "machine_name": "机器 2"},
     ]
-    page = RealtimePage(service)
+    page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
     try:
         for machine_id in ("1", "2"):
             page.update_measurement_progress(
@@ -381,10 +383,7 @@ def test_page_refresh_and_monitoring_stop_restore_safe_animation(
         assert not first_animation.frequency_listening
 
         # 服务结束后停止动画，刷新也不再恢复运行状态。
-        page.monitoring_service = SimpleNamespace(
-            failure_message="", deleteLater=Mock()
-        )
-        page.finish_monitoring()
+        page.finish_monitoring("")
         assert first_animation._machine_state.name == "STOPPING"
         assert not first_animation.capturing
         assert not first_animation.frequency_listening
@@ -407,7 +406,6 @@ def test_monitoring_service_delivers_text_from_background_thread(qt_application,
         返回示例：
             None  # 后台信号按顺序进入页面并显示最终文字
     """
-    from pathlib import Path
     from unittest.mock import AsyncMock
     from ui.pages.realtime_page import RealtimePage
     from src.service.monitoring_service import MonitoringService
@@ -415,7 +413,8 @@ def test_monitoring_service_delivers_text_from_background_thread(qt_application,
     # 创建页面和不访问设备的运行时替身。
     machine_service = Mock()
     machine_service.list_enabled_machines.return_value = [{"id": 1, "machine_name": "机器 1"}]
-    page = RealtimePage(machine_service)
+    controller = AppController(machine_service, Mock(), Mock(), Path("config"))
+    page = RealtimePage(controller)
     runtime = SimpleNamespace(failure=None, stop=AsyncMock())
 
     async def start_runtime(
@@ -446,15 +445,16 @@ def test_monitoring_service_delivers_text_from_background_thread(qt_application,
     monkeypatch.setattr("src.service.monitoring_service.SystemRuntime", Mock(return_value=runtime))
     service = MonitoringService(Path("config"))
     service.stop_requested.set()
-    service.measurement_progress_changed_signal.connect(page.update_measurement_progress)
-    service.cycle_closed_signal.connect(page.update_cycle_closed)
-    service.ocr_result_changed_signal.connect(page.update_ocr_result)
+    monkeypatch.setattr(
+        "src.controller.controller.MonitoringService", Mock(return_value=service)
+    )
     try:
         # 等待线程结束，再由主线程处理排队信号。
-        service.start()
+        assert controller.start_monitoring().success
         assert service.wait(5000)
         qt_application.processEvents()
         assert service.failure_message == ""
+        assert controller.monitoring_service is None
         assert page.ocr_results_by_machine_id["1"] == ("session", ("003",), ("003",))
         assert page.cards_by_machine_id["1"].ocr_result_label.text() == "20  --\n8  --\n3  003\n2  --"
         assert not page.measurement_states_by_machine_id["1"]["machine_running"]

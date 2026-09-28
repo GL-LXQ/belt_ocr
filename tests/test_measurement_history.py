@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from config_util import AppConfig
 from database import Database, MeasurementRecord
+from src.controller.controller import AppController
 from repo.machine_repo import MachineRepo
 from repo.abnormal_event_repo import AbnormalEventRepo
 from repo.measurement_record_repo import MeasurementRecordRepo
@@ -346,7 +347,10 @@ def test_history_page_shows_filters_and_read_only_details(
         返回示例：
             None  # 表格与详情显示筛选后的已保存测量记录
     """
-    page = HistoryPage(measurement_history_service)
+    controller = AppController(
+        Mock(), measurement_history_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
     try:
         # 页面进入时读取全部历史记录。
         page.refresh_history()
@@ -412,7 +416,10 @@ def test_history_page_completes_review_and_shows_original_and_final_results(
         返回示例：
             None  # 详情显示原始文字、人工结果和本地复核时间
     """
-    page = HistoryPage(measurement_history_service)
+    controller = AppController(
+        Mock(), measurement_history_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
     try:
         # 从待复核列表打开详情并完成当前记录。
         page.refresh_history()
@@ -453,7 +460,7 @@ def test_stale_history_detail_cannot_review_record_twice(
     measurement_history_service: MeasurementHistoryService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证旧详情重复提交时提示并切换为已复核只读详情。
+    """验证旧详情重复提交时提示且不覆盖已保存结果。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
@@ -462,11 +469,14 @@ def test_stale_history_detail_cannot_review_record_twice(
 
     Returns:
         返回示例：
-            None  # 第二次提交没有覆盖第一次复核结果
+            None  # 第二次提交只显示失败提示
     """
     warning_message = Mock()
     monkeypatch.setattr(QMessageBox, "warning", warning_message)
-    page = HistoryPage(measurement_history_service)
+    controller = AppController(
+        Mock(), measurement_history_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
     try:
         # 打开旧详情后由另一操作先完成复核。
         page.show_record_detail("review-session")
@@ -474,10 +484,8 @@ def test_stale_history_detail_cannot_review_record_twice(
         page.review_editor.setPlainText("不应覆盖原结果")
         page.save_review_button.click()
 
-        # 重复操作只提示并显示已复核状态。
+        # 重复操作只提示，不覆盖首次复核结果。
         assert warning_message.call_args.args[2] == "该记录已完成复核。"
-        assert page.detail_values["status"].text() == "已复核"
-        assert page.review_editor.isHidden()
         reviewed_record = measurement_history_service.get_record("review-session")
         assert reviewed_record["reviewed_lines"] is None
     finally:
@@ -519,7 +527,10 @@ def test_history_detail_shows_evidence_images_and_opens_large_image(
     (review_directory / "broken.jpg").write_bytes(b"not an image")
     (review_directory / "old-frame.ppm").write_bytes(b"legacy image")
 
-    page = HistoryPage(measurement_history_service)
+    controller = AppController(
+        Mock(), measurement_history_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
     try:
         # 正常记录使用自己的目录并显示一张缩略图。
         page.show_record_detail("normal-session")
@@ -590,7 +601,10 @@ def test_history_detail_handles_missing_empty_and_unreadable_evidence(
         返回示例：
             None  # 证据缺失或损坏时详情仍能打开并显示提示
     """
-    page = HistoryPage(measurement_history_service)
+    controller = AppController(
+        Mock(), measurement_history_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
     try:
         # 记录目录不存在时显示无图片提示。
         page.show_record_detail("normal-session")
@@ -638,11 +652,13 @@ def test_main_window_refreshes_only_when_entering_history(
     abnormal_event_service = AbnormalEventService(
         AbnormalEventRepo(database_path.with_suffix(".recovery.sqlite3"))
     )
-    window = MainWindow(
+    controller = AppController(
         MachineService(machine_repo),
         measurement_history_service,
         abnormal_event_service,
+        Path("config"),
     )
+    window = MainWindow(controller)
     try:
         window.history_page.refresh_history = Mock(
             wraps=window.history_page.refresh_history

@@ -20,18 +20,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.service.machine_service import MachineService, MachineServiceError
+from src.controller.controller import AppController
 from ui.theme import create_icon
 
 
 class MachinesPage(QWidget):
     """展示机器列表与新增、编辑共用的弹窗。"""
 
-    def __init__(self, machine_service: MachineService):
+    def __init__(self, controller: AppController):
         """读取机器数据并初始化列表、表单和页面展示。
 
         Args:
-            machine_service: 机器业务服务。
+            controller: 界面业务控制器。
 
         Returns:
             返回示例：
@@ -40,8 +40,11 @@ class MachinesPage(QWidget):
         # 读取数据库机器记录并创建页面布局。
         super().__init__()
         self.setObjectName("machines")
-        self.machine_service = machine_service
-        self.machines = self.machine_service.list_machines()
+        self.controller = controller
+        result = self.controller.list_machines()
+        self.machines = result.data if result.success else []
+        if not result.success:
+            QMessageBox.warning(self, "机器读取失败", result.message)
         # 记录正在编辑的机器编号，None 表示新增。
         self.editing_machine_id = None
         self.field_inputs = {}
@@ -353,29 +356,26 @@ class MachinesPage(QWidget):
         # 读取启用状态和备注，并按当前状态新增或修改机器。
         values["enabled"] = self.enabled_checkbox.isChecked()
         values["remark"] = self.remark_input.toPlainText().strip() or None
-        try:
-            if self.editing_machine_id is None:
-                result = self.machine_service.create_machine(**values)
-            else:
-                result = self.machine_service.update_machine(self.editing_machine_id, **values)
-        except MachineServiceError as error:
-            QMessageBox.warning(self.editor, "保存失败", str(error))
-            return
+        if self.editing_machine_id is None:
+            result = self.controller.create_machine(**values)
+        else:
+            result = self.controller.update_machine(self.editing_machine_id, **values)
 
-        # 重复时展示返回提示并将焦点移到对应字段。
-        if not result["success"]:
-            QMessageBox.warning(self.editor, "机器信息重复", result["message"])
-            self.field_inputs[result["field"]].setFocus()
+        # 保存失败时显示提示并定位对应字段。
+        if not result.success:
+            QMessageBox.warning(self.editor, "保存失败", result.message)
+            if result.data is not None:
+                self.field_inputs[result.data["field"]].setFocus()
             return
 
         # 保存成功后关闭表单，并重新读取数据库记录。
-        saved_machine_id = result["machine_id"]
+        saved_machine_id = result.data
         self.editor.accept()
-        try:
-            self.machines = self.machine_service.list_machines()
-        except MachineServiceError as error:
-            QMessageBox.warning(self, "列表刷新失败", f"机器已保存，列表刷新失败：{error}")
+        result = self.controller.list_machines()
+        if not result.success:
+            QMessageBox.warning(self, "列表刷新失败", f"机器已保存，列表刷新失败：{result.message}")
             return
+        self.machines = result.data
 
         # 刷新列表并选中刚保存的机器。
         self.populate_machines()
@@ -405,16 +405,15 @@ class MachinesPage(QWidget):
             return
 
         # 标记删除机器。
-        try:
-            self.machine_service.delete_machine(machine_id)
-        except MachineServiceError as error:
-            QMessageBox.warning(self, "删除失败", str(error))
+        result = self.controller.delete_machine(machine_id)
+        if not result.success:
+            QMessageBox.warning(self, "删除失败", result.message)
             return
 
         # 删除成功后重新读取列表并刷新表格。
-        try:
-            self.machines = self.machine_service.list_machines()
-        except MachineServiceError as error:
-            QMessageBox.warning(self, "列表刷新失败", f"机器已删除，列表刷新失败：{error}")
+        result = self.controller.list_machines()
+        if not result.success:
+            QMessageBox.warning(self, "列表刷新失败", f"机器已删除，列表刷新失败：{result.message}")
             return
+        self.machines = result.data
         self.populate_machines()

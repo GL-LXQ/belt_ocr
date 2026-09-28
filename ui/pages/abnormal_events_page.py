@@ -22,10 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.service.abnormal_event_service import (
-    AbnormalEventService,
-    AbnormalEventServiceError,
-)
+from src.controller.controller import AppController
 from ui.theme import create_icon
 
 
@@ -45,11 +42,11 @@ def format_event_time(created_at: float) -> str:
 class AbnormalEventsPage(QWidget):
     """组织异常事件筛选、列表和只读详情。"""
 
-    def __init__(self, abnormal_event_service: AbnormalEventService) -> None:
+    def __init__(self, controller: AppController) -> None:
         """创建异常事件页面并绑定查询操作。
 
         Args:
-            abnormal_event_service: 异常事件读取服务。
+            controller: 界面业务控制器。
 
         Returns:
             返回示例：
@@ -57,7 +54,7 @@ class AbnormalEventsPage(QWidget):
         """
         super().__init__()
         self.setObjectName("abnormal_events")
-        self.abnormal_event_service = abnormal_event_service
+        self.controller = controller
 
         # 创建页面标题和说明。
         layout = QVBoxLayout(self)
@@ -186,12 +183,12 @@ class AbnormalEventsPage(QWidget):
                 None  # 机器选项和异常列表已更新
         """
         # 读取异常记录中出现过的机器编号。
-        try:
-            machine_ids = self.abnormal_event_service.list_machine_ids()
-        except AbnormalEventServiceError as error:
+        result = self.controller.list_abnormal_event_machine_ids()
+        if not result.success:
             self.table.setRowCount(0)
-            QMessageBox.warning(self, "异常事件读取失败", str(error))
+            QMessageBox.warning(self, "异常事件读取失败", result.message)
             return
+        machine_ids = result.data
 
         # 更新机器选项并保留仍可使用的当前选择。
         selected_machine_id = self.machine_filter.currentData()
@@ -219,14 +216,14 @@ class AbnormalEventsPage(QWidget):
         """
         # 读取符合当前筛选条件的异常记录。
         session_id = self.session_search.text().strip() or None
-        try:
-            events = self.abnormal_event_service.list_events(
-                self.machine_filter.currentData(), session_id
-            )
-        except AbnormalEventServiceError as error:
+        result = self.controller.list_abnormal_events(
+            self.machine_filter.currentData(), session_id
+        )
+        if not result.success:
             self.table.setRowCount(0)
-            QMessageBox.warning(self, "异常事件读取失败", str(error))
+            QMessageBox.warning(self, "异常事件读取失败", result.message)
             return
+        events = result.data
 
         # 将发生时间、身份、异常原因和摘要填入表格。
         self.table.setRowCount(len(events))
@@ -263,11 +260,11 @@ class AbnormalEventsPage(QWidget):
                 None  # 对应详情已显示，读取失败时显示提示
         """
         # 查询当前异常记录并处理已删除或读取失败的情况。
-        try:
-            event = self.abnormal_event_service.get_event(abnormal_event_id)
-        except AbnormalEventServiceError as error:
-            QMessageBox.warning(self, "异常详情读取失败", str(error))
+        result = self.controller.get_abnormal_event(abnormal_event_id)
+        if not result.success:
+            QMessageBox.warning(self, "异常详情读取失败", result.message)
             return
+        event = result.data
         if event is None:
             QMessageBox.warning(self, "异常详情读取失败", "该异常记录已不存在。")
             return

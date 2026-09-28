@@ -1,7 +1,6 @@
 """实时监测页面、机器卡片和步骤进度组件。"""
 
 from html import escape
-from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QPixmap
@@ -23,8 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.service.machine_service import MachineService, MachineServiceError
-from src.service.monitoring_service import MonitoringService
+from src.controller.controller import AppController
 from ui.belt_animation import BeltAnimationWidget
 from ui.demo_data import LOG_ROWS
 from ui.theme import create_icon
@@ -378,13 +376,13 @@ class MachineCard(QFrame):
 
 
 class RealtimePage(QWidget):
-    """组织机器卡片、系统日志和数据库读取。"""
+    """组织机器卡片、系统日志和监测状态展示。"""
 
-    def __init__(self, machine_service: MachineService):
+    def __init__(self, controller: AppController):
         """初始化布局、机器卡片和本地交互。
 
         Args:
-            machine_service: 机器业务服务。
+            controller: 界面业务控制器。
 
         Returns:
             返回示例：
@@ -392,14 +390,12 @@ class RealtimePage(QWidget):
         """
         super().__init__()
         self.setObjectName("realtime")
-        self.machine_service = machine_service
-        self.monitoring_service = None
+        self.controller = controller
         self.closing_requested = False
         self.connection_states = {}
         self.ocr_results_by_machine_id = {}
         self.measurement_states_by_machine_id = {}
         self.cards_by_machine_id = {}
-        self.configuration_directory = Path(__file__).resolve().parents[2] / "config"
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_area = QScrollArea()
@@ -491,12 +487,25 @@ class RealtimePage(QWidget):
         log_layout.addWidget(self.log_table)
         layout.addWidget(log_panel)
 
-        # 绑定本地交互，填入演示日志并读取机器表。
+        # 绑定页面按钮和滚动交互。
         self.start_button.clicked.connect(self.start_monitoring)
         self.stop_button.clicked.connect(self.stop_monitoring)
         self.refresh_button.clicked.connect(self.reload_machines)
         self.clear_button.clicked.connect(lambda: self.log_table.setRowCount(0))
         self.auto_scroll.toggled.connect(lambda checked: self.log_table.scrollToBottom() if checked else None)
+
+        # 连接 Controller 的实时状态通知。
+        self.controller.camera_state_changed_signal.connect(
+            self.update_connection_state
+        )
+        self.controller.measurement_progress_changed_signal.connect(
+            self.update_measurement_progress
+        )
+        self.controller.cycle_closed_signal.connect(self.update_cycle_closed)
+        self.controller.ocr_result_changed_signal.connect(self.update_ocr_result)
+        self.controller.monitoring_finished_signal.connect(self.finish_monitoring)
+
+        # 填入演示日志并读取机器。
         self.fill_demo_logs()
         self.reload_machines()
 
@@ -511,10 +520,11 @@ class RealtimePage(QWidget):
                 None  # 卡片跟随数据库内容，读取失败时提示并清空卡片区
         """
         # 读取已启用机器，失败时提示并把卡片区置空。
-        try:
-            self.machines = self.machine_service.list_enabled_machines()
-        except MachineServiceError as error:
-            QMessageBox.warning(self, "机器读取失败", str(error))
+        result = self.controller.list_enabled_machines()
+        if result.success:
+            self.machines = result.data
+        else:
+            QMessageBox.warning(self, "机器读取失败", result.message)
             self.machines = []
         self.populate_cards()
         # 通知滚动区按新的卡片行数重新计算内容高度。
@@ -602,22 +612,21 @@ class RealtimePage(QWidget):
         Returns:
             None  # 后台启动，按钮等待监测结束后恢复
         """
-        # 重读机器清单，重置连接状态并切换按钮状态。
+        # 请求启动监测并显示启动失败提示。
+        result = self.controller.start_monitoring()
+        if not result.success:
+            QMessageBox.warning(self, "启动失败", result.message)
+            return
+
+        # 重读机器清单并切换按钮状态。
         self.connection_states.clear()
         self.reload_machines()
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+
+        # 显示各机器正在连接。
         for machine_id in self.cards_by_machine_id:
             self.update_connection_state(machine_id, "连接中", "正在初始化监测服务")
-
-        # 创建后台线程并连接页面更新信号。
-        self.monitoring_service = MonitoringService(self.configuration_directory)
-        self.monitoring_service.camera_state_changed_signal.connect(self.update_connection_state)
-        self.monitoring_service.measurement_progress_changed_signal.connect(self.update_measurement_progress)
-        self.monitoring_service.cycle_closed_signal.connect(self.update_cycle_closed)
-        self.monitoring_service.ocr_result_changed_signal.connect(self.update_ocr_result)
-        self.monitoring_service.finished.connect(self.finish_monitoring)
-        self.monitoring_service.start()
 
     def stop_monitoring(self):
         """通知后台停止并等待后台自行完成资源释放。
@@ -630,7 +639,7 @@ class RealtimePage(QWidget):
         """
         # 关闭重复停止入口，通知后台主流程退出。
         self.stop_button.setEnabled(False)
-        self.monitoring_service.stop_requested.set()
+        self.controller.stop_monitoring()
         for machine_id in self.cards_by_machine_id:
             self.update_connection_state(machine_id, "停止中", "正在释放相机和后台资源")
 
@@ -803,11 +812,11 @@ class RealtimePage(QWidget):
         if card is not None:
             card.set_ocr_result(ordered_lines, normalized_lines)
 
-    def finish_monitoring(self):
+    def finish_monitoring(self, failure_message: str):
         """显示最终停止结果并恢复启动入口。
 
         Args:
-            无。
+            failure_message: 后台监测结束时的故障提示。
 
         Returns:
             返回示例：
@@ -818,7 +827,6 @@ class RealtimePage(QWidget):
             measurement_state["machine_running"] = False
 
         # 更新全部卡片，保留具体机器的连接失败原因。
-        failure_message = self.monitoring_service.failure_message
         for machine_id in self.cards_by_machine_id:
             # 停止当前机器的动画。
             self.cards_by_machine_id[machine_id].belt_animation.stop_machine()
@@ -835,8 +843,6 @@ class RealtimePage(QWidget):
         self.stop_button.setEnabled(False)
         if failure_message and not self.closing_requested:
             QMessageBox.warning(self, "监测已停止", failure_message)
-        self.monitoring_service.deleteLater()
-        self.monitoring_service = None
 
     def fill_demo_logs(self):
         """清空日志表格并按时间顺序填入固定演示日志。

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 from config_util import AppConfig, read_configuration_settings
 
+from src.controller.controller import AppController
 from src.service.abnormal_event_service import AbnormalEventService
 from src.service.machine_service import MachineService
 from src.service.measurement_history_service import MeasurementHistoryService
@@ -68,10 +69,14 @@ def run_desktop_preview() -> int:
         AbnormalEventRepo(recovery_database_path)
     )
 
-    # 创建并显示桌面主窗口。
-    window = MainWindow(
-        machine_service, measurement_history_service, abnormal_event_service
+    # 组装界面业务控制器并创建主窗口。
+    controller = AppController(
+        machine_service,
+        measurement_history_service,
+        abnormal_event_service,
+        configuration_directory,
     )
+    window = MainWindow(controller)
     window.show()
 
     # 运行事件循环，等待窗口关闭。
