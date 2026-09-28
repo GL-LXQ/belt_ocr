@@ -143,28 +143,28 @@ def test_measurement_record_service_filters_and_reads_details(
             None  # 筛选结果和详情字段均来自 measurement_records
     """
     # 查询全部、正常、待复核和指定机器的记录。
-    records = measurement_record_service.list_records()
+    records = measurement_record_service.list_records()["records"]
     assert [record["session_id"] for record in records] == [
         "missing-machine-session", "disabled-machine-session",
         "review-session", "normal-session"
     ]
-    normal_records = measurement_record_service.list_records("normal")
+    normal_records = measurement_record_service.list_records("normal")["records"]
     assert [record["session_id"] for record in normal_records] == [
         "missing-machine-session", "disabled-machine-session", "normal-session"
     ]
-    review_records = measurement_record_service.list_records("pending")
+    review_records = measurement_record_service.list_records("pending")["records"]
     assert [record["session_id"] for record in review_records] == [
         "review-session"
     ]
-    assert measurement_record_service.list_records("reviewed") == []
-    assert measurement_record_service.list_records("pending", "1") == []
-    machine_records = measurement_record_service.list_records("pending", "2")
+    assert measurement_record_service.list_records("reviewed")["records"] == []
+    assert measurement_record_service.list_records("pending", "1")["records"] == []
+    machine_records = measurement_record_service.list_records("pending", "2")["records"]
     assert machine_records[0]["session_id"] == "review-session"
-    disabled_records = measurement_record_service.list_records("normal", "3")
+    disabled_records = measurement_record_service.list_records("normal", "3")["records"]
     assert disabled_records[0]["session_id"] == "disabled-machine-session"
 
     # 核对软删除机器和缺少机器信息时的展示名称。
-    machines = measurement_record_service.list_record_machines()
+    machines = measurement_record_service.list_record_machines()["machines"]
     machine_names = {
         machine["machine_id"]: machine["machine_name"] for machine in machines
     }
@@ -177,14 +177,14 @@ def test_measurement_record_service_filters_and_reads_details(
     assert records[0]["machine_name"] == "99"
 
     # 读取详情并确认文字、空频率和复核原因。
-    review_record = measurement_record_service.get_record("review-session")
-    normal_record = measurement_record_service.get_record("normal-session")
+    review_record = measurement_record_service.get_record("review-session")["record"]
+    normal_record = measurement_record_service.get_record("normal-session")["record"]
     assert review_record["ordered_lines"] == ("待确认文字",)
     assert review_record["final_frequency_hz"] is None
     assert review_record["review_reason"] == "没有可靠的 20 位文字"
     assert normal_record["ordered_lines"] == ("12345678", "003")
     assert normal_record["review_reason"] is None
-    assert measurement_record_service.get_record("unknown-session") is None
+    assert measurement_record_service.get_record("unknown-session")["record"] is None
 
 
 def test_existing_measurement_table_adds_review_columns_without_losing_records(
@@ -238,17 +238,19 @@ def test_confirm_original_ocr_preserves_original_record_and_prevents_repeat(
             None  # 原文字和复核原因保留，重复复核已拒绝
     """
     measurement_record_service.complete_review("review-session")
-    record = measurement_record_service.get_record("review-session")
+    record = measurement_record_service.get_record("review-session")["record"]
     reviewed_time = datetime.fromisoformat(record["reviewed_at"])
     assert reviewed_time.tzinfo == timezone.utc
     assert record["ordered_lines"] == ("待确认文字",)
     assert record["reviewed_lines"] is None
     assert record["needs_review"] is True
     assert record["review_reason"] == "没有可靠的 20 位文字"
-    assert measurement_record_service.list_records("pending") == []
-    reviewed_records = measurement_record_service.list_records("reviewed", "2")
+    assert measurement_record_service.list_records("pending")["records"] == []
+    reviewed_records = measurement_record_service.list_records(
+        "reviewed", "2"
+    )["records"]
     assert reviewed_records[0]["session_id"] == "review-session"
-    assert measurement_record_service.list_records("normal", "2") == []
+    assert measurement_record_service.list_records("normal", "2")["records"] == []
 
     # 从数据库再次确认原始字段没有被复核写入覆盖。
     database_path = measurement_record_service.measurement_record_repo.database_path
@@ -263,7 +265,7 @@ def test_confirm_original_ocr_preserves_original_record_and_prevents_repeat(
         measurement_record_service.complete_review("review-session", "再次修改")
     with pytest.raises(MeasurementReviewAlreadyCompletedError):
         measurement_record_service.complete_review("normal-session")
-    normal_record = measurement_record_service.get_record("normal-session")
+    normal_record = measurement_record_service.get_record("normal-session")["record"]
     assert normal_record["reviewed_at"] is None
 
 
@@ -281,18 +283,18 @@ def test_edited_review_saves_lines_and_rejects_empty_input(
     """
     with pytest.raises(MeasurementRecordServiceError, match="至少需要一条有效文字"):
         measurement_record_service.complete_review("review-session", " \n\t ")
-    pending_record = measurement_record_service.get_record("review-session")
+    pending_record = measurement_record_service.get_record("review-session")["record"]
     assert pending_record["reviewed_at"] is None
 
     # 保存去空白后的两条人工文字。
     measurement_record_service.complete_review("review-session", " 修正一 \n\n 修正二  ")
-    record = measurement_record_service.get_record("review-session")
+    record = measurement_record_service.get_record("review-session")["record"]
     assert record["ordered_lines"] == ("待确认文字",)
     assert record["reviewed_lines"] == ("修正一", "修正二")
     assert record["needs_review"] is True
     assert record["review_reason"] == "没有可靠的 20 位文字"
     assert datetime.fromisoformat(record["reviewed_at"]).tzinfo == timezone.utc
-    reviewed_records = measurement_record_service.list_records("reviewed")
+    reviewed_records = measurement_record_service.list_records("reviewed")["records"]
     assert reviewed_records[0]["reviewed_lines"] == (
         "修正一", "修正二"
     )
@@ -498,7 +500,9 @@ def test_stale_history_detail_cannot_review_record_twice(
         assert page.save_review_button.isHidden()
 
         # 首次保存的复核结果保持不变。
-        reviewed_record = measurement_record_service.get_record("review-session")
+        reviewed_record = measurement_record_service.get_record(
+            "review-session"
+        )["record"]
         assert reviewed_record["reviewed_lines"] is None
     finally:
         page.detail_dialog.close()

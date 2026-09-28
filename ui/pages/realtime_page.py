@@ -522,7 +522,7 @@ class RealtimePage(QWidget):
         # 读取已启用机器，失败时提示并把卡片区置空。
         result = self.controller.list_enabled_machines()
         if result.success:
-            self.machines = result.data
+            self.machines = result.data["machines"]
         else:
             QMessageBox.warning(self, "机器读取失败", result.message)
             self.machines = []

@@ -23,13 +23,17 @@ def test_machine_service_returns_machine_ids() -> None:
     machine_service = MachineService(machine_repo)
 
     # 核对新增操作返回已插入的编号。
-    assert machine_service.create_machine("皮带机", "CAM001", "FREQ001") == 7
+    assert machine_service.create_machine("皮带机", "CAM001", "FREQ001") == {
+        "machine_id": 7,
+    }
     machine_repo.insert.assert_called_once_with(
         "皮带机", "CAM001", "FREQ001", True, None
     )
 
     # 核对修改操作返回正在编辑的编号。
-    assert machine_service.update_machine(7, "皮带机", "CAM001", "FREQ001") == 7
+    assert machine_service.update_machine(7, "皮带机", "CAM001", "FREQ001") == {
+        "machine_id": 7,
+    }
     machine_repo.update.assert_called_once_with(
         7, "皮带机", "CAM001", "FREQ001", True, None
     )

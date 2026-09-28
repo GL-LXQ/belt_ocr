@@ -188,7 +188,7 @@ class AbnormalEventsPage(QWidget):
             self.table.setRowCount(0)
             QMessageBox.warning(self, "异常事件读取失败", result.message)
             return
-        machine_ids = result.data
+        machine_ids = result.data["machine_ids"]
 
         # 更新机器选项并保留仍可使用的当前选择。
         selected_machine_id = self.machine_filter.currentData()
@@ -223,7 +223,7 @@ class AbnormalEventsPage(QWidget):
             self.table.setRowCount(0)
             QMessageBox.warning(self, "异常事件读取失败", result.message)
             return
-        events = result.data
+        events = result.data["events"]
 
         # 将发生时间、身份、异常原因和摘要填入表格。
         self.table.setRowCount(len(events))
@@ -264,7 +264,7 @@ class AbnormalEventsPage(QWidget):
         if not result.success:
             QMessageBox.warning(self, "异常详情读取失败", result.message)
             return
-        event = result.data
+        event = result.data["event"]
         if event is None:
             QMessageBox.warning(self, "异常详情读取失败", "该异常记录已不存在。")
             return

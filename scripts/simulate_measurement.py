@@ -380,7 +380,7 @@ async def run_measurement_simulation(scenario: str) -> dict:
         measurement_record_service = MeasurementRecordService(
             MeasurementRecordRepo(config.database_path)
         )
-        record = measurement_record_service.get_record(session_id)
+        record = measurement_record_service.get_record(session_id)["record"]
         if record is None:
             raise RuntimeError("测量记录没有写入业务库")
         evidence_directory = Path(record["evidence_directory"])

@@ -34,7 +34,7 @@ class MeasurementRecordService:
         """
         self.measurement_record_repo = measurement_record_repo
 
-    def list_record_machines(self) -> list[dict]:
+    def list_record_machines(self) -> dict[str, list[dict]]:
         """读取历史记录中出现过的机器。
 
         Args:
@@ -42,14 +42,20 @@ class MeasurementRecordService:
 
         Returns:
             返回示例：
-                [{
-                    "machine_id": "1",  # 机器编号
-                    "machine_name": "皮带机 1",  # 机器名称或编号
-                }]
+                {
+                    "machines": [  # 有历史记录的机器列表
+                        {
+                            "machine_id": "1",  # 机器编号
+                            "machine_name": "皮带机 1",  # 机器名称或编号
+                        },
+                    ],
+                }
         """
         # 读取机器选项并将数据库错误转换为页面错误。
         try:
-            return self.measurement_record_repo.list_record_machines()
+            return {
+                "machines": self.measurement_record_repo.list_record_machines(),
+            }
         except sqlite3.Error as error:
             # 记录数据库读取故障。
             logger.exception("历史机器读取失败")
@@ -59,7 +65,7 @@ class MeasurementRecordService:
 
     def list_records(
         self, review_status: str | None = None, machine_id: str | None = None
-    ) -> list[dict]:
+    ) -> dict[str, list[dict]]:
         """读取筛选结果并转换文字与复核字段。
 
         Args:
@@ -68,17 +74,21 @@ class MeasurementRecordService:
 
         Returns:
             返回示例：
-                [{
-                    "session_id": "session-1",  # 测量周期编号
-                    "machine_id": "1",  # 机器编号
-                    "machine_name": "皮带机 1",  # 机器名称或编号
-                    "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
-                    "ordered_lines": ("ABC",),  # 完整 OCR 文字
-                    "final_frequency_hz": 50.0,  # 最终频率
-                    "needs_review": False,  # 是否需要人工复核
-                    "reviewed_at": None,  # 人工复核时间
-                    "reviewed_lines": None,  # 人工修改后的文字
-                }]
+                {
+                    "records": [  # 测量记录列表
+                        {
+                            "session_id": "session-1",  # 测量周期编号
+                            "machine_id": "1",  # 机器编号
+                            "machine_name": "皮带机 1",  # 机器名称或编号
+                            "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
+                            "ordered_lines": ("ABC",),  # 完整 OCR 文字
+                            "final_frequency_hz": 50.0,  # 最终频率
+                            "needs_review": False,  # 是否需要人工复核
+                            "reviewed_at": None,  # 人工复核时间
+                            "reviewed_lines": None,  # 人工修改后的文字
+                        },
+                    ],
+                }
         """
         # 查询测量记录并转换存储格式。
         try:
@@ -87,7 +97,9 @@ class MeasurementRecordService:
             )
             for record in records:
                 self.decode_record_fields(record)
-            return records
+            return {
+                "records": records,
+            }
         except (sqlite3.Error, json.JSONDecodeError) as error:
             # 记录数据库或 JSON 读取故障。
             logger.exception("历史记录读取失败")
@@ -95,7 +107,7 @@ class MeasurementRecordService:
             # 抛出可直接展示的业务提示。
             raise MeasurementRecordServiceError("历史记录读取失败。") from error
 
-    def get_record(self, session_id: str) -> dict | None:
+    def get_record(self, session_id: str) -> dict[str, dict | None]:
         """读取一条测量记录并转换详情字段。
 
         Args:
@@ -104,27 +116,33 @@ class MeasurementRecordService:
         Returns:
             返回示例：
                 {
-                    "session_id": "session-1",  # 测量周期编号
-                    "machine_id": "1",  # 机器编号
-                    "machine_name": "皮带机 1",  # 机器名称或编号
-                    "start_time": "2026-09-27T07:59:00+00:00",  # 开始时间
-                    "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
-                    "ordered_lines": ("ABC",),  # 完整 OCR 文字
-                    "final_frequency_hz": 50.0,  # 最终频率
-                    "evidence_directory": "runtime/evidence/1",  # 证据目录
-                    "needs_review": False,  # 是否待复核
-                    "review_reason": None,  # 复核原因
-                    "reviewed_at": None,  # 人工复核时间
-                    "reviewed_lines": None,  # 人工修改后的文字
+                    "record": {  # 测量记录详情
+                        "session_id": "session-1",  # 测量周期编号
+                        "machine_id": "1",  # 机器编号
+                        "machine_name": "皮带机 1",  # 机器名称或编号
+                        "start_time": "2026-09-27T07:59:00+00:00",  # 开始时间
+                        "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
+                        "ordered_lines": ("ABC",),  # 完整 OCR 文字
+                        "final_frequency_hz": 50.0,  # 最终频率
+                        "evidence_directory": "runtime/evidence/1",  # 证据目录
+                        "needs_review": False,  # 是否待复核
+                        "review_reason": None,  # 复核原因
+                        "reviewed_at": None,  # 人工复核时间
+                        "reviewed_lines": None,  # 人工修改后的文字
+                    },
                 }
-                None  # 周期编号没有对应记录
+                {
+                    "record": None,  # 周期编号没有对应记录
+                }
         """
         # 查询详情并转换存储格式。
         try:
             record = self.measurement_record_repo.get_record(session_id)
             if record is not None:
                 self.decode_record_fields(record)
-            return record
+            return {
+                "record": record,
+            }
         except (sqlite3.Error, json.JSONDecodeError) as error:
             # 记录数据库或 JSON 读取故障。
             logger.exception("历史详情读取失败")

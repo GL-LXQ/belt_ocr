@@ -42,7 +42,7 @@ class MachinesPage(QWidget):
         self.setObjectName("machines")
         self.controller = controller
         result = self.controller.list_machines()
-        self.machines = result.data if result.success else []
+        self.machines = result.data["machines"] if result.success else []
         if not result.success:
             QMessageBox.warning(self, "机器读取失败", result.message)
         # 记录正在编辑的机器编号，None 表示新增。
@@ -369,13 +369,13 @@ class MachinesPage(QWidget):
             return
 
         # 保存成功后关闭表单，并重新读取数据库记录。
-        saved_machine_id = result.data
+        saved_machine_id = result.data["machine_id"]
         self.editor.accept()
         result = self.controller.list_machines()
         if not result.success:
             QMessageBox.warning(self, "列表刷新失败", f"机器已保存，列表刷新失败：{result.message}")
             return
-        self.machines = result.data
+        self.machines = result.data["machines"]
 
         # 刷新列表并选中刚保存的机器。
         self.populate_machines()
@@ -415,5 +415,5 @@ class MachinesPage(QWidget):
         if not result.success:
             QMessageBox.warning(self, "列表刷新失败", f"机器已删除，列表刷新失败：{result.message}")
             return
-        self.machines = result.data
+        self.machines = result.data["machines"]
         self.populate_machines()

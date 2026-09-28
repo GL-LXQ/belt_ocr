@@ -154,10 +154,12 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
 
     # 创建两台机器的真实页面控件。
     service = Mock()
-    service.list_enabled_machines.return_value = [
-        {"id": 1, "machine_name": "机器 1"},
-        {"id": 2, "machine_name": "机器 2"},
-    ]
+    service.list_enabled_machines.return_value = {
+        "machines": [
+            {"id": 1, "machine_name": "机器 1"},
+            {"id": 2, "machine_name": "机器 2"},
+        ],
+    }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
     ordered_lines = ("14", "2926 215C", "<b>003</b>", "2926 216C", "2926 217C", "长文字")
     normalized_lines = ("14", "2926215C", "003", "2926216C", "2926217C", "A" * 20)
@@ -213,10 +215,12 @@ def test_page_animates_only_current_machine_and_session(
 
     # 创建两台机器的页面并受理第一台机器的周期。
     service = Mock()
-    service.list_enabled_machines.return_value = [
-        {"id": 1, "machine_name": "机器 1"},
-        {"id": 2, "machine_name": "机器 2"},
-    ]
+    service.list_enabled_machines.return_value = {
+        "machines": [
+            {"id": 1, "machine_name": "机器 1"},
+            {"id": 2, "machine_name": "机器 2"},
+        ],
+    }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
     try:
         page.update_measurement_progress("1", "first", "session_start", "success")
@@ -306,7 +310,9 @@ def test_failed_subprocess_stops_its_animation_without_closing_belt(
 
     # 创建单台机器并启动对应子动画。
     service = Mock()
-    service.list_enabled_machines.return_value = [{"id": 1, "machine_name": "机器 1"}]
+    service.list_enabled_machines.return_value = {
+        "machines": [{"id": 1, "machine_name": "机器 1"}],
+    }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
     try:
         page.update_measurement_progress("1", "session", "session_start", "success")
@@ -339,10 +345,12 @@ def test_page_refresh_and_monitoring_stop_restore_safe_animation(
 
     # 创建页面并让两台机器进入不同采集状态。
     service = Mock()
-    service.list_enabled_machines.return_value = [
-        {"id": 1, "machine_name": "机器 1"},
-        {"id": 2, "machine_name": "机器 2"},
-    ]
+    service.list_enabled_machines.return_value = {
+        "machines": [
+            {"id": 1, "machine_name": "机器 1"},
+            {"id": 2, "machine_name": "机器 2"},
+        ],
+    }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
     try:
         for machine_id in ("1", "2"):
@@ -414,7 +422,9 @@ def test_runtime_thread_delivers_text_from_background_thread(
 
     # 创建页面和不访问设备的运行时替身。
     machine_service = Mock()
-    machine_service.list_enabled_machines.return_value = [{"id": 1, "machine_name": "机器 1"}]
+    machine_service.list_enabled_machines.return_value = {
+        "machines": [{"id": 1, "machine_name": "机器 1"}],
+    }
     controller = AppController(machine_service, Mock(), Mock(), Path("config"))
     page = RealtimePage(controller)
     runtime = SimpleNamespace(failure=None, stop=AsyncMock())

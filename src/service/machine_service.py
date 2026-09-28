@@ -60,8 +60,8 @@ class MachineService:
         frequency_meter_serial: str,
         enabled: bool = True,
         remark: str | None = None,
-    ) -> int:
-        """新增机器并返回编号，重复字段或数据库故障抛出异常。
+    ) -> dict[str, int]:
+        """新增机器并返回业务数据，重复字段或数据库故障抛出异常。
 
         Args:
             machine_name: 已去除首尾空白的必填机器名称。
@@ -72,7 +72,9 @@ class MachineService:
 
         Returns:
             返回示例：
-                1  # 已创建的机器编号
+                {
+                    "machine_id": 1,  # 已创建的机器编号
+                }
         """
         try:
             # 查询表单中的重复字段，新增时不需要排除任何记录。
@@ -95,8 +97,10 @@ class MachineService:
             # 抛出可直接展示的业务提示。
             raise MachineServiceError("机器保存失败。") from error
 
-        # 返回已创建的机器编号。
-        return machine_id
+        # 返回已创建机器的业务数据。
+        return {
+            "machine_id": machine_id,
+        }
 
     def update_machine(
         self,
@@ -106,8 +110,8 @@ class MachineService:
         frequency_meter_serial: str,
         enabled: bool = True,
         remark: str | None = None,
-    ) -> int:
-        """修改机器并返回编号，重复字段或数据库故障抛出异常。
+    ) -> dict[str, int]:
+        """修改机器并返回业务数据，重复字段或数据库故障抛出异常。
 
         Args:
             machine_id: 要修改的机器编号。
@@ -119,7 +123,9 @@ class MachineService:
 
         Returns:
             返回示例：
-                1  # 已更新的机器编号
+                {
+                    "machine_id": 1,  # 已更新的机器编号
+                }
         """
         try:
             # 查重时排除正在编辑的机器，原样保留自身字段不算重复。
@@ -143,8 +149,10 @@ class MachineService:
             # 抛出可直接展示的业务提示。
             raise MachineServiceError("机器保存失败。") from error
 
-        # 返回已更新的机器编号。
-        return machine_id
+        # 返回已更新机器的业务数据。
+        return {
+            "machine_id": machine_id,
+        }
 
     def delete_machine(self, machine_id: int) -> None:
         """软删除机器并转换数据库故障。
@@ -166,7 +174,7 @@ class MachineService:
             # 抛出可直接展示的业务提示。
             raise MachineServiceError("机器删除失败。") from error
 
-    def list_machines(self) -> list[dict]:
+    def list_machines(self) -> dict[str, list[dict]]:
         """按编号读取全部机器信息。
 
         Args:
@@ -174,20 +182,26 @@ class MachineService:
 
         Returns:
             返回示例：
-                [{
-                    "id": 1,  # 机器编号
-                    "machine_name": "皮带机",  # 机器名称
-                    "camera_serial": "CAM001",  # 相机序列号
-                    "frequency_meter_serial": "FREQ001",  # 频率仪序列号
-                    "enabled": True,  # 是否启用
-                    "created_at": "2026-09-20 08:00:00",  # UTC 创建时间
-                    "updated_at": "2026-09-20 08:00:00",  # UTC 修改时间
-                    "remark": "",  # 备注，无备注时为空字符串
-                }]
+                {
+                    "machines": [  # 机器记录列表
+                        {
+                            "id": 1,  # 机器编号
+                            "machine_name": "皮带机",  # 机器名称
+                            "camera_serial": "CAM001",  # 相机序列号
+                            "frequency_meter_serial": "FREQ001",  # 频率仪序列号
+                            "enabled": True,  # 是否启用
+                            "created_at": "2026-09-20 08:00:00",  # UTC 创建时间
+                            "updated_at": "2026-09-20 08:00:00",  # UTC 修改时间
+                            "remark": "",  # 备注，无备注时为空字符串
+                        },
+                    ],
+                }
         """
         # 读取全部机器列表。
         try:
-            return self.machine_repo.list_all()
+            return {
+                "machines": self.machine_repo.list_all(),
+            }
         except sqlite3.Error as error:
             # 记录数据库故障详情。
             logger.exception("机器列表读取失败")
@@ -195,7 +209,7 @@ class MachineService:
             # 抛出可直接展示的业务提示。
             raise MachineServiceError("机器列表读取失败。") from error
 
-    def list_enabled_machines(self) -> list[dict]:
+    def list_enabled_machines(self) -> dict[str, list[dict]]:
         """按编号读取全部已启用机器信息。
 
         Args:
@@ -203,20 +217,26 @@ class MachineService:
 
         Returns:
             返回示例：
-                [{
-                    "id": 1,  # 机器编号
-                    "machine_name": "皮带机",  # 机器名称
-                    "camera_serial": "CAM001",  # 相机序列号
-                    "frequency_meter_serial": "FREQ001",  # 频率仪序列号
-                    "enabled": True,  # 是否启用
-                    "created_at": "2026-09-20 08:00:00",  # UTC 创建时间
-                    "updated_at": "2026-09-20 08:00:00",  # UTC 修改时间
-                    "remark": "",  # 备注，无备注时为空字符串
-                }]
+                {
+                    "machines": [  # 已启用机器列表
+                        {
+                            "id": 1,  # 机器编号
+                            "machine_name": "皮带机",  # 机器名称
+                            "camera_serial": "CAM001",  # 相机序列号
+                            "frequency_meter_serial": "FREQ001",  # 频率仪序列号
+                            "enabled": True,  # 是否启用
+                            "created_at": "2026-09-20 08:00:00",  # UTC 创建时间
+                            "updated_at": "2026-09-20 08:00:00",  # UTC 修改时间
+                            "remark": "",  # 备注，无备注时为空字符串
+                        },
+                    ],
+                }
         """
         # 读取已启用机器列表。
         try:
-            return self.machine_repo.list_enabled()
+            return {
+                "machines": self.machine_repo.list_enabled(),
+            }
         except sqlite3.Error as error:
             # 记录数据库故障详情。
             logger.exception("机器列表读取失败")

@@ -28,7 +28,7 @@ class AbnormalEventService:
         """
         self.abnormal_event_repo = abnormal_event_repo
 
-    def list_machine_ids(self) -> list[str]:
+    def list_machine_ids(self) -> dict[str, list[str]]:
         """读取异常事件关联的机器编号。
 
         Args:
@@ -36,11 +36,15 @@ class AbnormalEventService:
 
         Returns:
             返回示例：
-                ["1", "2"]  # 有异常事件的机器编号
+                {
+                    "machine_ids": ["1", "2"],  # 有异常事件的机器编号
+                }
         """
         # 读取机器选项并转换数据库读取错误。
         try:
-            return self.abnormal_event_repo.list_machine_ids()
+            return {
+                "machine_ids": self.abnormal_event_repo.list_machine_ids(),
+            }
         except sqlite3.Error as error:
             # 记录数据库读取故障。
             logger.exception("异常机器读取失败")
@@ -50,7 +54,7 @@ class AbnormalEventService:
 
     def list_events(
         self, machine_id: str | None = None, session_id: str | None = None
-    ) -> list[dict]:
+    ) -> dict[str, list[dict]]:
         """查询异常列表并准备原始内容摘要。
 
         Args:
@@ -59,15 +63,17 @@ class AbnormalEventService:
 
         Returns:
             返回示例：
-                [{
-                    "abnormal_event_id": 5,  # 异常事件主键
-                    "created_at": 1790496570.9,  # 发生时间戳
-                    "machine_id": "1",  # 机器编号
-                    "session_id": "session-1",  # 周期编号
-                    "reason": "OCR 识别超时",  # 异常原因描述
-                    "payload_json": "{}",  # 完整原始内容
-                    "payload_summary": "{}",  # 列表摘要
-                }]
+                {
+                    "events": [{  # 异常事件列表
+                        "abnormal_event_id": 5,  # 异常事件主键
+                        "created_at": 1790496570.9,  # 发生时间戳
+                        "machine_id": "1",  # 机器编号
+                        "session_id": "session-1",  # 周期编号
+                        "reason": "OCR 识别超时",  # 异常原因描述
+                        "payload_json": "{}",  # 完整原始内容
+                        "payload_summary": "{}",  # 列表摘要
+                    }],
+                }
         """
         # 读取符合筛选条件的异常事件。
         try:
@@ -85,9 +91,9 @@ class AbnormalEventService:
             event["payload_summary"] = (
                 summary[:79] + "…" if len(summary) > 80 else summary
             )
-        return events
+        return {"events": events}
 
-    def get_event(self, abnormal_event_id: int) -> dict | None:
+    def get_event(self, abnormal_event_id: int) -> dict[str, dict | None]:
         """按主键读取一条完整异常事件。
 
         Args:
@@ -96,14 +102,18 @@ class AbnormalEventService:
         Returns:
             返回示例：
                 {
-                    "abnormal_event_id": 5,  # 异常事件主键
-                    "created_at": 1790496570.9,  # 发生时间戳
-                    "machine_id": "1",  # 机器编号
-                    "session_id": "session-1",  # 周期编号
-                    "reason": "OCR 识别超时",  # 异常原因描述
-                    "payload_json": "{}",  # 完整原始内容
+                    "event": {  # 异常事件详情；不存在时为 None
+                        "abnormal_event_id": 5,  # 异常事件主键
+                        "created_at": 1790496570.9,  # 发生时间戳
+                        "machine_id": "1",  # 机器编号
+                        "session_id": "session-1",  # 周期编号
+                        "reason": "OCR 识别超时",  # 异常原因描述
+                        "payload_json": "{}",  # 完整原始内容
+                    },
                 }
-                None  # 记录不存在
+                {
+                    "event": None,  # 主键没有对应事件
+                }
         """
         # 按主键读取记录并转换数据库读取错误。
         try:
@@ -115,4 +125,4 @@ class AbnormalEventService:
             # 抛出可直接展示的业务提示。
             raise AbnormalEventServiceError("异常详情读取失败。") from error
 
-        return event
+        return {"event": event}

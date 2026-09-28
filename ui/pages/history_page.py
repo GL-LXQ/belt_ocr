@@ -275,7 +275,7 @@ class HistoryPage(QWidget):
             self.table.setRowCount(0)
             QMessageBox.warning(self, "历史记录读取失败", result.message)
             return
-        machines = result.data
+        machines = result.data["machines"]
 
         # 更新机器选项并保留仍然存在的筛选值。
         selected_machine_id = self.machine_filter.currentData()
@@ -328,7 +328,7 @@ class HistoryPage(QWidget):
             self.table.setRowCount(0)
             QMessageBox.warning(self, "历史记录读取失败", result.message)
             return
-        records = result.data
+        records = result.data["records"]
 
         # 将每条记录填入六列表格。
         self.table.setRowCount(len(records))
@@ -387,7 +387,7 @@ class HistoryPage(QWidget):
         if not result.success:
             QMessageBox.warning(self, "历史详情读取失败", result.message)
             return
-        record = result.data
+        record = result.data["record"]
         if record is None:
             QMessageBox.warning(self, "历史详情读取失败", "该测量记录已不存在。")
             return

@@ -83,7 +83,9 @@ GUI 启动入口创建 Repo、Service 和唯一的 `AppController`，四个正�
 
 业务 Service 向 `AppController` 返回数据或抛出业务异常；遇到已知 SQLite、JSON 故障时，Service 将技术详情记入日志，并把对外异常转换为可展示的固定提示。`AppController` 将结果包装为 `Result.ok(...)` 或 `Result.error(...)`，UI 继续读取 `success`、`data`、`message` 三个字段。
 
-机器新增和修改成功时，`MachineService` 返回机器编号；字段重复时抛出携带字段名和对应提示的 `MachineDuplicateFieldError`。`AppController` 将编号或异常转换为 `Result.ok(...)` 或 `Result.error(...)`，页面继续使用 `data["field"]` 定位重复字段。
+机器、测量记录和异常事件 Service 在方法返回值中组装带业务字段名的字典（`machine_id`、`machines`、`records`、`record`、`machine_ids`、`events`、`event`），`AppController` 直接用 `Result.ok(service_data)` 包装后交给 UI；线程运行状态由 Controller 组装为 `{"running": ...}`。删除、复核和监测启停等无数据操作仍返回 `Result.ok()`。
+
+机器新增和修改成功时，`MachineService` 返回包含 `machine_id` 的字典；字段重复时抛出携带字段名和对应提示的 `MachineDuplicateFieldError`。`AppController` 将业务数据或异常转换为 `Result.ok(...)` 或 `Result.error(...)`，页面继续使用 `data["field"]` 定位重复字段。
 
 历史记录页进入时通过 `AppController` 调用 `MeasurementRecordService`，再经 `MeasurementRecordRepo` 从业务库 `measurement_records` 读取已保存的测量结果，并可按正常、待复核、已复核及机器筛选；详情保留原始 OCR、频率、复核原因和本轮 JPG 证据图片。待复核记录可确认原文字或按行保存人工修正文字，Repo 只对尚未复核的记录写入 UTC 复核时间和可选的 `reviewed_lines` JSON，原 `ordered_lines`、`needs_review` 与 `review_reason` 保留；已复核详情同时显示原始与最终文字，列表摘要优先显示人工结果。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
 
@@ -102,7 +104,7 @@ GUI 启动时先在运行库确保 `abnormal_events` 表存在。异常事件页
 * `src/modbus_client.py`：Modbus RTU 串口连接和 DI 状态读取。
 * `src/database.py`：数据库初始化、测量记录、异常审计和实例锁。
 * `src/repo/`：机器等基础数据访问。
-* `src/service/`：机器、历史与异常事件业务服务。
+* `src/service/`：机器、测量记录与异常事件业务服务。
 * `src/controller/`：GUI 请求入口、统一结果与实时监测生命周期。
 * `src/system_runtime_thread.py`：运行 SystemRuntime 的后台线程与实时 Qt 信号。
 * `src/models.py` / `src/enums.py`：Session、事件、帧、OCR 结果及状态定义。

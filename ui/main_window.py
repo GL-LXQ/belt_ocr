@@ -228,7 +228,7 @@ class MainWindow(QMainWindow):
             None  # 后台运行时延迟关闭，否则接受关闭事件
         """
         # 后台运行期间保留窗口，等待线程结束后再次关闭。
-        if self.controller.is_monitoring_running().data:
+        if self.controller.is_monitoring_running().data["running"]:
             event.ignore()
             page = self.page_stack.widget(0)
             if not page.closing_requested:

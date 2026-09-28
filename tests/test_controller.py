@@ -158,9 +158,9 @@ def test_result_factories_preserve_public_fields() -> None:
         None  # 两种结果的成功标志、数据和提示已验证
     """
     # 检查成功结果的三个字段。
-    success_result = Result.ok("data")
+    success_result = Result.ok({"machines": []})
     assert success_result.success is True
-    assert success_result.data == "data"
+    assert success_result.data == {"machines": []}
     assert success_result.message == ""
 
     # 检查失败结果的三个字段。
@@ -182,18 +182,18 @@ def test_machine_calls_return_controller_results(controller_services) -> None:
     controller = controller_services[0]
     machine_service = controller_services[1]
     machines = [{"id": 1, "machine_name": "皮带机"}]
-    machine_service.list_machines.return_value = machines
-    machine_service.list_enabled_machines.return_value = machines
-    machine_service.create_machine.return_value = 1
+    machine_service.list_machines.return_value = {"machines": machines}
+    machine_service.list_enabled_machines.return_value = {"machines": machines}
+    machine_service.create_machine.return_value = {"machine_id": 1}
     machine_service.update_machine.side_effect = MachineDuplicateFieldError(
         "machine_name"
     )
 
     # 查询和新增请求返回界面使用的数据。
-    assert controller.list_machines() == Result.ok(machines)
-    assert controller.list_enabled_machines() == Result.ok(machines)
+    assert controller.list_machines() == Result.ok({"machines": machines})
+    assert controller.list_enabled_machines() == Result.ok({"machines": machines})
     result = controller.create_machine(" 皮带机 ", " CAM001 ", " FREQ001 ")
-    assert result == Result.ok(1)
+    assert result == Result.ok({"machine_id": 1})
     machine_service.create_machine.assert_called_once_with(
         "皮带机", "CAM001", "FREQ001", True, None
     )
@@ -204,8 +204,10 @@ def test_machine_calls_return_controller_results(controller_services) -> None:
 
     # 修改成功时返回原有的机器编号。
     machine_service.update_machine.side_effect = None
-    machine_service.update_machine.return_value = 1
-    assert controller.update_machine(1, "皮带机", "CAM002", "FREQ002") == Result.ok(1)
+    machine_service.update_machine.return_value = {"machine_id": 1}
+    assert controller.update_machine(1, "皮带机", "CAM002", "FREQ002") == Result.ok(
+        {"machine_id": 1}
+    )
 
     # 删除故障继续返回业务提示。
     machine_service.delete_machine.side_effect = MachineServiceError("机器删除失败")
@@ -276,10 +278,12 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
     measurement_record_service.complete_review.assert_not_called()
 
     # 合法查询转发筛选条件，重复复核转换为普通失败。
-    measurement_record_service.list_records.return_value = [{"session_id": "session-1"}]
+    measurement_record_service.list_records.return_value = {
+        "records": [{"session_id": "session-1"}],
+    }
     result = controller.list_measurement_records("pending", "1")
     assert result.success
-    assert result.data == [{"session_id": "session-1"}]
+    assert result.data == {"records": [{"session_id": "session-1"}]}
     measurement_record_service.list_records.assert_called_once_with("pending", "1")
     review_error = MeasurementReviewAlreadyCompletedError("该记录已完成复核。")
     measurement_record_service.complete_review.side_effect = review_error
@@ -337,20 +341,32 @@ def test_simple_requests_forward_service_data(controller_services) -> None:
     machine_service = controller_services[1]
     measurement_record_service = controller_services[2]
     abnormal_event_service = controller_services[3]
-    measurement_record_service.list_record_machines.return_value = [{"machine_id": "1"}]
-    measurement_record_service.get_record.return_value = {"session_id": "session-1"}
-    abnormal_event_service.list_machine_ids.return_value = ["1"]
-    abnormal_event_service.list_events.return_value = [{"abnormal_event_id": 3}]
-    abnormal_event_service.get_event.return_value = {"abnormal_event_id": 3}
+    measurement_record_service.list_record_machines.return_value = {
+        "machines": [{"machine_id": "1"}],
+    }
+    measurement_record_service.get_record.return_value = {
+        "record": {"session_id": "session-1"},
+    }
+    abnormal_event_service.list_machine_ids.return_value = {"machine_ids": ["1"]}
+    abnormal_event_service.list_events.return_value = {
+        "events": [{"abnormal_event_id": 3}],
+    }
+    abnormal_event_service.get_event.return_value = {
+        "event": {"abnormal_event_id": 3},
+    }
 
     # 将服务查询数据统一放入成功结果。
-    assert controller.list_record_machines().data == [{"machine_id": "1"}]
+    assert controller.list_record_machines().data == {"machines": [{"machine_id": "1"}]}
     assert controller.get_measurement_record(" session-1 ").data == {
-        "session_id": "session-1",
+        "record": {
+            "session_id": "session-1",
+        },
     }
-    assert controller.list_abnormal_event_machine_ids().data == ["1"]
-    assert controller.list_abnormal_events().data == [{"abnormal_event_id": 3}]
-    assert controller.get_abnormal_event(3).data == {"abnormal_event_id": 3}
+    assert controller.list_abnormal_event_machine_ids().data == {"machine_ids": ["1"]}
+    assert controller.list_abnormal_events().data == {
+        "events": [{"abnormal_event_id": 3}],
+    }
+    assert controller.get_abnormal_event(3).data == {"event": {"abnormal_event_id": 3}}
     measurement_record_service.get_record.assert_called_once_with("session-1")
 
     # 将成功的复核和删除转换为统一结果。
@@ -402,7 +418,7 @@ def test_monitoring_lifecycle_and_old_finished_signal(
     # 首次启动成功，重复启动不创建第二个线程。
     assert controller.start_monitoring().success
     assert first_thread.started
-    assert controller.is_monitoring_running().data is True
+    assert controller.is_monitoring_running().data == {"running": True}
     assert controller.start_monitoring() == Result.error("监测正在运行。")
     assert thread_factory.call_count == 1
 
@@ -413,7 +429,7 @@ def test_monitoring_lifecycle_and_old_finished_signal(
     first_thread.finished.emit()
     assert first_thread.released
     assert controller.runtime_thread is None
-    assert controller.is_monitoring_running().data is False
+    assert controller.is_monitoring_running().data == {"running": False}
     finished_messages.assert_called_once_with("设备故障")
 
     # 新线程启动后，旧线程的迟到结束通知不能清理新引用。
@@ -490,8 +506,8 @@ def test_window_closes_after_monitoring_cleanup(
     """
     controller = controller_services[0]
     machine_service = controller_services[1]
-    machine_service.list_machines.return_value = []
-    machine_service.list_enabled_machines.return_value = []
+    machine_service.list_machines.return_value = {"machines": []}
+    machine_service.list_enabled_machines.return_value = {"machines": []}
     runtime_thread = FakeSystemRuntimeThread()
     runtime_factory = Mock(return_value=runtime_thread)
     monkeypatch.setattr(

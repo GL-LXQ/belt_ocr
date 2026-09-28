@@ -110,7 +110,7 @@ def test_desktop_startup_initializes_empty_recovery_database(
     assert table == ("abnormal_events",)
     assert AbnormalEventService(
         AbnormalEventRepo(recovery_database_path)
-    ).list_events() == []
+    ).list_events()["events"] == []
 
     # 打开新库对应的异常页面，确认空列表可以正常显示。
     abnormal_event_service = AbnormalEventService(
@@ -150,12 +150,12 @@ def test_chinese_reason_passes_through_service(
     abnormal_event_service.abnormal_event_repo.insert(
         300.0, "1", session_id, reason, "{}"
     )
-    events = abnormal_event_service.list_events(session_id=session_id)
+    events = abnormal_event_service.list_events(session_id=session_id)["events"]
 
     # 核对列表和详情均保留原始中文原因。
     assert len(events) == 1
     assert events[0]["reason"] == reason
-    detail = abnormal_event_service.get_event(events[0]["abnormal_event_id"])
+    detail = abnormal_event_service.get_event(events[0]["abnormal_event_id"])["event"]
     assert detail["reason"] == reason
 
 
@@ -172,28 +172,28 @@ def test_service_filters_events_and_preserves_reason(
             None  # 查询结果符合筛选条件且历史原因原样保留
     """
     # 核对机器选项和默认时间倒序。
-    assert abnormal_event_service.list_machine_ids() == ["1", "2"]
-    events = abnormal_event_service.list_events()
+    assert abnormal_event_service.list_machine_ids()["machine_ids"] == ["1", "2"]
+    events = abnormal_event_service.list_events()["events"]
     assert [event["created_at"] for event in events] == [200.0, 150.0, 100.0]
     assert events[0]["reason"] == "CUSTOM_REASON"
     assert events[1]["reason"] == "CAPTURE_FAILED"
 
     # 核对机器过滤与完整 Session ID 精确匹配。
-    machine_events = abnormal_event_service.list_events(machine_id="1")
+    machine_events = abnormal_event_service.list_events(machine_id="1")["events"]
     assert [event["session_id"] for event in machine_events] == [
         "session-other", SESSION_ID
     ]
     target_events = abnormal_event_service.list_events(
         machine_id="1", session_id=SESSION_ID
-    )
+    )["events"]
     assert len(target_events) == 1
     assert target_events[0]["reason"] == "OCR_TIMEOUT"
-    assert abnormal_event_service.list_events(session_id=SESSION_ID[:8]) == []
+    assert abnormal_event_service.list_events(session_id=SESSION_ID[:8])["events"] == []
 
     # 按主键读取详情，确认历史英文原因和 payload 原样保留。
     target_event = abnormal_event_service.get_event(
         target_events[0]["abnormal_event_id"]
-    )
+    )["event"]
     assert target_event["reason"] == "OCR_TIMEOUT"
     assert target_event["payload_json"] == '{"session_errors": ["OCR_TIMEOUT"]}'
 
