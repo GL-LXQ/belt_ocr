@@ -3,12 +3,14 @@
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QDate, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
+    QDateEdit,
     QDialog,
     QFormLayout,
     QFrame,
@@ -129,6 +131,38 @@ class HistoryPage(QWidget):
         filters.addWidget(self.machine_filter)
         filters.addStretch()
         layout.addLayout(filters)
+
+        # 建立不限时间开关。
+        time_filters = QHBoxLayout()
+        time_filters.addWidget(QLabel("时间："))
+        self.unlimited_time_checkbox = QCheckBox("不限时间")
+        self.unlimited_time_checkbox.setChecked(True)
+        self.unlimited_time_checkbox.toggled.connect(self.select_time_filter)
+        time_filters.addWidget(self.unlimited_time_checkbox)
+
+        # 建立开始日期控件。
+        current_date = QDate.currentDate()
+        time_filters.addSpacing(24)
+        time_filters.addWidget(QLabel("开始："))
+        self.start_date_edit = QDateEdit(current_date)
+        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setEnabled(False)
+        self.start_date_edit.dateChanged.connect(self.select_start_date)
+        time_filters.addWidget(self.start_date_edit)
+
+        # 建立结束日期控件。
+        time_filters.addWidget(QLabel("结束："))
+        self.end_date_edit = QDateEdit(current_date)
+        self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setEnabled(False)
+        self.end_date_edit.dateChanged.connect(self.select_end_date)
+        time_filters.addWidget(self.end_date_edit)
+
+        # 将日期筛选栏放在状态和机器筛选栏下方。
+        time_filters.addStretch()
+        layout.addLayout(time_filters)
 
         # 建立六列只读历史记录表格。
         content = QFrame()
@@ -279,7 +313,7 @@ class HistoryPage(QWidget):
         detail_layout.addLayout(actions)
 
     def refresh_history(self) -> None:
-        """进入历史页时更新机器选项和当前筛选结果。
+        """进入历史页时恢复不限时间并更新机器和记录。
 
         Args:
             无外部参数。
@@ -288,6 +322,13 @@ class HistoryPage(QWidget):
             返回示例：
                 None  # 机器选项与历史列表已刷新，读取失败时显示提示
         """
+        # 恢复不限时间的筛选状态。
+        self.unlimited_time_checkbox.blockSignals(True)
+        self.unlimited_time_checkbox.setChecked(True)
+        self.unlimited_time_checkbox.blockSignals(False)
+        self.start_date_edit.setEnabled(False)
+        self.end_date_edit.setEnabled(False)
+
         # 读取有历史记录的机器。
         result = self.controller.list_record_machines()
         if not result.success:
@@ -352,6 +393,56 @@ class HistoryPage(QWidget):
         self.current_page = 1
         self.reload_records()
 
+    def select_time_filter(self) -> None:
+        """切换不限时间选项并读取第一页记录。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 日期控件和历史列表已按时间筛选状态更新
+        """
+        dates_enabled = not self.unlimited_time_checkbox.isChecked()
+        self.start_date_edit.setEnabled(dates_enabled)
+        self.end_date_edit.setEnabled(dates_enabled)
+        self.current_page = 1
+        self.reload_records()
+
+    def select_start_date(self) -> None:
+        """更新开始日期并读取新范围的第一页记录。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 结束日期和历史列表已同步更新
+        """
+        if self.start_date_edit.date() > self.end_date_edit.date():
+            self.end_date_edit.blockSignals(True)
+            self.end_date_edit.setDate(self.start_date_edit.date())
+            self.end_date_edit.blockSignals(False)
+        self.current_page = 1
+        self.reload_records()
+
+    def select_end_date(self) -> None:
+        """更新结束日期并读取新范围的第一页记录。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 开始日期和历史列表已同步更新
+        """
+        if self.end_date_edit.date() < self.start_date_edit.date():
+            self.start_date_edit.blockSignals(True)
+            self.start_date_edit.setDate(self.end_date_edit.date())
+            self.start_date_edit.blockSignals(False)
+        self.current_page = 1
+        self.reload_records()
+
     def show_previous_page(self) -> None:
         """在上一页可用时读取上一页记录。
 
@@ -381,7 +472,7 @@ class HistoryPage(QWidget):
             self.reload_records()
 
     def reload_records(self) -> None:
-        """按当前状态和机器条件填充历史记录表格。
+        """按状态、机器和日期条件填充历史记录表格。
 
         Args:
             无外部参数。
@@ -390,12 +481,21 @@ class HistoryPage(QWidget):
             返回示例：
                 None  # 表格显示符合筛选条件的测量记录
         """
+        # 整理当前选择的本地日期范围。
+        start_date = None
+        end_date = None
+        if not self.unlimited_time_checkbox.isChecked():
+            start_date = self.start_date_edit.date().toPython()
+            end_date = self.end_date_edit.date().toPython()
+
         # 按当前筛选条件读取测量结果。
         result = self.controller.list_measurement_records(
             self.selected_review_status,
             self.machine_filter.currentData(),
             self.current_page,
             self.page_size,
+            start_date=start_date,
+            end_date=end_date,
         )
         if not result.success:
             # 清空记录和分页显示。

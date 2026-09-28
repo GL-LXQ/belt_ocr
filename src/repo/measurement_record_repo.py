@@ -67,14 +67,18 @@ class MeasurementRecordRepo:
         machine_id: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        start_finish_time: str | None = None,
+        end_finish_time: str | None = None,
     ) -> list[dict]:
-        """按复核状态和机器编号分页读取测量历史。
+        """按复核状态、机器和结束时间分页读取测量历史。
 
         Args:
             review_status: None 表示全部，normal、pending、reviewed 表示查询状态。
             machine_id: None 表示全部机器，否则筛选指定机器。
             limit: 本页最多读取的记录数。
             offset: 跳过的记录数。
+            start_finish_time: 可选的 UTC 结束时间下界。
+            end_finish_time: 可选的 UTC 结束时间排他上界。
 
         Returns:
             返回示例：
@@ -104,6 +108,12 @@ class MeasurementRecordRepo:
         if machine_id is not None:
             conditions.append("record.machine_id = ?")
             parameters.append(machine_id)
+        if start_finish_time is not None:
+            conditions.append("record.finish_time >= ?")
+            parameters.append(start_finish_time)
+        if end_finish_time is not None:
+            conditions.append("record.finish_time < ?")
+            parameters.append(end_finish_time)
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
 
         # 读取测量结果和对应机器名称。
@@ -125,13 +135,19 @@ class MeasurementRecordRepo:
         return [dict(row) for row in rows]
 
     def count_records(
-        self, review_status: str | None = None, machine_id: str | None = None
+        self,
+        review_status: str | None = None,
+        machine_id: str | None = None,
+        start_finish_time: str | None = None,
+        end_finish_time: str | None = None,
     ) -> int:
-        """统计当前复核状态和机器条件下的测量记录。
+        """统计当前复核状态、机器和结束时间条件下的记录。
 
         Args:
             review_status: None 表示全部，normal、pending、reviewed 表示查询状态。
             machine_id: None 表示全部机器，否则筛选指定机器。
+            start_finish_time: 可选的 UTC 结束时间下界。
+            end_finish_time: 可选的 UTC 结束时间排他上界。
 
         Returns:
             返回示例：
@@ -151,6 +167,12 @@ class MeasurementRecordRepo:
         if machine_id is not None:
             conditions.append("record.machine_id = ?")
             parameters.append(machine_id)
+        if start_finish_time is not None:
+            conditions.append("record.finish_time >= ?")
+            parameters.append(start_finish_time)
+        if end_finish_time is not None:
+            conditions.append("record.finish_time < ?")
+            parameters.append(end_finish_time)
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
 
         # 查询符合筛选条件的记录总数。

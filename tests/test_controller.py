@@ -1,6 +1,7 @@
 """验证界面业务结果、参数检查和监测线程生命周期。"""
 
 import os
+from datetime import date
 from pathlib import Path
 from threading import Event
 from unittest.mock import AsyncMock, Mock
@@ -273,6 +274,9 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
     assert not controller.list_measurement_records("invalid").success
     assert controller.list_measurement_records(page=0) == Result.error("分页参数无效。")
     assert controller.list_measurement_records(page_size=0) == Result.error("分页参数无效。")
+    assert controller.list_measurement_records(
+        start_date=date(2026, 9, 29), end_date=date(2026, 9, 28)
+    ) == Result.error("开始日期不能晚于结束日期。")
     assert not controller.get_measurement_record("  ").success
     assert not controller.complete_measurement_review("  ").success
     measurement_record_service.list_records.assert_not_called()
@@ -287,11 +291,15 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
         "total": 21,
         "total_pages": 2,
     }
-    result = controller.list_measurement_records("pending", "1", 2, 20)
+    start_date = date(2026, 9, 27)
+    end_date = date(2026, 9, 28)
+    result = controller.list_measurement_records(
+        "pending", "1", 2, 20, start_date=start_date, end_date=end_date
+    )
     assert result.success
     assert result.data == measurement_record_service.list_records.return_value
     measurement_record_service.list_records.assert_called_once_with(
-        "pending", "1", 2, 20
+        "pending", "1", 2, 20, start_date, end_date
     )
     review_error = MeasurementReviewAlreadyCompletedError("该记录已完成复核。")
     measurement_record_service.complete_review.side_effect = review_error

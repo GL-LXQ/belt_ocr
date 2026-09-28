@@ -1,6 +1,7 @@
 """统一接收界面请求并管理后台监测线程。"""
 
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -337,14 +338,18 @@ class AppController(QObject):
         machine_id: str | None = None,
         page: int = 1,
         page_size: int = 20,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> Result:
-        """检查复核状态并读取测量记录。
+        """检查筛选参数并读取测量记录。
 
         Args:
             review_status: None 或 normal、pending、reviewed。
             machine_id: 可选机器编号。
             page: 当前页码，从 1 开始。
             page_size: 每页最多显示的记录数。
+            start_date: 可选的本地开始日期。
+            end_date: 可选的本地结束日期。
 
         Returns:
             Result(
@@ -363,11 +368,13 @@ class AppController(QObject):
             return Result.error("复核状态无效。")
         if page < 1 or page_size < 1:
             return Result.error("分页参数无效。")
+        if start_date is not None and end_date is not None and start_date > end_date:
+            return Result.error("开始日期不能晚于结束日期。")
 
         # 读取筛选记录并转换预期服务故障。
         try:
             record_data = self.measurement_record_service.list_records(
-                review_status, machine_id, page, page_size
+                review_status, machine_id, page, page_size, start_date, end_date
             )
             return Result.ok(record_data)
         except MeasurementRecordServiceError as error:

@@ -3,7 +3,7 @@
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -11,7 +11,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QDate, QTimer
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
@@ -296,6 +296,124 @@ def test_measurement_record_pages_count_only_filtered_records(
     assert empty_page["total_pages"] == 1
 
 
+def test_measurement_records_filter_by_local_day_boundaries(
+    measurement_record_service: MeasurementRecordService,
+) -> None:
+    """验证本地日期开始边界包含且次日开始边界排除。
+
+    Args:
+        measurement_record_service: 已建立业务库的测量记录服务。
+
+    Returns:
+        返回示例：
+            None  # 查询仅返回所选本地日期内的记录
+    """
+    # 按当前系统本地时区计算所选日期的 UTC 边界。
+    selected_date = date(2026, 9, 28)
+    local_start = datetime.combine(selected_date, time.min).astimezone(timezone.utc)
+    local_end = datetime.combine(
+        selected_date + timedelta(days=1), time.min
+    ).astimezone(timezone.utc)
+    local_midday = datetime.combine(
+        selected_date, time(12, 0)
+    ).astimezone(timezone.utc)
+    finish_times = {
+        "before": local_start - timedelta(seconds=1),
+        "start": local_start,
+        "inside": local_midday,
+        "after": local_end,
+    }
+
+    # 替换原有记录并写入边界两侧的 UTC 时间。
+    database_path = measurement_record_service.measurement_record_repo.database_path
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DELETE FROM measurement_records")
+        connection.executemany(
+            "INSERT INTO measurement_records "
+            "(session_id, machine_id, start_time, finish_time, "
+            "ordered_lines, evidence_directory) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    session_id,
+                    "1",
+                    finish_time.isoformat(),
+                    finish_time.isoformat(),
+                    '["文字"]',
+                    str(database_path.parent / session_id),
+                )
+                for session_id, finish_time in finish_times.items()
+            ],
+        )
+
+    # 查询单日本地日期并核对排他结束边界。
+    page = measurement_record_service.list_records(
+        start_date=selected_date, end_date=selected_date
+    )
+    assert page["total"] == 2
+    assert page["total_pages"] == 1
+    assert [record["session_id"] for record in page["records"]] == [
+        "inside", "start"
+    ]
+
+
+def test_measurement_records_combine_date_status_machine_and_pagination(
+    paged_measurement_record_service: MeasurementRecordService,
+) -> None:
+    """验证日期、状态、机器和分页使用相同筛选条件。
+
+    Args:
+        paged_measurement_record_service: 已保存二十五条分页记录的服务。
+
+    Returns:
+        返回示例：
+            None  # 总数和当前页仅包含同时匹配全部筛选条件的记录
+    """
+    # 在相同状态和机器下增加下一本地日期的记录。
+    selected_date = datetime.fromisoformat(
+        "2026-09-27T08:00:00+00:00"
+    ).astimezone().date()
+    next_day_start = datetime.combine(
+        selected_date + timedelta(days=1), time.min
+    ).astimezone(timezone.utc).isoformat()
+    database_path = (
+        paged_measurement_record_service.measurement_record_repo.database_path
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO measurement_records "
+            "(session_id, machine_id, start_time, finish_time, "
+            "ordered_lines, evidence_directory, needs_review) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "outside-date",
+                "1",
+                next_day_start,
+                next_day_start,
+                '["其他日期"]',
+                str(database_path.parent / "outside-date"),
+                1,
+            ),
+        )
+
+    # 同时应用全部筛选条件并核对两页结果与稳定排序。
+    second_page = paged_measurement_record_service.list_records(
+        "pending", "1", 2, 5, selected_date, selected_date
+    )
+    fourth_page = paged_measurement_record_service.list_records(
+        "pending", "1", 4, 5, selected_date, selected_date
+    )
+    assert second_page["total"] == 21
+    assert second_page["total_pages"] == 5
+    assert second_page["page_size"] == 5
+    assert [record["session_id"] for record in second_page["records"]] == [
+        "page-15", "page-14", "page-13", "page-12", "page-11"
+    ]
+    assert [record["session_id"] for record in fourth_page["records"][:2]] == [
+        "page-05", "page-04"
+    ]
+
+
 def test_existing_measurement_table_adds_review_columns_without_losing_records(
     tmp_path: Path,
 ) -> None:
@@ -470,6 +588,9 @@ def test_history_page_shows_filters_and_read_only_details(
     try:
         # 页面进入时读取全部历史记录。
         page.refresh_history()
+        assert page.unlimited_time_checkbox.isChecked()
+        assert not page.start_date_edit.isEnabled()
+        assert not page.end_date_edit.isEnabled()
         assert page.table.rowCount() == 4
         assert page.table.item(0, 1).text() == "99"
         assert page.table.item(2, 3).text() == "--"
@@ -572,6 +693,88 @@ def test_history_page_turns_pages_and_resets_on_filter_changes(
         page.refresh_history()
         assert page.current_page == 1
         assert page.table.item(0, 2).text() == "文字 24"
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_history_page_filters_dates_and_restores_unlimited_time(
+    qt_application: QApplication,
+    paged_measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证日期筛选交互、日期顺序同步和重新进入时重置。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        paged_measurement_record_service: 已保存二十五条分页记录的服务。
+        monkeypatch: pytest 提供的对象替换工具。
+
+    Returns:
+        返回示例：
+            None  # 日期变化只查询一次第一页，重新进入恢复不限时间
+    """
+    controller = AppController(
+        Mock(), paged_measurement_record_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
+    try:
+        # 设置无记录的日期并确认默认不限时间仍显示全部记录。
+        page.refresh_history()
+        selected_date = datetime.fromisoformat(
+            "2026-09-27T08:00:00+00:00"
+        ).astimezone().date()
+        selected_qdate = QDate(
+            selected_date.year, selected_date.month, selected_date.day
+        )
+        previous_qdate = selected_qdate.addDays(-1)
+        page.start_date_edit.setDate(previous_qdate)
+        page.end_date_edit.setDate(previous_qdate)
+        assert page.record_count_label.text() == "共 25 条"
+        page.next_page_button.click()
+        assert page.current_page == 2
+
+        # 启用日期筛选后读取新范围的第一页。
+        page.unlimited_time_checkbox.click()
+        assert not page.unlimited_time_checkbox.isChecked()
+        assert page.start_date_edit.isEnabled()
+        assert page.end_date_edit.isEnabled()
+        assert page.current_page == 1
+        assert page.record_count_label.text() == "共 0 条"
+
+        # 开始日期超过结束日期时同步结束日期并只查询一次。
+        list_measurement_records = Mock(wraps=controller.list_measurement_records)
+        monkeypatch.setattr(
+            controller, "list_measurement_records", list_measurement_records
+        )
+        page.start_date_edit.setDate(selected_qdate)
+        assert page.end_date_edit.date() == selected_qdate
+        assert list_measurement_records.call_count == 1
+        assert page.record_count_label.text() == "共 25 条"
+        assert page.page_label.text() == "第 1 / 2 页"
+
+        # 结束日期提前时同步开始日期并回到第一页。
+        page.next_page_button.click()
+        assert page.current_page == 2
+        list_measurement_records.reset_mock()
+        page.end_date_edit.setDate(previous_qdate)
+        assert page.start_date_edit.date() == previous_qdate
+        assert list_measurement_records.call_count == 1
+        assert page.current_page == 1
+        assert page.record_count_label.text() == "共 0 条"
+
+        # 重新进入历史页恢复不限时间并只读取一次记录。
+        list_measurement_records.reset_mock()
+        page.refresh_history()
+        assert list_measurement_records.call_count == 1
+        assert page.unlimited_time_checkbox.isChecked()
+        assert not page.start_date_edit.isEnabled()
+        assert not page.end_date_edit.isEnabled()
+        assert page.start_date_edit.date() == previous_qdate
+        assert page.end_date_edit.date() == previous_qdate
+        assert page.record_count_label.text() == "共 25 条"
+        assert page.current_page == 1
     finally:
         page.detail_dialog.close()
         page.close()

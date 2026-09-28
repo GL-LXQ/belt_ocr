@@ -3,7 +3,7 @@
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from src.repo.measurement_record_repo import MeasurementRecordRepo
 
@@ -69,6 +69,8 @@ class MeasurementRecordService:
         machine_id: str | None = None,
         page: int = 1,
         page_size: int = 20,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> dict:
         """分页读取筛选结果并转换文字与复核字段。
 
@@ -77,6 +79,8 @@ class MeasurementRecordService:
             machine_id: None 表示全部机器，否则筛选指定机器。
             page: 当前页码，从 1 开始。
             page_size: 每页最多显示的记录数。
+            start_date: 可选的本地开始日期。
+            end_date: 可选的本地结束日期。
 
         Returns:
             返回示例：
@@ -100,16 +104,35 @@ class MeasurementRecordService:
                     "total_pages": 1,  # 筛选后的总页数
                 }
         """
-        # 统计当前筛选条件下的记录。
         try:
+            # 将本地开始日期转换为 UTC 下界。
+            start_finish_time = None
+            if start_date is not None:
+                start_finish_time = datetime.combine(
+                    start_date, time.min
+                ).astimezone(timezone.utc).isoformat()
+
+            # 将本地结束日期的次日零点转换为 UTC 上界。
+            end_finish_time = None
+            if end_date is not None:
+                end_finish_time = datetime.combine(
+                    end_date + timedelta(days=1), time.min
+                ).astimezone(timezone.utc).isoformat()
+
+            # 统计当前筛选条件下的记录。
             total = self.measurement_record_repo.count_records(
-                review_status, machine_id
+                review_status, machine_id, start_finish_time, end_finish_time
             )
 
             # 计算当前位置并读取当前页记录。
             offset = (page - 1) * page_size
             records = self.measurement_record_repo.list_records(
-                review_status, machine_id, limit=page_size, offset=offset
+                review_status,
+                machine_id,
+                limit=page_size,
+                offset=offset,
+                start_finish_time=start_finish_time,
+                end_finish_time=end_finish_time,
             )
 
             # 转换当前页的存储字段。
