@@ -13,7 +13,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, QTimer
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from qfluentwidgets import InfoBar
 
 from config_util import AppConfig
 from database import Database, MeasurementRecord
@@ -749,7 +750,7 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
             controller, "list_measurement_records", list_measurement_records
         )
         page.start_date_edit.setDate(selected_qdate)
-        assert page.end_date_edit.date() == selected_qdate
+        assert page.end_date_edit.getDate() == selected_qdate
         assert list_measurement_records.call_count == 1
         assert page.record_count_label.text() == "共 25 条"
         assert page.page_label.text() == "第 1 / 2 页"
@@ -759,7 +760,7 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert page.current_page == 2
         list_measurement_records.reset_mock()
         page.end_date_edit.setDate(previous_qdate)
-        assert page.start_date_edit.date() == previous_qdate
+        assert page.start_date_edit.getDate() == previous_qdate
         assert list_measurement_records.call_count == 1
         assert page.current_page == 1
         assert page.record_count_label.text() == "共 0 条"
@@ -771,8 +772,8 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert page.unlimited_time_checkbox.isChecked()
         assert not page.start_date_edit.isEnabled()
         assert not page.end_date_edit.isEnabled()
-        assert page.start_date_edit.date() == previous_qdate
-        assert page.end_date_edit.date() == previous_qdate
+        assert page.start_date_edit.getDate() == previous_qdate
+        assert page.end_date_edit.getDate() == previous_qdate
         assert page.record_count_label.text() == "共 25 条"
         assert page.current_page == 1
     finally:
@@ -816,7 +817,7 @@ def test_history_page_clears_pagination_after_query_failure(
             assert page.next_page_button.isEnabled()
         assert page.record_count_label.text() == "共 25 条"
         warning_message = Mock()
-        monkeypatch.setattr(QMessageBox, "warning", warning_message)
+        monkeypatch.setattr(InfoBar, "error", warning_message)
 
         # 让对应查询失败并触发页面刷新。
         if failure_source == "machines":
@@ -842,7 +843,7 @@ def test_history_page_clears_pagination_after_query_failure(
         assert not page.previous_page_button.isEnabled()
         assert not page.next_page_button.isEnabled()
         warning_message.assert_called_once_with(
-            page, "历史记录读取失败", "模拟读取失败"
+            "历史记录读取失败", "模拟读取失败", duration=-1, parent=page
         )
         page.previous_page_button.click()
         page.next_page_button.click()
@@ -974,7 +975,7 @@ def test_stale_history_detail_cannot_review_record_twice(
             None  # 第二次提交提示并显示最新已复核详情
     """
     warning_message = Mock()
-    monkeypatch.setattr(QMessageBox, "warning", warning_message)
+    monkeypatch.setattr(InfoBar, "error", warning_message)
     controller = AppController(
         Mock(), measurement_record_service, Mock(), Path("config")
     )
@@ -988,7 +989,8 @@ def test_stale_history_detail_cannot_review_record_twice(
         page.save_review_button.click()
 
         # 重复操作提示失败并重新显示已复核详情。
-        assert warning_message.call_args.args[2] == "该记录已完成复核。"
+        assert warning_message.call_args.args[1] == "该记录已完成复核。"
+        assert warning_message.call_args.kwargs["parent"] is page.detail_dialog.widget
         assert page.detail_values["status"].text() == "已复核"
         assert page.review_editor.isHidden()
         assert page.confirm_review_button.isHidden()
@@ -1022,7 +1024,7 @@ def test_other_review_error_keeps_current_detail(
             None  # 普通失败保留当前待复核详情
     """
     warning_message = Mock()
-    monkeypatch.setattr(QMessageBox, "warning", warning_message)
+    monkeypatch.setattr(InfoBar, "error", warning_message)
     controller = AppController(
         Mock(), measurement_record_service, Mock(), Path("config")
     )
@@ -1035,7 +1037,8 @@ def test_other_review_error_keeps_current_detail(
         page.save_review_button.click()
 
         # 普通失败保留编辑状态且不重新读取详情。
-        assert warning_message.call_args.args[2] == "人工复核结果至少需要一条有效文字。"
+        assert warning_message.call_args.args[1] == "人工复核结果至少需要一条有效文字。"
+        assert warning_message.call_args.kwargs["parent"] is page.detail_dialog.widget
         page.show_record_detail.assert_not_called()
         assert page.detail_values["status"].text() == "待复核"
         assert not page.review_editor.isHidden()

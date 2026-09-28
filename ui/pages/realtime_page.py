@@ -1,27 +1,33 @@
 """实时监测页面、机器卡片和步骤进度组件。"""
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
-    QPushButton,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+)
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    FluentIcon,
+    InfoBar,
+    PrimaryPushButton,
+    PushButton,
+    ScrollArea,
+    SimpleCardWidget,
+    SubtitleLabel,
+    TitleLabel,
 )
 
 from src.controller.controller import AppController
 from ui.belt_animation import BeltAnimationWidget
 from ui.theme import create_icon
 
-
-# 卡片区每行固定放置的机器数量。
-CARDS_PER_ROW = 3
 
 # 本轮处理阶段按界面展示顺序排列。
 PROGRESS_STAGE_TITLES = {
@@ -100,18 +106,26 @@ class StepProgress(QFrame):
         for index, dot in enumerate(self.dots):
             progress_status = progress_statuses.get(stage_names[index])
             color = {
-                "running": "#2F7CF6",
+                "running": "#2563EB",
                 "success": "#18AE59",
                 "failed": "#EF4444",
             }.get(progress_status, "#C5CFDA")
             icon_name = "check" if progress_status == "success" else "close"
             icon = create_icon(icon_name, "white").pixmap(QSize(16, 16))
-            dot.setPixmap(icon if progress_status in ("success", "failed") else QPixmap())
+            dot.setPixmap(
+                icon if progress_status in ("success", "failed") else QPixmap()
+            )
             active = progress_status in ("running", "failed")
-            border = "#A6C9FF" if progress_status == "running" else "#FFD0D0" if progress_status == "failed" else "white"
-            self.step_labels[index].setStyleSheet("color: #34465F; font-weight: bold;" if active else "")
+            border = {
+                "running": "#A6C9FF",
+                "failed": "#FFD0D0",
+            }.get(progress_status, "white")
+            self.step_labels[index].setStyleSheet(
+                "color: #34465F; font-weight: bold;" if active else ""
+            )
             dot.setStyleSheet(
-                f"background: {color}; color: white; border: 2px solid {border}; border-radius: 12px;"
+                f"background: {color}; color: white; "
+                f"border: 2px solid {border}; border-radius: 12px;"
             )
 
     def resizeEvent(self, event):
@@ -135,7 +149,7 @@ class StepProgress(QFrame):
             connector.setGeometry(left, left_dot.center().y(), right - left, 2)
 
 
-class MachineCard(QFrame):
+class MachineCard(SimpleCardWidget):
     """展示一台机器的动画、状态、频率和进度。"""
 
     def __init__(self, data: dict):
@@ -152,94 +166,77 @@ class MachineCard(QFrame):
         self.setObjectName("machineCard")
         self.progress_session_id = ""
         self.progress_statuses = {}
-        self.setMinimumWidth(326)
-        # 高度按内容决定，可以被拉高但不会被压扁。
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.setMinimumWidth(280)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 14)
-        layout.setSpacing(8)
+        layout.setContentsMargins(18, 16, 18, 18)
+        layout.setSpacing(12)
 
         # 创建机器标题和状态徽标。
         heading = QHBoxLayout()
-        self.machine_icon = QLabel()
-        self.machine_icon.setFixedSize(28, 28)
-        heading.addWidget(self.machine_icon)
-        self.title = QLabel()
+        self.title = SubtitleLabel()
         self.title.setObjectName("machineTitle")
+        self.title.setWordWrap(True)
         self.badge = QLabel()
         self.badge.setObjectName("machineBadge")
         heading.addWidget(self.title)
         heading.addStretch()
         heading.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(heading)
+        heading_divider = QFrame()
+        heading_divider.setFrameShape(QFrame.Shape.HLine)
+        heading_divider.setObjectName("cardDivider")
+        layout.addWidget(heading_divider)
 
         # 在卡片画面区域显示皮带机动画。
         self.belt_animation = BeltAnimationWidget()
-        layout.addWidget(self.belt_animation, 1)
+        layout.addWidget(self.belt_animation)
+        animation_divider = QFrame()
+        animation_divider.setFrameShape(QFrame.Shape.HLine)
+        animation_divider.setObjectName("cardDivider")
+        layout.addWidget(animation_divider)
 
-        # 创建当前状态、OCR 结果和实时频率三栏。
+        # 在同一行显示当前状态与实时频率。
         metrics = QHBoxLayout()
-        metrics.setSpacing(8)
-        self.state_label = QLabel()
+        metrics.setSpacing(16)
+        state_panel = QVBoxLayout()
+        state_panel.setSpacing(4)
+        state_panel.addWidget(CaptionLabel("当前状态"))
+        self.state_label = BodyLabel()
         self.state_label.setWordWrap(True)
-        self.state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.frequency_label = QLabel()
-        self.frequency_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.state_icon = QLabel()
-        self.state_icon.setObjectName("stateIcon")
-        self.state_icon.setFixedSize(50, 50)
-        self.state_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.frequency_icon = QLabel()
-        self.frequency_icon.setFixedSize(68, 68)
-        self.frequency_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.frequency_icon.setAccessibleName("实时频率")
+        state_panel.addWidget(self.state_label)
+        frequency_panel = QVBoxLayout()
+        frequency_panel.setSpacing(4)
+        frequency_panel.addWidget(CaptionLabel("实时频率"))
+        self.frequency_label = BodyLabel()
+        frequency_panel.addWidget(self.frequency_label)
+        metrics.addLayout(state_panel, 2)
+        metrics.addLayout(frequency_panel, 1)
+        layout.addLayout(metrics)
+        metrics_divider = QFrame()
+        metrics_divider.setFrameShape(QFrame.Shape.HLine)
+        metrics_divider.setObjectName("cardDivider")
+        layout.addWidget(metrics_divider)
+
+        # 让 OCR 文字独占整行并支持复制。
+        layout.addWidget(CaptionLabel("OCR 识别结果"))
         self.ocr_result_label = QLabel("--")
         self.ocr_result_label.setObjectName("ocrResult")
         self.ocr_result_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.clear_ocr_result()
         self.ocr_result_label.setWordWrap(True)
-        self.ocr_result_label.setMinimumHeight(120)
-
-        # 适当增加频率栏宽度，并让 OCR 栏仍明显更宽。
-        metric_items = (
-            (self.state_label, self.state_icon, 4),
-            (self.ocr_result_label, None, 8),
-            (self.frequency_label, self.frequency_icon, 5),
+        self.ocr_result_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        for value, value_icon, stretch in metric_items:
-            panel = QFrame()
-            panel.setObjectName("metricPanel")
-            panel_layout = QVBoxLayout(panel)
-            is_ocr_value = value is self.ocr_result_label
-            horizontal_margin = 8 if is_ocr_value else 0
-            panel_layout.setContentsMargins(
-                horizontal_margin,
-                6,
-                horizontal_margin,
-                6,
-            )
-            panel_layout.setSpacing(4)
-            if is_ocr_value:
-                panel_layout.addWidget(value, 1, Qt.AlignmentFlag.AlignTop)
-            else:
-                # 将图标和对应数值作为一组垂直居中显示。
-                panel_layout.addStretch(1)
-                panel_layout.addWidget(value_icon, 0, Qt.AlignmentFlag.AlignHCenter)
-                value.setObjectName("metricValue")
-                panel_layout.addWidget(value, 0, Qt.AlignmentFlag.AlignHCenter)
-                panel_layout.addStretch(1)
-            metrics.addWidget(panel, stretch)
-        layout.addLayout(metrics)
+        layout.addWidget(self.ocr_result_label)
+        self.clear_ocr_result()
+        ocr_divider = QFrame()
+        ocr_divider.setFrameShape(QFrame.Shape.HLine)
+        ocr_divider.setObjectName("cardDivider")
+        layout.addWidget(ocr_divider)
 
         # 创建本轮步骤进度区域。
-        progress_panel = QFrame()
-        progress_panel.setObjectName("metricPanel")
-        progress_layout = QVBoxLayout(progress_panel)
-        progress_layout.setContentsMargins(8, 8, 8, 10)
-        progress_layout.setSpacing(6)
         self.steps = StepProgress()
-        progress_layout.addWidget(self.steps)
-        layout.addWidget(progress_panel)
+        layout.addWidget(self.steps)
 
         self.update_data(data)
 
@@ -260,26 +257,10 @@ class MachineCard(QFrame):
         self.state_label.setText(data["state"])
         self.frequency_label.setText(data["frequency"])
 
-        # 复用主题 SVG 图标，设置状态圆形图标和频率波形。
-        color = {"running": "normal", "idle": "muted", "waiting": "warning"}[data["tone"]]
-        state_icon = {"running": "play", "idle": "pause", "waiting": "hourglass"}[data["tone"]]
-        machine_icon = {"running": "alarm", "idle": "fan", "waiting": "warning_mark"}[data["tone"]]
-        self.state_icon.setPixmap(
-            create_icon(state_icon, "white").pixmap(QSize(30, 30))
-        )
-        self.state_icon.setAccessibleName(data["state"])
-        self.frequency_icon.setPixmap(
-            create_icon("pulse", color).pixmap(QSize(64, 64))
-        )
-        machine_color = "white" if data["tone"] == "waiting" else "blue" if data["tone"] == "idle" else color
-        self.machine_icon.setPixmap(create_icon(machine_icon, machine_color).pixmap(QSize(28, 28)))
-        self.machine_icon.setStyleSheet(
-            "background: #FFA43A; border-radius: 14px;" if data["tone"] == "waiting" else ""
-        )
-
-        for widget in (self, *self.findChildren(QWidget)):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
+        # 刷新小面积状态徽标。
+        self.badge.setProperty("tone", data["tone"])
+        self.badge.style().unpolish(self.badge)
+        self.badge.style().polish(self.badge)
         self.update()
 
     def set_frequency(self, frequency: float | None) -> None:
@@ -295,7 +276,9 @@ class MachineCard(QFrame):
         frequency_text = "--" if frequency is None else f"{frequency:.1f} Hz"
         self.frequency_label.setText(frequency_text)
 
-    def set_ocr_result(self, ordered_lines: tuple[str, ...], normalized_lines: tuple[str, ...]) -> None:
+    def set_ocr_result(
+        self, ordered_lines: tuple[str, ...], normalized_lines: tuple[str, ...]
+    ) -> None:
         """按去空格文字长度分类显示原始 OCR 文字。
 
         Args:
@@ -342,17 +325,18 @@ class MachineCard(QFrame):
 class RealtimePage(QWidget):
     """组织机器卡片和监测状态展示。"""
 
-    def __init__(self, controller: AppController):
+    def __init__(self, controller: AppController, parent: QWidget | None = None):
         """初始化布局、机器卡片和本地交互。
 
         Args:
             controller: 界面业务控制器。
+            parent: 所属主窗口。
 
         Returns:
             返回示例：
                 None  # 创建实时监测页面，子控件随页面释放
         """
-        super().__init__()
+        super().__init__(parent)
         self.setObjectName("realtime")
         self.controller = controller
         self.closing_requested = False
@@ -361,58 +345,48 @@ class RealtimePage(QWidget):
         self.measurement_states_by_machine_id = {}
         self.cards_by_machine_id = {}
         outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        self.scroll_area = QScrollArea()
+        outer_layout.setContentsMargins(24, 24, 24, 24)
+        outer_layout.setSpacing(20)
+
+        # 固定页面标题和监测操作区。
+        header = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(4)
+        titles.addWidget(TitleLabel("实时监测"))
+        titles.addWidget(BodyLabel("查看当前机器的检测状态"))
+        header.addLayout(titles)
+        header.addStretch()
+        self.start_button = PrimaryPushButton(FluentIcon.PLAY, "启动监测")
+        self.stop_button = PushButton(FluentIcon.PAUSE, "停止监测")
+        self.refresh_button = PushButton(FluentIcon.SYNC, "刷新")
+        for button in (self.start_button, self.stop_button, self.refresh_button):
+            header.addWidget(button)
+        self.stop_button.setEnabled(False)
+        outer_layout.addLayout(header)
+
+        # 将机器卡片放入可滚动区域。
+        self.scroll_area = ScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         outer_layout.addWidget(self.scroll_area)
         content = QWidget()
         content.setObjectName("monitorContent")
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(14)
+        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setSpacing(16)
         self.scroll_area.setWidget(content)
 
-        # 复用主题图标与页面标题样式，创建操作区域。
-        header = QHBoxLayout()
-        icon = QLabel()
-        icon.setPixmap(create_icon("pulse", "blue").pixmap(QSize(26, 26)))
-        header.addWidget(icon)
-        titles = QVBoxLayout()
-        titles.setSpacing(2)
-        title = QLabel("实时监测")
-        title.setObjectName("pageTitle")
-        subtitle = QLabel("实时查看皮带机的检测画面、状态和事件")
-        subtitle.setObjectName("pageSubtitle")
-        titles.addWidget(title)
-        titles.addWidget(subtitle)
-        header.addLayout(titles)
-        header.addStretch()
-        self.start_button = QPushButton("▶  启动监测")
-        self.stop_button = QPushButton("■  停止监测")
-        self.refresh_button = QPushButton("⟳  刷新")
-        for button, name in (
-            (self.start_button, "startAll"),
-            (self.stop_button, "stopAll"),
-            (self.refresh_button, "refreshDemo"),
-        ):
-            button.setObjectName(name)
-            button.setFixedHeight(38)
-            button.setMinimumWidth(96)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            header.addWidget(button)
-        self.stop_button.setEnabled(False)
-        layout.addLayout(header)
-
-        # 创建卡片网格，每行固定放置几台机器。
+        # 网格靠上排列，空余高度留在底部。
         cards_layout = QGridLayout()
-        cards_layout.setSpacing(12)
-        for column in range(CARDS_PER_ROW):
-            cards_layout.setColumnStretch(column, 1)
+        cards_layout.setSpacing(16)
+        cards_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.cards_layout = cards_layout
         self.machine_cards = []
         self.empty_hint = None
-        layout.addLayout(cards_layout, 1)
+        self.card_column_count = 0
+        layout.addLayout(cards_layout)
+        layout.addStretch(1)
+        self.scroll_area.viewport().installEventFilter(self)
 
         # 绑定页面操作按钮。
         self.start_button.clicked.connect(self.start_monitoring)
@@ -448,10 +422,11 @@ class RealtimePage(QWidget):
         if result.success:
             self.machines = result.data["machines"]
         else:
-            QMessageBox.warning(self, "机器读取失败", result.message)
+            InfoBar.error("机器读取失败", result.message, duration=-1, parent=self)
             self.machines = []
         self.populate_cards()
-        # 通知滚动区按新的卡片行数重新计算内容高度。
+        # 按当前滚动区宽度排列卡片。
+        self.reflow_cards()
         self.scroll_area.widget().updateGeometry()
 
     def populate_cards(self):
@@ -473,6 +448,7 @@ class RealtimePage(QWidget):
         self.machine_cards = []
         self.cards_by_machine_id = {}
         self.empty_hint = None
+        self.card_column_count = 0
 
         # 没有机器时显示横跨整行的空态提示。
         if not self.machines:
@@ -480,11 +456,11 @@ class RealtimePage(QWidget):
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             hint.setStyleSheet("color: #73849B;")
             self.empty_hint = hint
-            self.cards_layout.addWidget(hint, 0, 0, 1, CARDS_PER_ROW)
+            self.cards_layout.addWidget(hint, 0, 0)
             return
 
         # 按机器编号创建卡片，并恢复最近一次连接结果。
-        for index, machine in enumerate(self.machines):
+        for machine in self.machines:
             card = MachineCard({
                 "title": machine["machine_name"],
                 "tone": "idle",
@@ -492,7 +468,6 @@ class RealtimePage(QWidget):
                 "state": "未启动监测",
                 "frequency": "--",
             })
-            self.cards_layout.addWidget(card, index // CARDS_PER_ROW, index % CARDS_PER_ROW)
             self.machine_cards.append(card)
             machine_id = str(machine["id"])
             self.cards_by_machine_id[machine_id] = card
@@ -526,6 +501,56 @@ class RealtimePage(QWidget):
             status, reason = self.connection_states.get(machine_id, ("未启动", ""))
             self.update_connection_state(machine_id, status, reason)
 
+    def reflow_cards(self):
+        """按滚动区宽度重新排列已有机器卡片。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 卡片实例已按一至三列排列
+        """
+        if not self.machine_cards:
+            return
+        available_width = self.scroll_area.viewport().width()
+        column_count = max(1, min(3, (available_width + 16) // 376))
+        if column_count == self.card_column_count:
+            return
+
+        # 清除旧位置和列宽，再复用原有卡片。
+        while self.cards_layout.count():
+            self.cards_layout.takeAt(0)
+        for column_index in range(3):
+            self.cards_layout.setColumnStretch(column_index, 0)
+            self.cards_layout.setColumnMinimumWidth(column_index, 0)
+        for card_index, card in enumerate(self.machine_cards):
+            self.cards_layout.addWidget(
+                card,
+                card_index // column_count,
+                card_index % column_count,
+            )
+        for column_index in range(column_count):
+            self.cards_layout.setColumnStretch(column_index, 1)
+        self.card_column_count = column_count
+        self.scroll_area.widget().updateGeometry()
+
+    def eventFilter(self, watched, event):
+        """在滚动区宽度变化时重新排列卡片。
+
+        Args:
+            watched: 接收事件的控件。
+            event: Qt 事件。
+
+        Returns:
+            bool  # 事件交给父类继续处理
+        """
+        if (
+            watched is self.scroll_area.viewport()
+            and event.type() == QEvent.Type.Resize
+        ):
+            self.reflow_cards()
+        return super().eventFilter(watched, event)
+
     def start_monitoring(self):
         """读取机器卡片并启动一次后台监测。
 
@@ -538,7 +563,7 @@ class RealtimePage(QWidget):
         # 请求启动监测并显示启动失败提示。
         result = self.controller.start_monitoring()
         if not result.success:
-            QMessageBox.warning(self, "启动失败", result.message)
+            InfoBar.error("启动失败", result.message, duration=-1, parent=self)
             return
 
         # 重读机器清单并切换按钮状态。
@@ -594,7 +619,9 @@ class RealtimePage(QWidget):
         })
         card.setToolTip(reason)
 
-    def update_measurement_progress(self, machine_id: str, session_id: str, stage: str, status: str):
+    def update_measurement_progress(
+        self, machine_id: str, session_id: str, stage: str, status: str
+    ):
         """将后台发送的本轮阶段状态更新到对应机器卡片。
 
         Args:
@@ -728,7 +755,9 @@ class RealtimePage(QWidget):
             return
 
         # 保留轻量文字缓存并更新仍在页面中的卡片。
-        self.ocr_results_by_machine_id[machine_id] = (session_id, ordered_lines, normalized_lines)
+        self.ocr_results_by_machine_id[machine_id] = (
+            session_id, ordered_lines, normalized_lines
+        )
         card = self.cards_by_machine_id.get(machine_id)
         if card is not None:
             card.set_ocr_result(ordered_lines, normalized_lines)
@@ -763,5 +792,5 @@ class RealtimePage(QWidget):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         if failure_message and not self.closing_requested:
-            QMessageBox.warning(self, "监测已停止", failure_message)
+            InfoBar.error("监测已停止", failure_message, duration=-1, parent=self)
 

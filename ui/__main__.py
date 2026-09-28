@@ -21,6 +21,7 @@ from src.repo.abnormal_event_repo import AbnormalEventRepo
 from src.repo.machine_repo import MachineRepo
 from src.repo.measurement_record_repo import MeasurementRecordRepo
 from ui.main_window import MainWindow
+from ui.theme import initialize_theme
 
 
 def run_desktop_preview() -> int:
@@ -41,6 +42,7 @@ def run_desktop_preview() -> int:
 
     # 初始化应用实例和产品信息。
     application = QApplication(sys.argv)
+    initialize_theme()
     application.setApplicationName("BeltVision")
     application.setApplicationVersion("1.0.0")
 

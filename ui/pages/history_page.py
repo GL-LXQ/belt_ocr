@@ -7,8 +7,6 @@ from PySide6.QtCore import QDate, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QButtonGroup,
-    QDateEdit,
     QDialog,
     QFormLayout,
     QFrame,
@@ -16,24 +14,32 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QMessageBox,
-    QPlainTextEdit,
-    QScrollArea,
     QSizePolicy,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
+    BodyLabel,
+    CalendarPicker,
+    CaptionLabel,
     CheckBox,
     ComboBox,
+    InfoBar,
+    MaskDialogBase,
+    PlainTextEdit,
     PrimaryPushButton,
     PushButton,
+    ScrollArea,
+    SegmentedWidget,
+    SimpleCardWidget,
+    SubtitleLabel,
     TableWidget,
+    TitleLabel,
+    TransparentPushButton,
 )
 
 from src.controller.controller import AppController
-from ui.theme import create_icon
 
 
 def format_history_time(timestamp: str) -> str:
@@ -66,17 +72,20 @@ def format_history_frequency(frequency: float | None) -> str:
 class HistoryPage(QWidget):
     """组织测量历史筛选、表格、详情和人工复核。"""
 
-    def __init__(self, controller: AppController) -> None:
+    def __init__(
+        self, controller: AppController, parent: QWidget | None = None
+    ) -> None:
         """建立历史记录页面并连接筛选交互。
 
         Args:
             controller: 界面业务控制器。
+            parent: 所属主窗口。
 
         Returns:
             返回示例：
                 None  # 页面控件已建立，进入页面时再读取历史记录
         """
-        super().__init__()
+        super().__init__(parent)
         self.setObjectName("history")
         self.controller = controller
         self.selected_review_status: str | None = None
@@ -85,59 +94,65 @@ class HistoryPage(QWidget):
 
         # 创建页面标题和说明。
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(12)
-        header = QHBoxLayout()
-        icon = QLabel()
-        icon.setPixmap(create_icon("history", "blue").pixmap(QSize(24, 24)))
-        header.addWidget(icon)
-        heading = QVBoxLayout()
-        title = QLabel("历史记录")
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(20)
+        title = TitleLabel("历史记录")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("查看已保存的测量结果并处理待复核记录")
+        subtitle = BodyLabel("查看已保存的测量结果并处理待复核记录")
         subtitle.setObjectName("pageSubtitle")
+        heading = QVBoxLayout()
+        heading.setSpacing(4)
         heading.addWidget(title)
         heading.addWidget(subtitle)
-        header.addLayout(heading)
-        header.addStretch()
-        layout.addLayout(header)
+        layout.addLayout(heading)
 
-        # 建立状态按钮和机器筛选框。
+        # 在筛选卡片中建立状态和机器条件。
+        filter_card = SimpleCardWidget()
+        filter_layout = QVBoxLayout(filter_card)
+        filter_layout.setContentsMargins(20, 16, 20, 16)
+        filter_layout.setSpacing(12)
         filters = QHBoxLayout()
-        filters.setSpacing(8)
-        self.status_buttons: dict[str | None, PushButton] = {}
-        status_group = QButtonGroup(self)
-        status_group.setExclusive(True)
-        for review_status, caption in (
-            (None, "全部"),
+        filters.setSpacing(12)
+        self.status_filter = SegmentedWidget(self)
+        status_values = {
+            "all": None,
+            "normal": "normal",
+            "pending": "pending",
+            "reviewed": "reviewed",
+        }
+        self.status_buttons = {}
+        for route_key, caption in (
+            ("all", "全部"),
             ("normal", "正常"),
             ("pending", "待复核"),
             ("reviewed", "已复核"),
         ):
-            button = PushButton(caption)
-            button.setCheckable(True)
-            button.setProperty("historyFilter", True)
-            status_group.addButton(button)
-            button.clicked.connect(
-                lambda checked=False, status=review_status: self.select_status(status)
+            review_status = status_values[route_key]
+            segment = self.status_filter.addItem(
+                route_key,
+                caption,
+                onClick=lambda checked=False, status=review_status: (
+                    self.select_status(status)
+                ),
             )
-            self.status_buttons[review_status] = button
-            filters.addWidget(button)
-        self.status_buttons[None].setChecked(True)
-        filters.addSpacing(24)
-        filters.addWidget(QLabel("机器："))
+            self.status_buttons[review_status] = segment
+            self.status_buttons[route_key] = segment
+        self.status_filter.setCurrentItem("all")
+        filters.addWidget(self.status_filter)
+        filters.addStretch()
+        filters.addWidget(BodyLabel("机器"))
         self.machine_filter = ComboBox()
         self.machine_filter.setObjectName("historyMachineFilter")
         self.machine_filter.addItem("全部机器", userData=None)
         self.machine_filter.setMinimumWidth(170)
         self.machine_filter.currentIndexChanged.connect(self.select_machine)
         filters.addWidget(self.machine_filter)
-        filters.addStretch()
-        layout.addLayout(filters)
+        filter_layout.addLayout(filters)
 
         # 建立不限时间开关。
         time_filters = QHBoxLayout()
-        time_filters.addWidget(QLabel("时间："))
+        time_filters.setSpacing(12)
+        time_filters.addWidget(BodyLabel("时间"))
         self.unlimited_time_checkbox = CheckBox("不限时间")
         self.unlimited_time_checkbox.setChecked(True)
         self.unlimited_time_checkbox.toggled.connect(self.select_time_filter)
@@ -145,31 +160,34 @@ class HistoryPage(QWidget):
 
         # 建立开始日期控件。
         current_date = QDate.currentDate()
-        time_filters.addSpacing(24)
-        time_filters.addWidget(QLabel("开始："))
-        self.start_date_edit = QDateEdit(current_date)
-        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.start_date_edit.setCalendarPopup(True)
+        time_filters.addSpacing(12)
+        time_filters.addWidget(BodyLabel("开始"))
+        self.start_date_edit = CalendarPicker(self)
+        self.start_date_edit.setDate(current_date)
+        self.start_date_edit.setDateFormat("yyyy-MM-dd")
+        self.start_date_edit.setResetEnabled(False)
         self.start_date_edit.setEnabled(False)
         self.start_date_edit.dateChanged.connect(self.select_start_date)
         time_filters.addWidget(self.start_date_edit)
 
         # 建立结束日期控件。
-        time_filters.addWidget(QLabel("结束："))
-        self.end_date_edit = QDateEdit(current_date)
-        self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.end_date_edit.setCalendarPopup(True)
+        time_filters.addWidget(BodyLabel("结束"))
+        self.end_date_edit = CalendarPicker(self)
+        self.end_date_edit.setDate(current_date)
+        self.end_date_edit.setDateFormat("yyyy-MM-dd")
+        self.end_date_edit.setResetEnabled(False)
         self.end_date_edit.setEnabled(False)
         self.end_date_edit.dateChanged.connect(self.select_end_date)
         time_filters.addWidget(self.end_date_edit)
 
         # 将日期筛选栏放在状态和机器筛选栏下方。
         time_filters.addStretch()
-        layout.addLayout(time_filters)
+        filter_layout.addLayout(time_filters)
+        layout.addWidget(filter_card)
 
         # 建立六列只读历史记录表格。
-        content = QFrame()
-        content.setObjectName("pageContent")
+        content = SimpleCardWidget()
+        content.setObjectName("historyRecordsCard")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(16, 16, 16, 16)
         self.table = TableWidget()
@@ -180,9 +198,11 @@ class HistoryPage(QWidget):
         ))
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(48)
+        self.table.setShowGrid(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSortingEnabled(False)
         table_header = self.table.horizontalHeader()
         table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for column, width in ((0, 170), (1, 140), (3, 110), (4, 100), (5, 80)):
@@ -191,14 +211,14 @@ class HistoryPage(QWidget):
 
         # 在表格下方显示筛选后的总数和翻页入口。
         pagination_layout = QHBoxLayout()
-        self.record_count_label = QLabel("共 0 条")
+        self.record_count_label = CaptionLabel("共 0 条")
         pagination_layout.addWidget(self.record_count_label)
         pagination_layout.addStretch()
         self.previous_page_button = PushButton("上一页")
         self.previous_page_button.setEnabled(False)
         self.previous_page_button.clicked.connect(self.show_previous_page)
         pagination_layout.addWidget(self.previous_page_button)
-        self.page_label = QLabel("第 1 / 1 页")
+        self.page_label = CaptionLabel("第 1 / 1 页")
         pagination_layout.addWidget(self.page_label)
         self.next_page_button = PushButton("下一页")
         self.next_page_button.setEnabled(False)
@@ -220,15 +240,29 @@ class HistoryPage(QWidget):
             返回示例：
                 None  # 详情字段、人工复核控件和关闭按钮已建立
         """
-        # 创建弹窗和基本字段展示区。
-        self.detail_dialog = QDialog(self)
+        # 创建遮罩弹窗和可滚动正文。
+        dialog_parent = self.parentWidget() or self
+        self.detail_dialog = MaskDialogBase(dialog_parent)
         self.detail_dialog.setObjectName("historyDetail")
-        self.detail_dialog.setWindowTitle("测量记录详情")
-        self.detail_dialog.setWindowFlag(
-            Qt.WindowType.WindowContextHelpButtonHint, False
+        self.detail_dialog.widget.setObjectName("historyDetailContent")
+        self.detail_dialog.widget.setFixedSize(
+            min(900, dialog_parent.width() - 80),
+            min(780, dialog_parent.height() - 80),
         )
-        self.detail_dialog.resize(640, 780)
-        detail_layout = QVBoxLayout(self.detail_dialog)
+        detail_layout = QVBoxLayout(self.detail_dialog.widget)
+        detail_layout.setContentsMargins(24, 22, 24, 20)
+        detail_layout.setSpacing(14)
+        detail_layout.addWidget(TitleLabel("测量记录详情"))
+        detail_scroll = ScrollArea()
+        detail_scroll.setObjectName("historyDetailScroll")
+        detail_scroll.setWidgetResizable(True)
+        detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        detail_body = QWidget()
+        detail_body.setObjectName("historyDetailBody")
+        body_layout = QVBoxLayout(detail_body)
+        body_layout.setContentsMargins(0, 0, 4, 0)
+        body_layout.setSpacing(10)
+        body_layout.addWidget(SubtitleLabel("基础信息"))
         fields = QFormLayout()
         self.detail_values: dict[str, QLabel] = {}
         selectable_text = Qt.TextInteractionFlag.TextSelectableByMouse
@@ -250,52 +284,57 @@ class HistoryPage(QWidget):
                 )
             fields.addRow(caption + "：", value_label)
             self.detail_values[field_name] = value_label
-        detail_layout.addLayout(fields)
+        body_layout.addLayout(fields)
 
-        # 创建可滚动的原始 OCR 文字展示区。
-        detail_layout.addWidget(QLabel("原始 OCR 结果："))
-        self.detail_ocr_text = QPlainTextEdit()
+        # 创建原始文字和复核信息展示区。
+        body_layout.addWidget(SubtitleLabel("原始 OCR 结果"))
+        self.detail_ocr_text = PlainTextEdit()
         self.detail_ocr_text.setReadOnly(True)
         self.detail_ocr_text.setFixedHeight(100)
-        detail_layout.addWidget(self.detail_ocr_text)
+        body_layout.addWidget(self.detail_ocr_text)
 
-        # 创建只供待复核记录显示的原因区域。
-        self.review_reason_title = QLabel("复核原因：")
+        # 创建待复核记录的原因和人工编辑区。
+        self.review_reason_title = SubtitleLabel("复核原因")
         self.review_reason_value = QLabel()
         self.review_reason_value.setWordWrap(True)
         self.review_reason_value.setTextInteractionFlags(selectable_text)
-        detail_layout.addWidget(self.review_reason_title)
-        detail_layout.addWidget(self.review_reason_value)
+        body_layout.addWidget(self.review_reason_title)
+        body_layout.addWidget(self.review_reason_value)
 
         # 创建已复核记录的时间和最终文字展示区。
-        self.reviewed_at_title = QLabel("复核时间：")
+        self.reviewed_at_title = CaptionLabel("复核时间")
         self.reviewed_at_value = QLabel()
-        detail_layout.addWidget(self.reviewed_at_title)
-        detail_layout.addWidget(self.reviewed_at_value)
-        self.final_result_title = QLabel("人工最终结果：")
-        self.final_result_text = QPlainTextEdit()
+        body_layout.addWidget(self.reviewed_at_title)
+        body_layout.addWidget(self.reviewed_at_value)
+        self.final_result_title = SubtitleLabel("人工最终结果")
+        self.final_result_text = PlainTextEdit()
         self.final_result_text.setReadOnly(True)
         self.final_result_text.setFixedHeight(100)
-        detail_layout.addWidget(self.final_result_title)
-        detail_layout.addWidget(self.final_result_text)
+        body_layout.addWidget(self.final_result_title)
+        body_layout.addWidget(self.final_result_text)
 
-        # 创建可滚动的证据图片缩略图区域。
-        detail_layout.addWidget(QLabel("证据图片："))
-        self.evidence_scroll = QScrollArea()
+        # 创建保持图片比例的证据缩略图区域。
+        body_layout.addWidget(SubtitleLabel("证据图片缩略图"))
+        self.evidence_scroll = ScrollArea()
         self.evidence_scroll.setWidgetResizable(True)
         self.evidence_scroll.setFixedHeight(150)
         self.evidence_content = QWidget()
         self.evidence_grid = QGridLayout(self.evidence_content)
         self.evidence_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.evidence_scroll.setWidget(self.evidence_content)
-        detail_layout.addWidget(self.evidence_scroll)
+        body_layout.addWidget(self.evidence_scroll)
 
         # 创建待复核记录的文字编辑区和完成按钮。
-        self.review_editor_title = QLabel("人工复核结果（每条一行）：")
-        self.review_editor = QPlainTextEdit()
+        self.review_editor_title = SubtitleLabel("人工复核结果（每条一行）")
+        self.review_editor = PlainTextEdit()
         self.review_editor.setFixedHeight(100)
-        detail_layout.addWidget(self.review_editor_title)
-        detail_layout.addWidget(self.review_editor)
+        body_layout.addWidget(self.review_editor_title)
+        body_layout.addWidget(self.review_editor)
+        body_layout.addStretch()
+        detail_scroll.setWidget(detail_body)
+        detail_layout.addWidget(detail_scroll, 1)
+
+        # 将复核和关闭按钮固定在滚动正文下方。
         actions = QHBoxLayout()
         self.confirm_review_button = PushButton("确认无误")
         self.confirm_review_button.clicked.connect(
@@ -315,6 +354,7 @@ class HistoryPage(QWidget):
         close_button.clicked.connect(self.detail_dialog.close)
         actions.addWidget(close_button)
         detail_layout.addLayout(actions)
+        self.detail_dialog.hide()
 
     def refresh_history(self) -> None:
         """进入历史页时恢复不限时间并更新机器和记录。
@@ -345,7 +385,7 @@ class HistoryPage(QWidget):
             self.next_page_button.setEnabled(False)
 
             # 显示机器选项读取错误。
-            QMessageBox.warning(self, "历史记录读取失败", result.message)
+            InfoBar.error("历史记录读取失败", result.message, duration=-1, parent=self)
             return
         machines = result.data["machines"]
 
@@ -423,9 +463,9 @@ class HistoryPage(QWidget):
             返回示例：
                 None  # 结束日期和历史列表已同步更新
         """
-        if self.start_date_edit.date() > self.end_date_edit.date():
+        if self.start_date_edit.getDate() > self.end_date_edit.getDate():
             self.end_date_edit.blockSignals(True)
-            self.end_date_edit.setDate(self.start_date_edit.date())
+            self.end_date_edit.setDate(self.start_date_edit.getDate())
             self.end_date_edit.blockSignals(False)
         self.current_page = 1
         self.reload_records()
@@ -440,9 +480,9 @@ class HistoryPage(QWidget):
             返回示例：
                 None  # 开始日期和历史列表已同步更新
         """
-        if self.end_date_edit.date() < self.start_date_edit.date():
+        if self.end_date_edit.getDate() < self.start_date_edit.getDate():
             self.start_date_edit.blockSignals(True)
-            self.start_date_edit.setDate(self.end_date_edit.date())
+            self.start_date_edit.setDate(self.end_date_edit.getDate())
             self.start_date_edit.blockSignals(False)
         self.current_page = 1
         self.reload_records()
@@ -489,8 +529,8 @@ class HistoryPage(QWidget):
         start_date = None
         end_date = None
         if not self.unlimited_time_checkbox.isChecked():
-            start_date = self.start_date_edit.date().toPython()
-            end_date = self.end_date_edit.date().toPython()
+            start_date = self.start_date_edit.getDate().toPython()
+            end_date = self.end_date_edit.getDate().toPython()
 
         # 按当前筛选条件读取测量结果。
         result = self.controller.list_measurement_records(
@@ -511,7 +551,7 @@ class HistoryPage(QWidget):
             self.next_page_button.setEnabled(False)
 
             # 显示测量记录读取错误。
-            QMessageBox.warning(self, "历史记录读取失败", result.message)
+            InfoBar.error("历史记录读取失败", result.message, duration=-1, parent=self)
             return
         records = result.data["records"]
         total = result.data["total"]
@@ -563,8 +603,7 @@ class HistoryPage(QWidget):
             self.table.setItem(row_index, 4, status_item)
 
             # 为当前记录建立详情入口。
-            button = PushButton("查看")
-            button.setProperty("buttonRole", "text")
+            button = TransparentPushButton("查看")
             session_id = record["session_id"]
             button.clicked.connect(
                 lambda checked=False, cycle=session_id: self.show_record_detail(cycle)
@@ -584,11 +623,11 @@ class HistoryPage(QWidget):
         # 按周期编号读取完整记录。
         result = self.controller.get_measurement_record(session_id)
         if not result.success:
-            QMessageBox.warning(self, "历史详情读取失败", result.message)
+            InfoBar.error("历史详情读取失败", result.message, duration=-1, parent=self)
             return
         record = result.data["record"]
         if record is None:
-            QMessageBox.warning(self, "历史详情读取失败", "该测量记录已不存在。")
+            InfoBar.error("历史详情读取失败", "该测量记录已不存在。", duration=-1, parent=self)
             return
 
         # 填入机器、时间、状态、频率和证据目录。
@@ -638,6 +677,13 @@ class HistoryPage(QWidget):
 
         # 读取本轮证据目录并显示可用图片。
         self.populate_evidence_images(record["evidence_directory"])
+        dialog_parent = self.detail_dialog.parentWidget()
+        self.detail_dialog.widget.setFixedSize(
+            min(900, dialog_parent.width() - 80),
+            min(780, dialog_parent.height() - 80),
+        )
+        self.confirm_review_button.setEnabled(True)
+        self.save_review_button.setEnabled(True)
         self.detail_dialog.open()
 
     def complete_record_review(self, use_edited_text: bool) -> None:
@@ -655,12 +701,19 @@ class HistoryPage(QWidget):
         edited_text = self.review_editor.toPlainText() if use_edited_text else None
         result = self.controller.complete_measurement_review(session_id, edited_text)
         if not result.success:
-            QMessageBox.warning(self, "人工复核未完成", result.message)
+            InfoBar.error(
+                "人工复核未完成",
+                result.message,
+                duration=-1,
+                parent=self.detail_dialog.widget,
+            )
             if result.data is True:
                 self.show_record_detail(session_id)
             return
 
         # 关闭详情并刷新当前状态及机器筛选下的列表。
+        self.confirm_review_button.setEnabled(False)
+        self.save_review_button.setEnabled(False)
         self.detail_dialog.close()
         self.reload_records()
 

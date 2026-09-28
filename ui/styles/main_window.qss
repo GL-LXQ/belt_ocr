@@ -1,152 +1,72 @@
-/* 设置全局字体和主窗口分区背景。 */
-QWidget { font-family: "Microsoft YaHei UI", "Segoe UI"; font-size: 13px; color: @text; }
-QWidget#appRoot, QWidget#pageContainer { background: @background; }
-QWidget#titleBar { background: @title; border: none; }
-QWidget#sideBar { background: @sidebar; border: none; }
-/* 为普通窗口设置 10px 外轮廓圆角，最大化时恢复直角。 */
-QWidget#appRoot { border-radius: 10px; }
-QWidget#titleBar { border-top-left-radius: 10px; border-top-right-radius: 10px; }
-QWidget#sideBar { border-bottom-left-radius: 10px; }
-QWidget#pageContainer { border-bottom-right-radius: 10px; }
-QWidget#appRoot[windowMaximized="true"],
-QWidget#appRoot[windowMaximized="true"] QWidget#titleBar,
-QWidget#appRoot[windowMaximized="true"] QWidget#sideBar,
-QWidget#appRoot[windowMaximized="true"] QWidget#pageContainer {
-    border-top-left-radius: 0px;
-    border-top-right-radius: 0px;
-    border-bottom-left-radius: 0px;
-    border-bottom-right-radius: 0px;
+/* 设置业务页面的浅色背景。 */
+QWidget#realtime, QWidget#history, QWidget#abnormal_events,
+QWidget#machines, QWidget#images, QWidget#settings, QWidget#logs {
+    background: @background;
 }
-QLabel { background: transparent; border: none; }
-/* 设置标题栏的品牌、时钟和状态文字。 */
-QLabel#brand { color: @light; font-size: 15px; font-weight: 600; }
-QLabel#titleCaption { color: @caption; }
-QLabel#clock { color: @clock; }
-QLabel#systemStatus { color: @status; }
-QFrame#titleDivider { background: @divider; border: none; }
-/* 设置窗口控制按钮及悬停颜色。 */
-QPushButton#windowButton, QPushButton#closeButton, QPushButton#settingsButton {
-    background: transparent; border: none; border-radius: 0;
+QWidget#monitorContent {
+    background: transparent;
 }
-QPushButton#windowButton:hover, QPushButton#settingsButton:hover {
-    background: rgba(255,255,255,0.08);
+QWidget#machineFields, QWidget#historyDetailBody,
+QWidget#abnormalDetailBody {
+    background: @white;
 }
-QPushButton#closeButton:hover { background: @close; }
-/* 设置导航按钮的默认、悬停和选中状态。 */
-QPushButton[navigation="true"] {
-    background: transparent; color: @navigation; border: none;
-    border-radius: 6px; text-align: left; padding: 0 14px; font-size: 14px;
-}
-QPushButton[navigation="true"]:hover { background: @hover; }
-QPushButton[navigation="true"]:checked { background: @blue; color: @white; }
-QPushButton[navigation="true"] QLabel#navigationText { color: @navigation; font-size: 14px; }
-QPushButton[navigation="true"]:checked QLabel#navigationText { color: @white; }
-QPushButton:focus { border: 1px solid @secondary; }
-/* 设置侧栏底部信息和状态圆点。 */
-QLabel#serviceStatus { color: @navigation; font-size: 12px; }
-QLabel#version { color: @version; font-size: 11px; }
-QLabel[statusDot="true"] { border-radius: 4px; background: @normal; }
-QLabel[statusDot="true"][status="warning"] { background: @warning; }
-QLabel[statusDot="true"][status="error"] { background: @error; }
-QLabel[statusDot="true"][status="disconnected"] { background: @version; }
-/* 设置页面头部、空白内容卡片和操作提示。 */
-QStackedWidget#pageStack { border: none; background: transparent; }
-QWidget#pageHeader { background: transparent; }
-QLabel#pageTitle { color: @text; font-size: 24px; font-weight: bold; }
-QLabel#pageSubtitle { color: @muted; font-size: 13px; }
-QFrame#pageContent { background: @white; border: 1px solid @border; border-radius: 10px; }
-QToolTip { background: @white; color: @text; border: 1px solid @border; padding: 4px; }
 
-/* 设置实时监测页、卡片和状态面板。 */
-QWidget#monitorContent, QWidget#realtime QScrollArea { background: @background; }
-QFrame#machineCard {
-    background: @white; border: 1px solid @border; border-radius: 8px;
+/* 显示窗口和机器的业务状态。 */
+QLabel#windowStatusDot {
+    background: @normal;
+    border-radius: 4px;
 }
-QFrame#machineCard { border-top: 3px solid @blue; }
-QFrame#machineCard[tone="running"] { border-top-color: #18AE59; }
-QFrame#machineCard[tone="waiting"] { border-top-color: #FF9818; }
-QLabel#machineTitle { font-size: 18px; font-weight: bold; }
-QLabel#machineBadge { background: #DBEAFE; color: #2373E8; border-radius: 14px; padding: 5px 12px; font-weight: bold; }
-QFrame[tone="running"] QLabel#machineBadge { background: #DCF9DF; color: #138B3F; }
-QFrame[tone="waiting"] QLabel#machineBadge { background: #FFF0D8; color: #F58A09; }
-QFrame#metricPanel { background: #F5F8FB; border: 1px solid #F0F4F8; border-radius: 7px; }
-QLabel[smallText="true"] { color: #73849B; font-size: 11px; }
-QLabel#metricValue { font-size: 14px; font-weight: bold; color: #73849B; }
-QFrame[tone="running"] QLabel#metricValue { color: #18AE59; }
-QFrame[tone="waiting"] QLabel#metricValue { color: #FF9818; }
-QLabel#ocrResult { color: #526681; font-size: 13px; }
-QWidget#beltAnimation { background: #E9EEF4; border: 1px solid #DCE5EF; border-radius: 6px; }
+QLabel#windowStatusDot[status="warning"] { background: @warning; }
+QLabel#windowStatusDot[status="error"] { background: @error; }
+QLabel#windowStatusDot[status="disconnected"] { background: @secondary; }
+QLabel#machineBadge {
+    background: #EAF1FF;
+    color: @blue;
+    border-radius: 12px;
+    padding: 4px 10px;
+}
+QLabel#machineBadge[tone="running"] {
+    background: #E4F7EC;
+    color: #138B3F;
+}
+QLabel#machineBadge[tone="waiting"] {
+    background: #FFF1DD;
+    color: #A76200;
+}
+QLabel#machineStatus {
+    background: #EEF2F7;
+    color: #60748E;
+    border-radius: 14px;
+}
+QLabel#machineStatus[enabledStatus="true"] {
+    background: #E4F7EC;
+    color: #138B3F;
+}
 
-/* 设置操作按钮和禁用状态。 */
-QPushButton#startAll, QPushButton#stopAll { border: none; border-radius: 6px; color: white; font-weight: bold; }
-QPushButton#startAll { background: #12783B; }
-QPushButton#startAll:hover:enabled { background: #0D632F; }
-QPushButton#startAll:disabled { background: #79C79A; color: #F5FFF8; }
-QPushButton#stopAll:disabled { background: #ED9296; color: #FFF7F7; }
-QPushButton#refreshDemo {
-    background: white; border: 1px solid #DCE5EF; border-radius: 5px; padding: 5px 16px; color: #445671;
+/* 分隔机器卡片内的动画、读数和结果。 */
+QFrame#cardDivider {
+    background: @border;
+    border: none;
+    max-height: 1px;
 }
-QPushButton#refreshDemo:hover { background: #EFF5FF; }
+QLabel#ocrResult {
+    color: @text;
+    font-size: 13px;
+}
+QLabel[smallText="true"] {
+    color: @muted;
+    font-size: 11px;
+}
+QWidget#beltAnimation {
+    background: #EFF3F8;
+    border: 1px solid @border;
+    border-radius: 6px;
+}
 
-/* 设置表格、表头和滚动条。 */
-QTableWidget { background: white; border: 1px solid #E5EBF3; gridline-color: #EDF1F6; color: #526681; font-size: 12px; }
-QHeaderView::section { background: #F3F7FA; color: #526681; border: none; padding: 4px 10px; text-align: left; }
-QTableWidget::item:selected { background: #E8F1FF; color: #234A7B; }
-QCheckBox { color: #64748B; font-size: 11px; spacing: 6px; }
-QScrollBar:vertical { background: #F4F7FA; width: 9px; margin: 0; }
-QScrollBar::handle:vertical { background: #D4DEE9; border-radius: 4px; min-height: 20px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-
-/* 设置当前状态的圆形图标和卡片内的小标题。 */
-QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #AAB6C2, stop:1 #738393); border-radius: 25px; }
-QFrame[tone="running"] QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #49CF82, stop:1 #0C9F48); }
-QFrame[tone="waiting"] QLabel#stateIcon { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFC267, stop:1 #FF900A); }
-QLabel#machineBadge { border: 1px solid transparent; }
-
-/* 设置机器管理表格、表单和状态标签。 */
-/* 隐藏机器单元格的焦点框，保留整行选中高亮。 */
-QTableWidget#machineTable { color: @text; border-radius: 8px; font-size: 13px; outline: none; }
-QTableWidget#machineTable::item { border-bottom: 1px solid #EDF1F6; padding: 0 8px; }
-QTableWidget#machineTable QHeaderView::section { color: @text; font-weight: bold; padding: 0 8px; }
-QDialog#machineEditor { background: @white; border: 1px solid @border; border-radius: 8px; }
-QWidget#machineFields, QDialog#machineEditor QScrollArea { background: @white; }
-QLabel[fieldLabel="true"] { font-size: 14px; font-weight: bold; }
-QWidget#machines QLineEdit, QWidget#machines QTextEdit {
-    background: @white; border: 1px solid #CFDAE8; border-radius: 5px; padding: 0 10px;
+/* 设置三个遮罩弹窗的中心内容。 */
+QFrame#machineEditorContent, QFrame#historyDetailContent,
+QFrame#abnormalEventDetailContent {
+    background: @white;
+    border: 1px solid @border;
+    border-radius: 12px;
 }
-QWidget#machines QTextEdit { padding: 8px 10px; }
-QWidget#machines QLineEdit:focus, QWidget#machines QTextEdit:focus { border-color: @blue; }
-QCheckBox#machineEnabled { font-size: 14px; color: @text; spacing: 10px; }
-QCheckBox#machineEnabled::indicator { width: 20px; height: 20px; }
-QLabel#machineStatus { background: #EEF2F7; color: #60748E; border-radius: 14px; }
-QLabel#machineStatus[enabledStatus="true"] { background: #DCF8E9; color: #0AAF5B; }
-
-/* 设置历史记录筛选和只读表格。 */
-QWidget#history QPushButton[historyFilter="true"] {
-    background: @white; color: @text; border: 1px solid #CFDAE8;
-    border-radius: 5px; padding: 7px 18px;
-}
-QWidget#history QPushButton[historyFilter="true"]:checked {
-    background: @blue; color: @white; border-color: @blue;
-}
-QWidget#history QComboBox {
-    background: @white; color: @text; border: 1px solid #CFDAE8;
-    border-radius: 5px; padding: 5px 10px;
-}
-QTableWidget#historyTable { color: @text; border-radius: 8px; font-size: 13px; }
-QTableWidget#historyTable::item { border-bottom: 1px solid #EDF1F6; padding: 0 8px; }
-QDialog#historyDetail { background: @white; color: @text; }
-
-/* 通过按钮角色共用机器页操作样式。 */
-QPushButton[buttonRole="primary"] {
-    background: @blue; color: @white; border: 1px solid @blue; border-radius: 6px;
-}
-QPushButton[buttonRole="primary"]:hover { background: #246BE0; }
-QPushButton[buttonRole="secondary"] {
-    background: @white; color: @text; border: 1px solid #CFDAE8; border-radius: 6px;
-}
-QPushButton[buttonRole="secondary"]:hover { background: #EFF5FF; }
-QPushButton[buttonRole="text"], QPushButton[buttonRole="icon"] {
-    background: transparent; border: none; padding: 4px; border-radius: 4px;
-}
-QPushButton[buttonRole="text"]:hover, QPushButton[buttonRole="icon"]:hover { background: #E8F1FF; }
