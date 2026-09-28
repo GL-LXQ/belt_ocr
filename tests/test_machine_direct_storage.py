@@ -1928,12 +1928,15 @@ async def test_cycle_timeout_fails_and_is_audited(tmp_path: Path) -> None:
     assert events[0][2] == "测量周期超时"
     assert json.loads(events[0][3])["session_errors"] == session.errors
 
+    # 核对审计写入成功时不会升级为系统故障。
+    machine.on_system_failure.assert_not_called()
+
 
 @pytest.mark.asyncio
 async def test_audit_failure_does_not_block_session_cleanup(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """确认异常事件写入失败时仍完成 Session 失败收尾。
+    """确认异常事件写入失败时仍完成 Session 失败收尾并升级为系统故障。
 
     Args:
         tmp_path: pytest 提供的临时目录。
@@ -1941,18 +1944,35 @@ async def test_audit_failure_does_not_block_session_cleanup(
 
     Returns:
         返回示例：
-            None  # 审计失败已记录日志且现场关闭后释放周期
+            None  # 审计失败已记录日志，收尾完整且故障上报发生在清理之后
     """
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
     session.capture_stop_time = None
-    database.save_abnormal_event = Mock(
-        side_effect=sqlite3.OperationalError("运行库写入失败")
-    )
+    audit_error = sqlite3.OperationalError("运行库写入失败")
+    database.save_abnormal_event = Mock(side_effect=audit_error)
+
+    # 频率交付身份只在收尾中清空，用于核对故障上报发生在清理之后。
+    machine.frequency_adapter.active_session_id = session.session_id
+    state_at_escalation = {}
+
+    def record_state_at_escalation(error: Exception) -> None:
+        """记录上报系统故障时的本轮状态。
+
+        Args:
+            error: 本次交给系统故障入口的异常。
+
+        Returns:
+            返回示例：
+                None  # 上报时刻的周期状态已记录
+        """
+        state_at_escalation["frequency_session_id"] = machine.frequency_adapter.active_session_id
+        state_at_escalation["session_state"] = session.state
+
+    machine.on_system_failure = Mock(side_effect=record_state_at_escalation)
 
     # 执行失败收尾并等待现场关闭。
     await machine.handle_session_failure(session, "此次相机没有采集到任何帧")
-    assert session.state == SessionState.FAILED
     assert machine.current_session is session
     await machine.handle_machine_close()
 
@@ -1960,6 +1980,63 @@ async def test_audit_failure_does_not_block_session_cleanup(
     database.save_abnormal_event.assert_called_once()
     assert "记录测量失败事件失败" in caplog.text
     assert machine.current_session is None
+
+    # 核对系统故障在收尾完成后收到审计异常。
+    machine.on_system_failure.assert_called_once_with(audit_error)
+    assert state_at_escalation == {
+        "frequency_session_id": None,
+        "session_state": SessionState.FAILED,
+    }
+
+
+@pytest.mark.asyncio
+async def test_storage_failure_keeps_root_cause_when_audit_also_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """确认已有系统级根因时，异常事件写入失败不会覆盖原始根因。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+        monkeypatch: pytest 提供的属性替换工具。
+        caplog: pytest 捕获的日志。
+
+    Returns:
+        返回示例：
+            None  # 收尾完整、审计失败有日志且系统故障保留原始根因
+    """
+    # 同时设置证据图片写入故障和异常事件写入故障。
+    frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    write_error = OSError("图片写入失败")
+    monkeypatch.setattr(
+        "machine.save_evidence_image",
+        Mock(side_effect=write_error),
+    )
+    database.save_abnormal_event = Mock(
+        side_effect=sqlite3.OperationalError("运行库写入失败")
+    )
+
+    # 执行本轮结算。
+    await machine.try_finalize(session)
+
+    # 核对本轮已完整失败收尾并释放周期。
+    assert session.state == SessionState.FAILED
+    assert session.errors.count("证据图片保存失败") == 1
+    assert machine.current_session is None
+    assert machine.frequency_adapter.active_session_id is None
+
+    # 核对审计写入只尝试一次且失败已记录日志。
+    database.save_abnormal_event.assert_called_once()
+    assert read_abnormal_events(database) == []
+    assert "记录测量失败事件失败" in caplog.text
+
+    # 核对系统故障只上报一次，且仍是原始证据写入根因。
+    machine.on_system_failure.assert_called_once()
+    escalated_error = machine.on_system_failure.call_args.args[0]
+    assert isinstance(escalated_error, EvidenceWriteError)
+    assert escalated_error.__cause__ is write_error
 
 
 @pytest.mark.asyncio

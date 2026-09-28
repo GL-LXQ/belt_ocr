@@ -727,17 +727,22 @@ class Machine:
         await self.handle_session_failure(session, failure_reason)
 
     async def handle_session_failure(
-        self, session: BeltSession, failure_reason: str
+        self,
+        session: BeltSession,
+        failure_reason: str,
+        *,
+        system_error: Exception | None = None,
     ) -> None:
         """登记本轮失败并清理资源，保留尚未关闭的现场周期身份。
 
         Args:
             session: 处理失败、中断或提交失败的测量档案。
             failure_reason: 本轮失败的原因描述。
+            system_error: 调用方已取得的系统级根因，本轮收尾完成后优先上报该异常。
 
         Returns:
             返回示例：
-                None  # 已登记失败并清理资源，活动周期保留至 CLOSE 或中断
+                None  # 已登记失败并清理资源，系统级异常在收尾完成后交给故障入口
         """
         # 登记本轮失败原因。
         session.errors.append(failure_reason)
@@ -754,7 +759,8 @@ class Machine:
             session.errors,
         )
 
-        # 将本轮失败原因和错误明细写入异常事件表。
+        # 将本轮失败原因和错误明细写入异常事件表，写入失败留待本轮收尾结束后上报。
+        audit_error: Exception | None = None
         try:
             await run_blocking_operation(
                 self.database.save_abnormal_event,
@@ -763,8 +769,9 @@ class Machine:
                 session_id=session.session_id,
                 payload={"session_errors": list(session.errors)},
             )
-        except Exception:
-            # 审计写入失败时记录日志。
+        except Exception as error:
+            # 审计写入失败时记录日志并保留异常对象。
+            audit_error = error
             logger.exception(
                 "记录测量失败事件失败 machine_id=%s session_id=%s",
                 session.machine_id,
@@ -797,6 +804,11 @@ class Machine:
         # 停止本轮采集交付并尝试释放周期。
         await self.camera.inform_capture_workflow_stop()
         self.release_finished_session()
+
+        # 已有系统级根因时上报根因，否则上报异常事件存储故障。
+        escalated_error = system_error if system_error is not None else audit_error
+        if escalated_error is not None:
+            self.on_system_failure(escalated_error)
 
     def release_finished_session(self) -> None:
         """在周期关闭且当前任务与相机交付结束后清空当前周期。
@@ -1199,11 +1211,8 @@ class Machine:
                     ProgressStatus.FAILED,
                 )
 
-            # 按证据图片写入失败结束本轮测量。
-            await self.handle_session_failure(session, "证据图片保存失败")
-
-            # 将证据图片写入故障交给全局退出流程。
-            self.on_system_failure(error)
+            # 按证据图片写入失败结束本轮测量，并把写入故障交给全局退出流程。
+            await self.handle_session_failure(session, "证据图片保存失败", system_error=error)
             return
         except (CommitIntegrityConflictError, sqlite3.Error) as error:
             # 登记数据库提交失败或内容冲突。
@@ -1227,11 +1236,8 @@ class Machine:
                     ProgressStatus.FAILED,
                 )
 
-            # 清理本轮失败状态。
-            await self.handle_session_failure(session, failure_reason)
-
-            # 将数据库写入故障交给全局退出流程。
-            self.on_system_failure(error)
+            # 清理本轮失败状态，并把数据库写入故障交给全局退出流程。
+            await self.handle_session_failure(session, failure_reason, system_error=error)
             return
 
         # 标记本轮已入库。
