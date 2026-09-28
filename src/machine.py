@@ -501,9 +501,24 @@ class Machine:
             )
             return
 
-        # 记录当前周期上报的相机设备故障。
+        # 当前周期的相机故障统一进入机器级处理。
         if event.event_type == EventType.CAPTURE_FAILED:
-            self.machine_failure_reason = "相机采集失败"
+            if session.state == SessionState.RUNNING:
+                # 上报运行中周期的图像采集失败。
+                if self.notify_measurement_progress is not None:
+                    self.notify_measurement_progress(
+                        session.machine_id,
+                        session.session_id,
+                        ProgressStage.IMAGE_CAPTURE,
+                        ProgressStatus.FAILED,
+                    )
+
+                # 记录底层设备错误。
+                session.errors.append(event.payload)
+
+            # 登记本机故障并结算仍在运行的周期。
+            await self.handle_machine_failure(session, "相机采集失败")
+            return
 
         # 周期未关闭时处理期限通知。
         if event.event_type == EventType.CYCLE_TIMEOUT:
@@ -579,24 +594,6 @@ class Machine:
                     session.machine_id,
                     session.session_id,
                 )
-                return
-
-            # 相机采集设备故障。
-            case EventType.CAPTURE_FAILED:
-                # 上报本轮图像采集失败。
-                if self.notify_measurement_progress is not None:
-                    self.notify_measurement_progress(
-                        session.machine_id,
-                        session.session_id,
-                        ProgressStage.IMAGE_CAPTURE,
-                        ProgressStatus.FAILED,
-                    )
-
-                # 记录设备错误明细。
-                session.errors.append(event.payload)
-
-                # 按机器故障结束本轮测量。
-                await self.handle_machine_failure(session, "相机采集失败")
                 return
 
             # 识别结果到达。
@@ -701,7 +698,7 @@ class Machine:
     async def handle_machine_failure(
         self, session: BeltSession, failure_reason: str
     ) -> None:
-        """记录本机设备故障并结束当前周期。
+        """记录本机设备故障并结算仍在运行的周期。
 
         Args:
             session: 发生设备故障的测量周期。
@@ -709,7 +706,7 @@ class Machine:
 
         Returns:
             返回示例：
-                None  # 本机故障已登记，当前周期已按失败结算
+                None  # 本机故障已登记，运行中的周期已按失败结算
         """
         # 登记本机设备故障原因。
         self.machine_failure_reason = failure_reason
@@ -721,6 +718,10 @@ class Machine:
             session.session_id,
             failure_reason,
         )
+
+        # 已失败的周期不重复结算。
+        if session.state != SessionState.RUNNING:
+            return
 
         # 沿用当前周期的失败收尾。
         await self.handle_session_failure(session, failure_reason)
