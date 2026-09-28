@@ -395,7 +395,9 @@ def test_page_refresh_and_monitoring_stop_restore_safe_animation(
         page.deleteLater()
 
 
-def test_monitoring_service_delivers_text_from_background_thread(qt_application, monkeypatch) -> None:
+def test_runtime_thread_delivers_text_from_background_thread(
+    qt_application, monkeypatch
+) -> None:
     """验证后台监测通过 Qt 信号向页面交付周期和文字。
 
     Args:
@@ -408,7 +410,7 @@ def test_monitoring_service_delivers_text_from_background_thread(qt_application,
     """
     from unittest.mock import AsyncMock
     from ui.pages.realtime_page import RealtimePage
-    from src.service.monitoring_service import MonitoringService
+    from src.system_runtime_thread import SystemRuntimeThread
 
     # 创建页面和不访问设备的运行时替身。
     machine_service = Mock()
@@ -441,25 +443,28 @@ def test_monitoring_service_delivers_text_from_background_thread(qt_application,
 
     # 替换设备启动入口并绑定真实 Qt 信号。
     runtime.start = start_runtime
-    monkeypatch.setattr("src.service.monitoring_service.load_config", Mock())
-    monkeypatch.setattr("src.service.monitoring_service.SystemRuntime", Mock(return_value=runtime))
-    service = MonitoringService(Path("config"))
-    service.stop_requested.set()
+    monkeypatch.setattr("src.system_runtime_thread.load_config", Mock())
     monkeypatch.setattr(
-        "src.controller.controller.MonitoringService", Mock(return_value=service)
+        "src.system_runtime_thread.SystemRuntime", Mock(return_value=runtime)
+    )
+    runtime_thread = SystemRuntimeThread(Path("config"))
+    runtime_thread.stop_requested.set()
+    monkeypatch.setattr(
+        "src.controller.controller.SystemRuntimeThread",
+        Mock(return_value=runtime_thread),
     )
     try:
         # 等待线程结束，再由主线程处理排队信号。
         assert controller.start_monitoring().success
-        assert service.wait(5000)
+        assert runtime_thread.wait(5000)
         qt_application.processEvents()
-        assert service.failure_message == ""
-        assert controller.monitoring_service is None
+        assert runtime_thread.failure_message == ""
+        assert controller.runtime_thread is None
         assert page.ocr_results_by_machine_id["1"] == ("session", ("003",), ("003",))
         assert page.cards_by_machine_id["1"].ocr_result_label.text() == "20  --\n8  --\n3  003\n2  --"
         assert not page.measurement_states_by_machine_id["1"]["machine_running"]
         runtime.stop.assert_awaited_once()
     finally:
-        service.wait()
+        runtime_thread.wait()
         page.close()
         page.deleteLater()

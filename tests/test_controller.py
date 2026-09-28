@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 from threading import Event
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -19,10 +19,11 @@ from src.service.measurement_history_service import (
     MeasurementHistoryServiceError,
     MeasurementReviewAlreadyCompletedError,
 )
+from src.system_runtime_thread import SystemRuntimeThread
 from ui.main_window import MainWindow
 
 
-class FakeMonitoringService(QObject):
+class FakeSystemRuntimeThread(QObject):
     """提供可手动发出监测结束通知的线程替身。"""
 
     camera_state_changed_signal = Signal(str, str, str)
@@ -67,6 +68,38 @@ class FakeMonitoringService(QObject):
             None  # 释放请求已记录
         """
         self.released = True
+
+
+def test_runtime_thread_runs_and_stops_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证后台线程入口按原顺序启动并停止 Runtime。
+
+    Args:
+        monkeypatch: pytest 提供的属性替换工具。
+
+    Returns:
+        None  # 配置已加载且 Runtime 已启动和停止
+    """
+    configuration = object()
+    load_configuration = Mock(return_value=configuration)
+    system_runtime = Mock(failure=None)
+    system_runtime.start = AsyncMock()
+    system_runtime.stop = AsyncMock()
+    runtime_factory = Mock(return_value=system_runtime)
+    monkeypatch.setattr("src.system_runtime_thread.load_config", load_configuration)
+    monkeypatch.setattr("src.system_runtime_thread.SystemRuntime", runtime_factory)
+
+    # 提前提交停止请求并直接运行线程入口。
+    configuration_directory = Path("config")
+    runtime_thread = SystemRuntimeThread(configuration_directory)
+    runtime_thread.stop_requested.set()
+    runtime_thread.run()
+
+    # 检查配置加载、Runtime 创建和异步资源释放。
+    load_configuration.assert_called_once_with(configuration_directory)
+    runtime_factory.assert_called_once_with(configuration)
+    system_runtime.start.assert_awaited_once()
+    system_runtime.stop.assert_awaited_once()
+    assert runtime_thread.failure_message == ""
 
 
 @pytest.fixture
@@ -346,41 +379,41 @@ def test_monitoring_lifecycle_and_old_finished_signal(
         None  # 当前线程引用只由自己的结束通知清理
     """
     controller = controller_services[0]
-    first_service = FakeMonitoringService()
-    second_service = FakeMonitoringService()
-    service_factory = Mock(side_effect=[first_service, second_service])
-    monkeypatch.setattr("src.controller.controller.MonitoringService", service_factory)
+    first_thread = FakeSystemRuntimeThread()
+    second_thread = FakeSystemRuntimeThread()
+    thread_factory = Mock(side_effect=[first_thread, second_thread])
+    monkeypatch.setattr("src.controller.controller.SystemRuntimeThread", thread_factory)
     finished_messages = Mock()
     controller.monitoring_finished_signal.connect(finished_messages)
 
     # 首次启动成功，重复启动不创建第二个线程。
     assert controller.start_monitoring().success
-    assert first_service.started
+    assert first_thread.started
     assert controller.is_monitoring_running().data is True
     assert controller.start_monitoring() == ControllerResult(
         success=False,
         message="监测正在运行。",
     )
-    assert service_factory.call_count == 1
+    assert thread_factory.call_count == 1
 
     # 停止请求交给当前线程，结束后转发故障并释放引用。
     assert controller.stop_monitoring().success
-    assert first_service.stop_requested.is_set()
-    first_service.failure_message = "设备故障"
-    first_service.finished.emit()
-    assert first_service.released
-    assert controller.monitoring_service is None
+    assert first_thread.stop_requested.is_set()
+    first_thread.failure_message = "设备故障"
+    first_thread.finished.emit()
+    assert first_thread.released
+    assert controller.runtime_thread is None
     assert controller.is_monitoring_running().data is False
     finished_messages.assert_called_once_with("设备故障")
 
     # 新线程启动后，旧线程的迟到结束通知不能清理新引用。
     assert controller.start_monitoring().success
-    assert controller.monitoring_service is second_service
-    first_service.finished.emit()
-    assert controller.monitoring_service is second_service
+    assert controller.runtime_thread is second_thread
+    first_thread.finished.emit()
+    assert controller.runtime_thread is second_thread
     assert finished_messages.call_count == 1
-    second_service.finished.emit()
-    assert controller.monitoring_service is None
+    second_thread.finished.emit()
+    assert controller.runtime_thread is None
     assert finished_messages.call_count == 2
 
 
@@ -398,10 +431,10 @@ def test_monitoring_signals_are_forwarded(
         None  # 界面只接收 Controller 的四个信号
     """
     controller = controller_services[0]
-    monitoring_service = FakeMonitoringService()
-    monitoring_factory = Mock(return_value=monitoring_service)
+    runtime_thread = FakeSystemRuntimeThread()
+    runtime_factory = Mock(return_value=runtime_thread)
     monkeypatch.setattr(
-        "src.controller.controller.MonitoringService", monitoring_factory
+        "src.controller.controller.SystemRuntimeThread", runtime_factory
     )
     camera_notification = Mock()
     progress_notification = Mock()
@@ -414,12 +447,12 @@ def test_monitoring_signals_are_forwarded(
 
     # 后台通知按原有字段顺序进入 Controller 信号。
     assert controller.start_monitoring().success
-    monitoring_service.camera_state_changed_signal.emit("1", "已连接", "")
-    monitoring_service.measurement_progress_changed_signal.emit(
+    runtime_thread.camera_state_changed_signal.emit("1", "已连接", "")
+    runtime_thread.measurement_progress_changed_signal.emit(
         "1", "session-1", "image_capture", "running"
     )
-    monitoring_service.cycle_closed_signal.emit("1", "session-1")
-    monitoring_service.ocr_result_changed_signal.emit(
+    runtime_thread.cycle_closed_signal.emit("1", "session-1")
+    runtime_thread.ocr_result_changed_signal.emit(
         "1", "session-1", ("003",), ("003",)
     )
     camera_notification.assert_called_once_with("1", "已连接", "")
@@ -449,10 +482,10 @@ def test_window_closes_after_monitoring_cleanup(
     machine_service = controller_services[1]
     machine_service.list_machines.return_value = []
     machine_service.list_enabled_machines.return_value = []
-    monitoring_service = FakeMonitoringService()
-    monitoring_factory = Mock(return_value=monitoring_service)
+    runtime_thread = FakeSystemRuntimeThread()
+    runtime_factory = Mock(return_value=runtime_thread)
     monkeypatch.setattr(
-        "src.controller.controller.MonitoringService", monitoring_factory
+        "src.controller.controller.SystemRuntimeThread", runtime_factory
     )
     window = MainWindow(controller)
     try:
@@ -461,11 +494,11 @@ def test_window_closes_after_monitoring_cleanup(
         assert controller.start_monitoring().success
         window.close()
         assert window.isVisible()
-        assert monitoring_service.stop_requested.is_set()
+        assert runtime_thread.stop_requested.is_set()
 
         # 线程结束并清理引用后窗口完成关闭。
-        monitoring_service.finished.emit()
-        assert controller.monitoring_service is None
+        runtime_thread.finished.emit()
+        assert controller.runtime_thread is None
         assert not window.isVisible()
     finally:
         window.close()

@@ -15,7 +15,7 @@ from src.service.measurement_history_service import (
     MeasurementHistoryServiceError,
     MeasurementReviewAlreadyCompletedError,
 )
-from src.service.monitoring_service import MonitoringService
+from src.system_runtime_thread import SystemRuntimeThread
 
 
 @dataclass
@@ -61,7 +61,7 @@ class AppController(QObject):
         self.measurement_history_service = measurement_history_service
         self.abnormal_event_service = abnormal_event_service
         self.configuration_directory = configuration_directory
-        self.monitoring_service: MonitoringService | None = None
+        self.runtime_thread: SystemRuntimeThread | None = None
 
     def list_machines(self) -> ControllerResult:
         """读取全部未删除的机器。
@@ -428,33 +428,33 @@ class AppController(QObject):
                 message="",  # 重复启动提示
             )
         """
-        if self.monitoring_service is not None:
+        if self.runtime_thread is not None:
             return ControllerResult(success=False, message="监测正在运行。")
 
         # 创建当前监测线程。
-        self.monitoring_service = MonitoringService(self.configuration_directory)
+        self.runtime_thread = SystemRuntimeThread(self.configuration_directory)
 
         # 转发相机和测量状态信号。
-        self.monitoring_service.camera_state_changed_signal.connect(
+        self.runtime_thread.camera_state_changed_signal.connect(
             self.camera_state_changed_signal.emit
         )
-        self.monitoring_service.measurement_progress_changed_signal.connect(
+        self.runtime_thread.measurement_progress_changed_signal.connect(
             self.measurement_progress_changed_signal.emit
         )
 
         # 转发周期和 OCR 信号。
-        self.monitoring_service.cycle_closed_signal.connect(
+        self.runtime_thread.cycle_closed_signal.connect(
             self.cycle_closed_signal.emit
         )
-        self.monitoring_service.ocr_result_changed_signal.connect(
+        self.runtime_thread.ocr_result_changed_signal.connect(
             self.ocr_result_changed_signal.emit
         )
 
         # 连接结束回调。
-        self.monitoring_service.finished.connect(self.finish_monitoring)
+        self.runtime_thread.finished.connect(self.finish_monitoring)
 
         # 启动监测。
-        self.monitoring_service.start()
+        self.runtime_thread.start()
         return ControllerResult(success=True)
 
     def stop_monitoring(self) -> ControllerResult:
@@ -470,8 +470,8 @@ class AppController(QObject):
                 message="",  # 提示信息
             )
         """
-        if self.monitoring_service is not None:
-            self.monitoring_service.stop_requested.set()
+        if self.runtime_thread is not None:
+            self.runtime_thread.stop_requested.set()
         return ControllerResult(success=True)
 
     def is_monitoring_running(self) -> ControllerResult:
@@ -487,7 +487,7 @@ class AppController(QObject):
                 message="",  # 提示信息
             )
         """
-        return ControllerResult(success=True, data=self.monitoring_service is not None)
+        return ControllerResult(success=True, data=self.runtime_thread is not None)
 
     @Slot()
     def finish_monitoring(self) -> None:
@@ -499,16 +499,16 @@ class AppController(QObject):
         Returns:
             None  # 当前线程已清理，监测结束信号已发出
         """
-        monitoring_service = self.sender()
-        if monitoring_service is not self.monitoring_service:
+        runtime_thread = self.sender()
+        if runtime_thread is not self.runtime_thread:
             return
 
         # 读取监测结束时的失败信息。
-        failure_message = monitoring_service.failure_message
+        failure_message = runtime_thread.failure_message
 
         # 安排线程对象释放并清空当前引用。
-        monitoring_service.deleteLater()
-        self.monitoring_service = None
+        runtime_thread.deleteLater()
+        self.runtime_thread = None
 
         # 在引用清理后通知界面监测已结束。
         self.monitoring_finished_signal.emit(failure_message)

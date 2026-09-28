@@ -1,4 +1,4 @@
-"""在后台线程运行监测服务并发送相机、进度、文字和周期关闭通知。"""
+"""在后台线程运行 SystemRuntime 并发送实时通知。"""
 
 import asyncio
 import threading
@@ -6,12 +6,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from system_runtime import SystemRuntime
 from config_util import load_config
+from system_runtime import SystemRuntime
 
 
-class MonitoringService(QThread):
-    """管理一次监测服务的启动、等待和资源释放。"""
+class SystemRuntimeThread(QThread):
+    """在后台线程启动、等待并停止 SystemRuntime。"""
 
     # 相机连接状态信号，参数依次为机器编号、连接状态和失败原因。
     camera_state_changed_signal = Signal(str, str, str)
@@ -25,15 +25,14 @@ class MonitoringService(QThread):
     # 最终文字信号，参数依次为机器编号、周期编号、原文字和去空格文字。
     ocr_result_changed_signal = Signal(str, str, tuple, tuple)
 
-    def __init__(self, configuration_directory: Path):
+    def __init__(self, configuration_directory: Path) -> None:
         """保存配置路径并创建跨线程停止通知。
 
         Args:
             configuration_directory: 公共 YAML 配置目录。
 
         Returns:
-            返回示例：
-                None  # 后台线程已准备，尚未启动
+            None  # 后台线程已准备，尚未启动
         """
         # 初始化 Qt 线程基类。
         super().__init__()
@@ -45,36 +44,36 @@ class MonitoringService(QThread):
         self.stop_requested = threading.Event()
         self.failure_message = ""
 
-    def run(self):
+    def run(self) -> None:
         """运行后台事件循环并保存失败原因。
 
         Args:
             无外部参数。
 
         Returns:
-            返回示例：
-                None  # 事件循环结束，QThread 随后发送 finished 信号
+            None  # 事件循环结束，QThread 随后发送 finished 信号
         """
         try:
             # 在本线程中运行监测主流程。
             asyncio.run(self.run_monitoring())
         except Exception as error:
-            # 保存失败原因供界面读取。
+            # 保存失败原因供 Controller 读取。
             self.failure_message = str(error)
 
-    async def run_monitoring(self):
-        """读取机器、连接相机、等待停止并统一释放资源。
+    async def run_monitoring(self) -> None:
+        """启动 Runtime、等待停止并统一释放资源。
 
         Args:
             无外部参数。
 
         Returns:
-            返回示例：
-                None  # 监测结束，相机及数据库资源已释放
+            None  # 监测结束，Runtime 资源已释放
         """
-        # 读取公共配置并创建运行时对象。
-        config = load_config(self.configuration_directory)
-        system_runtime = SystemRuntime(config)
+        # 读取公共配置。
+        configuration = load_config(self.configuration_directory)
+
+        # 创建 Runtime。
+        system_runtime = SystemRuntime(configuration)
         try:
             # 连接相机并接入状态、进度、文字和周期关闭信号。
             await system_runtime.start(

@@ -142,7 +142,8 @@ class SystemRuntime:
         """初始化本次运行的机器状态和存储，启动监听与处理任务。
 
         Args:
-            notify_camera_state: 可选连接通知函数，接收机器编号、连接状态和失败原因；GUI 由 MonitoringService 的信号提供，无界面时传 None。
+            notify_camera_state: 可选连接通知函数，接收机器编号、连接状态和失败原因；
+                GUI 由 Controller 管理的后台 Runtime 线程提供 Qt 信号，无界面时传 None。
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、原文字和去空格文字。
             notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。

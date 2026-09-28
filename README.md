@@ -79,7 +79,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 → Session 结束
 → 等待下一轮。
 
-GUI 启动入口创建 Repo、Service 和唯一的 `AppController`，四个正式页面通过 `AppController` 请求机器、历史和异常事件数据，业务请求再进入对应 Service 与 Repo。实时监测由 `AppController` 创建、启动、停止并释放 `MonitoringService`（`QThread`）；`Machine` 的相机状态、测量进度、OCR 文字和周期关闭通知经 `SystemRuntime`、`MonitoringService`、`AppController` 的 Qt 信号进入 `RealtimePage`，页面按机器编号及当前 Session 更新 `MachineCard`。窗口关闭时先请求 Controller 停止监测，待线程完成资源释放并发出结束信号后再退出。页面仍负责卡片动画、OCR 分类显示和当前周期缓存；频率数值和最近事件仍未正式接入。
+GUI 启动入口创建 Repo、Service 和唯一的 `AppController`，四个正式页面通过 `AppController` 请求机器、历史和异常事件数据，再进入对应 Service 与 Repo。实时监测由 `AppController` 创建、启动、停止并释放 `src/system_runtime_thread.py` 中的 `SystemRuntimeThread`（`QThread`）；该线程仅负责在后台运行 `SystemRuntime`，不处理业务判断。`Machine` 的相机状态、测量进度、OCR 文字和周期关闭通知经 `SystemRuntime`、`SystemRuntimeThread`、`AppController` 的 Qt 信号进入 `RealtimePage`，页面按机器编号及当前 Session 更新 `MachineCard`。窗口关闭时先请求 Controller 停止监测，待 Runtime 完成资源释放并发出结束信号后再退出。页面仍负责卡片动画、OCR 分类显示和当前周期缓存；频率数值和最近事件仍未正式接入。
 
 历史记录页进入时通过 `AppController` 调用 `MeasurementHistoryService`，再经 `MeasurementRecordRepo` 从业务库 `measurement_records` 读取已保存的测量结果，并可按正常、待复核、已复核及机器筛选；详情保留原始 OCR、频率、复核原因和本轮 JPG 证据图片。待复核记录可确认原文字或按行保存人工修正文字，Repo 只对尚未复核的记录写入 UTC 复核时间和可选的 `reviewed_lines` JSON，原 `ordered_lines`、`needs_review` 与 `review_reason` 保留；已复核详情同时显示原始与最终文字，列表摘要优先显示人工结果。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
 
@@ -98,8 +98,9 @@ GUI 启动时先在运行库确保 `abnormal_events` 表存在。异常事件页
 * `src/modbus_client.py`：Modbus RTU 串口连接和 DI 状态读取。
 * `src/database.py`：数据库初始化、测量记录、异常审计和实例锁。
 * `src/repo/`：机器等基础数据访问。
-* `src/service/`：机器、历史、异常事件与监测业务服务。
-* `src/controller/`：GUI 请求入口、统一结果与监测线程管理。
+* `src/service/`：机器、历史与异常事件业务服务。
+* `src/controller/`：GUI 请求入口、统一结果与实时监测生命周期。
+* `src/system_runtime_thread.py`：运行 SystemRuntime 的后台线程与实时 Qt 信号。
 * `src/models.py` / `src/enums.py`：Session、事件、帧、OCR 结果及状态定义。
 * `src/config_util.py`：YAML 配置读取与校验。
 * `src/main.py`：命令行测量入口，程序化发送 START/CLOSE 做整轮联调。
