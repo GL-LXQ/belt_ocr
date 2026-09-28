@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
-from src.controller.controller import AppController, ControllerResult
+from src.controller.controller import AppController, Result
 from src.service.abnormal_event_service import AbnormalEventServiceError
 from src.service.machine_service import MachineServiceError
 from src.service.measurement_record_service import (
@@ -148,6 +148,28 @@ def qt_application() -> QApplication:
     return application or QApplication([])
 
 
+def test_result_factories_preserve_public_fields() -> None:
+    """验证成功和失败结果保留页面使用的三个字段。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        None  # 两种结果的成功标志、数据和提示已验证
+    """
+    # 检查成功结果的三个字段。
+    success_result = Result.ok("data")
+    assert success_result.success is True
+    assert success_result.data == "data"
+    assert success_result.message == ""
+
+    # 检查失败结果的三个字段。
+    error_result = Result.error("失败", data=True)
+    assert error_result.success is False
+    assert error_result.data is True
+    assert error_result.message == "失败"
+
+
 def test_machine_calls_return_controller_results(controller_services) -> None:
     """验证机器请求转发及成功、重复和服务故障结果。
 
@@ -175,28 +197,19 @@ def test_machine_calls_return_controller_results(controller_services) -> None:
     }
 
     # 查询和新增请求返回界面使用的数据。
-    assert controller.list_machines() == ControllerResult(success=True, data=machines)
-    assert controller.list_enabled_machines() == ControllerResult(
-        success=True, data=machines
-    )
+    assert controller.list_machines() == Result.ok(machines)
+    assert controller.list_enabled_machines() == Result.ok(machines)
     result = controller.create_machine(" 皮带机 ", " CAM001 ", " FREQ001 ")
-    assert result == ControllerResult(success=True, data=1)
+    assert result == Result.ok(1)
     machine_service.create_machine.assert_called_once_with(
         "皮带机", "CAM001", "FREQ001", True, None
     )
 
     # 重复字段与预期服务异常转成失败结果。
     result = controller.update_machine(1, "皮带机", "CAM002", "FREQ002")
-    assert result == ControllerResult(
-        success=False,
-        data={"field": "machine_name"},
-        message="机器名称已存在，请修改。",
-    )
+    assert result == Result.error("机器名称已存在，请修改。", data={"field": "machine_name"})
     machine_service.delete_machine.side_effect = MachineServiceError("机器删除失败")
-    assert controller.delete_machine(1) == ControllerResult(
-        success=False,
-        message="机器删除失败",
-    )
+    assert controller.delete_machine(1) == Result.error("机器删除失败")
 
 
 @pytest.mark.parametrize(
@@ -271,11 +284,7 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
     review_error = MeasurementReviewAlreadyCompletedError("该记录已完成复核。")
     measurement_record_service.complete_review.side_effect = review_error
     result = controller.complete_measurement_review(" session-1 ", None)
-    assert result == ControllerResult(
-        success=False,
-        data=True,
-        message="该记录已完成复核。",
-    )
+    assert result == Result.error("该记录已完成复核。", data=True)
     measurement_record_service.complete_review.assert_called_once_with(
         "session-1", None
     )
@@ -285,10 +294,7 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
         MeasurementRecordServiceError("人工复核保存失败")
     )
     result = controller.complete_measurement_review("session-1", None)
-    assert result == ControllerResult(
-        success=False,
-        message="人工复核保存失败",
-    )
+    assert result == Result.error("人工复核保存失败")
 
 
 def test_history_and_abnormal_service_errors_become_results(
@@ -311,13 +317,9 @@ def test_history_and_abnormal_service_errors_become_results(
     abnormal_event_service.list_events.side_effect = AbnormalEventServiceError(
         "异常事件读取失败"
     )
-    assert controller.get_measurement_record("session-1") == ControllerResult(
-        success=False,
-        message="历史详情读取失败",
-    )
-    assert controller.list_abnormal_events(" 1 ", " session-1 ") == ControllerResult(
-        success=False,
-        message="异常事件读取失败",
+    assert controller.get_measurement_record("session-1") == Result.error("历史详情读取失败")
+    assert controller.list_abnormal_events(" 1 ", " session-1 ") == Result.error(
+        "异常事件读取失败",
     )
     abnormal_event_service.list_events.assert_called_once_with("1", "session-1")
 
@@ -401,10 +403,7 @@ def test_monitoring_lifecycle_and_old_finished_signal(
     assert controller.start_monitoring().success
     assert first_thread.started
     assert controller.is_monitoring_running().data is True
-    assert controller.start_monitoring() == ControllerResult(
-        success=False,
-        message="监测正在运行。",
-    )
+    assert controller.start_monitoring() == Result.error("监测正在运行。")
     assert thread_factory.call_count == 1
 
     # 停止请求交给当前线程，结束后转发故障并释放引用。

@@ -19,12 +19,54 @@ from src.system_runtime_thread import SystemRuntimeThread
 
 
 @dataclass
-class ControllerResult:
+class Result:
     """保存界面请求的成功状态、数据和提示。"""
 
     success: bool
     data: object | None = None
     message: str = ""
+
+    @classmethod
+    def ok(cls, data: object | None = None, message: str = "") -> "Result":
+        """创建成功结果。
+
+        Args:
+            data: 返回给页面的业务数据。
+            message: 返回给页面的提示。
+
+        Returns:
+            Result(
+                success=True,  # 请求成功
+                data="data",  # 页面数据
+                message="",  # 页面提示
+            )
+        """
+        return cls(
+            success=True,
+            data=data,
+            message=message,
+        )
+
+    @classmethod
+    def error(cls, message: str, data: object | None = None) -> "Result":
+        """创建失败结果。
+
+        Args:
+            message: 返回给页面的失败提示。
+            data: 返回给页面的附加数据。
+
+        Returns:
+            Result(
+                success=False,  # 请求失败
+                data=True,  # 页面附加数据
+                message="失败",  # 失败提示
+            )
+        """
+        return cls(
+            success=False,
+            data=data,
+            message=message,
+        )
 
 
 class AppController(QObject):
@@ -63,14 +105,14 @@ class AppController(QObject):
         self.configuration_directory = configuration_directory
         self.runtime_thread: SystemRuntimeThread | None = None
 
-    def list_machines(self) -> ControllerResult:
+    def list_machines(self) -> Result:
         """读取全部未删除的机器。
 
         Args:
             无外部参数。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 查询是否成功
                 data=[],  # 机器记录列表为空
                 message="",  # 失败提示
@@ -79,18 +121,18 @@ class AppController(QObject):
         # 读取机器并转换预期服务故障。
         try:
             machines = self.machine_service.list_machines()
-            return ControllerResult(success=True, data=machines)
+            return Result.ok(machines)
         except MachineServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
 
-    def list_enabled_machines(self) -> ControllerResult:
+    def list_enabled_machines(self) -> Result:
         """读取已启用的机器。
 
         Args:
             无外部参数。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 查询是否成功
                 data=[],  # 已启用机器列表为空
                 message="",  # 失败提示
@@ -99,9 +141,9 @@ class AppController(QObject):
         # 读取已启用机器并转换预期服务故障。
         try:
             machines = self.machine_service.list_enabled_machines()
-            return ControllerResult(success=True, data=machines)
+            return Result.ok(machines)
         except MachineServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
 
     def create_machine(
         self,
@@ -110,7 +152,7 @@ class AppController(QObject):
         frequency_meter_serial: str,
         enabled: bool = True,
         remark: str | None = None,
-    ) -> ControllerResult:
+    ) -> Result:
         """检查必填字段并创建机器。
 
         Args:
@@ -121,7 +163,7 @@ class AppController(QObject):
             remark: 可选备注。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 是否创建成功
                 data=1,  # 新机器编号
                 message="",  # 失败提示
@@ -137,11 +179,7 @@ class AppController(QObject):
             ("frequency_meter_serial", frequency_meter_serial, "频率仪序列号"),
         ):
             if not value:
-                return ControllerResult(
-                    success=False,
-                    data={"field": field},
-                    message=f"请填写{title}。",
-                )
+                return Result.error(f"请填写{title}。", data={"field": field})
 
         # 调用机器服务并转换重复字段或数据库故障。
         try:
@@ -149,14 +187,10 @@ class AppController(QObject):
                 machine_name, camera_serial, frequency_meter_serial, enabled, remark
             )
         except MachineServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
         if not result["success"]:
-            return ControllerResult(
-                success=False,
-                data={"field": result["field"]},
-                message=result["message"],
-            )
-        return ControllerResult(success=True, data=result["machine_id"])
+            return Result.error(result["message"], data={"field": result["field"]})
+        return Result.ok(result["machine_id"])
 
     def update_machine(
         self,
@@ -166,7 +200,7 @@ class AppController(QObject):
         frequency_meter_serial: str,
         enabled: bool = True,
         remark: str | None = None,
-    ) -> ControllerResult:
+    ) -> Result:
         """检查必填字段并更新机器。
 
         Args:
@@ -178,7 +212,7 @@ class AppController(QObject):
             remark: 可选备注。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 是否更新成功
                 data=1,  # 已更新机器编号
                 message="",  # 失败提示
@@ -194,11 +228,7 @@ class AppController(QObject):
             ("frequency_meter_serial", frequency_meter_serial, "频率仪序列号"),
         ):
             if not value:
-                return ControllerResult(
-                    success=False,
-                    data={"field": field},
-                    message=f"请填写{title}。",
-                )
+                return Result.error(f"请填写{title}。", data={"field": field})
 
         # 调用机器服务并转换重复字段或数据库故障。
         try:
@@ -211,23 +241,19 @@ class AppController(QObject):
                 remark,
             )
         except MachineServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
         if not result["success"]:
-            return ControllerResult(
-                success=False,
-                data={"field": result["field"]},
-                message=result["message"],
-            )
-        return ControllerResult(success=True, data=result["machine_id"])
+            return Result.error(result["message"], data={"field": result["field"]})
+        return Result.ok(result["machine_id"])
 
-    def delete_machine(self, machine_id: int) -> ControllerResult:
+    def delete_machine(self, machine_id: int) -> Result:
         """软删除指定机器。
 
         Args:
             machine_id: 待删除机器编号。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 是否删除成功
                 data=None,  # 删除操作没有返回数据
                 message="",  # 失败提示
@@ -236,18 +262,18 @@ class AppController(QObject):
         # 删除机器并转换预期服务故障。
         try:
             self.machine_service.delete_machine(machine_id)
-            return ControllerResult(success=True)
+            return Result.ok()
         except MachineServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
 
-    def list_record_machines(self) -> ControllerResult:
+    def list_record_machines(self) -> Result:
         """读取历史记录关联的机器。
 
         Args:
             无外部参数。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 查询是否成功
                 data=[],  # 历史机器选项为空
                 message="",  # 失败提示
@@ -256,13 +282,13 @@ class AppController(QObject):
         # 读取历史机器并转换预期服务故障。
         try:
             machines = self.measurement_record_service.list_record_machines()
-            return ControllerResult(success=True, data=machines)
+            return Result.ok(machines)
         except MeasurementRecordServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
 
     def list_measurement_records(
         self, review_status: str | None = None, machine_id: str | None = None
-    ) -> ControllerResult:
+    ) -> Result:
         """检查复核状态并读取测量记录。
 
         Args:
@@ -270,32 +296,32 @@ class AppController(QObject):
             machine_id: 可选机器编号。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 查询是否成功
                 data=[],  # 测量记录列表为空
                 message="",  # 失败提示
             )
         """
         if review_status not in (None, "normal", "pending", "reviewed"):
-            return ControllerResult(success=False, message="复核状态无效。")
+            return Result.error("复核状态无效。")
 
         # 读取筛选记录并转换预期服务故障。
         try:
             records = self.measurement_record_service.list_records(
                 review_status, machine_id
             )
-            return ControllerResult(success=True, data=records)
+            return Result.ok(records)
         except MeasurementRecordServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
 
-    def get_measurement_record(self, session_id: str) -> ControllerResult:
+    def get_measurement_record(self, session_id: str) -> Result:
         """检查周期编号并读取测量详情。
 
         Args:
             session_id: 测量周期编号。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 查询是否成功
                 data=None,  # 周期编号没有对应记录
                 message="",  # 失败提示
@@ -303,18 +329,18 @@ class AppController(QObject):
         """
         session_id = session_id.strip()
         if not session_id:
-            return ControllerResult(success=False, message="Session ID 不能为空。")
+            return Result.error("Session ID 不能为空。")
 
         # 读取测量详情并转换预期服务故障。
         try:
             record = self.measurement_record_service.get_record(session_id)
-            return ControllerResult(success=True, data=record)
+            return Result.ok(record)
         except MeasurementRecordServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
 
     def complete_measurement_review(
         self, session_id: str, edited_text: str | None = None
-    ) -> ControllerResult:
+    ) -> Result:
         """检查周期编号并完成人工复核。
 
         Args:
@@ -322,12 +348,12 @@ class AppController(QObject):
             edited_text: 可选人工编辑文字。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 是否完成复核
                 data=None,  # 复核操作没有返回数据
                 message="",  # 失败提示
             )
-            ControllerResult(
+            Result(
                 success=False,  # 记录已经完成复核
                 data=True,  # 页面需要重新读取当前详情
                 message="该记录已完成复核。",  # 失败提示
@@ -335,25 +361,25 @@ class AppController(QObject):
         """
         session_id = session_id.strip()
         if not session_id:
-            return ControllerResult(success=False, message="Session ID 不能为空。")
+            return Result.error("Session ID 不能为空。")
 
         # 完成人工复核并转换预期服务故障。
         try:
             self.measurement_record_service.complete_review(session_id, edited_text)
-            return ControllerResult(success=True)
+            return Result.ok()
         except MeasurementReviewAlreadyCompletedError as error:
-            return ControllerResult(success=False, data=True, message=str(error))
+            return Result.error(str(error), data=True)
         except MeasurementRecordServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
 
-    def list_abnormal_event_machine_ids(self) -> ControllerResult:
+    def list_abnormal_event_machine_ids(self) -> Result:
         """读取异常事件关联的机器编号。
 
         Args:
             无外部参数。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 查询是否成功
                 data=[],  # 机器编号列表为空
                 message="",  # 失败提示
@@ -362,13 +388,13 @@ class AppController(QObject):
         # 读取异常机器编号并转换预期服务故障。
         try:
             machine_ids = self.abnormal_event_service.list_machine_ids()
-            return ControllerResult(success=True, data=machine_ids)
+            return Result.ok(machine_ids)
         except AbnormalEventServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
 
     def list_abnormal_events(
         self, machine_id: str | None = None, session_id: str | None = None
-    ) -> ControllerResult:
+    ) -> Result:
         """整理可选筛选值并读取异常事件。
 
         Args:
@@ -376,7 +402,7 @@ class AppController(QObject):
             session_id: 可选完整周期编号。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 查询是否成功
                 data=[],  # 异常事件列表为空
                 message="",  # 失败提示
@@ -391,18 +417,18 @@ class AppController(QObject):
         # 读取异常事件并转换预期服务故障。
         try:
             events = self.abnormal_event_service.list_events(machine_id, session_id)
-            return ControllerResult(success=True, data=events)
+            return Result.ok(events)
         except AbnormalEventServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
 
-    def get_abnormal_event(self, abnormal_event_id: int) -> ControllerResult:
+    def get_abnormal_event(self, abnormal_event_id: int) -> Result:
         """读取指定异常事件详情。
 
         Args:
             abnormal_event_id: 异常事件主键。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 查询是否成功
                 data=None,  # 主键没有对应事件
                 message="",  # 失败提示
@@ -411,25 +437,25 @@ class AppController(QObject):
         # 读取异常详情并转换预期服务故障。
         try:
             event = self.abnormal_event_service.get_event(abnormal_event_id)
-            return ControllerResult(success=True, data=event)
+            return Result.ok(event)
         except AbnormalEventServiceError as error:
-            return ControllerResult(success=False, message=str(error))
+            return Result.error(str(error))
 
-    def start_monitoring(self) -> ControllerResult:
+    def start_monitoring(self) -> Result:
         """创建并启动唯一的监测线程。
 
         Args:
             无外部参数。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 是否启动监测
                 data=None,  # 启动操作没有返回数据
                 message="",  # 重复启动提示
             )
         """
         if self.runtime_thread is not None:
-            return ControllerResult(success=False, message="监测正在运行。")
+            return Result.error("监测正在运行。")
 
         # 创建当前监测线程。
         self.runtime_thread = SystemRuntimeThread(self.configuration_directory)
@@ -455,16 +481,16 @@ class AppController(QObject):
 
         # 启动监测。
         self.runtime_thread.start()
-        return ControllerResult(success=True)
+        return Result.ok()
 
-    def stop_monitoring(self) -> ControllerResult:
+    def stop_monitoring(self) -> Result:
         """通知当前监测线程停止。
 
         Args:
             无外部参数。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 停止请求已处理
                 data=None,  # 停止操作没有返回数据
                 message="",  # 提示信息
@@ -472,22 +498,22 @@ class AppController(QObject):
         """
         if self.runtime_thread is not None:
             self.runtime_thread.stop_requested.set()
-        return ControllerResult(success=True)
+        return Result.ok()
 
-    def is_monitoring_running(self) -> ControllerResult:
+    def is_monitoring_running(self) -> Result:
         """查询监测线程是否尚未完成清理。
 
         Args:
             无外部参数。
 
         Returns:
-            ControllerResult(
+            Result(
                 success=True,  # 状态查询成功
                 data=True,  # 仍有监测线程等待清理
                 message="",  # 提示信息
             )
         """
-        return ControllerResult(success=True, data=self.runtime_thread is not None)
+        return Result.ok(self.runtime_thread is not None)
 
     @Slot()
     def finish_monitoring(self) -> None:

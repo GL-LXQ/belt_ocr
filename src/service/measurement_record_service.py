@@ -1,10 +1,14 @@
 """读取测量记录并处理人工复核。"""
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 
 from src.repo.measurement_record_repo import MeasurementRecordRepo
+
+
+logger = logging.getLogger(__name__)
 
 
 class MeasurementRecordServiceError(Exception):
@@ -47,7 +51,11 @@ class MeasurementRecordService:
         try:
             return self.measurement_record_repo.list_record_machines()
         except sqlite3.Error as error:
-            raise MeasurementRecordServiceError(f"历史机器读取失败：{error}") from error
+            # 记录数据库读取故障。
+            logger.exception("历史机器读取失败")
+
+            # 抛出可直接展示的业务提示。
+            raise MeasurementRecordServiceError("历史机器读取失败。") from error
 
     def list_records(
         self, review_status: str | None = None, machine_id: str | None = None
@@ -81,7 +89,11 @@ class MeasurementRecordService:
                 self.decode_record_fields(record)
             return records
         except (sqlite3.Error, json.JSONDecodeError) as error:
-            raise MeasurementRecordServiceError(f"历史记录读取失败：{error}") from error
+            # 记录数据库或 JSON 读取故障。
+            logger.exception("历史记录读取失败")
+
+            # 抛出可直接展示的业务提示。
+            raise MeasurementRecordServiceError("历史记录读取失败。") from error
 
     def get_record(self, session_id: str) -> dict | None:
         """读取一条测量记录并转换详情字段。
@@ -114,7 +126,11 @@ class MeasurementRecordService:
                 self.decode_record_fields(record)
             return record
         except (sqlite3.Error, json.JSONDecodeError) as error:
-            raise MeasurementRecordServiceError(f"历史详情读取失败：{error}") from error
+            # 记录数据库或 JSON 读取故障。
+            logger.exception("历史详情读取失败")
+
+            # 抛出可直接展示的业务提示。
+            raise MeasurementRecordServiceError("历史详情读取失败。") from error
 
     def complete_review(self, session_id: str, edited_text: str | None = None) -> None:
         """确认原始文字或保存人工文字并完成一条记录的复核。
@@ -144,7 +160,11 @@ class MeasurementRecordService:
                 session_id, reviewed_at, reviewed_lines
             )
         except sqlite3.Error as error:
-            raise MeasurementRecordServiceError(f"人工复核保存失败：{error}") from error
+            # 记录复核写入的数据库故障。
+            logger.exception("人工复核保存失败")
+
+            # 抛出可直接展示的业务提示。
+            raise MeasurementRecordServiceError("人工复核保存失败。") from error
         if not updated:
             raise MeasurementReviewAlreadyCompletedError("该记录已完成复核。")
 

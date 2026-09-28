@@ -327,10 +327,15 @@ def test_invalid_ocr_json_is_a_history_read_error(
             ("{broken", "normal-session"),
         )
 
-    with pytest.raises(MeasurementRecordServiceError, match="历史记录读取失败"):
+    # 核对列表读取的对外提示。
+    with pytest.raises(MeasurementRecordServiceError) as list_error:
         measurement_record_service.list_records()
-    with pytest.raises(MeasurementRecordServiceError, match="历史详情读取失败"):
+    assert str(list_error.value) == "历史记录读取失败。"
+
+    # 核对详情读取的对外提示。
+    with pytest.raises(MeasurementRecordServiceError) as detail_error:
         measurement_record_service.get_record("normal-session")
+    assert str(detail_error.value) == "历史详情读取失败。"
 
 
 def test_history_page_shows_filters_and_read_only_details(

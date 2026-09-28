@@ -1,8 +1,12 @@
 """向异常事件页面提供查询结果和内容摘要。"""
 
+import logging
 import sqlite3
 
 from src.repo.abnormal_event_repo import AbnormalEventRepo
+
+
+logger = logging.getLogger(__name__)
 
 
 class AbnormalEventServiceError(Exception):
@@ -38,7 +42,11 @@ class AbnormalEventService:
         try:
             return self.abnormal_event_repo.list_machine_ids()
         except sqlite3.Error as error:
-            raise AbnormalEventServiceError(f"异常机器读取失败：{error}") from error
+            # 记录数据库读取故障。
+            logger.exception("异常机器读取失败")
+
+            # 抛出可直接展示的业务提示。
+            raise AbnormalEventServiceError("异常机器读取失败。") from error
 
     def list_events(
         self, machine_id: str | None = None, session_id: str | None = None
@@ -65,7 +73,11 @@ class AbnormalEventService:
         try:
             events = self.abnormal_event_repo.list_events(machine_id, session_id)
         except sqlite3.Error as error:
-            raise AbnormalEventServiceError(f"异常事件读取失败：{error}") from error
+            # 记录数据库读取故障。
+            logger.exception("异常事件读取失败")
+
+            # 抛出可直接展示的业务提示。
+            raise AbnormalEventServiceError("异常事件读取失败。") from error
 
         # 为列表记录补充简短的原始内容摘要。
         for event in events:
@@ -97,6 +109,10 @@ class AbnormalEventService:
         try:
             event = self.abnormal_event_repo.get_event(abnormal_event_id)
         except sqlite3.Error as error:
-            raise AbnormalEventServiceError(f"异常详情读取失败：{error}") from error
+            # 记录数据库读取故障。
+            logger.exception("异常详情读取失败")
+
+            # 抛出可直接展示的业务提示。
+            raise AbnormalEventServiceError("异常详情读取失败。") from error
 
         return event

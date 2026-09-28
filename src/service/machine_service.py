@@ -1,8 +1,12 @@
 """组织机器新增、修改、删除、查询和业务错误转换。"""
 
+import logging
 import sqlite3
 
 from src.repo.machine_repo import MachineRepo
+
+
+logger = logging.getLogger(__name__)
 
 
 class MachineServiceError(Exception):
@@ -84,8 +88,11 @@ class MachineService:
             # 无重复字段时保存机器并取得编号。
             machine_id = self.machine_repo.insert(machine_name, camera_serial, frequency_meter_serial, enabled, remark)
         except sqlite3.Error as error:
-            # 数据库故障转换为业务错误。
-            raise MachineServiceError(f"机器保存失败：{error}") from error
+            # 记录数据库故障详情。
+            logger.exception("机器保存失败")
+
+            # 抛出可直接展示的业务提示。
+            raise MachineServiceError("机器保存失败。") from error
 
         # 返回已创建机器的成功结果。
         return {
@@ -148,8 +155,11 @@ class MachineService:
             # 无重复字段时更新机器记录。
             self.machine_repo.update(machine_id, machine_name, camera_serial, frequency_meter_serial, enabled, remark)
         except sqlite3.Error as error:
-            # 数据库故障转换为业务错误。
-            raise MachineServiceError(f"机器保存失败：{error}") from error
+            # 记录数据库故障详情。
+            logger.exception("机器保存失败")
+
+            # 抛出可直接展示的业务提示。
+            raise MachineServiceError("机器保存失败。") from error
 
         # 返回已更新机器的成功结果。
         return {
@@ -172,8 +182,11 @@ class MachineService:
         try:
             self.machine_repo.soft_delete(machine_id)
         except sqlite3.Error as error:
-            # 数据库故障转换为业务错误。
-            raise MachineServiceError(f"机器删除失败：{error}") from error
+            # 记录数据库故障详情。
+            logger.exception("机器删除失败")
+
+            # 抛出可直接展示的业务提示。
+            raise MachineServiceError("机器删除失败。") from error
 
     def list_machines(self) -> list[dict]:
         """按编号读取全部机器信息。
@@ -198,8 +211,11 @@ class MachineService:
         try:
             return self.machine_repo.list_all()
         except sqlite3.Error as error:
-            # 数据库故障转换为业务错误。
-            raise MachineServiceError(f"机器列表读取失败：{error}") from error
+            # 记录数据库故障详情。
+            logger.exception("机器列表读取失败")
+
+            # 抛出可直接展示的业务提示。
+            raise MachineServiceError("机器列表读取失败。") from error
 
     def list_enabled_machines(self) -> list[dict]:
         """按编号读取全部已启用机器信息。
@@ -224,5 +240,8 @@ class MachineService:
         try:
             return self.machine_repo.list_enabled()
         except sqlite3.Error as error:
-            # 数据库故障转换为业务错误。
-            raise MachineServiceError(f"机器列表读取失败：{error}") from error
+            # 记录数据库故障详情。
+            logger.exception("机器列表读取失败")
+
+            # 抛出可直接展示的业务提示。
+            raise MachineServiceError("机器列表读取失败。") from error
