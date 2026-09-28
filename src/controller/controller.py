@@ -13,6 +13,7 @@ from src.service.machine_service import MachineService, MachineServiceError
 from src.service.measurement_history_service import (
     MeasurementHistoryService,
     MeasurementHistoryServiceError,
+    MeasurementReviewAlreadyCompletedError,
 )
 from src.service.monitoring_service import MonitoringService
 
@@ -326,6 +327,11 @@ class AppController(QObject):
                 data=None,  # 复核操作没有返回数据
                 message="",  # 失败提示
             )
+            ControllerResult(
+                success=False,  # 记录已经完成复核
+                data=True,  # 页面需要重新读取当前详情
+                message="该记录已完成复核。",  # 失败提示
+            )
         """
         session_id = session_id.strip()
         if not session_id:
@@ -335,6 +341,8 @@ class AppController(QObject):
         try:
             self.measurement_history_service.complete_review(session_id, edited_text)
             return ControllerResult(success=True)
+        except MeasurementReviewAlreadyCompletedError as error:
+            return ControllerResult(success=False, data=True, message=str(error))
         except MeasurementHistoryServiceError as error:
             return ControllerResult(success=False, message=str(error))
 

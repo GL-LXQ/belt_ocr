@@ -457,6 +457,8 @@ class HistoryPage(QWidget):
         result = self.controller.complete_measurement_review(session_id, edited_text)
         if not result.success:
             QMessageBox.warning(self, "人工复核未完成", result.message)
+            if result.data is True:
+                self.show_record_detail(session_id)
             return
 
         # 关闭详情并刷新当前状态及机器筛选下的列表。

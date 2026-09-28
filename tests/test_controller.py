@@ -233,8 +233,22 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
     review_error = MeasurementReviewAlreadyCompletedError("该记录已完成复核。")
     history_service.complete_review.side_effect = review_error
     result = controller.complete_measurement_review(" session-1 ", None)
-    assert result == ControllerResult(success=False, message="该记录已完成复核。")
+    assert result == ControllerResult(
+        success=False,
+        data=True,
+        message="该记录已完成复核。",
+    )
     history_service.complete_review.assert_called_once_with("session-1", None)
+
+    # 普通复核错误不要求界面刷新详情。
+    history_service.complete_review.side_effect = MeasurementHistoryServiceError(
+        "人工复核保存失败"
+    )
+    result = controller.complete_measurement_review("session-1", None)
+    assert result == ControllerResult(
+        success=False,
+        message="人工复核保存失败",
+    )
 
 
 def test_history_and_abnormal_service_errors_become_results(

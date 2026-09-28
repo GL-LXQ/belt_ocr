@@ -460,7 +460,7 @@ def test_stale_history_detail_cannot_review_record_twice(
     measurement_history_service: MeasurementHistoryService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证旧详情重复提交时提示且不覆盖已保存结果。
+    """验证旧详情重复提交时刷新只读状态且不覆盖已保存结果。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
@@ -469,7 +469,7 @@ def test_stale_history_detail_cannot_review_record_twice(
 
     Returns:
         返回示例：
-            None  # 第二次提交只显示失败提示
+            None  # 第二次提交提示并显示最新已复核详情
     """
     warning_message = Mock()
     monkeypatch.setattr(QMessageBox, "warning", warning_message)
@@ -480,14 +480,63 @@ def test_stale_history_detail_cannot_review_record_twice(
     try:
         # 打开旧详情后由另一操作先完成复核。
         page.show_record_detail("review-session")
+        assert page.detail_values["status"].text() == "待复核"
         measurement_history_service.complete_review("review-session")
         page.review_editor.setPlainText("不应覆盖原结果")
         page.save_review_button.click()
 
-        # 重复操作只提示，不覆盖首次复核结果。
+        # 重复操作提示失败并重新显示已复核详情。
         assert warning_message.call_args.args[2] == "该记录已完成复核。"
+        assert page.detail_values["status"].text() == "已复核"
+        assert page.review_editor.isHidden()
+        assert page.confirm_review_button.isHidden()
+        assert page.save_review_button.isHidden()
+
+        # 首次保存的复核结果保持不变。
         reviewed_record = measurement_history_service.get_record("review-session")
         assert reviewed_record["reviewed_lines"] is None
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_other_review_error_keeps_current_detail(
+    qt_application: QApplication,
+    measurement_history_service: MeasurementHistoryService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证普通复核失败只提示，不重新读取当前详情。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_history_service: 已保存测试记录的历史服务。
+        monkeypatch: pytest 提供的对象替换工具。
+
+    Returns:
+        返回示例：
+            None  # 普通失败保留当前待复核详情
+    """
+    warning_message = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warning_message)
+    controller = AppController(
+        Mock(), measurement_history_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
+    try:
+        # 打开待复核详情并提交没有有效文字的修改。
+        page.show_record_detail("review-session")
+        page.show_record_detail = Mock(wraps=page.show_record_detail)
+        page.review_editor.setPlainText(" \n ")
+        page.save_review_button.click()
+
+        # 普通失败保留编辑状态且不重新读取详情。
+        assert warning_message.call_args.args[2] == "人工复核结果至少需要一条有效文字。"
+        page.show_record_detail.assert_not_called()
+        assert page.detail_values["status"].text() == "待复核"
+        assert not page.review_editor.isHidden()
+        assert not page.confirm_review_button.isHidden()
+        assert not page.save_review_button.isHidden()
     finally:
         page.detail_dialog.close()
         page.close()
