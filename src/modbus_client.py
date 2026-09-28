@@ -129,14 +129,14 @@ class ModbusClient:
 
         Returns:
             返回示例：
-                None  # 连接失败、响应异常、状态数量不足或发生通信异常
+                None  # 连接或读取发生通信异常、响应异常、状态数量不足
                 [True, False]  # 自起始地址开始的各离散输入状态
         """
-        # 读取前确保客户端已连接。
-        if not await self._ensure_connected():
-            return None
-
         try:
+            # 读取前确保客户端已连接。
+            if not await self._ensure_connected():
+                return None
+
             # 按设备地址读取离散输入。
             result = await self._client.read_discrete_inputs(address=address, count=count, device_id=self.unit_id)
 
@@ -152,20 +152,17 @@ class ModbusClient:
 
             # 按请求数量返回输入状态列表。
             return list(result.bits[:count])
-        except Exception as error:
-            # 连接失效时复位状态并等待下一轮重连。
-            if isinstance(error, OSError):
-                self._connected = False
-                logger.error("读取离散输入时连接失效: %s", error)
-                return None
 
-            # Modbus 协议异常时放弃本次结果。
-            if isinstance(error, ModbusException):
-                logger.error("读取离散输入时发生 Modbus 异常: %s", error)
-                return None
+        except OSError as error:
+            # 连接或读取时串口失效，复位状态并等待下一轮重连。
+            self._connected = False
+            logger.error("连接或读取离散输入时串口通信失败: %s", error)
+            return None
 
-            # 非通信异常交给调用方处理。
-            raise
+        except ModbusException as error:
+            # 连接或读取时发生 Modbus 协议异常，放弃本次结果。
+            logger.error("连接或读取离散输入时发生 Modbus 异常: %s", error)
+            return None
 
     async def _ensure_connected(self) -> bool:
         """确保当前存在有效的 Modbus RTU 连接。

@@ -137,3 +137,57 @@ async def test_read_uses_exception_type_instead_of_message(
         with pytest.raises(type(read_error)) as raised_error:
             await modbus_client.read_discrete_inputs(0)
         assert raised_error.value is read_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "connection_error",
+    [
+        OSError("串口连接失效"),
+        ModbusException("协议异常"),
+    ],
+)
+async def test_read_returns_none_when_reconnect_fails_with_communication_error(
+    connection_error: Exception,
+) -> None:
+    """确认重连阶段的通信异常按本次通信失败返回。
+
+    Args:
+        connection_error: 连接阶段抛出的通信异常。
+
+    Returns:
+        返回示例：
+            None  # 通信异常未向上传播，读取返回失败
+    """
+    # 建立无有效连接的客户端，并让重连抛出通信异常。
+    modbus_client = ModbusClient("COM1")
+    serial_client = SimpleNamespace(connect=AsyncMock(side_effect=connection_error))
+    modbus_client._create_client = Mock(return_value=serial_client)
+
+    # 核对通信异常被转换成一次读取失败。
+    assert await modbus_client.read_discrete_inputs(0) is None
+    assert modbus_client._connected is False
+    serial_client.connect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_read_propagates_program_error_from_reconnect() -> None:
+    """确认重连阶段的程序异常原样抛出。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 程序异常未被伪装成通信失败
+    """
+    # 建立无有效连接的客户端，并让重连抛出程序异常。
+    modbus_client = ModbusClient("COM1")
+    program_error = TypeError("连接参数错误")
+    serial_client = SimpleNamespace(connect=AsyncMock(side_effect=program_error))
+    modbus_client._create_client = Mock(return_value=serial_client)
+
+    # 核对程序异常仍向上传播给调用方。
+    with pytest.raises(TypeError) as raised_error:
+        await modbus_client.read_discrete_inputs(0)
+    assert raised_error.value is program_error
