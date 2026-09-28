@@ -24,7 +24,7 @@ START 后创建本轮 Session，同时开始相机采集和频率收集；频率
 
 原始帧 → `filter_qualified_frames()` 筛帧（当前原样返回全部图片）→ `recognize_images()` 逐帧转换 Mono8 图像并调用共享 OCR Engine → `generate_final_text_and_images()` 按现有规则终选文字与证据图片。识别结果按帧顺序返回；明确的帧格式和结果结构错误按本轮 OCR 失败处理，未分类异常交给 Runtime 全局故障流程。
 
-START 时只启动 `CYCLE_TIMEOUT`；相机采集完成后 OCR 任务等待共享 `processing_lock`，拿到锁并确认 Session 仍有效时才启动 `OCR_TIMEOUT` 和实际识别。`ocr_result_timeout_ms` 只计算获得锁后的 OCR 处理时间，不包含采集与排队；正常识别完成时取消 OCR 期限，失败或超时继续沿用本轮失败清理。
+START 时只启动 `CYCLE_TIMEOUT`；相机采集完成后 OCR 任务在 `ocr_lock_wait_timeout_ms` 内等待共享 `processing_lock`，等锁超时经独立事件将本轮失败写入 `abnormal_events`，等待真实 CLOSE 后释放 Session。拿到锁并确认 Session 仍有效时才启动 `OCR_TIMEOUT` 和实际识别；`ocr_result_timeout_ms` 只计算获得锁后的 OCR 处理时间，正常识别完成时取消该期限。后续 Session 各自独立等待并记录等锁失败。
 
 独立 OCR 项目的核心代码与原始配置 `config.yaml` 位于 `src/ocr/`：Runtime 在至少一台相机连接成功后，通过共享 `TextRecognizer` 加载配置并初始化一次 `BeltOCREngine`，等待模型准备完成后才启动机器任务并开放 START；三台机器及后续测量周期复用同一实例，独立调用识别入口时也由 `TextRecognizer` 兜底初始化。Engine 的路径入口仍按配置保存 JSON；内存入口 `process_image(image)` 返回 `image_path=None` 且不保存 JSON，两种入口共用尺寸处理、ROI、预处理、识别、过滤与文字块分组流程。
 
@@ -46,7 +46,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 
 证据图片文件操作出现 `OSError` 时清理本轮新建图片，将它包装为 `EvidenceWriteError`，并以 `EVIDENCE_WRITE_FAILED` 结束当前 Session；图片全部保存后，测量记录提交遇到 SQLite `SQLITE_BUSY` 时最多尝试两次，两次间隔 100 毫秒。写锁重试耗尽或发生其他 SQLite 提交错误时，以 `DATABASE_WRITE_FAILED` 结束本轮，已保存的图片保留。数据库发现同一 Session 内容冲突时抛出 `CommitIntegrityConflictError`，以 `COMMIT_INTEGRITY_CONFLICT` 结束本轮，原记录不被覆盖。这三类存储故障在 Session 失败记录完成后进入 Runtime 全局故障流程并停止接收新测量；已知 MVS 图片编码失败只结束当前 Session，未知保存异常继续沿现有全局故障路径上报。
 
-采集完成却没有帧时，图像采集阶段上报失败，OCR 不启动；已知的 OCR 处理错误或周期超时也进入 Session 失败收尾。`Machine` 将失败原因写入 Session、标记失败并把机器编号、周期编号和错误明细写入现有 `abnormal_events` 表；随后取消本轮任务，待现场关闭及相关任务结束后释放 Session。人工复核结果仍按正常测量流程保存，异常事件写入失败只记录日志，不阻断 Session 收尾。
+采集完成却没有帧时，图像采集阶段上报失败，OCR 不启动；已知的 OCR 处理错误或周期超时也进入 Session 失败收尾。`Machine` 将失败原因写入 Session、标记失败并把机器编号、周期编号和错误明细写入现有 `abnormal_events` 表；随后取消并解绑本轮 OCR 任务，待现场关闭后释放 Session，旧任务独立收尾。人工复核结果仍按正常测量流程保存，异常事件写入失败只记录日志，不阻断 Session 收尾。
 
 单次取帧没有数据时继续采集；整轮没有帧时以 `CAPTURE_EMPTY` 结束当前 Session。采集阶段发生明确的 MVS 设备异常时，相机先释放本轮采集资源，再向所属机器交付 `CAPTURE_FAILED`，由现有失败流程记录 Session 和 `abnormal_events`；故障相机停止受理新周期，其他机器继续运行。单台相机启动连接失败时保留该机器的不可用状态并继续初始化其他机器；所有相机都连接失败时结束本次启动。设备修复后通过重新启动客户端恢复。
 

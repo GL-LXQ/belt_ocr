@@ -618,6 +618,24 @@ class Machine:
                 if deadline is not None:
                     deadline.cancel()
 
+            # 等待共享识别锁超时。
+            case EventType.OCR_LOCK_WAIT_TIMEOUT:
+                # 只处理仍在等待识别结果的周期。
+                if session.ocr_state != OCRState.RUNNING:
+                    return
+
+                # 上报识别失败并结算当前周期。
+                session.ocr_state = OCRState.FAILED
+                if self.notify_measurement_progress is not None:
+                    self.notify_measurement_progress(
+                        session.machine_id,
+                        session.session_id,
+                        ProgressStage.CHARACTER_RECOGNITION,
+                        ProgressStatus.FAILED,
+                    )
+                await self.handle_measurement_failure(session, "OCR 识别资源等待超时")
+                return
+
             # 识别失败或识别超时。
             case EventType.OCR_FAILED | EventType.OCR_TIMEOUT:
                 # 已有终态时忽略本次失败或超时。
@@ -876,8 +894,29 @@ class Machine:
             session.session_id,
         )
 
-        # 等待共享识别锁。
-        async with self.text_recognizer.processing_lock:
+        # 限时等待共享识别锁。
+        try:
+            await asyncio.wait_for(
+                self.text_recognizer.processing_lock.acquire(),
+                timeout=self.config.ocr_lock_wait_timeout_ms / 1000,
+            )
+        except asyncio.TimeoutError:
+            # 向当前周期交付识别资源等待超时。
+            logger.warning(
+                "OCR等待共享识别资源超时 machine_id=%s session_id=%s "
+                "wait_timeout_ms=%s",
+                session.machine_id,
+                session.session_id,
+                self.config.ocr_lock_wait_timeout_ms,
+            )
+            await self.publish_event(RuntimeEvent(
+                EventType.OCR_LOCK_WAIT_TIMEOUT,
+                session.machine_id,
+                session.session_id,
+            ))
+            return
+
+        try:
             # 记录获得共享识别锁时的等待时长。
             logger.info(
                 "OCR获得共享识别资源 machine_id=%s session_id=%s wait_seconds=%.3f",
@@ -949,6 +988,9 @@ class Machine:
 
                 # 按识别成功交付结果。
                 event_type, payload = EventType.OCR_COMPLETED, result
+        finally:
+            # 释放本轮持有的共享识别锁。
+            self.text_recognizer.processing_lock.release()
 
         # 释放原始帧引用。
         frames = ()

@@ -32,6 +32,7 @@ class AppConfig:
     frequency_interval_ms: int = 100  # 频率读取间隔配置
     minimum_frequency_hz: float = 0.01  # 有效频率下限
     maximum_frequency_hz: float = 10000.0  # 有效频率上限
+    ocr_lock_wait_timeout_ms: int = 10000  # 等待共享 OCR 锁的期限，毫秒
     ocr_result_timeout_ms: int = 30000  # OCR 处理期限，毫秒
     max_cycle_open_ms: int = 60000  # 周期关闭期限，毫秒
     event_queue_capacity: int = 128  # 单机事件队列容量
@@ -83,7 +84,8 @@ class AppConfig:
         positive_parameters = (
             "capture_window_ms", "camera_timeout_ms",
             "frequency_interval_ms",
-            "ocr_result_timeout_ms", "max_cycle_open_ms", "event_queue_capacity",
+            "ocr_lock_wait_timeout_ms", "ocr_result_timeout_ms",
+            "max_cycle_open_ms", "event_queue_capacity",
             "shutdown_timeout_ms",
         )
 
@@ -129,6 +131,7 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
                 "mvs_dll_directory": None,  # 使用默认动态库目录
                 "capture_window_ms": 1000,  # 采集窗口，毫秒
                 "camera_timeout_ms": 50,  # 取帧超时，毫秒
+                "ocr_lock_wait_timeout_ms": 10000,  # 等待共享 OCR 锁的期限，毫秒
                 "ocr_result_timeout_ms": 30000,  # OCR 处理期限，毫秒
                 "frequency_interval_ms": 100,  # 频率读取间隔配置
                 "minimum_frequency_hz": 0.01,  # 最低有效频率
@@ -202,6 +205,7 @@ def load_config(configuration_directory: Path) -> AppConfig:
                 frequency_interval_ms=100,  # 频率读取间隔配置
                 minimum_frequency_hz=0.01,  # 最低有效频率
                 maximum_frequency_hz=10000.0,  # 最高有效频率
+                ocr_lock_wait_timeout_ms=10000,  # 等待共享 OCR 锁的期限
                 ocr_result_timeout_ms=30000,  # OCR 处理期限
                 max_cycle_open_ms=60000,  # 周期关闭期限
                 event_queue_capacity=128,  # 单机事件队列容量

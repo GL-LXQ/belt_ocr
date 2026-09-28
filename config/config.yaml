@@ -17,8 +17,9 @@ camera:
   capture_window_ms: 1000  # 单轮采集窗口，毫秒
   camera_timeout_ms: 50  # 单次取帧超时，毫秒
 
-# 获得共享 OCR 锁后开始计算的 OCR 处理期限。
+# 共享 OCR 锁的等待期限与获得锁后的处理期限。
 ocr:
+  ocr_lock_wait_timeout_ms: 10000  # 等待共享 OCR 识别锁的最大时间，毫秒
   ocr_result_timeout_ms: 3000  # OCR 处理期限，毫秒
 
 # 频率读取间隔与有效频率范围。

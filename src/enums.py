@@ -72,6 +72,7 @@ class EventType(str, Enum):
     CAPTURE_FAILED = "CaptureFailed"  # 相机采集设备故障
     OCR_COMPLETED = "OCRCompleted"  # 整轮识别结果
     OCR_FAILED = "OCRFailed"  # 整轮文字识别失败
+    OCR_LOCK_WAIT_TIMEOUT = "OCRLockWaitTimeout"  # 等待共享 OCR 锁超时
     OCR_TIMEOUT = "OCRTimeout"  # 文字识别超时
     FREQUENCY_MEASURED = "FrequencyMeasured"  # 收到有效频率测量
     CYCLE_TIMEOUT = "CycleTimeout"  # 测量周期超时

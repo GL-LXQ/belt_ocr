@@ -14,7 +14,7 @@ import pytest
 
 from async_utils import run_blocking_operation
 from camera.camera import Camera
-from config_util import AppConfig, MachineConfig
+from config_util import AppConfig, MachineConfig, load_config
 from camera.hikrobot_sdk import MvsError
 from database import CommitIntegrityConflictError, Database, MeasurementRecord
 from enums import EventType, OCRState, ProgressStage, ProgressStatus, SessionState
@@ -209,6 +209,26 @@ def read_abnormal_events(database: Database) -> list[tuple]:
             "SELECT machine_id, session_id, reason, payload_json "
             "FROM abnormal_events ORDER BY abnormal_event_id"
         ).fetchall()
+
+
+def test_ocr_lock_wait_timeout_configuration() -> None:
+    """确认共享 OCR 锁等待期限从配置读取并要求正数。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 配置值为 10000 毫秒，零值被拒绝
+    """
+    # 读取现场配置并核对共享锁等待期限。
+    configuration_directory = Path(__file__).resolve().parents[1] / "config"
+    configuration = load_config(configuration_directory)
+    assert configuration.ocr_lock_wait_timeout_ms == 10000
+
+    # 核对共享锁等待期限必须为正数。
+    with pytest.raises(ValueError, match="ocr_lock_wait_timeout_ms"):
+        replace(configuration, ocr_lock_wait_timeout_ms=0).validate()
 
 
 @pytest.mark.asyncio
@@ -1101,7 +1121,11 @@ async def test_ocr_timeout_starts_after_shared_lock_and_cancels_on_completion(
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
     machine.current_session = None
-    machine.config = replace(machine.config, ocr_result_timeout_ms=250)
+    machine.config = replace(
+        machine.config,
+        ocr_lock_wait_timeout_ms=1000,
+        ocr_result_timeout_ms=250,
+    )
     machine.camera.available = True
     machine.camera.is_capturing = False
     machine.camera.start_capture = Mock()
@@ -1352,6 +1376,171 @@ async def test_invalid_session_waiting_for_ocr_lock_skips_timeout_and_inference(
         if processing_lock.locked():
             processing_lock.release()
         await asyncio.gather(recognition_task, return_exceptions=True)
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_consecutive_ocr_lock_wait_timeouts_are_recorded_per_session(
+    tmp_path: Path,
+) -> None:
+    """确认连续等锁超时分别入库且关闭后仍可启动下一轮。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 两轮失败分别入库，第三轮仍可创建
+    """
+    # 建立持续占用的共享锁和待处理的首轮周期。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, first_session, progress_updates, _ = create_machine(
+        tmp_path, (evidence_frame,)
+    )
+    first_session.capture_stop_time = None
+    first_session.ocr_state = OCRState.WAITING
+    first_session.ocr_result = None
+    machine.config = replace(machine.config, ocr_lock_wait_timeout_ms=50)
+    processing_lock = asyncio.Lock()
+    await processing_lock.acquire()
+    machine.text_recognizer = SimpleNamespace(
+        processing_lock=processing_lock,
+        process_session_frames=Mock(),
+    )
+    machine.camera.available = True
+    machine.camera.is_capturing = False
+    machine.camera.start_capture = Mock()
+    machine.camera.stop = AsyncMock()
+    pending_events: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
+
+    async def queue_event(event: RuntimeEvent) -> None:
+        """收集识别任务发布的事件供机器主流程处理。
+
+        Args:
+            event: 识别任务发布的事件。
+
+        Returns:
+            返回示例：
+                None  # 事件已加入测试队列
+        """
+        await pending_events.put(event)
+
+    machine.publish_event = queue_event
+    capture_result = CaptureResult(
+        frames=(evidence_frame.camera_frame,), statistics={}
+    )
+    try:
+        for cycle_number in (1, 2):
+            # 采集完成后等待共享锁超时。
+            session = machine.current_session
+            assert session is not None
+            await machine.handle_event(RuntimeEvent(
+                EventType.CAPTURE_COMPLETED,
+                session.machine_id,
+                session.session_id,
+                capture_result,
+            ))
+            recognition_task = machine.current_recognition_task
+            assert recognition_task is not None
+            timeout_event = await asyncio.wait_for(pending_events.get(), timeout=5)
+            assert timeout_event.event_type == EventType.OCR_LOCK_WAIT_TIMEOUT
+            assert timeout_event.session_id == session.session_id
+            await recognition_task
+            await machine.handle_event(timeout_event)
+
+            # 核对本轮失败进度和独立异常记录。
+            assert session.ocr_state == OCRState.FAILED
+            assert session.state == SessionState.FAILED
+            assert session.errors == ["OCR 识别资源等待超时"]
+            assert machine.current_session is session
+            assert (
+                session.machine_id,
+                session.session_id,
+                ProgressStage.CHARACTER_RECOGNITION,
+                ProgressStatus.FAILED,
+            ) in progress_updates
+            abnormal_events = read_abnormal_events(database)
+            assert len(abnormal_events) == cycle_number
+            assert abnormal_events[-1][:3] == (
+                session.machine_id,
+                session.session_id,
+                "OCR 识别资源等待超时",
+            )
+            with sqlite3.connect(database.config.database_path) as connection:
+                measurement_count = connection.execute(
+                    "SELECT COUNT(*) FROM measurement_records"
+                ).fetchone()[0]
+            assert measurement_count == 0
+            assert processing_lock.locked()
+            machine.text_recognizer.process_session_frames.assert_not_called()
+            assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+
+            # 真实 CLOSE 释放本轮，再创建下一轮周期。
+            await machine.handle_machine_close()
+            assert machine.current_session is None
+            machine.camera.delivery_task = asyncio.get_running_loop().create_future()
+            machine.camera.delivery_task.set_result(None)
+            await machine.handle_machine_start()
+            assert machine.current_session is not None
+            assert machine.current_session.session_id != session.session_id
+            machine.camera.delivery_task = None
+
+        # 核对两条异常分别属于前两轮，第三轮已正常受理。
+        abnormal_events = read_abnormal_events(database)
+        assert [event[1] for event in abnormal_events] == [
+            first_session.session_id,
+            session.session_id,
+        ]
+        assert machine.current_session is not None
+    finally:
+        # 释放测试占用的锁和机器资源。
+        processing_lock.release()
+        machine.camera.delivery_task = None
+        await machine.release_resources("测试结束")
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_ocr_lock_wait_keeps_shared_lock_owned_by_other_task(
+    tmp_path: Path,
+) -> None:
+    """确认等待锁时取消识别任务不会释放其他任务持有的锁。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 锁仍由原任务持有，没有超时或识别结果
+    """
+    # 建立被其他任务占用的共享锁。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    processing_lock = asyncio.Lock()
+    await processing_lock.acquire()
+    machine.text_recognizer = SimpleNamespace(
+        processing_lock=processing_lock,
+        process_session_frames=Mock(),
+    )
+    machine.publish_event = AsyncMock()
+    recognition_task = asyncio.create_task(machine.recognize_session(
+        session, (evidence_frame.camera_frame,)
+    ))
+    try:
+        # 取消仍在等待共享锁的识别任务。
+        await asyncio.sleep(0)
+        session.state = SessionState.FAILED
+        recognition_task.cancel()
+        await asyncio.gather(recognition_task, return_exceptions=True)
+
+        # 核对取消没有释放锁或执行识别。
+        assert processing_lock.locked()
+        assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+        machine.text_recognizer.process_session_frames.assert_not_called()
+        machine.publish_event.assert_not_awaited()
+    finally:
+        # 释放测试占用的共享锁和数据库。
+        processing_lock.release()
         database.close()
 
 
