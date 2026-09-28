@@ -19,7 +19,7 @@ camera:
 
 # 获得共享 OCR 锁后开始计算的 OCR 处理期限。
 ocr:
-  ocr_result_timeout_ms: 30000  # OCR 处理期限，毫秒
+  ocr_result_timeout_ms: 3000  # OCR 处理期限，毫秒
 
 # 频率读取间隔与有效频率范围。
 frequency:
@@ -35,7 +35,7 @@ machine:
 
 # Modbus RTU 串口参数与机器到 DI 通道的绑定关系。
 io:
-  modbus_serial_port: COM7  # Modbus RTU 串口号
+  modbus_serial_port: COM8  # Modbus RTU 串口号
   modbus_baudrate: 115200  # 波特率
   modbus_parity: N  # 校验方式
   modbus_stopbits: 1  # 停止位数量

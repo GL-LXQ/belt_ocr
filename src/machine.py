@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sqlite3
+import time
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -262,7 +263,12 @@ class Machine:
         self.current_session = session
 
         # 记录本轮开始日志。
-        logger.info("开始测量 machine_id=%s session_id=%s", session.machine_id, session.session_id)
+        logger.info(
+            "开始测量 machine_id=%s session_id=%s unfinished_ocr_tasks=%s",
+            session.machine_id,
+            session.session_id,
+            len(self.unfinished_recognition_tasks),
+        )
 
         # 启动本轮图像采集。
         self.camera.start_capture(session.session_id, session.capture_start_time)
@@ -551,6 +557,12 @@ class Machine:
                 self.current_recognition_task = task
                 self.unfinished_recognition_tasks.add(task)
                 task.add_done_callback(self.handle_recognition_task_finished)
+                logger.info(
+                    "OCR任务已创建，等待共享识别资源 "
+                    "machine_id=%s session_id=%s",
+                    session.machine_id,
+                    session.session_id,
+                )
                 return
 
             # 相机采集设备故障。
@@ -611,6 +623,17 @@ class Machine:
                 # 已有终态时忽略本次失败或超时。
                 if session.ocr_state not in {OCRState.WAITING, OCRState.RUNNING}:
                     return
+
+                # 记录本轮 OCR 超时与后台任务数量。
+                if event.event_type == EventType.OCR_TIMEOUT:
+                    logger.info(
+                        "OCR识别超时 machine_id=%s session_id=%s "
+                        "current_task=%s unfinished_ocr_tasks=%s",
+                        session.machine_id,
+                        session.session_id,
+                        self.current_recognition_task is not None,
+                        len(self.unfinished_recognition_tasks),
+                    )
 
                 # 登记识别状态和执行异常明细。
                 session.ocr_state = OCRState.TIMED_OUT if event.event_type == EventType.OCR_TIMEOUT else OCRState.FAILED
@@ -760,8 +783,25 @@ class Machine:
             返回示例：
                 None  # 任务已回收，当前任务所属的结束周期已尝试清理
         """
+        # 记录识别任务结束时的绑定关系与未结束任务数量。
+        logger.info(
+            "OCR后台任务结束 machine_id=%s is_current=%s cancelled=%s "
+            "unfinished_before=%s",
+            self.machine_config.machine_id,
+            self.current_recognition_task is task,
+            task.cancelled(),
+            len(self.unfinished_recognition_tasks),
+        )
+
         # 从未结束任务集合中移除已经完成的识别任务。
         self.unfinished_recognition_tasks.discard(task)
+
+        # 记录回收后的未结束任务数量。
+        logger.info(
+            "OCR后台任务已回收 machine_id=%s unfinished_after=%s",
+            self.machine_config.machine_id,
+            len(self.unfinished_recognition_tasks),
+        )
 
         # 任务未被取消时读取异常并交给致命故障入口。
         if not task.cancelled():
@@ -828,16 +868,48 @@ class Machine:
             返回示例：
                 None  # 最终结果或失败原因通过事件交付
         """
+        # 记录等待共享识别锁的起点。
+        wait_started = time.monotonic()
+        logger.info(
+            "OCR等待共享识别资源 machine_id=%s session_id=%s",
+            session.machine_id,
+            session.session_id,
+        )
+
         # 等待共享识别锁。
         async with self.text_recognizer.processing_lock:
+            # 记录获得共享识别锁时的等待时长。
+            logger.info(
+                "OCR获得共享识别资源 machine_id=%s session_id=%s wait_seconds=%.3f",
+                session.machine_id,
+                session.session_id,
+                time.monotonic() - wait_started,
+            )
+
             # 周期已失效时直接结束。
             if session.state != SessionState.RUNNING:
+                logger.info(
+                    "OCR获得资源后发现Session已失效，跳过识别 "
+                    "machine_id=%s session_id=%s state=%s",
+                    session.machine_id,
+                    session.session_id,
+                    session.state.value,
+                )
                 return
 
             # 获得共享识别锁后启动本轮 OCR 处理期限。
             self.schedule_timeout(
                 session,
                 EventType.OCR_TIMEOUT,
+                self.config.ocr_result_timeout_ms,
+            )
+
+            # 记录本轮 OCR 实际开始时间和处理期限。
+            processing_started = time.monotonic()
+            logger.info(
+                "OCR开始识别 machine_id=%s session_id=%s timeout_ms=%s",
+                session.machine_id,
+                session.session_id,
                 self.config.ocr_result_timeout_ms,
             )
 
@@ -852,6 +924,13 @@ class Machine:
                 )
             except OCRProcessingError as error:
                 # 记录整轮处理失败。
+                logger.info(
+                    "OCR识别执行失败 machine_id=%s session_id=%s "
+                    "elapsed_seconds=%.3f",
+                    session.machine_id,
+                    session.session_id,
+                    time.monotonic() - processing_started,
+                )
                 logger.exception("OCR 处理失败 session_id=%s", session.session_id)
 
                 # 让出一次事件循环控制权。
@@ -860,6 +939,14 @@ class Machine:
                 # 按识别失败交付原因。
                 event_type, payload = EventType.OCR_FAILED, str(error)
             else:
+                # 记录本轮 OCR 执行时长。
+                logger.info(
+                    "OCR识别完成 machine_id=%s session_id=%s elapsed_seconds=%.3f",
+                    session.machine_id,
+                    session.session_id,
+                    time.monotonic() - processing_started,
+                )
+
                 # 按识别成功交付结果。
                 event_type, payload = EventType.OCR_COMPLETED, result
 

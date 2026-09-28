@@ -1,5 +1,6 @@
 """通过 python -m ui 启动桌面预览。"""
 
+import logging
 import sqlite3
 import sys
 from contextlib import closing
@@ -31,6 +32,12 @@ def run_desktop_preview() -> int:
         返回示例：
             0  # 正常退出时的进程状态码
     """
+    # 配置桌面入口的终端日志格式。
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
     # 初始化应用实例和产品信息。
     application = QApplication(sys.argv)
     application.setApplicationName("BeltVision")
