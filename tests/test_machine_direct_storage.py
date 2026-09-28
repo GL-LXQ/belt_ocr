@@ -1012,35 +1012,57 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
 async def test_late_capture_failure_notifies_without_repeating_session_failure(
     tmp_path: Path,
 ) -> None:
-    """确认迟到的采集故障仍通知相机状态，不重复结算已失败周期。
+    """确认 OCR 超时后的迟到采集故障只登记机器故障。
 
     Args:
         tmp_path: pytest 提供的临时目录。
 
     Returns:
         返回示例：
-            None  # 相机状态已通知，失败周期和异常记录未重复处理
+            None  # 机器故障已登记，失败周期和异常记录未重复处理
     """
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, progress_updates, _ = create_machine(tmp_path, (evidence_frame,))
     camera_state_notification = Mock()
     machine.notify_camera_state = camera_state_notification
-    session.state = SessionState.FAILED
-    session.errors.append("OCR 识别超时")
+    machine.initialized = True
+    machine.camera.available = True
+    machine.camera.is_capturing = False
+    session.capture_stop_time = None
+    session.ocr_state = OCRState.RUNNING
+    session.ocr_result = None
+
+    # OCR 超时先将当前周期结算为失败。
+    await machine.handle_event(RuntimeEvent(
+        EventType.OCR_TIMEOUT, "1", session.session_id
+    ))
+    assert session.state == SessionState.FAILED
+    assert session.errors == ["OCR 识别超时"]
+    assert machine.machine_failure_reason is None
+    abnormal_events = read_abnormal_events(database)
+    assert len(abnormal_events) == 1
+    progress_before_capture_failure = list(progress_updates)
 
     # 将真实采集故障交给已经失败的周期。
     await machine.handle_event(RuntimeEvent(
         EventType.CAPTURE_FAILED, "1", session.session_id, "StopGrabbing 失败"
     ))
 
-    # 核对机器级通知和周期记录均只执行一次。
+    # 核对机器故障和通知已登记，周期失败没有重复结算。
     camera_state_notification.assert_called_once_with("1", "相机故障", "StopGrabbing 失败")
     assert session.errors == ["OCR 识别超时"]
     assert session.state == SessionState.FAILED
     assert machine.current_session is session
-    assert machine.machine_failure_reason is None
-    assert read_abnormal_events(database) == []
-    assert progress_updates == []
+    assert machine.machine_failure_reason == "相机采集失败"
+    assert machine.acceptance_state == "FAULT"
+    assert read_abnormal_events(database) == abnormal_events
+    assert progress_updates == progress_before_capture_failure
+
+    # 真实 CLOSE 释放周期，本机故障继续阻止下一次 START。
+    await machine.handle_machine_close()
+    assert machine.current_session is None
+    await machine.handle_machine_start()
+    assert machine.current_session is None
 
 
 @pytest.mark.asyncio

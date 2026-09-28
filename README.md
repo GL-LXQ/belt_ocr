@@ -48,7 +48,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 
 采集完成却没有帧时，图像采集阶段上报失败，OCR 不启动；已知的 OCR 处理错误或周期超时也进入 Session 失败收尾。`Machine` 将失败原因写入 Session、标记失败并把机器编号、周期编号和错误明细写入现有 `abnormal_events` 表；随后取消并解绑本轮 OCR 任务，待现场关闭后释放 Session，旧任务独立收尾。人工复核结果仍按正常测量流程保存，异常事件写入失败只记录日志，不阻断 Session 收尾。
 
-异常按影响范围进入现有三个入口：`handle_session_failure()` 只结算当前 Session，`handle_machine_failure()` 记录本机故障并复用 Session 失败收尾，`handle_system_failure()` 关闭 Runtime 信号入口并安排整体退出。相机 `CAPTURE_FAILED` 进入机器级入口；现场 CLOSE 后释放失败 Session，本机后续不再受理 START，其他机器继续运行。OCR 超时等 Session 级失败不设置机器故障原因。
+异常按影响范围进入现有三个入口：`handle_session_failure()` 只结算当前 Session，`handle_machine_failure()` 记录本机故障并复用 Session 失败收尾，`handle_system_failure()` 关闭 Runtime 信号入口并安排整体退出。相机 `CAPTURE_FAILED` 进入机器级入口；即使当前 Session 已因 OCR 超时失败，迟到的同轮相机故障仍登记本机故障，但不重复结算 Session 或写入异常事件。现场 CLOSE 后释放失败 Session，本机后续不再受理 START，其他机器继续运行。
 
 单次取帧没有数据时继续采集；整轮没有帧时以 `CAPTURE_EMPTY` 结束当前 Session。采集阶段发生明确的 MVS 设备异常时，相机先释放本轮采集资源，再向所属机器交付 `CAPTURE_FAILED`，由现有失败流程记录 Session 和 `abnormal_events`；故障相机停止受理新周期，其他机器继续运行。单台相机启动连接失败时保留该机器的不可用状态并继续初始化其他机器；所有相机都连接失败时结束本次启动。设备修复后通过重新启动客户端恢复。
 

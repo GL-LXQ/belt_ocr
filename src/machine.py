@@ -501,6 +501,10 @@ class Machine:
             )
             return
 
+        # 记录当前周期上报的相机设备故障。
+        if event.event_type == EventType.CAPTURE_FAILED:
+            self.machine_failure_reason = "相机采集失败"
+
         # 周期未关闭时处理期限通知。
         if event.event_type == EventType.CYCLE_TIMEOUT:
             if session.capture_stop_time is None:
