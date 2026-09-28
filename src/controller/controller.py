@@ -332,30 +332,42 @@ class AppController(QObject):
             return Result.error(str(error))
 
     def list_measurement_records(
-        self, review_status: str | None = None, machine_id: str | None = None
+        self,
+        review_status: str | None = None,
+        machine_id: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
     ) -> Result:
         """检查复核状态并读取测量记录。
 
         Args:
             review_status: None 或 normal、pending、reviewed。
             machine_id: 可选机器编号。
+            page: 当前页码，从 1 开始。
+            page_size: 每页最多显示的记录数。
 
         Returns:
             Result(
                 success=True,  # 查询是否成功
                 data={  # 页面业务数据
                     "records": [],  # 测量记录列表为空
+                    "page": 1,  # 当前页码
+                    "page_size": 20,  # 每页记录数
+                    "total": 0,  # 筛选后的记录总数
+                    "total_pages": 1,  # 筛选后的总页数
                 },
                 message="",  # 失败提示
             )
         """
         if review_status not in (None, "normal", "pending", "reviewed"):
             return Result.error("复核状态无效。")
+        if page < 1 or page_size < 1:
+            return Result.error("分页参数无效。")
 
         # 读取筛选记录并转换预期服务故障。
         try:
             record_data = self.measurement_record_service.list_records(
-                review_status, machine_id
+                review_status, machine_id, page, page_size
             )
             return Result.ok(record_data)
         except MeasurementRecordServiceError as error:

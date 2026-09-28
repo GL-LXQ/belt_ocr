@@ -64,13 +64,19 @@ class MeasurementRecordService:
             raise MeasurementRecordServiceError("历史机器读取失败。") from error
 
     def list_records(
-        self, review_status: str | None = None, machine_id: str | None = None
-    ) -> dict[str, list[dict]]:
-        """读取筛选结果并转换文字与复核字段。
+        self,
+        review_status: str | None = None,
+        machine_id: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict:
+        """分页读取筛选结果并转换文字与复核字段。
 
         Args:
             review_status: None 表示全部，normal、pending、reviewed 表示查询状态。
             machine_id: None 表示全部机器，否则筛选指定机器。
+            page: 当前页码，从 1 开始。
+            page_size: 每页最多显示的记录数。
 
         Returns:
             返回示例：
@@ -88,17 +94,36 @@ class MeasurementRecordService:
                             "reviewed_lines": None,  # 人工修改后的文字
                         },
                     ],
+                    "page": 1,  # 当前页码
+                    "page_size": 20,  # 每页记录数
+                    "total": 1,  # 筛选后的记录总数
+                    "total_pages": 1,  # 筛选后的总页数
                 }
         """
-        # 查询测量记录并转换存储格式。
+        # 统计当前筛选条件下的记录。
         try:
-            records = self.measurement_record_repo.list_records(
+            total = self.measurement_record_repo.count_records(
                 review_status, machine_id
             )
+
+            # 计算当前位置并读取当前页记录。
+            offset = (page - 1) * page_size
+            records = self.measurement_record_repo.list_records(
+                review_status, machine_id, limit=page_size, offset=offset
+            )
+
+            # 转换当前页的存储字段。
             for record in records:
                 self.decode_record_fields(record)
+
+            # 整理分页业务结果。
+            total_pages = max(1, (total + page_size - 1) // page_size)
             return {
                 "records": records,
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": total_pages,
             }
         except (sqlite3.Error, json.JSONDecodeError) as error:
             # 记录数据库或 JSON 读取故障。

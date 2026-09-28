@@ -271,6 +271,8 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
     controller = controller_services[0]
     measurement_record_service = controller_services[2]
     assert not controller.list_measurement_records("invalid").success
+    assert controller.list_measurement_records(page=0) == Result.error("分页参数无效。")
+    assert controller.list_measurement_records(page_size=0) == Result.error("分页参数无效。")
     assert not controller.get_measurement_record("  ").success
     assert not controller.complete_measurement_review("  ").success
     measurement_record_service.list_records.assert_not_called()
@@ -280,11 +282,17 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
     # 合法查询转发筛选条件，重复复核转换为普通失败。
     measurement_record_service.list_records.return_value = {
         "records": [{"session_id": "session-1"}],
+        "page": 2,
+        "page_size": 20,
+        "total": 21,
+        "total_pages": 2,
     }
-    result = controller.list_measurement_records("pending", "1")
+    result = controller.list_measurement_records("pending", "1", 2, 20)
     assert result.success
-    assert result.data == {"records": [{"session_id": "session-1"}]}
-    measurement_record_service.list_records.assert_called_once_with("pending", "1")
+    assert result.data == measurement_record_service.list_records.return_value
+    measurement_record_service.list_records.assert_called_once_with(
+        "pending", "1", 2, 20
+    )
     review_error = MeasurementReviewAlreadyCompletedError("该记录已完成复核。")
     measurement_record_service.complete_review.side_effect = review_error
     result = controller.complete_measurement_review(" session-1 ", None)

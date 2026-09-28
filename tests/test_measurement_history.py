@@ -115,6 +115,47 @@ def measurement_record_service(tmp_path: Path) -> MeasurementRecordService:
     return MeasurementRecordService(MeasurementRecordRepo(config.database_path))
 
 
+@pytest.fixture
+def paged_measurement_record_service(
+    measurement_record_service: MeasurementRecordService,
+) -> MeasurementRecordService:
+    """在已有业务库中准备二十五条可分页记录。
+
+    Args:
+        measurement_record_service: 已建立业务库和机器信息的测量记录服务。
+
+    Returns:
+        返回示例：
+            MeasurementRecordService(...)  # 已保存二十五条分页测试记录的服务
+    """
+    # 准备跨页的正常及待复核记录。
+    database_path = measurement_record_service.measurement_record_repo.database_path
+    records_to_insert = []
+    for record_number in range(25):
+        finish_second = 5 if record_number == 4 else record_number
+        records_to_insert.append((
+            f"page-{record_number:02}",
+            "1" if record_number < 21 else "2",
+            "2026-09-27T08:00:00+00:00",
+            f"2026-09-27T08:00:{finish_second:02}+00:00",
+            json.dumps([f"文字 {record_number:02}"], ensure_ascii=False),
+            str(database_path.parent / f"page-{record_number:02}"),
+            int(record_number < 21),
+        ))
+
+    # 替换原有测量记录。
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DELETE FROM measurement_records")
+        connection.executemany(
+            "INSERT INTO measurement_records "
+            "(session_id, machine_id, start_time, finish_time, "
+            "ordered_lines, evidence_directory, needs_review) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            records_to_insert,
+        )
+    return measurement_record_service
+
+
 @pytest.fixture(scope="module")
 def qt_application() -> QApplication:
     """创建历史记录页面测试所需的 Qt 应用。
@@ -185,6 +226,74 @@ def test_measurement_record_service_filters_and_reads_details(
     assert normal_record["ordered_lines"] == ("12345678", "003")
     assert normal_record["review_reason"] is None
     assert measurement_record_service.get_record("unknown-session")["record"] is None
+
+
+def test_measurement_records_use_database_pages_and_stable_time_order(
+    paged_measurement_record_service: MeasurementRecordService,
+) -> None:
+    """验证数据库分页保留结束时间及周期编号的倒序。
+
+    Args:
+        paged_measurement_record_service: 已保存二十五条分页记录的服务。
+
+    Returns:
+        返回示例：
+            None  # 两页记录连续且分页总数准确
+    """
+    # 读取两页并核对记录数量与分页业务字段。
+    first_page = paged_measurement_record_service.list_records(page=1)
+    second_page = paged_measurement_record_service.list_records(page=2)
+    assert len(first_page["records"]) == 20
+    assert len(second_page["records"]) == 5
+    pagination = {
+        key: first_page[key]
+        for key in ("page", "page_size", "total", "total_pages")
+    }
+    assert pagination == {
+        "page": 1,
+        "page_size": 20,
+        "total": 25,
+        "total_pages": 2,
+    }
+    assert second_page["page"] == 2
+
+    # 核对页间顺序和结束时间相同的记录顺序。
+    session_ids = [record["session_id"] for record in first_page["records"]]
+    session_ids += [record["session_id"] for record in second_page["records"]]
+    assert session_ids == [
+        f"page-{record_number:02}" for record_number in reversed(range(25))
+    ]
+    assert first_page["records"][-1]["session_id"] == "page-05"
+    assert second_page["records"][0]["session_id"] == "page-04"
+
+
+def test_measurement_record_pages_count_only_filtered_records(
+    paged_measurement_record_service: MeasurementRecordService,
+) -> None:
+    """验证状态和机器筛选的总数仅统计匹配记录。
+
+    Args:
+        paged_measurement_record_service: 已保存二十五条分页记录的服务。
+
+    Returns:
+        返回示例：
+            None  # 筛选后的页数和记录均按对应条件计算
+    """
+    # 核对跨页的待复核记录和指定机器的正常记录。
+    pending_page = paged_measurement_record_service.list_records("pending", page=2)
+    machine_page = paged_measurement_record_service.list_records("normal", "2")
+    assert pending_page["total"] == 21
+    assert pending_page["total_pages"] == 2
+    assert [record["session_id"] for record in pending_page["records"]] == ["page-00"]
+    assert machine_page["total"] == 4
+    assert machine_page["total_pages"] == 1
+    assert len(machine_page["records"]) == 4
+
+    # 无匹配记录时保留第一页的显示页数。
+    empty_page = paged_measurement_record_service.list_records("reviewed")
+    assert empty_page["records"] == []
+    assert empty_page["total"] == 0
+    assert empty_page["total_pages"] == 1
 
 
 def test_existing_measurement_table_adds_review_columns_without_losing_records(
@@ -395,6 +504,117 @@ def test_history_page_shows_filters_and_read_only_details(
         assert page.review_reason_title.isHidden()
         assert page.review_editor.isHidden()
         assert page.confirm_review_button.isHidden()
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_history_page_turns_pages_and_resets_on_filter_changes(
+    qt_application: QApplication,
+    paged_measurement_record_service: MeasurementRecordService,
+) -> None:
+    """验证历史页翻页、页码展示及筛选变化后的第一页。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        paged_measurement_record_service: 已保存二十五条分页记录的服务。
+
+    Returns:
+        返回示例：
+            None  # 翻页与筛选后显示正确的分页记录
+    """
+    controller = AppController(
+        Mock(), paged_measurement_record_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
+    try:
+        # 初次进入历史页显示最新二十条记录。
+        page.refresh_history()
+        assert page.current_page == 1
+        assert page.table.rowCount() == 20
+        assert page.table.item(0, 2).text() == "文字 24"
+        assert page.record_count_label.text() == "共 25 条"
+        assert page.page_label.text() == "第 1 / 2 页"
+        assert not page.previous_page_button.isEnabled()
+        assert page.next_page_button.isEnabled()
+
+        # 下一页和上一页分别显示连续的记录。
+        page.next_page_button.click()
+        assert page.current_page == 2
+        assert page.table.rowCount() == 5
+        assert page.table.item(0, 2).text() == "文字 04"
+        assert page.table.item(4, 2).text() == "文字 00"
+        assert page.previous_page_button.isEnabled()
+        assert not page.next_page_button.isEnabled()
+        page.previous_page_button.click()
+        assert page.current_page == 1
+        assert page.table.item(0, 2).text() == "文字 24"
+
+        # 状态筛选回第一页并更新筛选后的总数。
+        page.next_page_button.click()
+        page.status_buttons["pending"].click()
+        assert page.current_page == 1
+        assert page.table.item(0, 2).text() == "文字 20"
+        assert page.record_count_label.text() == "共 21 条"
+        assert page.page_label.text() == "第 1 / 2 页"
+
+        # 机器筛选和重新进入历史页均回第一页。
+        page.status_buttons[None].click()
+        page.next_page_button.click()
+        page.machine_filter.setCurrentIndex(page.machine_filter.findData("2"))
+        assert page.current_page == 1
+        assert page.table.rowCount() == 4
+        assert page.table.item(0, 2).text() == "文字 24"
+        assert page.record_count_label.text() == "共 4 条"
+        page.machine_filter.setCurrentIndex(0)
+        page.next_page_button.click()
+        page.refresh_history()
+        assert page.current_page == 1
+        assert page.table.item(0, 2).text() == "文字 24"
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_history_page_returns_to_last_page_after_review_reduces_results(
+    qt_application: QApplication,
+    paged_measurement_record_service: MeasurementRecordService,
+) -> None:
+    """验证复核使待复核末页消失时页面自动回退。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        paged_measurement_record_service: 已保存二十五条分页记录的服务。
+
+    Returns:
+        返回示例：
+            None  # 当前页回到新的最后一页并显示剩余待复核记录
+    """
+    controller = AppController(
+        Mock(), paged_measurement_record_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
+    try:
+        # 打开待复核的最后一页并完成唯一一条记录。
+        page.refresh_history()
+        page.status_buttons["pending"].click()
+        page.next_page_button.click()
+        assert page.current_page == 2
+        assert page.table.rowCount() == 1
+        page.table.cellWidget(0, 5).click()
+        assert page.detail_values["session_id"].text() == "page-00"
+        page.confirm_review_button.click()
+
+        # 筛选结果缩为一页后显示新的最后一页。
+        assert page.current_page == 1
+        assert page.table.rowCount() == 20
+        assert page.table.item(0, 2).text() == "文字 20"
+        assert page.record_count_label.text() == "共 20 条"
+        assert page.page_label.text() == "第 1 / 1 页"
+        assert not page.previous_page_button.isEnabled()
+        assert not page.next_page_button.isEnabled()
     finally:
         page.detail_dialog.close()
         page.close()

@@ -75,6 +75,8 @@ class HistoryPage(QWidget):
         self.setObjectName("history")
         self.controller = controller
         self.selected_review_status: str | None = None
+        self.current_page = 1
+        self.page_size = 20
 
         # 创建页面标题和说明。
         layout = QVBoxLayout(self)
@@ -123,7 +125,7 @@ class HistoryPage(QWidget):
         self.machine_filter.setObjectName("historyMachineFilter")
         self.machine_filter.addItem("全部机器", None)
         self.machine_filter.setMinimumWidth(170)
-        self.machine_filter.currentIndexChanged.connect(self.reload_records)
+        self.machine_filter.currentIndexChanged.connect(self.select_machine)
         filters.addWidget(self.machine_filter)
         filters.addStretch()
         layout.addLayout(filters)
@@ -148,6 +150,23 @@ class HistoryPage(QWidget):
         for column, width in ((0, 170), (1, 140), (3, 110), (4, 100), (5, 80)):
             self.table.setColumnWidth(column, width)
         content_layout.addWidget(self.table)
+
+        # 在表格下方显示筛选后的总数和翻页入口。
+        pagination_layout = QHBoxLayout()
+        self.record_count_label = QLabel("共 0 条")
+        pagination_layout.addWidget(self.record_count_label)
+        pagination_layout.addStretch()
+        self.previous_page_button = QPushButton("上一页")
+        self.previous_page_button.setEnabled(False)
+        self.previous_page_button.clicked.connect(self.show_previous_page)
+        pagination_layout.addWidget(self.previous_page_button)
+        self.page_label = QLabel("第 1 / 1 页")
+        pagination_layout.addWidget(self.page_label)
+        self.next_page_button = QPushButton("下一页")
+        self.next_page_button.setEnabled(False)
+        self.next_page_button.clicked.connect(self.show_next_page)
+        pagination_layout.addWidget(self.next_page_button)
+        content_layout.addLayout(pagination_layout)
         layout.addWidget(content, 1)
 
         # 创建共用的详情弹窗。
@@ -295,6 +314,7 @@ class HistoryPage(QWidget):
         self.machine_filter.blockSignals(False)
 
         # 读取当前状态和机器条件下的记录。
+        self.current_page = 1
         self.reload_records()
 
     def select_status(self, review_status: str | None) -> None:
@@ -308,7 +328,49 @@ class HistoryPage(QWidget):
                 None  # 列表已按所选状态刷新
         """
         self.selected_review_status = review_status
+        self.current_page = 1
         self.reload_records()
+
+    def select_machine(self) -> None:
+        """切换机器筛选并读取第一页记录。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 列表已按所选机器从第一页刷新
+        """
+        self.current_page = 1
+        self.reload_records()
+
+    def show_previous_page(self) -> None:
+        """在上一页可用时读取上一页记录。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 上一页记录已显示，或页码保持不变
+        """
+        if self.previous_page_button.isEnabled():
+            self.current_page -= 1
+            self.reload_records()
+
+    def show_next_page(self) -> None:
+        """在下一页可用时读取下一页记录。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 下一页记录已显示，或页码保持不变
+        """
+        if self.next_page_button.isEnabled():
+            self.current_page += 1
+            self.reload_records()
 
     def reload_records(self) -> None:
         """按当前状态和机器条件填充历史记录表格。
@@ -322,13 +384,30 @@ class HistoryPage(QWidget):
         """
         # 按当前筛选条件读取测量结果。
         result = self.controller.list_measurement_records(
-            self.selected_review_status, self.machine_filter.currentData()
+            self.selected_review_status,
+            self.machine_filter.currentData(),
+            self.current_page,
+            self.page_size,
         )
         if not result.success:
             self.table.setRowCount(0)
             QMessageBox.warning(self, "历史记录读取失败", result.message)
             return
         records = result.data["records"]
+        total = result.data["total"]
+        total_pages = result.data["total_pages"]
+
+        # 当前页消失时读取最后一个有效页。
+        if self.current_page > total_pages:
+            self.current_page = total_pages
+            self.reload_records()
+            return
+
+        # 更新页码、总数和翻页按钮。
+        self.record_count_label.setText(f"共 {total} 条")
+        self.page_label.setText(f"第 {self.current_page} / {total_pages} 页")
+        self.previous_page_button.setEnabled(self.current_page > 1)
+        self.next_page_button.setEnabled(self.current_page < total_pages)
 
         # 将每条记录填入六列表格。
         self.table.setRowCount(len(records))

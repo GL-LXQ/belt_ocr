@@ -47,6 +47,7 @@ def test_measurement_record_list_hides_database_message() -> None:
     """
     # 设置测量记录 Repo 的数据库故障。
     measurement_record_repo = Mock()
+    measurement_record_repo.count_records.return_value = 1
     measurement_record_repo.list_records.side_effect = sqlite3.OperationalError(
         "database is locked"
     )

@@ -62,13 +62,19 @@ class MeasurementRecordRepo:
             )
 
     def list_records(
-        self, review_status: str | None = None, machine_id: str | None = None
+        self,
+        review_status: str | None = None,
+        machine_id: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
     ) -> list[dict]:
-        """按复核状态和机器编号读取测量历史。
+        """按复核状态和机器编号分页读取测量历史。
 
         Args:
             review_status: None 表示全部，normal、pending、reviewed 表示查询状态。
             machine_id: None 表示全部机器，否则筛选指定机器。
+            limit: 本页最多读取的记录数。
+            offset: 跳过的记录数。
 
         Returns:
             返回示例：
@@ -112,10 +118,48 @@ class MeasurementRecordRepo:
                 "FROM measurement_records AS record "
                 "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id"
                 + where_clause
-                + " ORDER BY record.finish_time DESC, record.session_id DESC",
-                parameters,
+                + " ORDER BY record.finish_time DESC, record.session_id DESC"
+                + " LIMIT ? OFFSET ?",
+                (*parameters, limit, offset),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def count_records(
+        self, review_status: str | None = None, machine_id: str | None = None
+    ) -> int:
+        """统计当前复核状态和机器条件下的测量记录。
+
+        Args:
+            review_status: None 表示全部，normal、pending、reviewed 表示查询状态。
+            machine_id: None 表示全部机器，否则筛选指定机器。
+
+        Returns:
+            返回示例：
+                25  # 当前筛选条件下的测量记录数
+        """
+        # 按当前复核状态和机器编号整理筛选条件。
+        conditions = []
+        parameters = []
+        if review_status == "normal":
+            conditions.append("record.needs_review = 0")
+        elif review_status == "pending":
+            conditions.append("record.needs_review = 1 AND record.reviewed_at IS NULL")
+        elif review_status == "reviewed":
+            conditions.append(
+                "record.needs_review = 1 AND record.reviewed_at IS NOT NULL"
+            )
+        if machine_id is not None:
+            conditions.append("record.machine_id = ?")
+            parameters.append(machine_id)
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+        # 查询符合筛选条件的记录总数。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM measurement_records AS record" + where_clause,
+                parameters,
+            ).fetchone()
+        return row[0]
 
     def list_record_machines(self) -> list[dict]:
         """读取所有出现过测量记录的机器。

@@ -89,7 +89,7 @@ GUI 启动入口创建 Repo、Service 和唯一的 `AppController`，四个正�
 
 `SystemRuntime.start()` 只在启动时读取一次启用机器并据此创建 `Machine`、`Camera`、`FrequencyAdapter`，运行期间不刷新机器配置。因此 `AppController` 以 `runtime_thread` 是否存在作为拦截条件：只要线程尚未清空（启动中、运行中、停止清理中），`create_machine()`、`update_machine()`、`delete_machine()` 在调用 `MachineService` 之前直接返回 `Result.error("监测运行中，请先停止监测后再修改机器配置。")`；`SystemRuntimeThread` 发出 `finished`、`finish_monitoring()` 将 `runtime_thread` 置为 `None` 后，机器写操作自动恢复。机器查询接口不受影响。
 
-历史记录页进入时通过 `AppController` 调用 `MeasurementRecordService`，再经 `MeasurementRecordRepo` 从业务库 `measurement_records` 读取已保存的测量结果，并可按正常、待复核、已复核及机器筛选；详情保留原始 OCR、频率、复核原因和本轮 JPG 证据图片。待复核记录可确认原文字或按行保存人工修正文字，Repo 只对尚未复核的记录写入 UTC 复核时间和可选的 `reviewed_lines` JSON，原 `ordered_lines`、`needs_review` 与 `review_reason` 保留；已复核详情同时显示原始与最终文字，列表摘要优先显示人工结果。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
+历史记录页进入时通过 `AppController` 调用 `MeasurementRecordService`，再经 `MeasurementRecordRepo` 从业务库 `measurement_records` 按当前状态和机器条件统计总数，并以 SQLite `LIMIT / OFFSET` 每页读取 20 条测量结果；结果按结束时间倒序，同时间按 `session_id` 倒序，切换筛选或重新进入页面从第一页读取，复核后刷新当前页，末页消失时回退到最后有效页。详情保留原始 OCR、频率、复核原因和本轮 JPG 证据图片。待复核记录可确认原文字或按行保存人工修正文字，Repo 只对尚未复核的记录写入 UTC 复核时间和可选的 `reviewed_lines` JSON，原 `ordered_lines`、`needs_review` 与 `review_reason` 保留；已复核详情同时显示原始与最终文字，列表摘要优先显示人工结果。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
 
 GUI 启动时先在运行库确保 `abnormal_events` 表存在。异常事件页进入时经 `AppController`、`AbnormalEventService`、`AbnormalEventRepo` 读取该表，按时间倒序显示异常记录，并支持机器筛选、完整 Session ID 搜索和详情查看。后续异常写入使用中文 `reason`，已有记录原样保留；页面直接显示库中的异常原因，详情展示完整 `payload_json`。
 
