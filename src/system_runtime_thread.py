@@ -8,6 +8,9 @@ from PySide6.QtCore import QThread, Signal
 
 from config_util import load_config
 from system_runtime import SystemRuntime
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class SystemRuntimeThread(QThread):
@@ -57,6 +60,7 @@ class SystemRuntimeThread(QThread):
             # 在本线程中运行监测主流程。
             asyncio.run(self.run_monitoring())
         except Exception as error:
+            logger.exception("监测后台线程运行失败")
             # 保存失败原因供 Controller 读取。
             self.failure_message = str(error)
 
