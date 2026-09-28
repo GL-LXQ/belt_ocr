@@ -8,8 +8,6 @@ from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
-    QCheckBox,
-    QComboBox,
     QDateEdit,
     QDialog,
     QFormLayout,
@@ -20,13 +18,18 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPlainTextEdit,
-    QPushButton,
     QScrollArea,
     QSizePolicy,
-    QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+)
+from qfluentwidgets import (
+    CheckBox,
+    ComboBox,
+    PrimaryPushButton,
+    PushButton,
+    TableWidget,
 )
 
 from src.controller.controller import AppController
@@ -102,7 +105,7 @@ class HistoryPage(QWidget):
         # 建立状态按钮和机器筛选框。
         filters = QHBoxLayout()
         filters.setSpacing(8)
-        self.status_buttons: dict[str | None, QPushButton] = {}
+        self.status_buttons: dict[str | None, PushButton] = {}
         status_group = QButtonGroup(self)
         status_group.setExclusive(True)
         for review_status, caption in (
@@ -111,7 +114,7 @@ class HistoryPage(QWidget):
             ("pending", "待复核"),
             ("reviewed", "已复核"),
         ):
-            button = QPushButton(caption)
+            button = PushButton(caption)
             button.setCheckable(True)
             button.setProperty("historyFilter", True)
             status_group.addButton(button)
@@ -123,9 +126,9 @@ class HistoryPage(QWidget):
         self.status_buttons[None].setChecked(True)
         filters.addSpacing(24)
         filters.addWidget(QLabel("机器："))
-        self.machine_filter = QComboBox()
+        self.machine_filter = ComboBox()
         self.machine_filter.setObjectName("historyMachineFilter")
-        self.machine_filter.addItem("全部机器", None)
+        self.machine_filter.addItem("全部机器", userData=None)
         self.machine_filter.setMinimumWidth(170)
         self.machine_filter.currentIndexChanged.connect(self.select_machine)
         filters.addWidget(self.machine_filter)
@@ -135,7 +138,7 @@ class HistoryPage(QWidget):
         # 建立不限时间开关。
         time_filters = QHBoxLayout()
         time_filters.addWidget(QLabel("时间："))
-        self.unlimited_time_checkbox = QCheckBox("不限时间")
+        self.unlimited_time_checkbox = CheckBox("不限时间")
         self.unlimited_time_checkbox.setChecked(True)
         self.unlimited_time_checkbox.toggled.connect(self.select_time_filter)
         time_filters.addWidget(self.unlimited_time_checkbox)
@@ -169,7 +172,8 @@ class HistoryPage(QWidget):
         content.setObjectName("pageContent")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(16, 16, 16, 16)
-        self.table = QTableWidget(0, 6)
+        self.table = TableWidget()
+        self.table.setColumnCount(6)
         self.table.setObjectName("historyTable")
         self.table.setHorizontalHeaderLabels((
             "时间", "机器", "OCR 结果摘要", "最终频率", "状态", "操作"
@@ -190,13 +194,13 @@ class HistoryPage(QWidget):
         self.record_count_label = QLabel("共 0 条")
         pagination_layout.addWidget(self.record_count_label)
         pagination_layout.addStretch()
-        self.previous_page_button = QPushButton("上一页")
+        self.previous_page_button = PushButton("上一页")
         self.previous_page_button.setEnabled(False)
         self.previous_page_button.clicked.connect(self.show_previous_page)
         pagination_layout.addWidget(self.previous_page_button)
         self.page_label = QLabel("第 1 / 1 页")
         pagination_layout.addWidget(self.page_label)
-        self.next_page_button = QPushButton("下一页")
+        self.next_page_button = PushButton("下一页")
         self.next_page_button.setEnabled(False)
         self.next_page_button.clicked.connect(self.show_next_page)
         pagination_layout.addWidget(self.next_page_button)
@@ -293,11 +297,11 @@ class HistoryPage(QWidget):
         detail_layout.addWidget(self.review_editor_title)
         detail_layout.addWidget(self.review_editor)
         actions = QHBoxLayout()
-        self.confirm_review_button = QPushButton("确认无误")
+        self.confirm_review_button = PushButton("确认无误")
         self.confirm_review_button.clicked.connect(
             lambda: self.complete_record_review(False)
         )
-        self.save_review_button = QPushButton("保存并完成复核")
+        self.save_review_button = PrimaryPushButton("保存并完成复核")
         self.save_review_button.clicked.connect(
             lambda: self.complete_record_review(True)
         )
@@ -306,7 +310,7 @@ class HistoryPage(QWidget):
         actions.addStretch()
 
         # 在弹窗底部放置关闭入口。
-        close_button = QPushButton("关闭")
+        close_button = PushButton("关闭")
         close_button.setProperty("buttonRole", "secondary")
         close_button.clicked.connect(self.detail_dialog.close)
         actions.addWidget(close_button)
@@ -349,7 +353,7 @@ class HistoryPage(QWidget):
         selected_machine_id = self.machine_filter.currentData()
         self.machine_filter.blockSignals(True)
         self.machine_filter.clear()
-        self.machine_filter.addItem("全部机器", None)
+        self.machine_filter.addItem("全部机器", userData=None)
         for machine in machines:
             machine_id = machine["machine_id"]
             machine_name = machine["machine_name"]
@@ -357,7 +361,7 @@ class HistoryPage(QWidget):
                 f"{machine_name}（{machine_id}#）"
                 if machine_name != machine_id else f"{machine_id}#"
             )
-            self.machine_filter.addItem(caption, machine_id)
+            self.machine_filter.addItem(caption, userData=machine_id)
         selected_index = self.machine_filter.findData(selected_machine_id)
         self.machine_filter.setCurrentIndex(max(selected_index, 0))
         self.machine_filter.blockSignals(False)
@@ -559,7 +563,7 @@ class HistoryPage(QWidget):
             self.table.setItem(row_index, 4, status_item)
 
             # 为当前记录建立详情入口。
-            button = QPushButton("查看")
+            button = PushButton("查看")
             button.setProperty("buttonRole", "text")
             session_id = record["session_id"]
             button.clicked.connect(
@@ -692,7 +696,7 @@ class HistoryPage(QWidget):
                 continue
 
             # 为可读取的图片创建可点击缩略图。
-            thumbnail = QPushButton()
+            thumbnail = PushButton()
             thumbnail.setObjectName("evidenceThumbnail")
             thumbnail.setToolTip(image_path.name)
             thumbnail.setAccessibleName(image_path.name)
@@ -760,7 +764,7 @@ class HistoryPage(QWidget):
         image_layout.addWidget(image_label, 1)
 
         # 添加关闭按钮并显示大图窗口。
-        close_button = QPushButton("关闭")
+        close_button = PushButton("关闭")
         close_button.clicked.connect(image_dialog.accept)
         image_layout.addWidget(close_button, alignment=Qt.AlignmentFlag.AlignRight)
         image_dialog.exec()
