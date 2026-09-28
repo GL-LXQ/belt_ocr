@@ -178,7 +178,16 @@ class AppController(QObject):
                 },
                 message="",  # 失败提示
             )
+            Result(
+                success=False,  # 监测运行中禁止修改机器配置
+                data=None,  # 拒绝操作没有返回数据
+                message="监测运行中，请先停止监测后再修改机器配置。",  # 失败提示
+            )
         """
+        # 监测线程尚未结束时禁止修改机器配置。
+        if self.runtime_thread is not None:
+            return Result.error("监测运行中，请先停止监测后再修改机器配置。")
+
         # 清理三个必填字段并返回第一个空字段。
         machine_name = machine_name.strip()
         camera_serial = camera_serial.strip()
@@ -231,7 +240,16 @@ class AppController(QObject):
                 },
                 message="",  # 失败提示
             )
+            Result(
+                success=False,  # 监测运行中禁止修改机器配置
+                data=None,  # 拒绝操作没有返回数据
+                message="监测运行中，请先停止监测后再修改机器配置。",  # 失败提示
+            )
         """
+        # 监测线程尚未结束时禁止修改机器配置。
+        if self.runtime_thread is not None:
+            return Result.error("监测运行中，请先停止监测后再修改机器配置。")
+
         # 清理三个必填字段并返回第一个空字段。
         machine_name = machine_name.strip()
         camera_serial = camera_serial.strip()
@@ -274,7 +292,16 @@ class AppController(QObject):
                 data=None,  # 删除操作没有返回数据
                 message="",  # 失败提示
             )
+            Result(
+                success=False,  # 监测运行中禁止修改机器配置
+                data=None,  # 拒绝操作没有返回数据
+                message="监测运行中，请先停止监测后再修改机器配置。",  # 失败提示
+            )
         """
+        # 监测线程尚未结束时禁止修改机器配置。
+        if self.runtime_thread is not None:
+            return Result.error("监测运行中，请先停止监测后再修改机器配置。")
+
         # 删除机器并转换预期服务故障。
         try:
             self.machine_service.delete_machine(machine_id)

@@ -398,22 +398,24 @@ def test_monitoring_lifecycle_and_old_finished_signal(
     controller_services,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证启动、停止、结束清理和旧线程结束通知隔离。
+    """验证启动、停止、结束清理、旧线程结束通知隔离和监测期间的机器写操作限制。
 
     Args:
         controller_services: 控制器及三个业务服务。
         monkeypatch: pytest 提供的属性替换工具。
 
     Returns:
-        None  # 当前线程引用只由自己的结束通知清理
+        None  # 当前线程引用只由自己的结束通知清理，机器写操作随监测结束恢复
     """
     controller = controller_services[0]
+    machine_service = controller_services[1]
     first_thread = FakeSystemRuntimeThread()
     second_thread = FakeSystemRuntimeThread()
     thread_factory = Mock(side_effect=[first_thread, second_thread])
     monkeypatch.setattr("src.controller.controller.SystemRuntimeThread", thread_factory)
     finished_messages = Mock()
     controller.monitoring_finished_signal.connect(finished_messages)
+    monitoring_rejected = Result.error("监测运行中，请先停止监测后再修改机器配置。")
 
     # 首次启动成功，重复启动不创建第二个线程。
     assert controller.start_monitoring().success
@@ -422,15 +424,37 @@ def test_monitoring_lifecycle_and_old_finished_signal(
     assert controller.start_monitoring() == Result.error("监测正在运行。")
     assert thread_factory.call_count == 1
 
+    # 监测运行中拒绝机器写操作，机器服务保持不被调用。
+    assert controller.create_machine(" 皮带机 ", " CAM001 ", " FREQ001 ") == monitoring_rejected
+    assert controller.update_machine(1, "皮带机", "CAM002", "FREQ002") == monitoring_rejected
+    assert controller.delete_machine(1) == monitoring_rejected
+    machine_service.create_machine.assert_not_called()
+    machine_service.update_machine.assert_not_called()
+    machine_service.delete_machine.assert_not_called()
+
     # 停止请求交给当前线程，结束后转发故障并释放引用。
     assert controller.stop_monitoring().success
     assert first_thread.stop_requested.is_set()
     first_thread.failure_message = "设备故障"
+
+    # 线程尚未结束时停止期间同样禁止机器写操作。
+    assert controller.delete_machine(1) == monitoring_rejected
+    machine_service.delete_machine.assert_not_called()
+
     first_thread.finished.emit()
     assert first_thread.released
     assert controller.runtime_thread is None
     assert controller.is_monitoring_running().data == {"running": False}
     finished_messages.assert_called_once_with("设备故障")
+
+    # 线程引用清空后机器写操作恢复正常。
+    machine_service.create_machine.return_value = {"machine_id": 1}
+    assert controller.create_machine("皮带机", "CAM001", "FREQ001") == Result.ok(
+        {"machine_id": 1}
+    )
+    machine_service.create_machine.assert_called_once_with(
+        "皮带机", "CAM001", "FREQ001", True, None
+    )
 
     # 新线程启动后，旧线程的迟到结束通知不能清理新引用。
     assert controller.start_monitoring().success
