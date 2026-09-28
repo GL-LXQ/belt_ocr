@@ -1,4 +1,4 @@
-"""读取测量历史并处理人工复核。"""
+"""读取测量记录并处理人工复核。"""
 
 import json
 import sqlite3
@@ -7,15 +7,15 @@ from datetime import datetime, timezone
 from src.repo.measurement_record_repo import MeasurementRecordRepo
 
 
-class MeasurementHistoryServiceError(Exception):
-    """表示测量历史读取、复核写入或文字解析失败。"""
+class MeasurementRecordServiceError(Exception):
+    """表示测量记录读取、复核写入或文字解析失败。"""
 
 
-class MeasurementReviewAlreadyCompletedError(MeasurementHistoryServiceError):
+class MeasurementReviewAlreadyCompletedError(MeasurementRecordServiceError):
     """表示这条记录已经完成复核或不属于待复核记录。"""
 
 
-class MeasurementHistoryService:
+class MeasurementRecordService:
     """向历史记录页提供查询结果和人工复核操作。"""
 
     def __init__(self, measurement_record_repo: MeasurementRecordRepo) -> None:
@@ -26,7 +26,7 @@ class MeasurementHistoryService:
 
         Returns:
             返回示例：
-                None  # 历史记录服务已初始化
+                None  # 测量记录服务已初始化
         """
         self.measurement_record_repo = measurement_record_repo
 
@@ -47,7 +47,7 @@ class MeasurementHistoryService:
         try:
             return self.measurement_record_repo.list_record_machines()
         except sqlite3.Error as error:
-            raise MeasurementHistoryServiceError(f"历史机器读取失败：{error}") from error
+            raise MeasurementRecordServiceError(f"历史机器读取失败：{error}") from error
 
     def list_records(
         self, review_status: str | None = None, machine_id: str | None = None
@@ -81,7 +81,7 @@ class MeasurementHistoryService:
                 self.decode_record_fields(record)
             return records
         except (sqlite3.Error, json.JSONDecodeError) as error:
-            raise MeasurementHistoryServiceError(f"历史记录读取失败：{error}") from error
+            raise MeasurementRecordServiceError(f"历史记录读取失败：{error}") from error
 
     def get_record(self, session_id: str) -> dict | None:
         """读取一条测量记录并转换详情字段。
@@ -114,7 +114,7 @@ class MeasurementHistoryService:
                 self.decode_record_fields(record)
             return record
         except (sqlite3.Error, json.JSONDecodeError) as error:
-            raise MeasurementHistoryServiceError(f"历史详情读取失败：{error}") from error
+            raise MeasurementRecordServiceError(f"历史详情读取失败：{error}") from error
 
     def complete_review(self, session_id: str, edited_text: str | None = None) -> None:
         """确认原始文字或保存人工文字并完成一条记录的复核。
@@ -134,7 +134,7 @@ class MeasurementHistoryService:
                 line.strip() for line in edited_text.splitlines() if line.strip()
             )
             if not lines:
-                raise MeasurementHistoryServiceError("人工复核结果至少需要一条有效文字。")
+                raise MeasurementRecordServiceError("人工复核结果至少需要一条有效文字。")
             reviewed_lines = json.dumps(lines, ensure_ascii=False)
 
         # 使用统一 UTC 时间提交复核并报告重复操作。
@@ -144,7 +144,7 @@ class MeasurementHistoryService:
                 session_id, reviewed_at, reviewed_lines
             )
         except sqlite3.Error as error:
-            raise MeasurementHistoryServiceError(f"人工复核保存失败：{error}") from error
+            raise MeasurementRecordServiceError(f"人工复核保存失败：{error}") from error
         if not updated:
             raise MeasurementReviewAlreadyCompletedError("该记录已完成复核。")
 

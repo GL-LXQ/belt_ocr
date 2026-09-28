@@ -15,8 +15,8 @@ from PySide6.QtWidgets import QApplication
 from src.controller.controller import AppController, ControllerResult
 from src.service.abnormal_event_service import AbnormalEventServiceError
 from src.service.machine_service import MachineServiceError
-from src.service.measurement_history_service import (
-    MeasurementHistoryServiceError,
+from src.service.measurement_record_service import (
+    MeasurementRecordServiceError,
     MeasurementReviewAlreadyCompletedError,
 )
 from src.system_runtime_thread import SystemRuntimeThread
@@ -118,15 +118,20 @@ def controller_services() -> tuple[AppController, Mock, Mock, Mock]:
         )
     """
     machine_service = Mock()
-    history_service = Mock()
+    measurement_record_service = Mock()
     abnormal_event_service = Mock()
     controller = AppController(
         machine_service,
-        history_service,
+        measurement_record_service,
         abnormal_event_service,
         Path("config"),
     )
-    return controller, machine_service, history_service, abnormal_event_service
+    return (
+        controller,
+        machine_service,
+        measurement_record_service,
+        abnormal_event_service,
+    )
 
 
 @pytest.fixture
@@ -249,33 +254,35 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
         None  # 非法参数和已复核记录均返回失败结果
     """
     controller = controller_services[0]
-    history_service = controller_services[2]
+    measurement_record_service = controller_services[2]
     assert not controller.list_measurement_records("invalid").success
     assert not controller.get_measurement_record("  ").success
     assert not controller.complete_measurement_review("  ").success
-    history_service.list_records.assert_not_called()
-    history_service.get_record.assert_not_called()
-    history_service.complete_review.assert_not_called()
+    measurement_record_service.list_records.assert_not_called()
+    measurement_record_service.get_record.assert_not_called()
+    measurement_record_service.complete_review.assert_not_called()
 
     # 合法查询转发筛选条件，重复复核转换为普通失败。
-    history_service.list_records.return_value = [{"session_id": "session-1"}]
+    measurement_record_service.list_records.return_value = [{"session_id": "session-1"}]
     result = controller.list_measurement_records("pending", "1")
     assert result.success
     assert result.data == [{"session_id": "session-1"}]
-    history_service.list_records.assert_called_once_with("pending", "1")
+    measurement_record_service.list_records.assert_called_once_with("pending", "1")
     review_error = MeasurementReviewAlreadyCompletedError("该记录已完成复核。")
-    history_service.complete_review.side_effect = review_error
+    measurement_record_service.complete_review.side_effect = review_error
     result = controller.complete_measurement_review(" session-1 ", None)
     assert result == ControllerResult(
         success=False,
         data=True,
         message="该记录已完成复核。",
     )
-    history_service.complete_review.assert_called_once_with("session-1", None)
+    measurement_record_service.complete_review.assert_called_once_with(
+        "session-1", None
+    )
 
     # 普通复核错误不要求界面刷新详情。
-    history_service.complete_review.side_effect = MeasurementHistoryServiceError(
-        "人工复核保存失败"
+    measurement_record_service.complete_review.side_effect = (
+        MeasurementRecordServiceError("人工复核保存失败")
     )
     result = controller.complete_measurement_review("session-1", None)
     assert result == ControllerResult(
@@ -296,9 +303,11 @@ def test_history_and_abnormal_service_errors_become_results(
         None  # 业务异常没有传入界面
     """
     controller = controller_services[0]
-    history_service = controller_services[2]
+    measurement_record_service = controller_services[2]
     abnormal_event_service = controller_services[3]
-    history_service.get_record.side_effect = MeasurementHistoryServiceError("历史详情读取失败")
+    measurement_record_service.get_record.side_effect = (
+        MeasurementRecordServiceError("历史详情读取失败")
+    )
     abnormal_event_service.list_events.side_effect = AbnormalEventServiceError(
         "异常事件读取失败"
     )
@@ -324,10 +333,10 @@ def test_simple_requests_forward_service_data(controller_services) -> None:
     """
     controller = controller_services[0]
     machine_service = controller_services[1]
-    history_service = controller_services[2]
+    measurement_record_service = controller_services[2]
     abnormal_event_service = controller_services[3]
-    history_service.list_record_machines.return_value = [{"machine_id": "1"}]
-    history_service.get_record.return_value = {"session_id": "session-1"}
+    measurement_record_service.list_record_machines.return_value = [{"machine_id": "1"}]
+    measurement_record_service.get_record.return_value = {"session_id": "session-1"}
     abnormal_event_service.list_machine_ids.return_value = ["1"]
     abnormal_event_service.list_events.return_value = [{"abnormal_event_id": 3}]
     abnormal_event_service.get_event.return_value = {"abnormal_event_id": 3}
@@ -340,12 +349,14 @@ def test_simple_requests_forward_service_data(controller_services) -> None:
     assert controller.list_abnormal_event_machine_ids().data == ["1"]
     assert controller.list_abnormal_events().data == [{"abnormal_event_id": 3}]
     assert controller.get_abnormal_event(3).data == {"abnormal_event_id": 3}
-    history_service.get_record.assert_called_once_with("session-1")
+    measurement_record_service.get_record.assert_called_once_with("session-1")
 
     # 将成功的复核和删除转换为统一结果。
     assert controller.complete_measurement_review(" session-1 ").success
     assert controller.delete_machine(1).success
-    history_service.complete_review.assert_called_once_with("session-1", None)
+    measurement_record_service.complete_review.assert_called_once_with(
+        "session-1", None
+    )
     machine_service.delete_machine.assert_called_once_with(1)
 
 

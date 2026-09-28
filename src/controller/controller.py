@@ -10,9 +10,9 @@ from src.service.abnormal_event_service import (
     AbnormalEventServiceError,
 )
 from src.service.machine_service import MachineService, MachineServiceError
-from src.service.measurement_history_service import (
-    MeasurementHistoryService,
-    MeasurementHistoryServiceError,
+from src.service.measurement_record_service import (
+    MeasurementRecordService,
+    MeasurementRecordServiceError,
     MeasurementReviewAlreadyCompletedError,
 )
 from src.system_runtime_thread import SystemRuntimeThread
@@ -39,7 +39,7 @@ class AppController(QObject):
     def __init__(
         self,
         machine_service: MachineService,
-        measurement_history_service: MeasurementHistoryService,
+        measurement_record_service: MeasurementRecordService,
         abnormal_event_service: AbnormalEventService,
         configuration_directory: Path,
     ) -> None:
@@ -47,7 +47,7 @@ class AppController(QObject):
 
         Args:
             machine_service: 机器业务服务。
-            measurement_history_service: 测量历史业务服务。
+            measurement_record_service: 测量记录业务服务。
             abnormal_event_service: 异常事件业务服务。
             configuration_directory: 公共配置目录。
 
@@ -58,7 +58,7 @@ class AppController(QObject):
 
         # 保存页面请求所需的业务服务和监测配置。
         self.machine_service = machine_service
-        self.measurement_history_service = measurement_history_service
+        self.measurement_record_service = measurement_record_service
         self.abnormal_event_service = abnormal_event_service
         self.configuration_directory = configuration_directory
         self.runtime_thread: SystemRuntimeThread | None = None
@@ -255,9 +255,9 @@ class AppController(QObject):
         """
         # 读取历史机器并转换预期服务故障。
         try:
-            machines = self.measurement_history_service.list_record_machines()
+            machines = self.measurement_record_service.list_record_machines()
             return ControllerResult(success=True, data=machines)
-        except MeasurementHistoryServiceError as error:
+        except MeasurementRecordServiceError as error:
             return ControllerResult(success=False, message=str(error))
 
     def list_measurement_records(
@@ -281,11 +281,11 @@ class AppController(QObject):
 
         # 读取筛选记录并转换预期服务故障。
         try:
-            records = self.measurement_history_service.list_records(
+            records = self.measurement_record_service.list_records(
                 review_status, machine_id
             )
             return ControllerResult(success=True, data=records)
-        except MeasurementHistoryServiceError as error:
+        except MeasurementRecordServiceError as error:
             return ControllerResult(success=False, message=str(error))
 
     def get_measurement_record(self, session_id: str) -> ControllerResult:
@@ -307,9 +307,9 @@ class AppController(QObject):
 
         # 读取测量详情并转换预期服务故障。
         try:
-            record = self.measurement_history_service.get_record(session_id)
+            record = self.measurement_record_service.get_record(session_id)
             return ControllerResult(success=True, data=record)
-        except MeasurementHistoryServiceError as error:
+        except MeasurementRecordServiceError as error:
             return ControllerResult(success=False, message=str(error))
 
     def complete_measurement_review(
@@ -339,11 +339,11 @@ class AppController(QObject):
 
         # 完成人工复核并转换预期服务故障。
         try:
-            self.measurement_history_service.complete_review(session_id, edited_text)
+            self.measurement_record_service.complete_review(session_id, edited_text)
             return ControllerResult(success=True)
         except MeasurementReviewAlreadyCompletedError as error:
             return ControllerResult(success=False, data=True, message=str(error))
-        except MeasurementHistoryServiceError as error:
+        except MeasurementRecordServiceError as error:
             return ControllerResult(success=False, message=str(error))
 
     def list_abnormal_event_machine_ids(self) -> ControllerResult:

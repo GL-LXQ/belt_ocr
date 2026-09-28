@@ -16,7 +16,7 @@ from config_util import AppConfig, read_configuration_settings
 from src.controller.controller import AppController
 from src.service.abnormal_event_service import AbnormalEventService
 from src.service.machine_service import MachineService
-from src.service.measurement_history_service import MeasurementHistoryService
+from src.service.measurement_record_service import MeasurementRecordService
 from src.repo.abnormal_event_repo import AbnormalEventRepo
 from src.repo.machine_repo import MachineRepo
 from src.repo.measurement_record_repo import MeasurementRecordRepo
@@ -59,10 +59,10 @@ def run_desktop_preview() -> int:
     with closing(sqlite3.connect(recovery_database_path)) as connection, connection:
         AbnormalEventRepo.create_table(connection)
 
-    # 创建机器、历史记录和异常事件服务。
+    # 创建机器、测量记录和异常事件服务。
     machine_repo = MachineRepo(database_path)
     machine_service = MachineService(machine_repo)
-    measurement_history_service = MeasurementHistoryService(
+    measurement_record_service = MeasurementRecordService(
         MeasurementRecordRepo(database_path)
     )
     abnormal_event_service = AbnormalEventService(
@@ -72,7 +72,7 @@ def run_desktop_preview() -> int:
     # 组装界面业务控制器并创建主窗口。
     controller = AppController(
         machine_service,
-        measurement_history_service,
+        measurement_record_service,
         abnormal_event_service,
         configuration_directory,
     )

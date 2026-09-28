@@ -29,7 +29,7 @@ from machine import Machine
 from models import FrequencyMeasurement, RuntimeEvent
 from repo.machine_repo import MachineRepo
 from repo.measurement_record_repo import MeasurementRecordRepo
-from service.measurement_history_service import MeasurementHistoryService
+from service.measurement_record_service import MeasurementRecordService
 from text_recognition import TextRecognizer
 
 
@@ -376,11 +376,11 @@ async def run_measurement_simulation(scenario: str) -> dict:
             EventType.MACHINE_CLOSED, machine_config.machine_id, session_id
         ))
 
-        # 用现有历史服务核对正式记录和本轮 JPG 证据。
-        history_service = MeasurementHistoryService(
+        # 用现有测量记录服务核对正式记录和本轮 JPG 证据。
+        measurement_record_service = MeasurementRecordService(
             MeasurementRecordRepo(config.database_path)
         )
-        record = history_service.get_record(session_id)
+        record = measurement_record_service.get_record(session_id)
         if record is None:
             raise RuntimeError("测量记录没有写入业务库")
         evidence_directory = Path(record["evidence_directory"])
