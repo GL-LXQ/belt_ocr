@@ -2123,6 +2123,128 @@ async def test_io_interruption_preserves_closed_session(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_session_releases_when_delivery_task_finishes(tmp_path: Path) -> None:
+    """确认 IO 中断失败的周期在采集交付任务结束后被释放。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 交付期间周期保留，同轮采集故障只登记机器故障，交付结束后周期已释放
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
+    camera = machine.camera
+    camera.available = True
+    camera.is_capturing = False
+    camera.stop = AsyncMock()
+    machine.current_session = None
+    machine.initialized = True
+
+    # 采集交付任务由测试放行结束。
+    delivery_released = asyncio.Event()
+
+    def clear_delivery_task(task: asyncio.Task) -> None:
+        """按真实相机顺序在交付结束时先清空交付任务引用。
+
+        Args:
+            task: 已结束的采集交付任务。
+
+        Returns:
+            返回示例：
+                None  # 相机交付任务引用已清空
+        """
+        camera.delivery_task = None
+
+    def start_capture(session_id: str, capture_start_time: float) -> None:
+        """建立等待放行的采集交付任务。
+
+        Args:
+            session_id: 本轮采集归属的周期编号。
+            capture_start_time: 本轮采集开始的单调时间。
+
+        Returns:
+            返回示例：
+                None  # 交付任务已登记，相机清理回调已先于机器的释放回调
+        """
+        camera.delivery_task = asyncio.create_task(delivery_released.wait())
+        camera.delivery_task.add_done_callback(clear_delivery_task)
+
+    camera.start_capture = start_capture
+
+    # 受理 START 后交付任务仍在运行，IO 中断先把本轮结算为失败。
+    await machine.handle_machine_start()
+    session = machine.current_session
+    assert session is not None
+    delivery_task = camera.delivery_task
+    await machine.handle_event(RuntimeEvent(EventType.IO_INTERRUPTED, "1"))
+    assert session.state == SessionState.FAILED
+    assert session.errors == ["IO 通信中断"]
+    assert len(read_abnormal_events(database)) == 1
+    assert machine.current_session is session
+
+    # 同轮采集故障在交付结束前到达，只登记机器故障，本轮不重复结算。
+    await machine.handle_event(RuntimeEvent(
+        EventType.CAPTURE_FAILED, "1", session.session_id, "GetImageBuffer 失败"
+    ))
+    assert machine.machine_failure_reason == "相机采集失败"
+    assert session.errors == ["IO 通信中断"]
+    assert [(row[0], row[1], row[2]) for row in read_abnormal_events(database)] == [
+        ("1", session.session_id, "IO 通信中断"),
+    ]
+    assert machine.current_session is session
+
+    # 放行交付任务，相机清空引用后机器的交付回调完成释放。
+    delivery_released.set()
+    await asyncio.gather(delivery_task, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert camera.delivery_task is None
+    assert machine.current_session is None
+    assert machine.acceptance_state == "FAULT"
+
+    # 机器故障登记继续阻止下一轮 START。
+    await machine.handle_machine_start()
+    assert machine.current_session is None
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_machine_failure_does_not_release_failed_session_itself(tmp_path: Path) -> None:
+    """确认机器故障收尾只登记故障，不负责释放已满足条件的失败周期。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 周期由显式释放清空，机器故障处理本身不触发释放
+    """
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+
+    # 建立全部释放条件已满足、且交付任务已结束的失败周期。
+    session.state = SessionState.FAILED
+    session.errors = ["IO 通信中断"]
+    machine.camera.delivery_task = None
+
+    # 同轮采集故障交给已失败的周期，只登记机器故障。
+    await machine.handle_event(RuntimeEvent(
+        EventType.CAPTURE_FAILED, "1", session.session_id, "GetImageBuffer 失败"
+    ))
+    assert machine.machine_failure_reason == "相机采集失败"
+    assert session.errors == ["IO 通信中断"]
+    assert read_abnormal_events(database) == []
+
+    # 真实受理 START 时相机的交付结束回调会再次尝试释放，本测试绕过该回调。
+    # 机器故障处理没有释放周期，显式调用释放才清空当前周期。
+    assert machine.current_session is session
+    machine.release_finished_session()
+    assert machine.current_session is None
+    database.close()
+
+
+@pytest.mark.asyncio
 async def test_ocr_notification_precedes_close_and_survives_release(tmp_path: Path) -> None:
     """验证有效 OCR 立即通知文字且后续结算不清空通知结果。
 
