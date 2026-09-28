@@ -249,6 +249,10 @@ class Machine:
 
         # 等待现场复位时跳过本次 START。
         if self.waiting_cycle_reset:
+            logger.warning(
+                "等待现场复位，跳过 START machine_id=%s",
+                self.machine_config.machine_id,
+            )
             return
 
         # 检查相机可用性与采集占用。
@@ -256,8 +260,13 @@ class Machine:
             # 标记等待周期复位。
             self.waiting_cycle_reset = True
 
-            # 记录本轮未受理。
-            logger.error("本轮未受理 machine_id=%s", self.machine_config.machine_id)
+            # 记录本轮未受理及本机相机状态。
+            logger.error(
+                "本轮未受理 machine_id=%s camera_available=%s is_capturing=%s",
+                self.machine_config.machine_id,
+                self.camera.available,
+                self.camera.is_capturing,
+            )
             return
 
         # 创建本轮测量档案，登记周期编号、采集编号和开始时间。
@@ -363,6 +372,15 @@ class Machine:
                 self.waiting_cycle_reset = False
             return
 
+        # 记录本轮进入关闭处理，正常关闭没有中断原因。
+        logger.info(
+            "开始关闭周期 machine_id=%s session_id=%s interrupted=%s failure_reason=%s",
+            session.machine_id,
+            session.session_id,
+            interrupted,
+            failure_reason if interrupted else None,
+        )
+
         # 记录本轮关闭边界时间。
         session.capture_stop_time = (
             capture_stop_time if capture_stop_time is not None else asyncio.get_running_loop().time()
@@ -394,6 +412,16 @@ class Machine:
             # 没有有效读数时标记频率异常并记录缺少测量的错误。
             session.frequency_state = FrequencyState.FAILED
             session.errors.append("FREQUENCY_NO_VALID_MEASUREMENT")
+
+        # 记录本轮频率结算结果。
+        logger.info(
+            "频率结算 machine_id=%s session_id=%s frequency_count=%s frequency_state=%s final_frequency=%s",
+            session.machine_id,
+            session.session_id,
+            len(session.measurement_frequencies),
+            session.frequency_state.value,
+            session.final_frequency.value_hz if session.final_frequency is not None else None,
+        )
 
         # 通知界面本轮频率采集的结算结果。
         if self.notify_measurement_progress is not None:
@@ -550,6 +578,15 @@ class Machine:
                 # 保留整轮采集统计。
                 capture_result = event.payload
                 session.capture_summary = capture_result.statistics
+
+                # 记录本轮采集帧数和统计。
+                logger.info(
+                    "采集结果已接收 machine_id=%s session_id=%s frame_count=%s capture_summary=%s",
+                    session.machine_id,
+                    session.session_id,
+                    len(capture_result.frames),
+                    capture_result.statistics,
+                )
 
                 # 没有采集帧时上报图像采集失败。
                 if not capture_result.frames:
@@ -842,6 +879,14 @@ class Machine:
         for task in self.deadline_tasks.values():
             task.cancel()
         self.deadline_tasks.clear()
+
+        # 记录本轮 Session 已满足释放条件。
+        logger.info(
+            "Session释放 machine_id=%s session_id=%s state=%s",
+            session.machine_id,
+            session.session_id,
+            session.state.value,
+        )
 
         # 清空当前周期并通知等待方。
         self.current_session = None
@@ -1170,6 +1215,16 @@ class Machine:
 
         # 释放本轮识别结果引用。
         session.ocr_result = None
+
+        # 记录本轮待保存的证据图片数量和最终结果。
+        logger.info(
+            "开始保存测量结果 machine_id=%s session_id=%s evidence_frame_count=%s needs_review=%s final_frequency=%s",
+            session.machine_id,
+            session.session_id,
+            len(evidence_frames),
+            needs_review,
+            record.final_frequency_hz,
+        )
 
         # 在线程中依次保存证据图片和测量记录。
         try:

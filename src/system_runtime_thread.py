@@ -56,6 +56,8 @@ class SystemRuntimeThread(QThread):
         Returns:
             None  # 事件循环结束，QThread 随后发送 finished 信号
         """
+        # 记录本线程开始运行监测主流程。
+        logger.info("监测后台线程启动")
         try:
             # 在本线程中运行监测主流程。
             asyncio.run(self.run_monitoring())
@@ -63,6 +65,9 @@ class SystemRuntimeThread(QThread):
             logger.exception("监测后台线程运行失败")
             # 保存失败原因供 Controller 读取。
             self.failure_message = str(error)
+
+        # 记录本线程已结束，无故障时 failure 为空。
+        logger.info("监测后台线程结束 failure=%s", self.failure_message)
 
     async def run_monitoring(self) -> None:
         """启动 Runtime、等待停止并统一释放资源。

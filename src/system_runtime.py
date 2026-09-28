@@ -156,6 +156,14 @@ class SystemRuntime:
         # 拒绝重复启动同一个应用实例。
         if self.has_started:
             raise RuntimeError("请为新一次运行创建新的测量应用实例。")
+
+        # 记录本次启动使用的存储路径。
+        logger.info(
+            "Runtime开始启动 database_path=%s recovery_path=%s evidence_directory=%s",
+            self.config.database_path,
+            self.config.recovery_path,
+            self.config.evidence_directory,
+        )
         try:
             # 创建证据图片目录，此处按同步方式执行。
             self.config.evidence_directory.mkdir(parents=True, exist_ok=True)
@@ -169,6 +177,13 @@ class SystemRuntime:
                 notify_camera_state,
                 notify_ocr_result,
                 notify_cycle_closed,
+            )
+
+            # 记录本次运行加载的启用机器。
+            logger.info(
+                "已加载启用机器 machine_count=%s machine_ids=%s",
+                len(self.machines),
+                ", ".join(sorted(self.machines)),
             )
 
             # 校验当前启用机器的串口和 DI 通道绑定。
@@ -229,6 +244,13 @@ class SystemRuntime:
                         notify_camera_state(machine_config.machine_id, "连接失败", str(error))
                     raise
 
+                # 记录本机相机连接成功。
+                logger.info(
+                    "相机连接成功 machine_id=%s camera_serial=%s",
+                    machine_config.machine_id,
+                    machine_config.camera_serial,
+                )
+
                 # 打开成功时通知界面相机已连接。
                 if notify_camera_state is not None:
                     notify_camera_state(machine_config.machine_id, "相机已连接", "IO、频率仪尚未接入")
@@ -236,6 +258,9 @@ class SystemRuntime:
             # 所有相机连接失败时结束本次启动。
             if all(machine.camera.sdk_camera is None for machine in self.machines.values()):
                 raise MvsError("所有启用机器的相机均连接失败")
+
+            # 记录共享 OCR Engine 初始化开始。
+            logger.info("开始初始化 OCR Engine")
 
             # 在线程中初始化共享 OCR Engine 并等待模型准备完成。
             await run_blocking_operation(self.text_recognizer.initialize)
@@ -273,6 +298,14 @@ class SystemRuntime:
 
             # 启动 Modbus DI 监听任务。
             self.worker_tasks.append(asyncio.create_task(self.run_worker("Modbus IO监听", self.listen_io)))
+
+            # 记录 Runtime 已正式启动并开放现场信号入口。
+            logger.info(
+                "Runtime启动完成 machine_count=%s worker_count=%s modbus_serial_port=%s",
+                len(self.machines),
+                len(self.worker_tasks),
+                serial_port,
+            )
         except BaseException as error:
             # 记录启动失败异常。
             logger.exception("测量系统初始化失败")
@@ -400,8 +433,25 @@ class SystemRuntime:
             if previous_state is None:
                 machine.waiting_cycle_reset = current_state
 
+                # 记录本机 DI 初始状态。
+                logger.info(
+                    "DI初始状态 machine_id=%s channel=%s state=%s",
+                    machine_id,
+                    channel,
+                    current_state,
+                )
+
             # 后续状态变化进入现有启动或关闭入口。
             elif previous_state != current_state:
+                # 记录本次 DI 电平变化。
+                logger.info(
+                    "DI状态变化 machine_id=%s channel=%s previous=%s current=%s",
+                    machine_id,
+                    channel,
+                    previous_state,
+                    current_state,
+                )
+
                 if current_state:
                     await self.handle_start(machine_id)
                 else:
@@ -531,6 +581,13 @@ class SystemRuntime:
         # 只保存首次故障。
         if self.failure is None:
             self.failure = error
+
+            # 记录首次系统故障的异常类型和内容。
+            logger.error(
+                "系统故障 error_type=%s error=%s",
+                type(error).__name__,
+                error,
+            )
 
         # 关闭信号入口并通知故障与状态等待方。
         self.accepting_signals = False
@@ -673,6 +730,14 @@ class SystemRuntime:
             返回示例：
                 None  # 测量、任务和相机资源已清理，清理故障保存在 failure 中
         """
+        # 记录本次停止开始时的故障、机器和后台任务数量。
+        logger.info(
+            "Runtime开始停止 failure=%s machine_count=%s worker_count=%s",
+            self.failure,
+            len(self.machines),
+            len(self.worker_tasks),
+        )
+
         # 关闭信号入口并标记进入停止流程。
         self.accepting_signals = False
         self.stopping = True
@@ -752,3 +817,6 @@ class SystemRuntime:
 
             # 通知全部状态等待方本次退出已结束。
             self.state_changed.set()
+
+            # 记录全部资源释放完成时的最终故障状态。
+            logger.info("Runtime资源释放完成 failure=%s", self.failure)

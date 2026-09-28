@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import sqlite3
 import threading
 from dataclasses import replace
@@ -232,16 +233,22 @@ def test_ocr_lock_wait_timeout_configuration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_finalize_saves_images_before_record(tmp_path: Path) -> None:
+async def test_finalize_saves_images_before_record(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """确认正常证据先落盘，随后直接写入测量记录。
 
     Args:
         tmp_path: pytest 提供的临时目录。
+        caplog: pytest 捕获的日志。
 
     Returns:
         返回示例：
             None  # 图片和数据库记录均已核对
     """
+    # 记录保存与释放阶段的关键节点日志。
+    caplog.set_level(logging.INFO)
+
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, progress_updates, encoding_threads = create_machine(
         tmp_path, (frame,)
@@ -296,6 +303,17 @@ async def test_finalize_saves_images_before_record(tmp_path: Path) -> None:
     expected_directory = tmp_path / "evidence/20240922/1/session-1"
     assert record[2] == str(expected_directory)
     assert record[3] == 0
+
+    # 核对保存开始与 Session 释放日志及先后顺序。
+    log_messages = [log_record.getMessage() for log_record in caplog.records]
+    save_message = (
+        "开始保存测量结果 machine_id=1 session_id=session-1 "
+        "evidence_frame_count=1 needs_review=False final_frequency=50.0"
+    )
+    release_message = "Session释放 machine_id=1 session_id=session-1 state=COMMITTED"
+    assert save_message in log_messages
+    assert release_message in log_messages
+    assert log_messages.index(save_message) < log_messages.index(release_message)
 
 
 @pytest.mark.asyncio
@@ -739,11 +757,14 @@ async def test_unknown_database_value_error_is_not_commit_conflict(
     machine.on_system_failure.assert_not_called()
 
 
-def test_database_compares_evidence_directory(tmp_path: Path) -> None:
+def test_database_compares_evidence_directory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """确认同一周期重复写入只接受相同证据目录。
 
     Args:
         tmp_path: pytest 提供的临时目录。
+        caplog: pytest 捕获的日志。
 
     Returns:
         返回示例：
@@ -772,6 +793,15 @@ def test_database_compares_evidence_directory(tmp_path: Path) -> None:
     # 重复保存相同记录。
     database.write_measurement_record(record)
     database.write_measurement_record(record)
+
+    # 核对重复写入只记录一条跳过告警。
+    skip_warnings = [
+        log_record
+        for log_record in caplog.records
+        if "跳过重复写入" in log_record.getMessage()
+    ]
+    assert len(skip_warnings) == 1
+    assert skip_warnings[0].levelname == "WARNING"
 
     # 拒绝同一周期使用不同证据目录。
     with pytest.raises(CommitIntegrityConflictError):

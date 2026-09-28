@@ -63,13 +63,14 @@ def create_database_and_record(
 
 
 def test_busy_write_succeeds_on_second_attempt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """确认首次写锁竞争后重新连接并成功写入一次。
 
     Args:
         tmp_path: pytest 提供的临时目录。
         monkeypatch: pytest 提供的属性替换工具。
+        caplog: pytest 捕获的日志。
 
     Returns:
         返回示例：
@@ -97,6 +98,16 @@ def test_busy_write_succeeds_on_second_attempt(
     # 核对重试次数和最终写入内容。
     assert connect_mock.call_count == 2
     sleep_mock.assert_called_once_with(0.1)
+
+    # 核对重试前只记录一条写锁竞争告警。
+    retry_warnings = [
+        log_record
+        for log_record in caplog.records
+        if "测量记录写锁竞争" in log_record.getMessage()
+    ]
+    assert len(retry_warnings) == 1
+    assert retry_warnings[0].levelname == "WARNING"
+    assert retry_warnings[0].getMessage() == "测量记录写锁竞争，准备重试 session_id=session-1"
     with sqlite3.connect(database.config.database_path) as connection:
         record_count = connection.execute(
             "SELECT COUNT(*) FROM measurement_records WHERE session_id = ?",
@@ -135,13 +146,14 @@ def test_persistent_busy_stops_after_second_attempt(
 
 
 def test_other_operational_error_is_not_retried(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """确认非写锁错误不进入重试。
 
     Args:
         tmp_path: pytest 提供的临时目录。
         monkeypatch: pytest 提供的属性替换工具。
+        caplog: pytest 捕获的日志。
 
     Returns:
         返回示例：
@@ -164,3 +176,6 @@ def test_other_operational_error_is_not_retried(
     # 核对没有进行第二次尝试。
     assert connect_mock.call_count == 1
     sleep_mock.assert_not_called()
+
+    # 核对非写锁错误没有记录重试告警。
+    assert "测量记录写锁竞争" not in caplog.text

@@ -206,6 +206,15 @@ class Camera:
         self.current_capture = capture_task
         self.delivery_task.add_done_callback(self.handle_capture_task_finished)
 
+        # 记录本轮采集启动参数。
+        logger.info(
+            "相机采集开始 machine_id=%s session_id=%s camera_serial=%s capture_window_ms=%s",
+            self.machine_id,
+            session_id,
+            sdk_camera.serial,
+            self.capture_window_ms,
+        )
+
     def handle_capture_task_finished(self, task: asyncio.Task) -> None:
         """移除交付任务并报告未处理异常。
 
@@ -290,6 +299,13 @@ class Camera:
 
         # 相机采集故障交给所属机器处理。
         if capture_error is not None:
+            # 记录本轮采集故障身份，底层异常已有记录。
+            logger.error(
+                "相机采集故障 machine_id=%s session_id=%s error=%s",
+                self.machine_id,
+                session_id,
+                capture_error,
+            )
             await self.publish_event(RuntimeEvent(
                 EventType.CAPTURE_FAILED,
                 self.machine_id,
@@ -297,6 +313,16 @@ class Camera:
                 str(capture_error),
             ))
             return
+
+        # 记录本轮采集完成的帧数和耗时。
+        logger.info(
+            "相机采集完成 machine_id=%s session_id=%s frame_count=%s capture_duration_seconds=%.3f received_frame_count=%s",
+            self.machine_id,
+            session_id,
+            len(result.frames),
+            result.statistics["capture_duration_seconds"],
+            result.statistics["received_frame_count"],
+        )
 
         try:
             # 将成功采集的整轮结果交回所属机器。

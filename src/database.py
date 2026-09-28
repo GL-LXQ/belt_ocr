@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -14,6 +15,9 @@ from config_util import AppConfig
 from repo.machine_repo import MachineRepo
 from repo.measurement_record_repo import MeasurementRecordRepo
 from repo.abnormal_event_repo import AbnormalEventRepo
+
+
+logger = logging.getLogger(__name__)
 
 
 def save_evidence_image(image_data: bytes, image_path: Path) -> None:
@@ -145,6 +149,13 @@ class Database:
         # 每次调用都检查最终结果库结构。
         self.initialize_result_database()
 
+        # 记录双库初始化完成及所在路径。
+        logger.info(
+            "数据库初始化完成 database_path=%s recovery_path=%s",
+            self.config.database_path,
+            self.config.recovery_path,
+        )
+
     def initialize_runtime_database(self) -> None:
         """锁定本地实例并创建本地运行表。
 
@@ -268,6 +279,12 @@ class Database:
                                     raise CommitIntegrityConflictError(
                                         "同一 Session 的提交内容不一致。"
                                     )
+
+                                # 记录本轮内容一致，跳过重复写入。
+                                logger.warning(
+                                    "测量记录已存在且内容一致，跳过重复写入 session_id=%s",
+                                    record.session_id,
+                                )
                                 return
 
                             # 写入本轮测量记录。
@@ -293,6 +310,10 @@ class Database:
                         raise
 
                     # 关闭本次连接后等待下一次写入尝试。
+                    logger.warning(
+                        "测量记录写锁竞争，准备重试 session_id=%s",
+                        record.session_id,
+                    )
                     time.sleep(0.1)
 
     def close(self) -> None:

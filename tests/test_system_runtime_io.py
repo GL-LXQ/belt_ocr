@@ -1,6 +1,7 @@
 """验证 IO 断线后的状态失效和恢复同步。"""
 
 import asyncio
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -25,6 +26,7 @@ async def test_io_recovery_only_uses_first_read_as_baseline(
     recovered_state: bool,
     later_states: tuple[bool, ...],
     expected_events: tuple[EventType, ...],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """确认断线后首读只同步状态，后续边沿正常交付。
 
@@ -33,11 +35,15 @@ async def test_io_recovery_only_uses_first_read_as_baseline(
         recovered_state: 通信恢复后的第一份 DI 状态。
         later_states: 恢复后继续读取的 DI 状态。
         expected_events: 恢复后应交付的边沿事件。
+        caplog: pytest 捕获的日志。
 
     Returns:
         返回示例：
             None  # 断线仅通知一次且恢复首读未触发机器事件
     """
+    # 记录 DI 初始状态和电平变化日志。
+    caplog.set_level(logging.INFO)
+
     # 建立单机运行对象和轮询读数序列。
     config = AppConfig(
         database_path=tmp_path / "measurements.sqlite3",
@@ -112,3 +118,20 @@ async def test_io_recovery_only_uses_first_read_as_baseline(
     ]
     assert runtime.io_previous_states == {0: later_states[-1]}
     runtime.modbus_client.disconnect.assert_not_awaited()
+
+    # 核对首读只记录初始状态，首个边沿同时记录电平变化。
+    assert "DI初始状态 machine_id=1 channel=0 state=False" in caplog.text
+    assert "DI状态变化 machine_id=1 channel=0 previous=False current=True" in caplog.text
+
+    # 核对每次 DI 电平变化产生一条日志和一条机器信号，正常轮询不产生日志。
+    edge_logs = [record for record in caplog.records if "DI状态变化" in record.getMessage()]
+    machine_signal_events = [
+        event_type
+        for event_type in delivered_events
+        if event_type in {EventType.MACHINE_STARTED, EventType.MACHINE_CLOSED}
+    ]
+    assert len(edge_logs) == len(machine_signal_events)
+
+    # 核对断线前后的两份首读各记录一条初始状态日志。
+    baseline_logs = [record for record in caplog.records if "DI初始状态" in record.getMessage()]
+    assert len(baseline_logs) == 2
