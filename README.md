@@ -83,6 +83,8 @@ GUI 启动入口创建 Repo、Service 和唯一的 `AppController`，四个正�
 
 业务 Service 向 `AppController` 返回数据或抛出业务异常；遇到已知 SQLite、JSON 故障时，Service 将技术详情记入日志，并把对外异常转换为可展示的固定提示。`AppController` 将结果包装为 `Result.ok(...)` 或 `Result.error(...)`，UI 继续读取 `success`、`data`、`message` 三个字段。
 
+机器新增和修改成功时，`MachineService` 返回机器编号；字段重复时抛出携带字段名和对应提示的 `MachineDuplicateFieldError`。`AppController` 将编号或异常转换为 `Result.ok(...)` 或 `Result.error(...)`，页面继续使用 `data["field"]` 定位重复字段。
+
 历史记录页进入时通过 `AppController` 调用 `MeasurementRecordService`，再经 `MeasurementRecordRepo` 从业务库 `measurement_records` 读取已保存的测量结果，并可按正常、待复核、已复核及机器筛选；详情保留原始 OCR、频率、复核原因和本轮 JPG 证据图片。待复核记录可确认原文字或按行保存人工修正文字，Repo 只对尚未复核的记录写入 UTC 复核时间和可选的 `reviewed_lines` JSON，原 `ordered_lines`、`needs_review` 与 `review_reason` 保留；已复核详情同时显示原始与最终文字，列表摘要优先显示人工结果。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
 
 GUI 启动时先在运行库确保 `abnormal_events` 表存在。异常事件页进入时经 `AppController`、`AbnormalEventService`、`AbnormalEventRepo` 读取该表，按时间倒序显示异常记录，并支持机器筛选、完整 Session ID 搜索和详情查看。后续异常写入使用中文 `reason`，已有记录原样保留；页面直接显示库中的异常原因，详情展示完整 `payload_json`。

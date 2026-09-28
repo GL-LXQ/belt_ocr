@@ -9,7 +9,11 @@ from src.service.abnormal_event_service import (
     AbnormalEventService,
     AbnormalEventServiceError,
 )
-from src.service.machine_service import MachineService, MachineServiceError
+from src.service.machine_service import (
+    MachineDuplicateFieldError,
+    MachineService,
+    MachineServiceError,
+)
 from src.service.measurement_record_service import (
     MeasurementRecordService,
     MeasurementRecordServiceError,
@@ -181,16 +185,18 @@ class AppController(QObject):
             if not value:
                 return Result.error(f"请填写{title}。", data={"field": field})
 
-        # 调用机器服务并转换重复字段或数据库故障。
+        # 调用机器服务新增记录。
         try:
-            result = self.machine_service.create_machine(
+            machine_id = self.machine_service.create_machine(
                 machine_name, camera_serial, frequency_meter_serial, enabled, remark
             )
+        except MachineDuplicateFieldError as error:
+            return Result.error(str(error), data={"field": error.field})
         except MachineServiceError as error:
             return Result.error(str(error))
-        if not result["success"]:
-            return Result.error(result["message"], data={"field": result["field"]})
-        return Result.ok(result["machine_id"])
+
+        # 返回已创建的机器编号。
+        return Result.ok(machine_id)
 
     def update_machine(
         self,
@@ -230,9 +236,9 @@ class AppController(QObject):
             if not value:
                 return Result.error(f"请填写{title}。", data={"field": field})
 
-        # 调用机器服务并转换重复字段或数据库故障。
+        # 调用机器服务更新记录。
         try:
-            result = self.machine_service.update_machine(
+            updated_machine_id = self.machine_service.update_machine(
                 machine_id,
                 machine_name,
                 camera_serial,
@@ -240,11 +246,13 @@ class AppController(QObject):
                 enabled,
                 remark,
             )
+        except MachineDuplicateFieldError as error:
+            return Result.error(str(error), data={"field": error.field})
         except MachineServiceError as error:
             return Result.error(str(error))
-        if not result["success"]:
-            return Result.error(result["message"], data={"field": result["field"]})
-        return Result.ok(result["machine_id"])
+
+        # 返回已更新的机器编号。
+        return Result.ok(updated_machine_id)
 
     def delete_machine(self, machine_id: int) -> Result:
         """软删除指定机器。

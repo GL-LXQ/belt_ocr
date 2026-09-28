@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from src.controller.controller import AppController, Result
 from src.service.abnormal_event_service import AbnormalEventServiceError
-from src.service.machine_service import MachineServiceError
+from src.service.machine_service import MachineDuplicateFieldError, MachineServiceError
 from src.service.measurement_record_service import (
     MeasurementRecordServiceError,
     MeasurementReviewAlreadyCompletedError,
@@ -184,17 +184,10 @@ def test_machine_calls_return_controller_results(controller_services) -> None:
     machines = [{"id": 1, "machine_name": "皮带机"}]
     machine_service.list_machines.return_value = machines
     machine_service.list_enabled_machines.return_value = machines
-    machine_service.create_machine.return_value = {
-        "success": True,
-        "machine_id": 1,
-        "field": None,
-    }
-    machine_service.update_machine.return_value = {
-        "success": False,
-        "machine_id": 1,
-        "field": "machine_name",
-        "message": "机器名称已存在，请修改。",
-    }
+    machine_service.create_machine.return_value = 1
+    machine_service.update_machine.side_effect = MachineDuplicateFieldError(
+        "machine_name"
+    )
 
     # 查询和新增请求返回界面使用的数据。
     assert controller.list_machines() == Result.ok(machines)
@@ -208,6 +201,13 @@ def test_machine_calls_return_controller_results(controller_services) -> None:
     # 重复字段与预期服务异常转成失败结果。
     result = controller.update_machine(1, "皮带机", "CAM002", "FREQ002")
     assert result == Result.error("机器名称已存在，请修改。", data={"field": "machine_name"})
+
+    # 修改成功时返回原有的机器编号。
+    machine_service.update_machine.side_effect = None
+    machine_service.update_machine.return_value = 1
+    assert controller.update_machine(1, "皮带机", "CAM002", "FREQ002") == Result.ok(1)
+
+    # 删除故障继续返回业务提示。
     machine_service.delete_machine.side_effect = MachineServiceError("机器删除失败")
     assert controller.delete_machine(1) == Result.error("机器删除失败")
 
