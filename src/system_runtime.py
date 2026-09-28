@@ -103,13 +103,13 @@ class SystemRuntime:
                 frequency_meter_serial=machine_row["frequency_meter_serial"],
             )
 
-            # 建立本机采集器，接入事件入口与致命故障回调。
+            # 建立本机采集器，接入事件入口与系统故障回调。
             camera = Camera(
                 machine_config.machine_id,
                 self.config.capture_window_ms,
                 self.config.camera_timeout_ms,
                 self.publish_event,
-                self.handle_fatal_error,
+                self.handle_system_failure,
             )
 
             # 建立本机频率接收适配器。
@@ -125,7 +125,7 @@ class SystemRuntime:
                 self.database,
                 self.publish_event,
                 notify_measurement_progress,
-                self.handle_fatal_error,
+                self.handle_system_failure,
                 self.state_changed,
                 notify_camera_state,
                 notify_ocr_result,
@@ -517,7 +517,7 @@ class SystemRuntime:
         if self.releasing_resources:
             machine.discard_pending_events()
 
-    def handle_fatal_error(self, error: Exception) -> None:
+    def handle_system_failure(self, error: Exception) -> None:
         """保存故障、关闭信号入口并安排整个应用退出。
 
         Args:
@@ -562,12 +562,12 @@ class SystemRuntime:
             # 非停止流程中的取消按故障登记。
             if not self.stopping:
                 logger.exception("后台任务意外取消 component=%s", component)
-                self.handle_fatal_error(RuntimeError(f"后台任务意外取消：{component}"))
+                self.handle_system_failure(RuntimeError(f"后台任务意外取消：{component}"))
             raise
         except Exception as error:
-            # 记录后台运行异常并交给致命故障入口。
+            # 记录后台运行异常并交给系统故障入口。
             logger.exception("后台任务失败 component=%s", component)
-            self.handle_fatal_error(error)
+            self.handle_system_failure(error)
 
     async def wait_for_failure(self) -> None:
         """等待首次故障并向主流程抛出原始异常。
@@ -687,7 +687,7 @@ class SystemRuntime:
         except Exception as error:
             if error is not self.failure:
                 logger.exception("退出测量失败")
-            self.handle_fatal_error(error)
+            self.handle_system_failure(error)
 
         # 标记进入资源释放阶段，停止事件交付。
         self.releasing_resources = True
@@ -707,7 +707,7 @@ class SystemRuntime:
         # 逐条登记机器资源释放过程中的异常。
         for result in release_results:
             if isinstance(result, Exception):
-                self.handle_fatal_error(result)
+                self.handle_system_failure(result)
 
         # 取消全部系统级后台任务。
         for task in self.worker_tasks:
@@ -723,7 +723,7 @@ class SystemRuntime:
             except Exception as error:
                 # 记录 Modbus 关闭失败并继续释放其他资源。
                 logger.exception("关闭 Modbus 客户端失败")
-                self.handle_fatal_error(error)
+                self.handle_system_failure(error)
 
         # 清空已登记的后台任务列表。
         self.worker_tasks.clear()
@@ -739,7 +739,7 @@ class SystemRuntime:
         except Exception as error:
             # 记录关闭相机驱动失败并登记故障。
             logger.exception("关闭相机驱动失败")
-            self.handle_fatal_error(error)
+            self.handle_system_failure(error)
         finally:
             # 关闭本地记录库并释放实例锁。
             try:
@@ -747,7 +747,7 @@ class SystemRuntime:
             except Exception as error:
                 # 记录关闭记录库失败并登记故障。
                 logger.exception("关闭本地记录库失败")
-                self.handle_fatal_error(error)
+                self.handle_system_failure(error)
 
             # 通知全部状态等待方本次退出已结束。
             self.state_changed.set()

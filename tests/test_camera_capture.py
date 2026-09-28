@@ -130,8 +130,8 @@ async def test_mvs_capture_error_publishes_machine_failure() -> None:
         stop_grabbing=Mock(),
     )
     publish_event = AsyncMock()
-    on_fatal_error = Mock()
-    camera = Camera("1", 1000, 50, publish_event, on_fatal_error)
+    on_system_failure = Mock()
+    camera = Camera("1", 1000, 50, publish_event, on_system_failure)
     camera.sdk_camera = sdk_camera
     capture_task = CaptureTask(sdk_camera, time.monotonic(), 1.0, 50)
     camera.current_capture = capture_task
@@ -146,11 +146,11 @@ async def test_mvs_capture_error_publishes_machine_failure() -> None:
     assert camera.current_capture is None
     assert not capture_lock.locked()
     assert not camera.available
-    on_fatal_error.assert_not_called()
+    on_system_failure.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_unknown_capture_error_uses_fatal_callback() -> None:
+async def test_unknown_capture_error_uses_system_failure_callback() -> None:
     """确认未知采集异常继续进入原有全局故障回调。
 
     Args:
@@ -158,7 +158,7 @@ async def test_unknown_capture_error_uses_fatal_callback() -> None:
 
     Returns:
         返回示例：
-            None  # 未交付 CAPTURE_FAILED，原始异常已交给致命故障入口
+            None  # 未交付 CAPTURE_FAILED，原始异常已交给系统故障入口
     """
     sdk_camera = SimpleNamespace(
         serial="camera-1",
@@ -171,8 +171,8 @@ async def test_unknown_capture_error_uses_fatal_callback() -> None:
         stop_grabbing=Mock(),
     )
     publish_event = AsyncMock()
-    on_fatal_error = Mock()
-    camera = Camera("1", 1000, 50, publish_event, on_fatal_error)
+    on_system_failure = Mock()
+    camera = Camera("1", 1000, 50, publish_event, on_system_failure)
     camera.sdk_camera = sdk_camera
 
     # 启动采集并等待任务完成回调处理原始异常。
@@ -181,4 +181,4 @@ async def test_unknown_capture_error_uses_fatal_callback() -> None:
     await asyncio.gather(delivery_task, return_exceptions=True)
     await asyncio.sleep(0)
     publish_event.assert_not_awaited()
-    assert isinstance(on_fatal_error.call_args.args[0], RuntimeError)
+    assert isinstance(on_system_failure.call_args.args[0], RuntimeError)

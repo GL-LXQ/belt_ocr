@@ -158,7 +158,7 @@ def create_machine(
         database=database,
         publish_event=publish_event,
         notify_measurement_progress=record_progress,
-        on_fatal_error=Mock(),
+        on_system_failure=Mock(),
         state_changed=asyncio.Event(),
     )
 
@@ -475,7 +475,7 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
         faulted=False,
         capture_lock=threading.Lock(),
     )
-    camera = Camera("1", 1000, 50, publish_event, machine.on_fatal_error)
+    camera = Camera("1", 1000, 50, publish_event, machine.on_system_failure)
     camera.sdk_camera = sdk_camera
     machine.camera = camera
     machine.initialized = True
@@ -499,7 +499,7 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
     assert not sdk_camera.faulted
     assert camera.available
     assert machine.acceptance_state == "READY"
-    machine.on_fatal_error.assert_not_called()
+    machine.on_system_failure.assert_not_called()
     assert progress_updates[-1][2:] == (ProgressStage.EVIDENCE_STORAGE, ProgressStatus.FAILED)
 
 
@@ -581,10 +581,10 @@ async def test_image_write_failure_skips_database(
     assert "测量结果入库失败" not in session.errors
     assert "测量记录提交冲突" not in session.errors
     assert read_abnormal_events(database)[0][2] == "证据图片保存失败"
-    machine.on_fatal_error.assert_called_once()
-    fatal_error = machine.on_fatal_error.call_args.args[0]
-    assert isinstance(fatal_error, EvidenceWriteError)
-    assert fatal_error.__cause__ is write_error
+    machine.on_system_failure.assert_called_once()
+    system_error = machine.on_system_failure.call_args.args[0]
+    assert isinstance(system_error, EvidenceWriteError)
+    assert system_error.__cause__ is write_error
     with sqlite3.connect(database.config.database_path) as connection:
         record_count = connection.execute(
             "SELECT COUNT(*) FROM measurement_records"
@@ -626,7 +626,7 @@ async def test_unknown_image_write_error_is_not_database_failure(
     assert "证据图片保存失败" not in session.errors
     assert "测量记录提交冲突" not in session.errors
     assert read_abnormal_events(database) == []
-    machine.on_fatal_error.assert_not_called()
+    machine.on_system_failure.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -651,7 +651,7 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
     assert "测量结果入库失败" in session.errors
     assert "证据图片保存失败" not in session.errors
     assert read_abnormal_events(database)[0][2] == "测量结果入库失败"
-    machine.on_fatal_error.assert_called_once_with(write_error)
+    machine.on_system_failure.assert_called_once_with(write_error)
     assert machine.current_session is None
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
     assert (expected_directory / "frame-1.jpg").read_bytes() == b"image-one"
@@ -694,8 +694,8 @@ async def test_database_conflict_keeps_conflict_reason(tmp_path: Path) -> None:
     assert "测量记录提交冲突" in session.errors
     assert "测量结果入库失败" not in session.errors
     assert read_abnormal_events(database)[0][2] == "测量记录提交冲突"
-    machine.on_fatal_error.assert_called_once()
-    conflict_error = machine.on_fatal_error.call_args.args[0]
+    machine.on_system_failure.assert_called_once()
+    conflict_error = machine.on_system_failure.call_args.args[0]
     assert isinstance(conflict_error, CommitIntegrityConflictError)
 
     # 核对数据库仍保留首次提交的内容。
@@ -736,7 +736,7 @@ async def test_unknown_database_value_error_is_not_commit_conflict(
     assert "测量记录提交冲突" not in session.errors
     assert "DATABASE_WRITE_FAILED" not in session.errors
     assert read_abnormal_events(database) == []
-    machine.on_fatal_error.assert_not_called()
+    machine.on_system_failure.assert_not_called()
 
 
 def test_database_compares_evidence_directory(tmp_path: Path) -> None:
@@ -938,9 +938,10 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
         await machine.queue.put(event)
 
     # 将真实相机适配器和测试设备接入机器。
-    camera = Camera("1", 1000, 50, deliver_capture_event, machine.on_fatal_error)
+    camera = Camera("1", 1000, 50, deliver_capture_event, machine.on_system_failure)
     camera.sdk_camera = sdk_camera
     machine.camera = camera
+    machine.initialized = True
 
     # 启动采集并处理相机交付的故障事件。
     await machine.handle_machine_start()
@@ -959,7 +960,9 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     assert machine.current_session is session
     assert not camera.available
     assert not camera.is_capturing
-    machine.on_fatal_error.assert_not_called()
+    assert machine.machine_failure_reason == "相机采集失败"
+    assert machine.acceptance_state == "FAULT"
+    machine.on_system_failure.assert_not_called()
     camera_state_notification.assert_called_once_with("1", "相机故障", "GetImageBuffer 失败")
     assert progress_updates[-1][2:] == (
         ProgressStage.IMAGE_CAPTURE,
@@ -969,10 +972,40 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     assert events[0][2] == "相机采集失败"
     assert json.loads(events[0][3])["session_errors"] == session.errors
 
-    # 现场关闭后尝试重新启动本机周期。
+    # 现场关闭后即使相机恢复可用，本机仍不再受理 START。
     await machine.handle_machine_close()
+    assert machine.current_session is None
+    sdk_camera.faulted = False
     await machine.handle_machine_start()
     assert machine.current_session is None
+    assert machine.acceptance_state == "FAULT"
+
+    # 另一台机器仍能正常创建自己的测量周期。
+    other_directory = tmp_path / "other"
+    other_directory.mkdir()
+    other_machine, other_database, _, _, _ = create_machine(
+        other_directory, (evidence_frame,)
+    )
+    other_machine.machine_config = MachineConfig("2", "camera-2", "meter-2")
+    other_machine.current_session = None
+    other_machine.initialized = True
+    other_machine.camera.available = True
+    other_machine.camera.is_capturing = False
+    other_machine.camera.start_capture = Mock()
+    other_machine.camera.stop = AsyncMock()
+    other_machine.camera.delivery_task = asyncio.get_running_loop().create_future()
+    try:
+        assert other_machine.acceptance_state == "READY"
+        await other_machine.handle_machine_start()
+        assert other_machine.current_session is not None
+        assert other_machine.current_session.machine_id == "2"
+        assert other_machine.machine_failure_reason is None
+    finally:
+        # 清理另一台机器的测试资源。
+        other_machine.camera.delivery_task.cancel()
+        other_machine.camera.delivery_task = None
+        await other_machine.release_resources("测试结束")
+        other_database.close()
 
 
 @pytest.mark.asyncio
@@ -1005,6 +1038,7 @@ async def test_late_capture_failure_notifies_without_repeating_session_failure(
     assert session.errors == ["OCR 识别超时"]
     assert session.state == SessionState.FAILED
     assert machine.current_session is session
+    assert machine.machine_failure_reason is None
     assert read_abnormal_events(database) == []
     assert progress_updates == []
 
@@ -1065,6 +1099,7 @@ async def test_capture_failure_after_close_releases_session(tmp_path: Path) -> N
     ))
     assert session.state == SessionState.FAILED
     assert machine.current_session is None
+    assert machine.machine_failure_reason == "相机采集失败"
     assert read_abnormal_events(database)[0][2] == "相机采集失败"
 
 
@@ -1453,6 +1488,7 @@ async def test_consecutive_ocr_lock_wait_timeouts_are_recorded_per_session(
             assert session.state == SessionState.FAILED
             assert session.errors == ["OCR 识别资源等待超时"]
             assert machine.current_session is session
+            assert machine.machine_failure_reason is None
             assert (
                 session.machine_id,
                 session.session_id,
@@ -1680,7 +1716,7 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
 
 
 @pytest.mark.asyncio
-async def test_old_ocr_unknown_error_remains_fatal_without_clearing_new_task(
+async def test_old_ocr_unknown_error_reports_system_failure_without_clearing_new_task(
     tmp_path: Path,
 ) -> None:
     """确认旧 OCR 的未知异常上报故障且不清理新任务引用。
@@ -1723,7 +1759,7 @@ async def test_old_ocr_unknown_error_remains_fatal_without_clearing_new_task(
         await asyncio.sleep(0)
 
         # 核对未知异常与新周期隔离。
-        machine.on_fatal_error.assert_called_once_with(unknown_error)
+        machine.on_system_failure.assert_called_once_with(unknown_error)
         assert old_task not in machine.unfinished_recognition_tasks
         assert new_task in machine.unfinished_recognition_tasks
         assert machine.current_recognition_task is new_task
@@ -1797,7 +1833,7 @@ async def test_shutdown_waits_for_detached_ocr_task(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_type", [RuntimeError, TypeError])
-async def test_unknown_ocr_error_reaches_fatal_callback(
+async def test_unknown_ocr_error_reaches_system_failure_callback(
     tmp_path: Path, error_type: type[Exception]
 ) -> None:
     """确认未知识别异常通过任务完成回调交给全局故障入口。
@@ -1808,7 +1844,7 @@ async def test_unknown_ocr_error_reaches_fatal_callback(
 
     Returns:
         返回示例：
-            None  # 未知异常已交给致命故障回调，未生成 OCR 失败事件
+            None  # 未知异常已交给系统故障回调，未生成 OCR 失败事件
     """
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
@@ -1833,7 +1869,7 @@ async def test_unknown_ocr_error_reaches_fatal_callback(
     with pytest.raises(error_type) as captured_error:
         await current_recognition_task
     assert captured_error.value is error
-    machine.on_fatal_error.assert_called_once_with(error)
+    machine.on_system_failure.assert_called_once_with(error)
     machine.publish_event.assert_not_awaited()
     assert machine.current_recognition_task is None
     assert session.ocr_state == OCRState.RUNNING
@@ -1893,7 +1929,7 @@ async def test_audit_failure_does_not_block_session_cleanup(
     )
 
     # 执行失败收尾并等待现场关闭。
-    await machine.handle_measurement_failure(session, "此次相机没有采集到任何帧")
+    await machine.handle_session_failure(session, "此次相机没有采集到任何帧")
     assert session.state == SessionState.FAILED
     assert machine.current_session is session
     await machine.handle_machine_close()

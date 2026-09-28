@@ -172,7 +172,7 @@ async def test_machine_collects_three_readings_before_close(
         capture_start_time=0.0,
     )
     delivered_events: list[RuntimeEvent] = []
-    fatal_errors: list[Exception] = []
+    system_errors: list[Exception] = []
 
     async def publish_event(event: RuntimeEvent) -> None:
         """把频率事件交给当前机器处理。
@@ -211,7 +211,7 @@ async def test_machine_collects_three_readings_before_close(
         database=SimpleNamespace(),
         publish_event=publish_event,
         notify_measurement_progress=None,
-        on_fatal_error=fatal_errors.append,
+        on_system_failure=system_errors.append,
         state_changed=asyncio.Event(),
     )
     machine.current_session = session
@@ -256,4 +256,4 @@ async def test_machine_collects_three_readings_before_close(
     assert session.frequency_window_sealed is True
     assert session.capture_stop_time is not None
     assert adapter.active_session_id is None
-    assert fatal_errors == []
+    assert system_errors == []

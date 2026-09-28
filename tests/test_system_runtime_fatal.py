@@ -12,10 +12,10 @@ from system_runtime import SystemRuntime
 
 
 @pytest.mark.asyncio
-async def test_fatal_error_stops_signals_and_schedules_shutdown_once(
+async def test_system_failure_stops_signals_and_schedules_shutdown_once(
     tmp_path: Path,
 ) -> None:
-    """确认致命故障关闭信号入口并只安排一次退出任务。
+    """确认系统故障关闭信号入口并只安排一次退出任务。
 
     Args:
         tmp_path: pytest 提供的临时目录。
@@ -36,9 +36,9 @@ async def test_fatal_error_stops_signals_and_schedules_shutdown_once(
     storage_error = OSError("证据图片写入失败")
 
     # 报告同一轮中的两次故障并等待既有退出任务。
-    runtime.handle_fatal_error(storage_error)
+    runtime.handle_system_failure(storage_error)
     shutdown_task = runtime.shutdown_task
-    runtime.handle_fatal_error(RuntimeError("后续故障"))
+    runtime.handle_system_failure(RuntimeError("后续故障"))
     await shutdown_task
 
     # 核对首次故障和信号入口状态。
@@ -93,7 +93,7 @@ async def test_shutdown_releases_resources_after_modbus_disconnect(
 
     # 按是否已有故障启动退出流程。
     if previous_error is not None:
-        runtime.handle_fatal_error(previous_error)
+        runtime.handle_system_failure(previous_error)
     await runtime.stop()
 
     # 核对 Modbus、相机、数据库和实例锁的清理结果。

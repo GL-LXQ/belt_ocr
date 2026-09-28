@@ -48,7 +48,7 @@ class Machine:
         database: Database,
         publish_event: PublishEvent,
         notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None,
-        on_fatal_error: Callable[[Exception], None],
+        on_system_failure: Callable[[Exception], None],
         state_changed: asyncio.Event,
         notify_camera_state: Callable[[str, str, str], None] | None = None,
         notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
@@ -65,7 +65,7 @@ class Machine:
             database: 数据库访问对象。
             publish_event: 业务事件路由入口。
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
-            on_fatal_error: 致命故障回调，把识别任务异常交给运行时处理。
+            on_system_failure: 系统故障回调，把识别任务异常交给运行时处理。
             state_changed: 周期状态变化通知。
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、原文字和去空格文字。
@@ -94,8 +94,8 @@ class Machine:
         self.notify_ocr_result = notify_ocr_result
         self.notify_cycle_closed = notify_cycle_closed
 
-        # 登记致命故障回调与状态变化通知。
-        self.on_fatal_error = on_fatal_error
+        # 登记系统故障回调与状态变化通知。
+        self.on_system_failure = on_system_failure
         self.state_changed = state_changed
 
         # 按配置容量创建本机串行事件队列。
@@ -104,6 +104,9 @@ class Machine:
         # 初始化唯一周期与机器复位标志。
         self.current_session: BeltSession | None = None
         self.waiting_cycle_reset = False
+
+        # 初始化本机设备故障原因。
+        self.machine_failure_reason: str | None = None
 
         # 初始化期限任务表和启动准备标志。
         self.deadline_tasks: dict[EventType, asyncio.Task[None]] = {}
@@ -124,7 +127,7 @@ class Machine:
             返回示例：
                 "READY"  # 可接收新周期
                 "INITIALIZING"  # 本机尚未完成启动准备
-                "FAULT"  # 相机不可用
+                "FAULT"  # 机器故障或相机不可用
                 "WAIT_CYCLE_RESET"  # 等待现场周期复位
                 "ACTIVE"  # 已有活动周期
                 "DEGRADED"  # 相机仍被上一轮占用
@@ -133,8 +136,8 @@ class Machine:
         if not self.initialized:
             return "INITIALIZING"
 
-        # 相机不可用时不受理。
-        if not self.camera.available:
+        # 机器故障或相机不可用时不受理。
+        if self.machine_failure_reason is not None or not self.camera.available:
             return "FAULT"
 
         # 等待现场复位时不受理。
@@ -233,6 +236,15 @@ class Machine:
         # 上一轮尚未结束时跳过本次 START。
         if self.current_session is not None:
             logger.warning("上一轮尚未结束，跳过 START machine_id=%s", self.machine_config.machine_id)
+            return
+
+        # 本机发生设备故障后不再受理 START。
+        if self.machine_failure_reason is not None:
+            logger.warning(
+                "机器故障，跳过 START machine_id=%s reason=%s",
+                self.machine_config.machine_id,
+                self.machine_failure_reason,
+            )
             return
 
         # 等待现场复位时跳过本次 START。
@@ -417,7 +429,7 @@ class Machine:
 
         # 中断关闭按失败清理并结束。
         if interrupted:
-            await self.handle_measurement_failure(session, failure_reason)
+            await self.handle_session_failure(session, failure_reason)
             return
 
         # 检查正常关闭周期的结果，条件满足时提交数据库。
@@ -531,7 +543,7 @@ class Machine:
                         )
 
                     # 按无采集帧原因结束本轮测量。
-                    await self.handle_measurement_failure(session, "本轮未采集到图像")
+                    await self.handle_session_failure(session, "本轮未采集到图像")
                     return
 
                 # 上报图像采集完成，并标记字符识别开始。
@@ -579,8 +591,8 @@ class Machine:
                 # 记录设备错误明细。
                 session.errors.append(event.payload)
 
-                # 按相机故障结束本轮测量。
-                await self.handle_measurement_failure(session, "相机采集失败")
+                # 按机器故障结束本轮测量。
+                await self.handle_machine_failure(session, "相机采集失败")
                 return
 
             # 识别结果到达。
@@ -633,7 +645,7 @@ class Machine:
                         ProgressStage.CHARACTER_RECOGNITION,
                         ProgressStatus.FAILED,
                     )
-                await self.handle_measurement_failure(session, "OCR 识别资源等待超时")
+                await self.handle_session_failure(session, "OCR 识别资源等待超时")
                 return
 
             # 识别失败或识别超时。
@@ -682,7 +694,34 @@ class Machine:
         # 统一处理本轮失败或满足条件后的提交。
         await self.try_finalize(session)
 
-    async def handle_measurement_failure(
+    async def handle_machine_failure(
+        self, session: BeltSession, failure_reason: str
+    ) -> None:
+        """记录本机设备故障并结束当前周期。
+
+        Args:
+            session: 发生设备故障的测量周期。
+            failure_reason: 本机设备故障原因。
+
+        Returns:
+            返回示例：
+                None  # 本机故障已登记，当前周期已按失败结算
+        """
+        # 登记本机设备故障原因。
+        self.machine_failure_reason = failure_reason
+
+        # 记录本机设备故障。
+        logger.error(
+            "机器故障 machine_id=%s session_id=%s reason=%s",
+            session.machine_id,
+            session.session_id,
+            failure_reason,
+        )
+
+        # 沿用当前周期的失败收尾。
+        await self.handle_session_failure(session, failure_reason)
+
+    async def handle_session_failure(
         self, session: BeltSession, failure_reason: str
     ) -> None:
         """登记本轮失败并清理资源，保留尚未关闭的现场周期身份。
@@ -821,11 +860,11 @@ class Machine:
             len(self.unfinished_recognition_tasks),
         )
 
-        # 任务未被取消时读取异常并交给致命故障入口。
+        # 任务未被取消时读取异常并交给系统故障入口。
         if not task.cancelled():
             error = task.exception()
             if error is not None:
-                self.on_fatal_error(error)
+                self.on_system_failure(error)
 
         # 仅由当前周期的任务清空当前引用并尝试释放周期。
         if self.current_recognition_task is task:
@@ -842,11 +881,11 @@ class Machine:
             返回示例：
                 None  # 相机已停止，本机任务已结束，周期与频率交付身份已清空
         """
-        # 停止本机采集并等待结果交付结束，异常交给致命故障入口。
+        # 停止本机采集并等待结果交付结束，异常交给系统故障入口。
         try:
             await self.camera.stop()
         except Exception as error:
-            self.on_fatal_error(error)
+            self.on_system_failure(error)
 
         # 收集并取消本机全部识别任务与期限任务。
         machine_tasks = [
@@ -867,9 +906,9 @@ class Machine:
             and session.state in {SessionState.RUNNING, SessionState.SAVING_RESULT}
         ):
             try:
-                await self.handle_measurement_failure(session, shutdown_reason)
+                await self.handle_session_failure(session, shutdown_reason)
             except Exception as error:
-                self.on_fatal_error(error)
+                self.on_system_failure(error)
 
         # 清空退出后不再保留的周期身份与频率交付身份。
         self.current_session = None
@@ -1045,7 +1084,7 @@ class Machine:
                 "OCR 识别超时" if session.ocr_state == OCRState.TIMED_OUT
                 else "OCR 识别执行失败"
             )
-            await self.handle_measurement_failure(session, failure_reason)
+            await self.handle_session_failure(session, failure_reason)
             return
 
         # 周期未关闭或 OCR 未完成时继续等待。
@@ -1136,7 +1175,7 @@ class Machine:
                 )
 
             # 按证据图片编码失败结束本轮测量。
-            await self.handle_measurement_failure(session, "证据图片编码失败")
+            await self.handle_session_failure(session, "证据图片编码失败")
             return
         except EvidenceWriteError as error:
             # 记录证据图片写入失败。
@@ -1156,10 +1195,10 @@ class Machine:
                 )
 
             # 按证据图片写入失败结束本轮测量。
-            await self.handle_measurement_failure(session, "证据图片保存失败")
+            await self.handle_session_failure(session, "证据图片保存失败")
 
             # 将证据图片写入故障交给全局退出流程。
-            self.on_fatal_error(error)
+            self.on_system_failure(error)
             return
         except (CommitIntegrityConflictError, sqlite3.Error) as error:
             # 登记数据库提交失败或内容冲突。
@@ -1184,10 +1223,10 @@ class Machine:
                 )
 
             # 清理本轮失败状态。
-            await self.handle_measurement_failure(session, failure_reason)
+            await self.handle_session_failure(session, failure_reason)
 
             # 将数据库写入故障交给全局退出流程。
-            self.on_fatal_error(error)
+            self.on_system_failure(error)
             return
 
         # 标记本轮已入库。
