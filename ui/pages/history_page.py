@@ -291,7 +291,15 @@ class HistoryPage(QWidget):
         # 读取有历史记录的机器。
         result = self.controller.list_record_machines()
         if not result.success:
+            # 清空记录和分页显示。
             self.table.setRowCount(0)
+            self.current_page = 1
+            self.record_count_label.setText("共 0 条")
+            self.page_label.setText("第 1 / 1 页")
+            self.previous_page_button.setEnabled(False)
+            self.next_page_button.setEnabled(False)
+
+            # 显示机器选项读取错误。
             QMessageBox.warning(self, "历史记录读取失败", result.message)
             return
         machines = result.data["machines"]
@@ -390,7 +398,15 @@ class HistoryPage(QWidget):
             self.page_size,
         )
         if not result.success:
+            # 清空记录和分页显示。
             self.table.setRowCount(0)
+            self.current_page = 1
+            self.record_count_label.setText("共 0 条")
+            self.page_label.setText("第 1 / 1 页")
+            self.previous_page_button.setEnabled(False)
+            self.next_page_button.setEnabled(False)
+
+            # 显示测量记录读取错误。
             QMessageBox.warning(self, "历史记录读取失败", result.message)
             return
         records = result.data["records"]

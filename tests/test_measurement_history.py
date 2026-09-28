@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from config_util import AppConfig
 from database import Database, MeasurementRecord
-from src.controller.controller import AppController
+from src.controller.controller import AppController, Result
 from repo.machine_repo import MachineRepo
 from repo.abnormal_event_repo import AbnormalEventRepo
 from repo.measurement_record_repo import MeasurementRecordRepo
@@ -572,6 +572,78 @@ def test_history_page_turns_pages_and_resets_on_filter_changes(
         page.refresh_history()
         assert page.current_page == 1
         assert page.table.item(0, 2).text() == "文字 24"
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+@pytest.mark.parametrize("failure_source", ("machines", "records"))
+def test_history_page_clears_pagination_after_query_failure(
+    qt_application: QApplication,
+    paged_measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_source: str,
+) -> None:
+    """验证机器或记录读取失败时清空旧分页状态。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        paged_measurement_record_service: 已保存二十五条分页记录的服务。
+        monkeypatch: pytest 提供的对象替换工具。
+        failure_source: 发生读取失败的查询入口。
+
+    Returns:
+        返回示例：
+            None  # 旧记录和分页信息已清空，翻页按钮不可用
+    """
+    controller = AppController(
+        Mock(), paged_measurement_record_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
+    try:
+        # 先保留成功查询后的总数和可用翻页按钮。
+        page.refresh_history()
+        if failure_source == "machines":
+            page.next_page_button.click()
+            assert page.current_page == 2
+            assert page.previous_page_button.isEnabled()
+        else:
+            assert page.current_page == 1
+            assert page.next_page_button.isEnabled()
+        assert page.record_count_label.text() == "共 25 条"
+        warning_message = Mock()
+        monkeypatch.setattr(QMessageBox, "warning", warning_message)
+
+        # 让对应查询失败并触发页面刷新。
+        if failure_source == "machines":
+            monkeypatch.setattr(
+                controller,
+                "list_record_machines",
+                Mock(return_value=Result.error("模拟读取失败")),
+            )
+            page.refresh_history()
+        else:
+            monkeypatch.setattr(
+                controller,
+                "list_measurement_records",
+                Mock(return_value=Result.error("模拟读取失败")),
+            )
+            page.reload_records()
+
+        # 核对旧记录和分页入口已清空。
+        assert page.table.rowCount() == 0
+        assert page.current_page == 1
+        assert page.record_count_label.text() == "共 0 条"
+        assert page.page_label.text() == "第 1 / 1 页"
+        assert not page.previous_page_button.isEnabled()
+        assert not page.next_page_button.isEnabled()
+        warning_message.assert_called_once_with(
+            page, "历史记录读取失败", "模拟读取失败"
+        )
+        page.previous_page_button.click()
+        page.next_page_button.click()
+        assert page.current_page == 1
     finally:
         page.detail_dialog.close()
         page.close()
