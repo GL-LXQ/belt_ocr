@@ -725,6 +725,17 @@ class RealtimePage(QWidget):
         # 在总览卡片与机器列表分区之间保留明显的区块间距。
         outer_layout.addSpacing(10)
 
+        # 并排放置机器列表分区和详情滚动区。
+        machine_section_layout = QHBoxLayout()
+        machine_section_layout.setContentsMargins(0, 0, 0, 0)
+        machine_section_layout.setSpacing(MACHINE_CARD_GAP)
+        outer_layout.addLayout(machine_section_layout, 1)
+
+        # 在左侧纵向排列分区标题和机器列表。
+        left_machine_layout = QVBoxLayout()
+        left_machine_layout.setContentsMargins(0, 0, 0, 0)
+        left_machine_layout.setSpacing(12)
+
         # 显示机器列表分区标题和说明。
         section_layout = QVBoxLayout()
         section_layout.setContentsMargins(0, 0, 0, 0)
@@ -737,10 +748,7 @@ class RealtimePage(QWidget):
         section_description.setObjectName("machineSectionDescription")
         section_layout.addWidget(section_title)
         section_layout.addWidget(section_description)
-        outer_layout.addLayout(section_layout)
-        body_layout = QHBoxLayout()
-        body_layout.setSpacing(MACHINE_CARD_GAP)
-        outer_layout.addLayout(body_layout, 1)
+        left_machine_layout.addLayout(section_layout)
 
         # 将机器卡片放入可滚动区域。
         self.scroll_area = ScrollArea()
@@ -756,7 +764,8 @@ class RealtimePage(QWidget):
         vertical_scroll_bar.setHandleColor("#D5DAE1", "#D5DAE1")
         vertical_scroll_bar.setGrooveColor("transparent", "transparent")
         vertical_scroll_bar.setArrowColor("transparent", "transparent")
-        body_layout.addWidget(self.scroll_area, 1)
+        left_machine_layout.addWidget(self.scroll_area, 1)
+        machine_section_layout.addLayout(left_machine_layout, 1)
 
         # 详情内容较高时仅在右侧区域内部滚动。
         self.detail_scroll_area = ScrollArea()
@@ -774,7 +783,7 @@ class RealtimePage(QWidget):
         detail_scroll_bar.setArrowColor("transparent", "transparent")
         self.detail_panel = MachineDetailPanel()
         self.detail_scroll_area.setWidget(self.detail_panel)
-        body_layout.addWidget(self.detail_scroll_area, 0)
+        machine_section_layout.addWidget(self.detail_scroll_area, 0)
 
         content = QWidget()
         content.setObjectName("monitorContent")

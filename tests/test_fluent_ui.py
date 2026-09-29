@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QApplication, QFrame, QGridLayout, QSizePolicy
+from PySide6.QtWidgets import QApplication, QFrame, QGridLayout, QLabel, QSizePolicy
 from PySide6.QtTest import QTest
 from qfluentwidgets import FluentWindow, InfoBar, MaskDialogBase, MessageBox
 
@@ -222,8 +222,9 @@ def test_realtime_resize_reflows_existing_cards_without_query(
         assert detail_panel.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Maximum
         assert detail_panel.height() < window.realtime_page.scroll_area.height()
         scroll_area = window.realtime_page.scroll_area
+        section_title = window.realtime_page.findChild(QLabel, "machineSectionTitle")
         assert detail_panel.mapTo(window, QPoint(0, 0)).y() == (
-            scroll_area.mapTo(window, QPoint(0, 0)).y()
+            section_title.mapTo(window, QPoint(0, 0)).y()
         )
 
         # 核对两列与三列下的等宽卡片、固定间距及详情右对齐。
@@ -238,6 +239,10 @@ def test_realtime_resize_reflows_existing_cards_without_query(
             window.resize(width, height)
             qt_application.processEvents()
             page = window.realtime_page
+            # 核对详情区始终与左侧分区标题顶部对齐。
+            assert page.detail_scroll_area.mapTo(window, QPoint(0, 0)).y() == (
+                section_title.mapTo(window, QPoint(0, 0)).y()
+            )
             assert page.card_column_count == expected_columns
             assert window.navigationInterface.panel.displayMode.name == "EXPAND"
             assert scroll_area.width() > 0
