@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QFrame, QGridLayout, QSizePolicy
 from PySide6.QtTest import QTest
 from qfluentwidgets import FluentWindow, InfoBar, MaskDialogBase, MessageBox
@@ -213,7 +213,9 @@ def test_realtime_resize_reflows_existing_cards_without_query(
         assert detail_panel.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Maximum
         assert detail_panel.height() < window.realtime_page.scroll_area.height()
         scroll_area = window.realtime_page.scroll_area
-        assert detail_panel.geometry().top() == scroll_area.geometry().top()
+        assert detail_panel.mapTo(window, QPoint(0, 0)).y() == (
+            scroll_area.mapTo(window, QPoint(0, 0)).y()
+        )
 
         window.resize(1280, 720)
         QTest.qWait(300)
@@ -264,7 +266,7 @@ def test_machine_detail_keeps_long_ocr_text_selectable(qt_application) -> None:
         editor = page.detail_panel.ocr_text
         assert editor.parentWidget().objectName() == "detailOcrPanel"
         assert editor.frameShape() == QFrame.Shape.NoFrame
-        assert editor.height() == 100
+        assert editor.height() == 110
         assert all(line in editor.toPlainText() for line in ordered_lines)
         assert ordered_lines[-1] in editor.toPlainText()
         assert editor.isReadOnly()
@@ -273,6 +275,46 @@ def test_machine_detail_keeps_long_ocr_text_selectable(qt_application) -> None:
         assert QApplication.clipboard().text() == editor.toPlainText()
         assert card.ocr_result_label.text() == ordered_lines[0]
         assert card.sizeHint().height() == initial_height
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+def test_machine_detail_sections_follow_selected_machine(qt_application) -> None:
+    """验证频率、OCR、步骤和占位统计随详情卡完整显示。
+
+    Args:
+        qt_application: Qt 应用实例。
+
+    Returns:
+        None  # 分区结构和现有状态信号保持可用
+    """
+    page = RealtimePage(make_ui_controller())
+    try:
+        page.show()
+        qt_application.processEvents()
+        panel = page.detail_panel
+
+        # 核对详情分区与三项固定占位统计。
+        assert panel.findChild(QFrame, "detailFrequencyCard") is not None
+        assert panel.findChild(QFrame, "detailOcrCard") is not None
+        assert panel.findChild(QFrame, "detailStatsBar") is not None
+        assert [label.text() for label in panel.stat_values.values()] == [
+            "--", "--", "--"
+        ]
+        assert panel.frequency_label.text() == "--"
+
+        # 连接和本轮进度继续刷新当前机器的详情。
+        page.update_connection_state("1", "相机已连接", "")
+        assert panel.camera_state_label.text() == "相机已连接"
+        page.update_measurement_progress("1", "first", "session_start", "success")
+        assert "#138B3F" in panel.state_label.styleSheet()
+        assert "#2563EB" in panel.steps.dots[0].styleSheet()
+        page.select_machine("2")
+        assert panel.camera_serial_label.text() == "CAM-2"
+        assert [label.text() for label in panel.stat_values.values()] == [
+            "--", "--", "--"
+        ]
     finally:
         page.close()
         page.deleteLater()
@@ -307,8 +349,16 @@ def test_dashboard_selection_reload_and_summary(qt_application) -> None:
         assert meter_widget is page.detail_panel.frequency_meter_serial_label
         state_widget = attributes_layout.itemAtPosition(4, 0).widget()
         assert state_widget is page.detail_panel.state_label
-        frequency_widget = attributes_layout.itemAtPosition(4, 1).widget()
-        assert frequency_widget is page.detail_panel.frequency_label
+        camera_state_widget = attributes_layout.itemAtPosition(4, 1).widget()
+        assert camera_state_widget is page.detail_panel.camera_state_label
+        assert page.detail_panel.frequency_label.text() == "--"
+        assert set(page.detail_panel.stat_values) == {
+            "运行时长", "今日识别数量", "今日待复核数量"
+        }
+        assert all(
+            label.text() == "--" for label in page.detail_panel.stat_values.values()
+        )
+        assert not controller.list_measurement_records.called
         page.reload_machines()
         assert page.selected_machine_id == "2"
 
@@ -322,6 +372,7 @@ def test_dashboard_selection_reload_and_summary(qt_application) -> None:
             "5", "1", "1", "1",
         ]
         assert page.detail_panel.badge.text() == "相机故障"
+        assert page.detail_panel.camera_state_label.text() == "相机故障"
         page.update_cycle_closed("2", "first")
         assert page.summary_cards[2].value_label.text() == "0"
         page.finish_monitoring("")

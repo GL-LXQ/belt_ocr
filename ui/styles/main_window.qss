@@ -23,6 +23,10 @@ QScrollArea#machineScrollArea {
     background: transparent;
     border: none;
 }
+QScrollArea#detailScrollArea, QWidget#detailScrollViewport {
+    background: transparent;
+    border: none;
+}
 QWidget#machineScrollViewport {
     background: transparent;
 }
@@ -103,7 +107,7 @@ QWidget#summaryCard, QWidget#machineCard {
 QWidget#machineDetailPanel {
     background: @white;
     border: 1px solid @border;
-    border-radius: 12px;
+    border-radius: 14px;
 }
 QWidget#machineCard[selected="true"] {
     border: 1px solid @blue;
@@ -132,15 +136,51 @@ QLabel#detailMachineName {
     font-size: 18px;
     font-weight: 600;
 }
-QLabel#detailSectionLabel, QLabel#detailFieldLabel {
+QLabel#detailSectionLabel, QLabel#detailMetaKey, QLabel#detailCardTitle {
     color: @muted;
     font-size: 12px;
     font-weight: 500;
 }
-QLabel#detailFieldValue {
+QLabel#detailMetaValue {
     color: @text;
     font-size: 14px;
     font-weight: 500;
+}
+QWidget#machineDetailPanel QLabel#machineBadge[tone="idle"] {
+    background: #EDF2F7;
+    color: #60748E;
+}
+QFrame#detailFrequencyCard {
+    background: #F7F9FC;
+    border: none;
+    border-radius: 12px;
+}
+QLabel#detailFrequencyValue {
+    color: @text;
+    font-size: 30px;
+    font-weight: 600;
+}
+QFrame#detailOcrCard {
+    background: @white;
+    border: 1px solid #EEF1F5;
+    border-radius: 12px;
+}
+QFrame#detailStatsBar, QFrame#detailStatItem {
+    background: transparent;
+    border: none;
+}
+QLabel#detailStatTitle {
+    color: @muted;
+    font-size: 10px;
+}
+QLabel#detailStatValue {
+    color: @text;
+    font-size: 16px;
+    font-weight: 600;
+}
+QFrame#detailStatDivider {
+    background: @border;
+    border: none;
 }
 
 /* 设置 OCR 摘要和详情信息卡。 */

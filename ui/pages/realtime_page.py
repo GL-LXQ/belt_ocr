@@ -1,7 +1,7 @@
 """实时监测页面、机器卡片和步骤进度组件。"""
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -63,7 +63,7 @@ class StepProgress(QFrame):
         """
         super().__init__()
         layout = QGridLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setContentsMargins(0, 2, 0, 2)
         layout.setHorizontalSpacing(0)
         layout.setVerticalSpacing(8)
         self.dots = []
@@ -74,7 +74,7 @@ class StepProgress(QFrame):
         for index, title in enumerate(PROGRESS_STAGE_TITLES.values()):
             dot = QLabel()
             dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            dot.setFixedSize(25, 25)
+            dot.setFixedSize(22, 22)
             layout.addWidget(dot, 0, index, Qt.AlignmentFlag.AlignCenter)
             self.dots.append(dot)
             label = QLabel(title)
@@ -85,7 +85,7 @@ class StepProgress(QFrame):
             layout.setColumnStretch(index, 1)
             if index < 4:
                 connector = QFrame(self)
-                connector.setFixedHeight(2)
+                connector.setFixedHeight(1)
                 # 连接线固定为轨道颜色，不随阶段状态变化。
                 connector.setStyleSheet("background: #D9E1EA; border: none;")
                 connector.lower()
@@ -109,7 +109,7 @@ class StepProgress(QFrame):
             progress_status = progress_statuses.get(stage_names[index])
             color = {
                 "running": "#2563EB",
-                "success": "#18AE59",
+                "success": COLORS["blue"],
                 "failed": "#EF4444",
             }.get(progress_status, "#C5CFDA")
             icon_name = "check" if progress_status == "success" else "close"
@@ -123,11 +123,11 @@ class StepProgress(QFrame):
                 "failed": "#FFD0D0",
             }.get(progress_status, "white")
             self.step_labels[index].setStyleSheet(
-                "color: #34465F; font-weight: bold;" if active else ""
+                "color: #34465F; font-weight: 500;" if active else ""
             )
             dot.setStyleSheet(
                 f"background: {color}; color: white; "
-                f"border: 2px solid {border}; border-radius: 12px;"
+                f"border: 1px solid {border}; border-radius: 11px;"
             )
 
     def resizeEvent(self, event):
@@ -148,7 +148,7 @@ class StepProgress(QFrame):
             right_dot = self.dots[index + 1].geometry()
             left = left_dot.right() + 3
             right = right_dot.left() - 3
-            connector.setGeometry(left, left_dot.center().y(), right - left, 2)
+            connector.setGeometry(left, left_dot.center().y(), right - left, 1)
 
 
 def format_ocr_result_text(ordered_lines, normalized_lines) -> str:
@@ -456,7 +456,7 @@ class MachineDetailPanel(SimpleCardWidget):
             QSizePolicy.Policy.Maximum,
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setContentsMargins(16, 8, 16, 8)
         layout.setSpacing(0)
         section_label = CaptionLabel("机器详情")
         section_label.setObjectName("detailSectionLabel")
@@ -474,55 +474,101 @@ class MachineDetailPanel(SimpleCardWidget):
         heading.addWidget(self.badge)
         layout.addLayout(heading)
 
-        # 在同一个网格中展示设备序列号和实时读数。
-        layout.addSpacing(12)
+        # 在两列网格中展示设备序列号和当前状态。
+        layout.addSpacing(10)
         self.attributes_layout = QGridLayout()
         self.attributes_layout.setContentsMargins(0, 0, 0, 0)
         self.attributes_layout.setHorizontalSpacing(24)
-        self.attributes_layout.setVerticalSpacing(4)
+        self.attributes_layout.setVerticalSpacing(3)
         for column_index, title in enumerate(("相机序列号", "频率仪序列号")):
             label = CaptionLabel(title)
-            label.setObjectName("detailFieldLabel")
+            label.setObjectName("detailMetaKey")
             self.attributes_layout.addWidget(label, 0, column_index)
         self.camera_serial_label = BodyLabel("--")
-        self.camera_serial_label.setObjectName("detailFieldValue")
+        self.camera_serial_label.setObjectName("detailMetaValue")
         self.camera_serial_label.setWordWrap(True)
         self.frequency_meter_serial_label = BodyLabel("--")
-        self.frequency_meter_serial_label.setObjectName("detailFieldValue")
+        self.frequency_meter_serial_label.setObjectName("detailMetaValue")
         self.frequency_meter_serial_label.setWordWrap(True)
         self.attributes_layout.addWidget(self.camera_serial_label, 1, 0)
         self.attributes_layout.addWidget(self.frequency_meter_serial_label, 1, 1)
-        self.attributes_layout.setRowMinimumHeight(2, 6)
-        for column_index, title in enumerate(("当前状态", "实时频率")):
+        self.attributes_layout.setRowMinimumHeight(2, 7)
+        for column_index, title in enumerate(("当前状态", "相机状态")):
             label = CaptionLabel(title)
-            label.setObjectName("detailFieldLabel")
+            label.setObjectName("detailMetaKey")
             self.attributes_layout.addWidget(label, 3, column_index)
         self.state_label = BodyLabel("--")
-        self.state_label.setObjectName("detailFieldValue")
+        self.state_label.setObjectName("detailMetaValue")
         self.state_label.setWordWrap(True)
         self.attributes_layout.addWidget(self.state_label, 4, 0)
-        self.frequency_label = BodyLabel("--")
-        self.frequency_label.setObjectName("detailFieldValue")
-        self.attributes_layout.addWidget(self.frequency_label, 4, 1)
+        self.camera_state_label = BodyLabel("--")
+        self.camera_state_label.setObjectName("detailMetaValue")
+        self.camera_state_label.setWordWrap(True)
+        self.attributes_layout.addWidget(self.camera_state_label, 4, 1)
         self.attributes_layout.setColumnStretch(0, 1)
         self.attributes_layout.setColumnStretch(1, 1)
         layout.addLayout(self.attributes_layout)
 
-        # 在浅灰信息卡中显示完整 OCR。
-        layout.addSpacing(14)
+        # 在浅灰分区卡中突出当前实时频率。
+        layout.addSpacing(10)
+        frequency_card = QFrame()
+        frequency_card.setObjectName("detailFrequencyCard")
+        frequency_layout = QVBoxLayout(frequency_card)
+        frequency_layout.setContentsMargins(14, 8, 14, 8)
+        frequency_layout.setSpacing(4)
+
+        # 显示蓝色图标和频率标题。
+        frequency_heading = QHBoxLayout()
+        frequency_heading.setSpacing(6)
+        frequency_icon = QLabel()
+        frequency_icon.setPixmap(
+            FluentIcon.SPEED_HIGH.icon(color=QColor(COLORS["blue"])).pixmap(16, 16)
+        )
+        frequency_heading.addWidget(frequency_icon)
+        frequency_title = CaptionLabel("实时频率")
+        frequency_title.setObjectName("detailCardTitle")
+        frequency_heading.addWidget(frequency_title)
+        frequency_heading.addStretch()
+        frequency_layout.addLayout(frequency_heading)
+
+        # 在标题下方显示当前频率值。
+        self.frequency_label = QLabel("--")
+        self.frequency_label.setObjectName("detailFrequencyValue")
+        frequency_layout.addWidget(self.frequency_label)
+        layout.addWidget(frequency_card)
+
+        # 在独立的 OCR 分区卡中保留可复制的完整分类文字。
+        layout.addSpacing(8)
+        ocr_card = QFrame()
+        ocr_card.setObjectName("detailOcrCard")
+        ocr_card_layout = QVBoxLayout(ocr_card)
+        ocr_card_layout.setContentsMargins(12, 8, 12, 8)
+        ocr_card_layout.setSpacing(6)
+
+        # 显示蓝色图标和 OCR 标题。
+        ocr_heading = QHBoxLayout()
+        ocr_heading.setSpacing(6)
+        ocr_icon = QLabel()
+        ocr_icon.setPixmap(
+            FluentIcon.DOCUMENT.icon(color=QColor(COLORS["blue"])).pixmap(16, 16)
+        )
+        ocr_heading.addWidget(ocr_icon)
         ocr_title = CaptionLabel("OCR 识别结果")
-        ocr_title.setObjectName("detailSectionLabel")
-        layout.addWidget(ocr_title)
-        layout.addSpacing(6)
+        ocr_title.setObjectName("detailCardTitle")
+        ocr_heading.addWidget(ocr_title)
+        ocr_heading.addStretch()
+        ocr_card_layout.addLayout(ocr_heading)
+
+        # 在浅灰区域中显示可复制的完整 OCR 文本。
         ocr_panel = QFrame()
         ocr_panel.setObjectName("detailOcrPanel")
         ocr_layout = QVBoxLayout(ocr_panel)
-        ocr_layout.setContentsMargins(16, 14, 16, 14)
+        ocr_layout.setContentsMargins(12, 6, 12, 6)
         self.ocr_text = PlainTextEdit()
         self.ocr_text.setObjectName("detailOcrText")
         self.ocr_text.setReadOnly(True)
         self.ocr_text.setFrameShape(QFrame.Shape.NoFrame)
-        self.ocr_text.setFixedHeight(100)
+        self.ocr_text.setFixedHeight(110)
         ocr_style = (
             "PlainTextEdit {"
             f"background: transparent; color: {COLORS['text']};"
@@ -530,16 +576,71 @@ class MachineDetailPanel(SimpleCardWidget):
         )
         setCustomStyleSheet(self.ocr_text, ocr_style, ocr_style)
         ocr_layout.addWidget(self.ocr_text)
-        layout.addWidget(ocr_panel)
+        ocr_card_layout.addWidget(ocr_panel)
+        layout.addWidget(ocr_card)
 
-        # 显示当前周期的完整步骤。
+        # 在蓝色图标标题下显示本轮处理步骤。
         layout.addSpacing(10)
+        progress_heading = QHBoxLayout()
+        progress_heading.setSpacing(6)
+        progress_icon = QLabel()
+        progress_icon.setPixmap(
+            FluentIcon.CHECKBOX.icon(color=QColor(COLORS["blue"])).pixmap(16, 16)
+        )
+        progress_heading.addWidget(progress_icon)
         progress_title = CaptionLabel("本轮处理")
         progress_title.setObjectName("detailSectionLabel")
-        layout.addWidget(progress_title)
-        layout.addSpacing(6)
+        progress_heading.addWidget(progress_title)
+        progress_heading.addStretch()
+        layout.addLayout(progress_heading)
+        layout.addSpacing(4)
         self.steps = StepProgress()
         layout.addWidget(self.steps)
+
+        # 在详情底部并排显示三项固定占位统计。
+        layout.addSpacing(10)
+        stats_bar = QFrame()
+        stats_bar.setObjectName("detailStatsBar")
+        stats_layout = QHBoxLayout(stats_bar)
+        stats_layout.setContentsMargins(0, 0, 0, 0)
+        stats_layout.setSpacing(0)
+        self.stat_values = {}
+        for index, (title, icon) in enumerate((
+            ("运行时长", FluentIcon.DATE_TIME),
+            ("今日识别数量", FluentIcon.DOCUMENT),
+            ("今日待复核数量", FluentIcon.INFO),
+        )):
+            # 在相邻统计项之间显示竖向分隔线。
+            if index:
+                divider = QFrame()
+                divider.setObjectName("detailStatDivider")
+                divider.setFixedSize(1, 38)
+                stats_layout.addWidget(divider, 0, Qt.AlignmentFlag.AlignVCenter)
+
+            # 将图标和标题放在统计项首行。
+            stat_item = QFrame()
+            stat_item.setObjectName("detailStatItem")
+            stat_layout = QVBoxLayout(stat_item)
+            stat_layout.setContentsMargins(2, 0, 2, 0)
+            stat_layout.setSpacing(4)
+            stat_heading = QHBoxLayout()
+            stat_heading.setSpacing(3)
+            stat_icon = QLabel()
+            stat_icon.setPixmap(icon.icon(color=QColor(COLORS["blue"])).pixmap(12, 12))
+            stat_heading.addWidget(stat_icon)
+            stat_title = QLabel(title)
+            stat_title.setObjectName("detailStatTitle")
+            stat_heading.addWidget(stat_title)
+            stat_heading.addStretch()
+            stat_layout.addLayout(stat_heading)
+
+            # 在标题下方保存固定占位值。
+            stat_value = QLabel("--")
+            stat_value.setObjectName("detailStatValue")
+            stat_layout.addWidget(stat_value)
+            stats_layout.addWidget(stat_item, 1)
+            self.stat_values[title] = stat_value
+        layout.addWidget(stats_bar)
 
         # 设置详情文字的辅助色和数值字重。
         for label in self.findChildren(CaptionLabel):
@@ -639,8 +740,24 @@ class RealtimePage(QWidget):
         vertical_scroll_bar.setGrooveColor("transparent", "transparent")
         vertical_scroll_bar.setArrowColor("transparent", "transparent")
         body_layout.addWidget(self.scroll_area, 1)
+
+        # 详情内容较高时仅在右侧区域内部滚动。
+        self.detail_scroll_area = ScrollArea()
+        self.detail_scroll_area.setObjectName("detailScrollArea")
+        self.detail_scroll_area.viewport().setObjectName("detailScrollViewport")
+        self.detail_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.detail_scroll_area.setWidgetResizable(False)
+        self.detail_scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.detail_scroll_area.setFixedWidth(320)
+        detail_scroll_bar = self.detail_scroll_area.scrollDelagate.vScrollBar
+        detail_scroll_bar.setHandleColor("#D5DAE1", "#D5DAE1")
+        detail_scroll_bar.setGrooveColor("transparent", "transparent")
+        detail_scroll_bar.setArrowColor("transparent", "transparent")
         self.detail_panel = MachineDetailPanel()
-        body_layout.addWidget(self.detail_panel, 0, Qt.AlignmentFlag.AlignTop)
+        self.detail_scroll_area.setWidget(self.detail_panel)
+        body_layout.addWidget(self.detail_scroll_area, 0)
         content = QWidget()
         content.setObjectName("monitorContent")
         layout = QVBoxLayout(content)
@@ -863,6 +980,10 @@ class RealtimePage(QWidget):
             machine["frequency_meter_serial"] if machine else "--"
         )
         panel.state_label.setText(card.state_label.text() if card else "--")
+        camera_status = self.connection_states.get(
+            self.selected_machine_id, ("未启动", "")
+        )[0]
+        panel.camera_state_label.setText(camera_status if card else "--")
         panel.frequency_label.setText(card.frequency_label.text() if card else "--")
 
         # 同步主状态徽标和故障说明。
@@ -871,6 +992,17 @@ class RealtimePage(QWidget):
         panel.badge.style().unpolish(panel.badge)
         panel.badge.style().polish(panel.badge)
         panel.setToolTip(card.toolTip() if card else "")
+
+        # 按当前卡片状态设置详情值的文字颜色。
+        state_tone = card.property("tone") if card else "idle"
+        state_color = {
+            "running": "#138B3F",
+            "waiting": "#A76200",
+            "error": "#B42318",
+        }.get(state_tone, COLORS["text"])
+        panel.state_label.setStyleSheet(
+            f"color: {state_color}; font-size: 14px; font-weight: 500;"
+        )
 
         # 从已有缓存恢复全文和步骤。
         cached_result = self.ocr_results_by_machine_id.get(self.selected_machine_id)
