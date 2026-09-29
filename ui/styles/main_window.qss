@@ -68,9 +68,8 @@ QLabel[smallText="true"] {
     font-size: 11px;
 }
 QWidget#beltAnimation {
-    background: #EFF3F8;
-    border: 1px solid @border;
-    border-radius: 6px;
+    background: transparent;
+    border: none;
 }
 
 /* 设置遮罩弹窗的中心内容。 */
