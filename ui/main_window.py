@@ -33,6 +33,8 @@ PAGES = {
     "logs": ("日志查看", "日志查看功能尚未开放", FluentIcon.DOCUMENT),
 }
 
+NAVIGATION_WIDTH = 176
+
 
 class MainWindow(FluentWindow):
     """展示监测、历史、异常和机器管理页面。"""
@@ -63,11 +65,45 @@ class MainWindow(FluentWindow):
             "machines": self.machines_page,
         }
 
-        # 建立主导航和底部占位入口。
+        # 固定展开导航并隐藏折叠与返回按钮。
+        self.navigationInterface.setExpandWidth(NAVIGATION_WIDTH)
+        self.navigationInterface.setMenuButtonVisible(False)
+        self.navigationInterface.setReturnButtonVisible(False)
+        self.navigationInterface.setCollapsible(False)
+        self.navigationInterface.expand(useAni=False)
+
+        # 在页面入口上方显示不可点击的品牌。
+        brand_item = self.navigationInterface.addItem(
+            routeKey="beltvisionBrand",
+            icon=create_icon("logo", "blue"),
+            text="BeltVision",
+            selectable=False,
+            position=NavigationItemPosition.TOP,
+        )
+        brand_item.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        brand_font = QFont(brand_item.font())
+        brand_font.setPixelSize(14)
+        brand_font.setWeight(QFont.Weight.DemiBold)
+        brand_item.setFont(brand_font)
+        brand_item.setLightTextColor(COLORS["text"])
+
+        # 在品牌下方显示工作台分组标题。
+        workspace_header = self.navigationInterface.addItemHeader(
+            "工作台", NavigationItemPosition.TOP
+        )
+        header_font = QFont(workspace_header.font())
+        header_font.setPixelSize(12)
+        header_font.setWeight(QFont.Weight.Normal)
+        workspace_header.setFont(header_font)
+        workspace_header.setLightTextColor(COLORS["muted"])
+
+        # 建立正式页面的顶部导航入口。
         for page_key in ("realtime", "history", "abnormal_events", "machines"):
             self.addSubInterface(
                 self.pages[page_key], PAGES[page_key][2], PAGES[page_key][0]
             )
+
+        # 建立底部占位页面入口。
         for page_key in ("images", "settings", "logs"):
             page = self.create_placeholder_page(page_key)
             self.pages[page_key] = page
@@ -77,8 +113,11 @@ class MainWindow(FluentWindow):
                 PAGES[page_key][0],
                 position=NavigationItemPosition.BOTTOM,
             )
-        self.navigationInterface.setExpandWidth(188)
         self.stackedWidget.currentChanged.connect(self.update_current_page)
+
+        # 隐藏标题栏中的重复品牌和页面标题。
+        self.titleBar.iconLabel.hide()
+        self.titleBar.titleLabel.hide()
 
         # 在现有标题栏显示时钟和连接状态。
         self.status_area = QWidget(self.titleBar)
@@ -109,8 +148,33 @@ class MainWindow(FluentWindow):
         self.set_connection_status(True)
         self.setup_clock()
         self.apply_style()
-        # 默认展开现有导航面板。
-        self.navigationInterface.expand(False)
+        self.update_title_bar_geometry()
+
+    def update_title_bar_geometry(self):
+        """将标题栏放在固定导航的右侧。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 标题栏位置和宽度已更新
+        """
+        self.titleBar.move(NAVIGATION_WIDTH, 0)
+        self.titleBar.resize(
+            max(0, self.width() - NAVIGATION_WIDTH), self.titleBar.height()
+        )
+
+    def resizeEvent(self, event):
+        """在窗口缩放时更新标题栏位置。
+
+        Args:
+            event: 窗口缩放事件。
+
+        Returns:
+            None  # 标题栏已与导航边界对齐
+        """
+        super().resizeEvent(event)
+        self.update_title_bar_geometry()
 
     def setup_window(self):
         """设置窗口标题、尺寸、图标和字体。
@@ -272,6 +336,12 @@ class MainWindow(FluentWindow):
         for name, color in COLORS.items():
             stylesheet = stylesheet.replace(f"@{name}", color)
         self.setStyleSheet(stylesheet)
+
+        # 在导航面板的 Fluent 样式后应用项目导航背景。
+        navigation_panel = self.navigationInterface.panel
+        navigation_panel.setStyleSheet(
+            navigation_panel.styleSheet() + "\n" + stylesheet
+        )
 
     def closeEvent(self, event):
         """等待监测结束后关闭窗口。

@@ -1,3 +1,16 @@
+/* 设置固定导航的浅灰背景。 */
+NavigationPanel[menu=false] {
+    background: @navigation_background;
+    border: none;
+    border-right: 1px solid @border;
+    border-radius: 0;
+}
+NavigationPanel QScrollArea,
+NavigationPanel #scrollWidget {
+    background: transparent;
+    border: none;
+}
+
 /* 设置业务页面的浅色背景。 */
 QWidget#realtime {
     background: @background;

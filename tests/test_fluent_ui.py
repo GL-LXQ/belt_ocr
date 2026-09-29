@@ -10,7 +10,7 @@ from PySide6.QtTest import QTest
 from qfluentwidgets import FluentWindow, InfoBar, MaskDialogBase, MessageBox
 
 from src.controller.controller import AppController, Result
-from ui.main_window import MainWindow
+from ui.main_window import NAVIGATION_WIDTH, MainWindow
 from ui.pages.realtime_page import RealtimePage
 
 
@@ -110,6 +110,78 @@ def test_fluent_navigation_uses_existing_pages_and_refreshes_once(
         assert window.history_page is history_page
         assert window.abnormal_events_page is abnormal_page
         assert window.machines_page is machines_page
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_fixed_navigation_and_title_bar_stay_aligned(
+    qt_application: QApplication,
+) -> None:
+    """验证固定导航在两种窗口尺寸下完整显示且不覆盖标题栏。
+
+    Args:
+        qt_application: 测试使用的 Qt 应用。
+
+    Returns:
+        None  # 导航、品牌、分组与标题栏保持预期布局
+    """
+    window = MainWindow(make_ui_controller())
+    try:
+        window.show()
+        QTest.qWait(200)
+        qt_application.processEvents()
+        panel = window.navigationInterface.panel
+
+        # 核对品牌、分组及上下导航项的顺序。
+        top_items = [
+            panel.topLayout.itemAt(index).widget()
+            for index in range(panel.topLayout.count())
+            if panel.topLayout.itemAt(index).widget().text()
+        ]
+        bottom_items = [
+            panel.bottomLayout.itemAt(index).widget()
+            for index in range(panel.bottomLayout.count())
+        ]
+        assert [item.text() for item in top_items] == [
+            "BeltVision", "工作台", "实时监测", "历史记录", "异常事件", "机器管理"
+        ]
+        assert [item.text() for item in bottom_items] == [
+            "图片管理", "系统配置", "日志查看"
+        ]
+        assert top_items[0].testAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        assert not top_items[0].isSelectable
+        assert top_items[1].height() > 0
+        assert top_items[1].lightTextColor.name() == "#667085"
+        assert not panel.menuButton.isVisible()
+        assert not panel.returnButton.isVisible()
+        assert "#F7F8FA" in panel.styleSheet()
+
+        # 核对导航宽度及标题栏在缩放前后的边界。
+        for width, height in ((1600, 900), (1280, 720)):
+            window.resize(width, height)
+            qt_application.processEvents()
+            assert panel.displayMode.name == "EXPAND"
+            assert window.navigationInterface.width() == NAVIGATION_WIDTH
+            assert window.titleBar.x() == NAVIGATION_WIDTH
+            assert window.titleBar.width() == width - NAVIGATION_WIDTH
+            assert not window.titleBar.iconLabel.isVisible()
+            assert not window.titleBar.titleLabel.isVisible()
+            assert window.status_area.isVisible()
+            assert window.clock_label.text()
+            assert window.status_text.text() == "系统运行正常"
+            assert window.connection_text.text() == "服务已连接"
+            assert all(
+                button.isVisible()
+                for button in (
+                    window.titleBar.minBtn,
+                    window.titleBar.maxBtn,
+                    window.titleBar.closeBtn,
+                )
+            )
+        assert window.windowTitle() == "BeltVision | 实时监测"
     finally:
         window.close()
         window.deleteLater()

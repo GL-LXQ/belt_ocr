@@ -10,6 +10,7 @@ from qfluentwidgets import Theme, setTheme, setThemeColor
 COLORS = {
     "blue": "#2563EB",
     "background": "#F5F7FA",
+    "navigation_background": "#F7F8FA",
     "white": "#FFFFFF",
     "border": "#E7ECF2",
     "text": "#182230",
