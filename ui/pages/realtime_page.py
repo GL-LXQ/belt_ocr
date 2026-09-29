@@ -688,8 +688,8 @@ class RealtimePage(QWidget):
         self.selected_machine_id: str | None = None
         self.cards_by_machine_id = {}
         outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(24, 6, 24, 6)
-        outer_layout.setSpacing(4)
+        outer_layout.setContentsMargins(24, 16, 24, 20)
+        outer_layout.setSpacing(12)
 
         # 固定页面标题和监测操作区。
         header = QHBoxLayout()

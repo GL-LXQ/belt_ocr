@@ -157,7 +157,7 @@ def test_fixed_navigation_and_title_bar_stay_aligned(
         assert top_items[1].lightTextColor.name() == "#667085"
         assert not panel.menuButton.isVisible()
         assert not panel.returnButton.isVisible()
-        assert "#F7F8FA" in panel.styleSheet()
+        assert "#F6F6F7" in panel.styleSheet()
 
         # 核对导航宽度及标题栏在缩放前后的边界。
         for width, height in ((1600, 900), (1320, 720)):
@@ -170,6 +170,15 @@ def test_fixed_navigation_and_title_bar_stay_aligned(
             assert not window.titleBar.iconLabel.isVisible()
             assert not window.titleBar.titleLabel.isVisible()
             assert window.status_area.isVisible()
+            # 核对状态区域紧邻右侧窗口按钮。
+            status_right = window.status_area.mapTo(
+                window.titleBar, QPoint(window.status_area.width(), 0)
+            ).x()
+            buttons_left = window.titleBar.minBtn.mapTo(
+                window.titleBar, QPoint(0, 0)
+            ).x()
+            assert status_right == buttons_left
+
             assert window.clock_label.text()
             assert window.status_text.text() == "系统运行正常"
             assert window.connection_text.text() == "服务已连接"

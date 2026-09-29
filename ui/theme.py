@@ -9,10 +9,10 @@ from qfluentwidgets import Theme, setTheme, setThemeColor
 # 保存项目背景、文字和业务状态颜色。
 COLORS = {
     "blue": "#2563EB",
-    "background": "#F5F7FA",
-    "navigation_background": "#F7F8FA",
+    "background": "#F4F4F6",
+    "navigation_background": "#F6F6F7",
     "white": "#FFFFFF",
-    "border": "#E7ECF2",
+    "border": "#E9E9EC",
     "text": "#182230",
     "muted": "#667085",
     "secondary": "#AEB8C4",

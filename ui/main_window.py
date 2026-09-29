@@ -115,12 +115,18 @@ class MainWindow(FluentWindow):
             )
         self.stackedWidget.currentChanged.connect(self.update_current_page)
 
+        # 设置标题栏和页面栈的项目样式标识。
+        self.titleBar.setObjectName("mainTitleBar")
+        self.titleBar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.stackedWidget.setObjectName("mainStackedWidget")
+
         # 隐藏标题栏中的重复品牌和页面标题。
         self.titleBar.iconLabel.hide()
         self.titleBar.titleLabel.hide()
 
         # 在现有标题栏显示时钟和连接状态。
         self.status_area = QWidget(self.titleBar)
+        self.status_area.setObjectName("windowStatusArea")
         status_layout = QHBoxLayout(self.status_area)
         status_layout.setContentsMargins(0, 0, 18, 0)
         status_layout.setSpacing(8)
@@ -141,8 +147,12 @@ class MainWindow(FluentWindow):
             self.connection_text,
         ):
             status_layout.addWidget(status_widget)
+        # 将状态区域放在弹性留白之后、窗口按钮之前。
         self.titleBar.hBoxLayout.insertWidget(
-            2, self.status_area, 1, Qt.AlignmentFlag.AlignRight
+            self.titleBar.hBoxLayout.count() - 1,
+            self.status_area,
+            0,
+            Qt.AlignmentFlag.AlignRight,
         )
         self.set_system_status("系统运行正常")
         self.set_connection_status(True)
@@ -336,6 +346,14 @@ class MainWindow(FluentWindow):
         for name, color in COLORS.items():
             stylesheet = stylesheet.replace(f"@{name}", color)
         self.setStyleSheet(stylesheet)
+
+        # 在标题栏的 Fluent 样式后应用项目背景和无边框样式。
+        self.titleBar.setStyleSheet(self.titleBar.styleSheet() + "\n" + stylesheet)
+
+        # 在页面栈的 Fluent 样式后应用项目背景和无边框样式。
+        self.stackedWidget.setStyleSheet(
+            self.stackedWidget.styleSheet() + "\n" + stylesheet
+        )
 
         # 在导航面板的 Fluent 样式后应用项目导航背景。
         navigation_panel = self.navigationInterface.panel
