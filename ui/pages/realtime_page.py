@@ -1,6 +1,6 @@
 """实时监测页面、机器卡片和步骤进度组件。"""
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -47,8 +47,8 @@ PROGRESS_STATUS_TITLES = {
     "failed": "失败",
 }
 
-# 固定机器卡片、详情卡和列数的布局尺寸。
-MACHINE_CARD_WIDTH = 310
+# 设置机器卡片、详情卡和列数的布局尺寸。
+MACHINE_CARD_MIN_WIDTH = 280
 MACHINE_CARD_GAP = 16
 MACHINE_DETAIL_WIDTH = 380
 MIN_MACHINE_COLUMNS = 2
@@ -221,8 +221,8 @@ class MachineCard(SimpleCardWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.progress_session_id = ""
         self.progress_statuses = {}
-        self.setFixedWidth(MACHINE_CARD_WIDTH)
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.setMinimumWidth(MACHINE_CARD_MIN_WIDTH)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 14)
         layout.setSpacing(9)
@@ -748,7 +748,7 @@ class RealtimePage(QWidget):
         vertical_scroll_bar.setHandleColor("#D5DAE1", "#D5DAE1")
         vertical_scroll_bar.setGrooveColor("transparent", "transparent")
         vertical_scroll_bar.setArrowColor("transparent", "transparent")
-        body_layout.addWidget(self.scroll_area, 0)
+        body_layout.addWidget(self.scroll_area, 1)
 
         # 详情内容较高时仅在右侧区域内部滚动。
         self.detail_scroll_area = ScrollArea()
@@ -768,9 +768,6 @@ class RealtimePage(QWidget):
         self.detail_scroll_area.setWidget(self.detail_panel)
         body_layout.addWidget(self.detail_scroll_area, 0)
 
-        # 将宽屏剩余空间放在详情卡右侧。
-        body_layout.addStretch(1)
-
         content = QWidget()
         content.setObjectName("monitorContent")
         layout = QVBoxLayout(content)
@@ -780,16 +777,17 @@ class RealtimePage(QWidget):
 
         # 网格靠上排列，空余高度留在底部。
         cards_layout = QGridLayout()
-        cards_layout.setSpacing(MACHINE_CARD_GAP)
-        cards_layout.setAlignment(
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
-        )
+        cards_layout.setHorizontalSpacing(MACHINE_CARD_GAP)
+        cards_layout.setVerticalSpacing(MACHINE_CARD_GAP)
+        cards_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.cards_layout = cards_layout
         self.machine_cards = []
         self.empty_hint = None
         self.card_column_count = 0
         layout.addLayout(cards_layout)
         layout.addStretch(1)
+        self.scroll_area.viewport().installEventFilter(self)
+
         # 绑定页面操作按钮。
         self.start_button.clicked.connect(self.start_monitoring)
         self.stop_button.clicked.connect(self.stop_monitoring)
@@ -1031,35 +1029,24 @@ class RealtimePage(QWidget):
         )
 
     def reflow_cards(self):
-        """按页面可用宽度排列已有机器卡片并收紧列表区域。
+        """按机器列表宽度将已有卡片排列为两列或三列。
 
         Args:
             无。
 
         Returns:
-            None  # 卡片实例已按两列或三列排列，滚动区宽度同步更新
+            None  # 卡片实例已按两列或三列排列
         """
-        # 用主体宽度判断能否同时容纳三列机器和详情卡。
-        page_margins = self.layout().contentsMargins()
-        available_width = self.width() - page_margins.left() - page_margins.right()
-        three_column_width = (
-            MACHINE_CARD_WIDTH * MAX_MACHINE_COLUMNS
+        # 用列表可视宽度判断能否容纳三列最小宽度的机器卡片。
+        available_width = self.scroll_area.viewport().width()
+        three_column_min_width = (
+            MACHINE_CARD_MIN_WIDTH * MAX_MACHINE_COLUMNS
             + MACHINE_CARD_GAP * (MAX_MACHINE_COLUMNS - 1)
-            + MACHINE_CARD_GAP
-            + MACHINE_DETAIL_WIDTH
         )
         column_count = (
-            MAX_MACHINE_COLUMNS if available_width >= three_column_width
+            MAX_MACHINE_COLUMNS if available_width >= three_column_min_width
             else MIN_MACHINE_COLUMNS
         )
-
-        # 根据实际机器数量设置列表宽度，剩余宽度留在详情右侧。
-        visible_columns = min(column_count, max(1, len(self.machine_cards)))
-        machine_area_width = (
-            MACHINE_CARD_WIDTH * visible_columns
-            + MACHINE_CARD_GAP * (visible_columns - 1)
-        )
-        self.scroll_area.setFixedWidth(machine_area_width)
         if not self.machine_cards:
             self.card_column_count = column_count
             return
@@ -1073,6 +1060,8 @@ class RealtimePage(QWidget):
         for column_index in range(MAX_MACHINE_COLUMNS):
             self.cards_layout.setColumnStretch(column_index, 0)
             self.cards_layout.setColumnMinimumWidth(column_index, 0)
+        for column_index in range(column_count):
+            self.cards_layout.setColumnStretch(column_index, 1)
         for card_index, card in enumerate(self.machine_cards):
             self.cards_layout.addWidget(
                 card,
@@ -1082,17 +1071,22 @@ class RealtimePage(QWidget):
         self.card_column_count = column_count
         self.scroll_area.widget().updateGeometry()
 
-    def resizeEvent(self, event):
-        """在页面宽度变化时重新计算机器列数和列表宽度。
+    def eventFilter(self, watched, event):
+        """在机器列表可视宽度变化时重新排列已有卡片。
 
         Args:
-            event: 页面尺寸变化事件。
+            watched: 接收事件的控件。
+            event: Qt 事件。
 
         Returns:
-            None  # 机器列表已按当前页面宽度重新排列
+            bool  # 事件交给父类继续处理
         """
-        super().resizeEvent(event)
-        self.reflow_cards()
+        if (
+            watched is self.scroll_area.viewport()
+            and event.type() == QEvent.Type.Resize
+        ):
+            self.reflow_cards()
+        return super().eventFilter(watched, event)
 
     def start_monitoring(self):
         """读取机器卡片并启动一次后台监测。
