@@ -570,6 +570,8 @@ class RealtimePage(QWidget):
         """
         super().__init__(parent)
         self.setObjectName("realtime")
+        # 绘制实时页的统一背景。
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.controller = controller
         self.closing_requested = False
         self.connection_states = {}
@@ -625,6 +627,8 @@ class RealtimePage(QWidget):
 
         # 将机器卡片放入可滚动区域。
         self.scroll_area = ScrollArea()
+        self.scroll_area.setObjectName("machineScrollArea")
+        self.scroll_area.viewport().setObjectName("machineScrollViewport")
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         body_layout.addWidget(self.scroll_area, 1)

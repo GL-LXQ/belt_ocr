@@ -1,7 +1,17 @@
 /* 设置业务页面的浅色背景。 */
-QWidget#realtime, QWidget#history, QWidget#abnormal_events,
+QWidget#realtime {
+    background: @background;
+}
+QWidget#history, QWidget#abnormal_events,
 QWidget#machines, QWidget#images, QWidget#settings, QWidget#logs {
     background: @background;
+}
+QScrollArea#machineScrollArea {
+    background: transparent;
+    border: none;
+}
+QWidget#machineScrollViewport {
+    background: transparent;
 }
 QWidget#monitorContent {
     background: transparent;
