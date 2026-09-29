@@ -455,70 +455,103 @@ class MachineDetailPanel(SimpleCardWidget):
             QSizePolicy.Policy.Maximum,
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(6)
-        layout.addWidget(SubtitleLabel("机器详情"))
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(0)
+        section_label = CaptionLabel("机器详情")
+        section_label.setObjectName("detailSectionLabel")
+        layout.addWidget(section_label)
 
-        # 显示机器名称、徽标和相机编号。
+        # 显示机器名称和状态徽标。
+        layout.addSpacing(4)
         heading = QHBoxLayout()
-        self.title = BodyLabel("未选择机器")
+        self.title = SubtitleLabel("未选择机器")
+        self.title.setObjectName("detailMachineName")
         self.title.setWordWrap(True)
         self.badge = QLabel()
         self.badge.setObjectName("machineBadge")
         heading.addWidget(self.title, 1)
         heading.addWidget(self.badge)
         layout.addLayout(heading)
-        self.camera_label = CaptionLabel("Camera · --")
-        layout.addWidget(self.camera_label)
 
-        # 并排显示主状态和实时频率的标题与数值。
-        layout.addSpacing(4)
-        metrics_layout = QGridLayout()
-        metrics_layout.setContentsMargins(0, 0, 0, 0)
-        metrics_layout.setHorizontalSpacing(12)
-        metrics_layout.setVerticalSpacing(4)
-        metrics_layout.addWidget(CaptionLabel("当前状态"), 0, 0)
-        metrics_layout.addWidget(CaptionLabel("实时频率"), 0, 1)
+        # 在同一个网格中展示设备序列号和实时读数。
+        layout.addSpacing(12)
+        self.attributes_layout = QGridLayout()
+        self.attributes_layout.setContentsMargins(0, 0, 0, 0)
+        self.attributes_layout.setHorizontalSpacing(24)
+        self.attributes_layout.setVerticalSpacing(4)
+        for column_index, title in enumerate(("相机序列号", "频率仪序列号")):
+            label = CaptionLabel(title)
+            label.setObjectName("detailFieldLabel")
+            self.attributes_layout.addWidget(label, 0, column_index)
+        self.camera_serial_label = BodyLabel("--")
+        self.camera_serial_label.setObjectName("detailFieldValue")
+        self.camera_serial_label.setWordWrap(True)
+        self.frequency_meter_serial_label = BodyLabel("--")
+        self.frequency_meter_serial_label.setObjectName("detailFieldValue")
+        self.frequency_meter_serial_label.setWordWrap(True)
+        self.attributes_layout.addWidget(self.camera_serial_label, 1, 0)
+        self.attributes_layout.addWidget(self.frequency_meter_serial_label, 1, 1)
+        self.attributes_layout.setRowMinimumHeight(2, 6)
+        for column_index, title in enumerate(("当前状态", "实时频率")):
+            label = CaptionLabel(title)
+            label.setObjectName("detailFieldLabel")
+            self.attributes_layout.addWidget(label, 3, column_index)
         self.state_label = BodyLabel("--")
+        self.state_label.setObjectName("detailFieldValue")
         self.state_label.setWordWrap(True)
-        metrics_layout.addWidget(self.state_label, 1, 0)
+        self.attributes_layout.addWidget(self.state_label, 4, 0)
         self.frequency_label = BodyLabel("--")
-        self.frequency_label.setObjectName("frequencyValue")
-        metrics_layout.addWidget(self.frequency_label, 1, 1)
-        metrics_layout.setColumnStretch(0, 1)
-        metrics_layout.setColumnStretch(1, 1)
-        layout.addLayout(metrics_layout)
+        self.frequency_label.setObjectName("detailFieldValue")
+        self.attributes_layout.addWidget(self.frequency_label, 4, 1)
+        self.attributes_layout.setColumnStretch(0, 1)
+        self.attributes_layout.setColumnStretch(1, 1)
+        layout.addLayout(self.attributes_layout)
 
         # 在浅灰信息卡中显示完整 OCR。
-        layout.addSpacing(4)
-        layout.addWidget(CaptionLabel("OCR 识别结果"))
+        layout.addSpacing(14)
+        ocr_title = CaptionLabel("OCR 识别结果")
+        ocr_title.setObjectName("detailSectionLabel")
+        layout.addWidget(ocr_title)
+        layout.addSpacing(6)
         ocr_panel = QFrame()
         ocr_panel.setObjectName("detailOcrPanel")
         ocr_layout = QVBoxLayout(ocr_panel)
-        ocr_layout.setContentsMargins(12, 10, 12, 10)
+        ocr_layout.setContentsMargins(16, 14, 16, 14)
         self.ocr_text = PlainTextEdit()
         self.ocr_text.setObjectName("detailOcrText")
         self.ocr_text.setReadOnly(True)
         self.ocr_text.setFrameShape(QFrame.Shape.NoFrame)
-        self.ocr_text.setFixedHeight(120)
+        self.ocr_text.setFixedHeight(110)
         ocr_style = (
             "PlainTextEdit {"
             f"background: transparent; color: {COLORS['text']};"
-            "border: none; padding: 0;}"
+            "border: none; padding: 0; font-size: 13px;}"
         )
         setCustomStyleSheet(self.ocr_text, ocr_style, ocr_style)
         ocr_layout.addWidget(self.ocr_text)
         layout.addWidget(ocr_panel)
 
         # 显示当前周期的完整步骤。
-        layout.addSpacing(4)
-        layout.addWidget(CaptionLabel("本轮处理"))
+        layout.addSpacing(10)
+        progress_title = CaptionLabel("本轮处理")
+        progress_title.setObjectName("detailSectionLabel")
+        layout.addWidget(progress_title)
+        layout.addSpacing(6)
         self.steps = StepProgress()
         layout.addWidget(self.steps)
 
-        # 弱化详情字段标题。
+        # 设置详情文字的辅助色和数值字重。
         for label in self.findChildren(CaptionLabel):
-            label.setStyleSheet(f"color: {COLORS['muted']};")
+            label.setStyleSheet(
+                f"color: {COLORS['muted']}; font-size: 12px; font-weight: 500;"
+            )
+        self.title.setStyleSheet(
+            f"color: {COLORS['text']}; font-size: 18px; font-weight: 600;"
+        )
+        for label in self.findChildren(BodyLabel):
+            label.setStyleSheet(
+                f"color: {COLORS['text']}; font-size: 14px; font-weight: 500;"
+            )
 
 
 class RealtimePage(QWidget):
@@ -803,8 +836,19 @@ class RealtimePage(QWidget):
         """
         panel = self.detail_panel
         card = self.cards_by_machine_id.get(self.selected_machine_id)
+        machine = next(
+            (
+                machine
+                for machine in self.machines
+                if str(machine["id"]) == self.selected_machine_id
+            ),
+            None,
+        )
         panel.title.setText(card.title.text() if card else "未选择机器")
-        panel.camera_label.setText(card.camera_label.text() if card else "Camera · --")
+        panel.camera_serial_label.setText(machine["camera_serial"] if machine else "--")
+        panel.frequency_meter_serial_label.setText(
+            machine["frequency_meter_serial"] if machine else "--"
+        )
         panel.state_label.setText(card.state_label.text() if card else "--")
         panel.frequency_label.setText(card.frequency_label.text() if card else "--")
 

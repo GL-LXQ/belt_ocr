@@ -156,8 +156,18 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
     service = Mock()
     service.list_enabled_machines.return_value = {
         "machines": [
-            {"id": 1, "machine_name": "机器 1", "camera_serial": "CAM-1"},
-            {"id": 2, "machine_name": "机器 2", "camera_serial": "CAM-2"},
+            {
+                "id": 1,
+                "machine_name": "机器 1",
+                "camera_serial": "CAM-1",
+                "frequency_meter_serial": "FREQ-1",
+            },
+            {
+                "id": 2,
+                "machine_name": "机器 2",
+                "camera_serial": "CAM-2",
+                "frequency_meter_serial": "FREQ-2",
+            },
         ],
     }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
@@ -167,9 +177,13 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
         # 正式启动后交付乱序文字，核对分类和纯文本设置。
         page.update_measurement_progress("1", "first", "session_start", "success")
         page.update_ocr_result("1", "first", ordered_lines, normalized_lines)
-        expected_text = "20  长文字\n8  2926 215C\n    2926 216C\n    2926 217C\n3  <b>003</b>\n2  14"
+        expected_text = (
+            "20  长文字\n8  2926 215C\n    2926 216C\n    2926 217C"
+            "\n3  <b>003</b>\n2  14"
+        )
         assert page.detail_panel.ocr_text.toPlainText() == expected_text
-        assert page.cards_by_machine_id["1"].ocr_result_label.textFormat() == Qt.TextFormat.PlainText
+        result_label = page.cards_by_machine_id["1"].ocr_result_label
+        assert result_label.textFormat() == Qt.TextFormat.PlainText
         assert page.cards_by_machine_id["2"].ocr_result_label.text() == "--"
 
         # 入库进度、连接状态和刷新均保留已完成文字。
@@ -217,8 +231,18 @@ def test_page_animates_only_current_machine_and_session(
     service = Mock()
     service.list_enabled_machines.return_value = {
         "machines": [
-            {"id": 1, "machine_name": "机器 1", "camera_serial": "CAM-1"},
-            {"id": 2, "machine_name": "机器 2", "camera_serial": "CAM-2"},
+            {
+                "id": 1,
+                "machine_name": "机器 1",
+                "camera_serial": "CAM-1",
+                "frequency_meter_serial": "FREQ-1",
+            },
+            {
+                "id": 2,
+                "machine_name": "机器 2",
+                "camera_serial": "CAM-2",
+                "frequency_meter_serial": "FREQ-2",
+            },
         ],
     }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
@@ -311,7 +335,14 @@ def test_failed_subprocess_stops_its_animation_without_closing_belt(
     # 创建单台机器并启动对应子动画。
     service = Mock()
     service.list_enabled_machines.return_value = {
-        "machines": [{"id": 1, "machine_name": "机器 1", "camera_serial": "CAM-1"}],
+        "machines": [
+            {
+                "id": 1,
+                "machine_name": "机器 1",
+                "camera_serial": "CAM-1",
+                "frequency_meter_serial": "FREQ-1",
+            },
+        ],
     }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
     try:
@@ -347,8 +378,18 @@ def test_page_refresh_and_monitoring_stop_restore_safe_animation(
     service = Mock()
     service.list_enabled_machines.return_value = {
         "machines": [
-            {"id": 1, "machine_name": "机器 1", "camera_serial": "CAM-1"},
-            {"id": 2, "machine_name": "机器 2", "camera_serial": "CAM-2"},
+            {
+                "id": 1,
+                "machine_name": "机器 1",
+                "camera_serial": "CAM-1",
+                "frequency_meter_serial": "FREQ-1",
+            },
+            {
+                "id": 2,
+                "machine_name": "机器 2",
+                "camera_serial": "CAM-2",
+                "frequency_meter_serial": "FREQ-2",
+            },
         ],
     }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
@@ -423,7 +464,14 @@ def test_runtime_thread_delivers_text_from_background_thread(
     # 创建页面和不访问设备的运行时替身。
     machine_service = Mock()
     machine_service.list_enabled_machines.return_value = {
-        "machines": [{"id": 1, "machine_name": "机器 1", "camera_serial": "CAM-1"}],
+        "machines": [
+            {
+                "id": 1,
+                "machine_name": "机器 1",
+                "camera_serial": "CAM-1",
+                "frequency_meter_serial": "FREQ-1",
+            },
+        ],
     }
     controller = AppController(machine_service, Mock(), Mock(), Path("config"))
     page = RealtimePage(controller)

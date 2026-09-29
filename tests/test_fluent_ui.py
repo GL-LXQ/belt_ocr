@@ -188,7 +188,7 @@ def test_machine_detail_keeps_long_ocr_text_selectable(qt_application) -> None:
         editor = page.detail_panel.ocr_text
         assert editor.parentWidget().objectName() == "detailOcrPanel"
         assert editor.frameShape() == QFrame.Shape.NoFrame
-        assert editor.height() == 120
+        assert editor.height() == 110
         assert all(line in editor.toPlainText() for line in ordered_lines)
         assert ordered_lines[-1] in editor.toPlainText()
         assert editor.isReadOnly()
@@ -221,12 +221,17 @@ def test_dashboard_selection_reload_and_summary(qt_application) -> None:
         assert page.selected_machine_id == "2"
         assert sum(card.property("selected") for card in page.machine_cards) == 1
         assert page.detail_panel.title.text() == "第 2 台机器"
-        assert page.detail_panel.camera_label.text() == "Camera · CAM-2"
-        metrics_layout = page.detail_panel.layout().itemAt(4).layout()
-        assert isinstance(metrics_layout, QGridLayout)
-        state_widget = metrics_layout.itemAtPosition(1, 0).widget()
+        assert page.detail_panel.camera_serial_label.text() == "CAM-2"
+        assert page.detail_panel.frequency_meter_serial_label.text() == "FREQ-2"
+        attributes_layout = page.detail_panel.attributes_layout
+        assert isinstance(attributes_layout, QGridLayout)
+        camera_widget = attributes_layout.itemAtPosition(1, 0).widget()
+        assert camera_widget is page.detail_panel.camera_serial_label
+        meter_widget = attributes_layout.itemAtPosition(1, 1).widget()
+        assert meter_widget is page.detail_panel.frequency_meter_serial_label
+        state_widget = attributes_layout.itemAtPosition(4, 0).widget()
         assert state_widget is page.detail_panel.state_label
-        frequency_widget = metrics_layout.itemAtPosition(1, 1).widget()
+        frequency_widget = attributes_layout.itemAtPosition(4, 1).widget()
         assert frequency_widget is page.detail_panel.frequency_label
         page.reload_machines()
         assert page.selected_machine_id == "2"
