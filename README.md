@@ -22,7 +22,7 @@ IO 读取失败时，系统记录日志并清空旧 DI 状态，以 `IO_INTERRUP
 
 现场 START 经本机事件队列进入 `MachineRuntime`，创建当前 `MeasurementSession`；相机采集结果先完成帧准备与筛选，有合格帧时再进入 OCR 排队与识别，频率读数按收到的顺序保存到同一 Session。收到 CLOSE 后停止本轮采集并确定最终频率；关闭信号和 OCR 结果都到达时，先保存证据图片，再写入测量记录并释放当前 Session。频率当前按配置模拟，真实协议待接入。
 
-相机通过 `CaptureResult.frames` 交付 `CameraFrame`，其 `image_bytes` 保存 SDK 复制的原始像素字节；`MachineRuntime.run_ocr_pipeline()` 调用 `prepare_frames_for_ocr()` 为原始帧登记周期身份，生成 `MeasurementFrame`，再得到 `qualified_frames`。识别时，`convert_mono8_frame_to_array()` 校验 Mono8 格式与字节数，将合格帧转换为 `image_numpy`（二维 `uint8` 图像）交给共享 OCR Engine；证据编码继续使用原始像素字节。
+相机通过 `CaptureResult.frames` 发送 `CameraFrame`，其 `image_bytes` 保存 SDK 复制的原始像素字节；`MachineRuntime.run_ocr_pipeline()` 调用 `prepare_frames_for_ocr()` 为相机帧补充 Session 和采集信息，生成 `MeasurementFrame`，再筛选出 `qualified_frames`。识别时，`convert_mono8_frame_to_array()` 校验 Mono8 格式与字节数，将合格帧转换为 `image_numpy`（二维 `uint8` 图像）交给共享 OCR Engine；证据编码继续使用原始像素字节。
 
 原始帧先由 `prepare_frames_for_ocr()` 在线程中整理为带周期身份的 `MeasurementFrame`，再调用 `select_qualified_frames()` 初筛；这一步不占用共享 OCR 资源，当前初筛仍原样返回全部图片。初筛为空时直接生成包含全部原始帧的人工复核结果并交给现有 `OCR_COMPLETED` 流程；有合格帧时才开始等待共享资源，获得资源后由 `recognize_qualified_frames()` 调用 `recognize_images()` 逐帧转换 Mono8 图像并使用共享 OCR Engine，最后由 `generate_final_text_and_images()` 终选文字与证据图片。预处理后和获得资源后都检查 Session 状态；明确的预处理、帧格式和模型结果结构错误按本轮 OCR 失败处理，未分类异常交给 Runtime 全局故障流程。
 
