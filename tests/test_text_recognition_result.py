@@ -9,10 +9,10 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-import text_recognition
+import text_recognizer
 from camera.hikrobot_sdk import PIXEL_TYPE_MONO8, CameraFrame
 from models import OCRResult
-from text_recognition import (
+from text_recognizer import (
     OCRProcessingError,
     OCRResourceWaitTimeoutError,
     TextRecognizer,
@@ -158,10 +158,10 @@ def test_recognize_images_reuses_engine_and_preserves_order(
     ]
     engine = Mock()
     engine.process_image.side_effect = expected_results
-    configuration_loader = Mock(wraps=text_recognition.load_ocr_config)
+    configuration_loader = Mock(wraps=text_recognizer.load_ocr_config)
     engine_factory = Mock(return_value=engine)
-    monkeypatch.setattr(text_recognition, "load_ocr_config", configuration_loader)
-    monkeypatch.setattr(text_recognition, "BeltOCREngine", engine_factory)
+    monkeypatch.setattr(text_recognizer, "load_ocr_config", configuration_loader)
+    monkeypatch.setattr(text_recognizer, "BeltOCREngine", engine_factory)
     monkeypatch.chdir(tmp_path)
 
     # 建立按像素值区分的三张 Mono8 原始帧。
@@ -189,7 +189,7 @@ def test_recognize_images_reuses_engine_and_preserves_order(
     assert later_results[0] is expected_results[2]
 
     # 核对首次配置加载位置和 Engine 复用次数。
-    module_directory = Path(text_recognition.__file__).resolve().parent
+    module_directory = Path(text_recognizer.__file__).resolve().parent
     config_path = module_directory / "ocr" / "config.yaml"
     configuration_loader.assert_called_once_with(config_path)
     engine_factory.assert_called_once()
@@ -223,7 +223,7 @@ def test_initialize_reuses_shared_engine_without_inference(
     # 用模拟 Engine 记录初始化与推理调用。
     engine = Mock()
     engine_factory = Mock(return_value=engine)
-    monkeypatch.setattr(text_recognition, "BeltOCREngine", engine_factory)
+    monkeypatch.setattr(text_recognizer, "BeltOCREngine", engine_factory)
 
     # 重复初始化并核对共享实例。
     recognizer = TextRecognizer()

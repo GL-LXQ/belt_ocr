@@ -12,11 +12,11 @@ from camera.hikrobot_sdk import MvsError, load_mvs_sdk
 from config_util import AppConfig, MachineConfig
 from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
-from machine import Machine
+from machine_runtime import MachineRuntime
 from enums import EventType, MachineState, ProgressStage, ProgressStatus
 from models import RuntimeEvent
 from async_utils import run_blocking_operation
-from text_recognition import TextRecognizer
+from text_recognizer import TextRecognizer
 from database import Database
 from modbus_client import ModbusClient
 
@@ -47,7 +47,7 @@ class SystemRuntime:
         self.text_recognizer = TextRecognizer()
 
         # 登记机器运行对象与后台任务列表。
-        self.machines: dict[str, Machine] = {}
+        self.machines: dict[str, MachineRuntime] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
 
         # 登记启动、停止与资源释放标志。
@@ -123,7 +123,7 @@ class SystemRuntime:
             frequency_adapter = FrequencyAdapter(machine_config, self.config, self.publish_event)
 
             # 建立本机运行对象并按机器编号登记。
-            self.machines[machine_config.machine_id] = Machine(
+            self.machines[machine_config.machine_id] = MachineRuntime(
                 machine_config,
                 self.config,
                 camera,

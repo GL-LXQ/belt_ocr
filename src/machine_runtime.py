@@ -1,4 +1,4 @@
-"""串行处理一台机器的启动、关闭和后台结果。"""
+"""定义单台机器运行时实例及其事件处理流程。"""
 
 import asyncio
 import logging
@@ -15,9 +15,9 @@ from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
 from enums import EventType, FrequencyState, OCRState, ProgressStage, ProgressStatus, SessionState
 from camera.hikrobot_sdk import CameraFrame, MvsError
-from models import BeltSession, CapturedFrame, RuntimeEvent, PublishEvent
+from models import MeasurementSession, CapturedFrame, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
-from text_recognition import (
+from text_recognizer import (
     OCRProcessingError,
     OCRResourceWaitTimeoutError,
     TextRecognizer,
@@ -41,7 +41,7 @@ class EvidenceWriteError(RuntimeError):
     """标记证据图片文件写入失败。"""
 
 
-class Machine:
+class MachineRuntime:
     def __init__(
         self,
         machine_config: MachineConfig,
@@ -106,7 +106,7 @@ class Machine:
         self.queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue(config.event_queue_capacity)
 
         # 初始化唯一周期与机器复位标志。
-        self.current_session: BeltSession | None = None
+        self.current_session: MeasurementSession | None = None
         self.waiting_cycle_reset = False
 
         # 初始化本机设备故障原因。
@@ -274,7 +274,7 @@ class Machine:
             return
 
         # 创建本轮测量档案，登记周期编号、采集编号和开始时间。
-        session = BeltSession(
+        session = MeasurementSession(
             session_id=uuid4().hex,
             machine_id=self.machine_config.machine_id,
             camera_serial=self.machine_config.camera_serial,
@@ -737,7 +737,7 @@ class Machine:
         await self.try_finalize(session)
 
     async def handle_machine_failure(
-        self, session: BeltSession, failure_reason: str
+        self, session: MeasurementSession, failure_reason: str
     ) -> None:
         """记录本机设备故障并结算仍在运行的周期。
 
@@ -769,7 +769,7 @@ class Machine:
 
     async def handle_session_failure(
         self,
-        session: BeltSession,
+        session: MeasurementSession,
         failure_reason: str,
         *,
         system_error: Exception | None = None,
@@ -980,7 +980,9 @@ class Machine:
         self.current_session = None
         self.frequency_adapter.active_session_id = None
 
-    async def recognize_session(self, session: BeltSession, frames: tuple[CameraFrame, ...]) -> None:
+    async def recognize_session(
+        self, session: MeasurementSession, frames: tuple[CameraFrame, ...]
+    ) -> None:
         """等待共享 OCR 处理资源并执行整轮识别，向所属周期交付结果。
 
         Args:
@@ -1105,7 +1107,9 @@ class Machine:
                 logger.exception("OCR 结果交付失败 session_id=%s", session.session_id)
                 raise
 
-    async def handle_frequency_measured(self, session: BeltSession, event: RuntimeEvent) -> None:
+    async def handle_frequency_measured(
+        self, session: MeasurementSession, event: RuntimeEvent
+    ) -> None:
         """按接收顺序保存黑盒交付的新有效测量。
 
         Args:
@@ -1126,7 +1130,7 @@ class Machine:
         # 按接收顺序追加本轮频率明细。
         session.measurement_frequencies.append(event.payload)
 
-    async def try_finalize(self, session: BeltSession) -> None:
+    async def try_finalize(self, session: MeasurementSession) -> None:
         """检查本轮结果，收到 OCR 结果后提交普通或待复核记录。
 
         Args:
@@ -1391,7 +1395,9 @@ class Machine:
             # 原子保存本帧证据图片。
             save_evidence_image(image_data, image_path)
 
-    def schedule_timeout(self, session: BeltSession, event_type: EventType, timeout_ms: int) -> None:
+    def schedule_timeout(
+        self, session: MeasurementSession, event_type: EventType, timeout_ms: int
+    ) -> None:
         """为当前周期安排指定类型的期限通知。
 
         Args:

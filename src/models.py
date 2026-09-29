@@ -78,7 +78,7 @@ class CaptureResult:
 
 
 @dataclass
-class BeltSession:
+class MeasurementSession:
     """一台机器一轮测量的全部现场数据。"""
 
     session_id: str  # 本轮测量周期编号

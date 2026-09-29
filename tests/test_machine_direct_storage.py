@@ -19,16 +19,16 @@ from config_util import AppConfig, MachineConfig, load_config
 from camera.hikrobot_sdk import MvsError
 from database import CommitIntegrityConflictError, Database, MeasurementRecord
 from enums import EventType, OCRState, ProgressStage, ProgressStatus, SessionState
-from machine import EvidenceWriteError, ImageEncodingError, Machine
+from machine_runtime import EvidenceWriteError, ImageEncodingError, MachineRuntime
 from models import (
-    BeltSession,
+    MeasurementSession,
     CaptureResult,
     CapturedFrame,
     FrequencyMeasurement,
     OCRResult,
     RuntimeEvent,
 )
-from text_recognition import (
+from text_recognizer import (
     OCRProcessingError,
     OCRResourceWaitTimeoutError,
     TextRecognizer,
@@ -101,7 +101,7 @@ def create_machine(
     selected_frames: tuple[CapturedFrame, ...],
     review_frames: tuple[CapturedFrame, ...] = (),
     review_reason: str | None = None,
-) -> tuple[Machine, Database, BeltSession, list, list]:
+) -> tuple[MachineRuntime, Database, MeasurementSession, list, list]:
     """建立可直接结算的机器、数据库和周期。
 
     Args:
@@ -113,9 +113,9 @@ def create_machine(
     Returns:
         返回示例：
             (
-                Machine(...),  # 测试机器
+                MachineRuntime(...),  # 测试机器运行时实例
                 Database(...),  # 测试数据库
-                BeltSession(...),  # 当前测量周期
+                MeasurementSession(...),  # 当前测量周期
                 [],  # 进度通知记录
                 [],  # 编码线程编号记录
             )
@@ -176,7 +176,7 @@ def create_machine(
         """
         progress_updates.append((machine_id, session_id, stage, status))
 
-    machine = Machine(
+    machine = MachineRuntime(
         machine_config=MachineConfig("1", "camera-1", "meter-1"),
         config=config,
         camera=camera,
@@ -190,7 +190,7 @@ def create_machine(
     )
 
     # 建立已关闭且 OCR 完成的周期。
-    session = BeltSession(
+    session = MeasurementSession(
         session_id="session-1",
         machine_id="1",
         camera_serial="camera-1",
@@ -628,7 +628,7 @@ async def test_image_write_failure_skips_database(
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
     write_error = OSError("图片写入失败")
     monkeypatch.setattr(
-        "machine.save_evidence_image",
+        "machine_runtime.save_evidence_image",
         Mock(side_effect=write_error),
     )
     await machine.try_finalize(session)
@@ -672,7 +672,7 @@ async def test_unknown_image_write_error_is_not_database_failure(
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
     unknown_error = error_type("未知图片保存错误")
     monkeypatch.setattr(
-        "machine.save_evidence_image",
+        "machine_runtime.save_evidence_image",
         Mock(side_effect=unknown_error),
     )
 
@@ -2120,7 +2120,7 @@ async def test_storage_failure_keeps_root_cause_when_audit_also_fails(
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
     write_error = OSError("图片写入失败")
     monkeypatch.setattr(
-        "machine.save_evidence_image",
+        "machine_runtime.save_evidence_image",
         Mock(side_effect=write_error),
     )
     database.save_abnormal_event = Mock(

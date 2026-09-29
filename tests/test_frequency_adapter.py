@@ -11,8 +11,8 @@ import frequency_adapter as frequency_adapter_module
 from config_util import AppConfig, MachineConfig
 from enums import EventType, FrequencyState
 from frequency_adapter import FrequencyAdapter
-from machine import Machine
-from models import BeltSession, RuntimeEvent
+from machine_runtime import MachineRuntime
+from models import MeasurementSession, RuntimeEvent
 
 
 @pytest.mark.asyncio
@@ -162,7 +162,7 @@ async def test_machine_collects_three_readings_before_close(
         mvs_development_directory=tmp_path,
     )
     machine_config = MachineConfig("1", "camera-1", "meter-1")
-    session = BeltSession(
+    session = MeasurementSession(
         session_id="current-session",
         machine_id="1",
         camera_serial="camera-1",
@@ -202,7 +202,7 @@ async def test_machine_collects_three_readings_before_close(
         return None
 
     adapter = FrequencyAdapter(machine_config, config, publish_event)
-    machine = Machine(
+    machine = MachineRuntime(
         machine_config=machine_config,
         config=config,
         camera=SimpleNamespace(inform_capture_workflow_stop=stop_capture_workflow),
@@ -244,7 +244,7 @@ async def test_machine_collects_three_readings_before_close(
         frequency_adapter_module, "asyncio", SimpleNamespace(sleep=advance_polling)
     )
 
-    # 核对 Machine 收到的读数、关闭状态和最终频率。
+    # 核对 MachineRuntime 收到的读数、关闭状态和最终频率。
     with pytest.raises(RuntimeError, match="轮询结束"):
         await adapter.listen_measurements()
 

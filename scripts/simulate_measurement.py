@@ -25,12 +25,12 @@ from config_util import MachineConfig, load_config
 from database import Database
 from enums import EventType, ProgressStage, ProgressStatus
 from frequency_adapter import FrequencyAdapter
-from machine import Machine
+from machine_runtime import MachineRuntime
 from models import FrequencyMeasurement, RuntimeEvent
 from repo.machine_repo import MachineRepo
 from repo.measurement_record_repo import MeasurementRecordRepo
 from service.measurement_record_service import MeasurementRecordService
-from text_recognition import TextRecognizer
+from text_recognizer import TextRecognizer
 
 
 def load_camera_frames(
@@ -303,7 +303,7 @@ async def run_measurement_simulation(scenario: str) -> dict:
         )
         camera.sdk_camera = SimulatedCameraSdk(machine_config.camera_serial, frames)
         frequency_adapter = FrequencyAdapter(machine_config, config, publish_event)
-        machine = Machine(
+        machine = MachineRuntime(
             machine_config,
             config,
             camera,
