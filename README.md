@@ -20,7 +20,7 @@ IO 读取失败时，系统记录日志并清空旧 DI 状态，以 `IO_INTERRUP
 
 数据库收尾时先尝试关闭运行库连接，再解锁并关闭实例锁文件；某一步关闭失败仍继续处理其他数据库资源，最后将最先发生的关闭异常交给 Runtime 记录。
 
-现场 START 经本机事件队列进入 `MachineRuntime`，创建当前 `MeasurementSession`；相机结果进入 OCR 排队与识别，频率读数按收到的顺序保存到同一 Session。收到 CLOSE 后停止本轮采集并确定最终频率；关闭信号和 OCR 结果都到达时，先保存证据图片，再写入测量记录并释放当前 Session。频率当前按配置模拟，真实协议待接入。
+现场 START 经本机事件队列进入 `MachineRuntime`，创建当前 `MeasurementSession`；相机采集结果先完成帧准备与筛选，有合格帧时再进入 OCR 排队与识别，频率读数按收到的顺序保存到同一 Session。收到 CLOSE 后停止本轮采集并确定最终频率；关闭信号和 OCR 结果都到达时，先保存证据图片，再写入测量记录并释放当前 Session。频率当前按配置模拟，真实协议待接入。
 
 相机通过 `CaptureResult.frames` 交付 `CameraFrame`，其 `image_bytes` 保存 SDK 复制的原始像素字节；`MachineRuntime.run_ocr_pipeline()` 调用 `prepare_frames_for_ocr()` 为原始帧登记周期身份，生成 `MeasurementFrame`，再得到 `qualified_frames`。识别时，`convert_mono8_frame_to_array()` 校验 Mono8 格式与字节数，将合格帧转换为 `image_numpy`（二维 `uint8` 图像）交给共享 OCR Engine；证据编码继续使用原始像素字节。
 

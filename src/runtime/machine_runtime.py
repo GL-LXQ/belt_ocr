@@ -34,11 +34,11 @@ logger = logging.getLogger(__name__)
 
 
 class ImageEncodingError(RuntimeError):
-    """标记证据图片编码阶段的未知异常。"""
+    """证据图片编码过程中发生的未知异常。"""
 
 
 class EvidenceWriteError(RuntimeError):
-    """标记证据图片文件写入失败。"""
+    """证据图片写入失败。"""
 
 
 class MachineRuntime:
@@ -65,7 +65,7 @@ class MachineRuntime:
             config: 采集、超时和存储配置。
             camera: 当前机器的相机适配器。
             frequency_adapter: 当前机器的频率接收适配器。
-            text_recognizer: 三台机器共享的 OCR 处理器。
+            text_recognizer: 系统共享的 OCR 处理器。
             database: 数据库访问对象。
             publish_event: 业务事件发送入口。
             notify_measurement_progress: 可选进度通知函数，接收机器编号、Session ID、处理阶段和阶段状态。
@@ -813,7 +813,7 @@ class MachineRuntime:
 
         Returns:
             返回示例：
-                None  # 当前测量已标记失败并清理，系统级异常已上报
+                None  # 当前测量已标记失败并完成清理；如有系统级异常，会在清理后上报
         """
         # 保存本轮失败原因。
         session.errors.append(failure_reason)
@@ -884,7 +884,7 @@ class MachineRuntime:
             self.on_system_failure(escalated_error)
 
     def release_finished_session(self) -> None:
-        """在测量已关闭、OCR 和相机任务结束后释放当前测量。
+        """在测量已关闭、当前 Session 不再关联 OCR 任务且相机结果处理结束后释放当前测量。
 
         Args:
             无外部参数。
@@ -934,7 +934,7 @@ class MachineRuntime:
         """处理已经结束的 OCR 任务，上报未处理异常，并检查当前测量是否可以释放。
 
         Args:
-            task: 已结束或取消的本轮 OCR 任务。
+            task: 已结束或取消的 OCR 后台任务。
 
         Returns:
             返回示例：
