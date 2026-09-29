@@ -99,6 +99,7 @@ class SystemRuntime:
             # 组装机器身份与公共相机运行参数。
             machine_config = MachineConfig(
                 machine_id=str(machine_row["id"]),
+                machine_name=machine_row["machine_name"],
                 camera_serial=machine_row["camera_serial"],
                 frequency_meter_serial=machine_row["frequency_meter_serial"],
                 camera_pixel_format=self.config.camera_pixel_format,
@@ -113,6 +114,7 @@ class SystemRuntime:
             # 建立本机采集器，接入事件入口与系统故障回调。
             camera = Camera(
                 machine_config.machine_id,
+                machine_config.machine_name,
                 self.config.capture_window_ms,
                 self.config.camera_timeout_ms,
                 self.publish_event,
@@ -166,7 +168,7 @@ class SystemRuntime:
 
         # 记录本次启动使用的存储路径。
         logger.info(
-            "Runtime开始启动 database_path=%s recovery_path=%s evidence_directory=%s",
+            "监测系统开始启动 database_path=%s recovery_path=%s evidence_directory=%s",
             self.config.database_path,
             self.config.recovery_path,
             self.config.evidence_directory,
@@ -188,9 +190,13 @@ class SystemRuntime:
 
             # 记录本次运行加载的启用机器。
             logger.info(
-                "已加载启用机器 machine_count=%s machine_ids=%s",
+                "监测系统已加载启用机器 machine_count=%s machines=%s",
                 len(self.machines),
-                ", ".join(sorted(self.machines)),
+                ",".join(
+                    f"{machine.machine_config.machine_name}"
+                    f"(id={machine.machine_config.machine_id})"
+                    for machine in self.machines.values()
+                ),
             )
 
             # 校验当前启用机器的串口和 DI 通道绑定。
@@ -238,7 +244,8 @@ class SystemRuntime:
                 # 记录单台相机设备连接失败。
                 except MvsError as error:
                     logger.error(
-                        "相机连接失败 machine_id=%s camera_serial=%s error=%s",
+                        "%s 相机连接失败 machine_id=%s camera_serial=%s error=%s",
+                        machine_config.machine_name,
                         machine_config.machine_id,
                         machine_config.camera_serial,
                         error,
@@ -257,9 +264,10 @@ class SystemRuntime:
 
                 # 记录本机相机连接成功。
                 logger.info(
-                    "相机连接成功 machine_id=%s camera_serial=%s "
+                    "%s 相机连接成功 machine_id=%s camera_serial=%s "
                     "pixel_format=%s exposure_time_us=%s gain=%s "
                     "line_selector=%s line_mode=%s line_source=%s strobe_enabled=%s",
+                    machine_config.machine_name,
                     machine_config.machine_id,
                     machine_config.camera_serial,
                     machine_config.camera_pixel_format,
@@ -280,11 +288,11 @@ class SystemRuntime:
                 raise MvsError("所有启用机器的相机均连接失败")
 
             # 记录共享 OCR Engine 初始化开始。
-            logger.info("开始初始化 OCR Engine")
+            logger.info("开始加载共享OCR模型")
 
             # 在线程中初始化共享 OCR Engine 并等待模型准备完成。
             await run_blocking_operation(self.text_recognizer.initialize)
-            logger.info("OCR Engine 已准备好")
+            logger.info("共享OCR模型已准备完成")
 
             # 按现场初始状态设置各机器的等待复位标志。
             for machine in self.machines.values():
@@ -299,14 +307,13 @@ class SystemRuntime:
 
                 # 启动本机事件处理任务。
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
-                    f"机器处理 machine_id={machine_config.machine_id}",
+                    f"{machine_config.machine_name} 事件处理",
                     machine.listen_events,
                 )))
 
                 # 启动本机频率监听任务。
                 self.worker_tasks.append(asyncio.create_task(self.run_worker(
-                    f"频率监听 machine_id={machine_config.machine_id} "
-                    f"frequency_meter_serial={machine_config.frequency_meter_serial}",
+                    f"{machine_config.machine_name} 频率监听",
                     machine.frequency_adapter.listen_measurements,
                 )))
 
@@ -321,7 +328,8 @@ class SystemRuntime:
 
             # 记录 Runtime 已正式启动并开放现场信号入口。
             logger.info(
-                "Runtime启动完成 machine_count=%s worker_count=%s modbus_serial_port=%s",
+                "监测系统启动完成 machine_count=%s worker_count=%s "
+                "modbus_serial_port=%s",
                 len(self.machines),
                 len(self.worker_tasks),
                 serial_port,
@@ -406,7 +414,12 @@ class SystemRuntime:
 
             # 通信失败时记录日志。
             if states is None:
-                logger.warning("IO 读取失败，旧 DI 状态已清空")
+                logger.warning(
+                    "Modbus DI读取失败，已清空旧状态；未关闭的测量将按IO中断处理，"
+                    "并等待自动重连 serial_port=%s reconnect_interval_ms=%s",
+                    self.config.modbus_serial_port,
+                    self.config.modbus_reconnect_interval_ms,
+                )
 
                 # 清空旧 DI 状态。
                 self.io_previous_states.clear()
@@ -440,7 +453,12 @@ class SystemRuntime:
 
         # 状态数量不足时放弃整次读取结果。
         if len(states) < input_count:
-            logger.warning("DI 状态数量不足，期望 %s，实际 %s", input_count, len(states))
+            logger.warning(
+                "Modbus DI响应数量不足，本次读取已忽略 "
+                "expected_count=%s actual_count=%s",
+                input_count,
+                len(states),
+            )
             return
 
         # 按机器绑定通道逐一处理初始状态或状态变化。
@@ -455,7 +473,9 @@ class SystemRuntime:
 
                 # 记录本机 DI 初始状态。
                 logger.info(
-                    "DI初始状态 machine_id=%s channel=%s state=%s",
+                    "%s 已建立DI初始状态，本次不触发启动或关闭 "
+                    "machine_id=%s channel=%s state=%s",
+                    machine.machine_config.machine_name,
                     machine_id,
                     channel,
                     current_state,
@@ -463,9 +483,13 @@ class SystemRuntime:
 
             # 后续状态变化进入现有启动或关闭入口。
             elif previous_state != current_state:
-                # 记录本次 DI 电平变化。
+                # 记录本次 DI 电平变化及即将发送的机器信号。
+                signal_name = "机器启动信号" if current_state else "机器关闭信号"
                 logger.info(
-                    "DI状态变化 machine_id=%s channel=%s previous=%s current=%s",
+                    "%s DI状态变化，将发送%s machine_id=%s channel=%s "
+                    "previous=%s current=%s",
+                    machine.machine_config.machine_name,
+                    signal_name,
                     machine_id,
                     channel,
                     previous_state,
@@ -604,7 +628,8 @@ class SystemRuntime:
 
             # 记录首次系统故障的异常类型和内容。
             logger.error(
-                "系统故障 error_type=%s error=%s",
+                "检测到系统级故障，停止接收新信号并开始退出 "
+                "error_type=%s error=%s",
                 type(error).__name__,
                 error,
             )
@@ -752,7 +777,7 @@ class SystemRuntime:
         """
         # 记录本次停止开始时的故障、机器和后台任务数量。
         logger.info(
-            "Runtime开始停止 failure=%s machine_count=%s worker_count=%s",
+            "监测系统开始停止 failure=%s machine_count=%s worker_count=%s",
             self.failure,
             len(self.machines),
             len(self.worker_tasks),
@@ -839,4 +864,4 @@ class SystemRuntime:
             self.state_changed.set()
 
             # 记录全部资源释放完成时的最终故障状态。
-            logger.info("Runtime资源释放完成 failure=%s", self.failure)
+            logger.info("监测系统资源释放完成 failure=%s", self.failure)

@@ -54,7 +54,11 @@ async def test_io_recovery_only_uses_first_read_as_baseline(
         modbus_reconnect_interval_ms=1,
     )
     runtime = SystemRuntime(config)
-    machine = SimpleNamespace(waiting_cycle_reset=False, current_session=None)
+    machine = SimpleNamespace(
+        machine_config=SimpleNamespace(machine_name="1号皮带机"),
+        waiting_cycle_reset=False,
+        current_session=None,
+    )
     runtime.machines = {"1": machine}
     runtime.accepting_signals = True
     readings = iter((False, True, None, None, recovered_state, *later_states))
@@ -120,8 +124,14 @@ async def test_io_recovery_only_uses_first_read_as_baseline(
     runtime.modbus_client.disconnect.assert_not_awaited()
 
     # 核对首读只记录初始状态，首个边沿同时记录电平变化。
-    assert "DI初始状态 machine_id=1 channel=0 state=False" in caplog.text
-    assert "DI状态变化 machine_id=1 channel=0 previous=False current=True" in caplog.text
+    assert (
+        "1号皮带机 已建立DI初始状态，本次不触发启动或关闭 "
+        "machine_id=1 channel=0 state=False"
+    ) in caplog.text
+    assert (
+        "1号皮带机 DI状态变化，将发送机器启动信号 "
+        "machine_id=1 channel=0 previous=False current=True"
+    ) in caplog.text
 
     # 核对每次 DI 电平变化产生一条日志和一条机器信号，正常轮询不产生日志。
     edge_logs = [record for record in caplog.records if "DI状态变化" in record.getMessage()]
@@ -133,5 +143,8 @@ async def test_io_recovery_only_uses_first_read_as_baseline(
     assert len(edge_logs) == len(machine_signal_events)
 
     # 核对断线前后的两份首读各记录一条初始状态日志。
-    baseline_logs = [record for record in caplog.records if "DI初始状态" in record.getMessage()]
+    baseline_logs = [
+        record for record in caplog.records
+        if "已建立DI初始状态" in record.getMessage()
+    ]
     assert len(baseline_logs) == 2

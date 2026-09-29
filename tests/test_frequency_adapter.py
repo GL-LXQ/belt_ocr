@@ -37,7 +37,7 @@ async def test_frequency_readings_follow_each_session(
         mvs_development_directory=tmp_path,
         frequency_interval_ms=125,
     )
-    machine_config = MachineConfig("1", "camera-1", "meter-1")
+    machine_config = MachineConfig("1", "1号皮带机", "camera-1", "meter-1")
     delivered_events: list[RuntimeEvent] = []
 
     async def publish_event(event: RuntimeEvent) -> None:
@@ -161,7 +161,7 @@ async def test_machine_collects_three_readings_before_close(
         evidence_directory=tmp_path / "evidence",
         mvs_development_directory=tmp_path,
     )
-    machine_config = MachineConfig("1", "camera-1", "meter-1")
+    machine_config = MachineConfig("1", "1号皮带机", "camera-1", "meter-1")
     session = MeasurementSession(
         session_id="current-session",
         machine_id="1",

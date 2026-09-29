@@ -65,7 +65,9 @@ class CaptureTask:
         except Exception:
             # 标记相机故障，记录采集异常并继续抛出。
             self.sdk_camera.faulted = True
-            logger.exception("相机采集失败 serial=%s", self.sdk_camera.serial)
+            logger.exception(
+                "相机取流过程中发生异常 camera_serial=%s", self.sdk_camera.serial
+            )
             raise
         finally:
             # 在同一线程停止取流。
@@ -74,7 +76,9 @@ class CaptureTask:
             except Exception:
                 # 停流失败时标记相机故障并抛出。
                 self.sdk_camera.faulted = True
-                logger.exception("相机停流失败 serial=%s", self.sdk_camera.serial)
+                logger.exception(
+                    "相机停止取流失败 camera_serial=%s", self.sdk_camera.serial
+                )
                 raise
 
         # 成功停流后返回本轮全部帧和统计。
@@ -94,15 +98,17 @@ class Camera:
     def __init__(
         self,
         machine_id: str,
+        machine_name: str,
         capture_window_ms: int,
         camera_timeout_ms: int,
         publish_event: PublishEvent,
         on_system_failure: Callable[[Exception], None],
     ) -> None:
-        """登记机器编号、采集任务与业务事件入口。
+        """登记机器身份、采集任务与业务事件入口。
 
         Args:
             machine_id: 采集结果归属的机器编号。
+            machine_name: 采集结果归属的机器名称。
             capture_window_ms: 单轮采集窗口毫秒数。
             camera_timeout_ms: 单帧读取超时毫秒数。
             publish_event: 整轮结果交付入口。
@@ -112,8 +118,9 @@ class Camera:
             返回示例：
                 None  # 相机适配器初始化完成
         """
-        # 登记机器编号与采集参数。
+        # 登记机器身份与采集参数。
         self.machine_id = machine_id
+        self.machine_name = machine_name
         self.capture_window_ms = capture_window_ms
         self.camera_timeout_ms = camera_timeout_ms
 
@@ -208,7 +215,9 @@ class Camera:
 
         # 记录本轮采集启动参数。
         logger.info(
-            "相机采集开始 machine_id=%s session_id=%s camera_serial=%s capture_window_ms=%s",
+            "%s 相机采集开始 machine_id=%s session_id=%s "
+            "camera_serial=%s capture_window_ms=%s",
+            self.machine_name,
             self.machine_id,
             session_id,
             sdk_camera.serial,
@@ -285,7 +294,11 @@ class Camera:
         except Exception:
             # 采集线程未记录过的调度异常在此记录。
             if not capture_task.sdk_camera.faulted:
-                logger.exception("采集任务执行失败 machine_id=%s", self.machine_id)
+                logger.exception(
+                    "%s 相机采集任务发生未分类异常 machine_id=%s",
+                    self.machine_name,
+                    self.machine_id,
+                )
             raise
         finally:
             # 释放相机采集锁。
@@ -301,9 +314,12 @@ class Camera:
         if capture_error is not None:
             # 记录本轮采集故障身份，底层异常已有记录。
             logger.error(
-                "相机采集故障 machine_id=%s session_id=%s error=%s",
+                "%s 本轮相机采集失败 machine_id=%s session_id=%s "
+                "camera_serial=%s error=%s",
+                self.machine_name,
                 self.machine_id,
                 session_id,
+                capture_task.sdk_camera.serial,
                 capture_error,
             )
             await self.publish_event(RuntimeEvent(
@@ -316,7 +332,9 @@ class Camera:
 
         # 记录本轮采集完成的帧数和耗时。
         logger.info(
-            "相机采集完成 machine_id=%s session_id=%s frame_count=%s capture_duration_seconds=%.3f received_frame_count=%s",
+            "%s 相机采集完成 machine_id=%s session_id=%s frame_count=%s "
+            "capture_duration_seconds=%.3f received_frame_count=%s",
+            self.machine_name,
             self.machine_id,
             session_id,
             len(result.frames),
@@ -329,7 +347,12 @@ class Camera:
             await self.publish_event(RuntimeEvent(EventType.CAPTURE_COMPLETED, self.machine_id, session_id, result))
         except Exception:
             # 记录结果交付异常并结束后台任务。
-            logger.exception("采集结果交付失败 machine_id=%s session_id=%s", self.machine_id, session_id)
+            logger.exception(
+                "%s 相机采集结果交付到测量流程失败 machine_id=%s session_id=%s",
+                self.machine_name,
+                self.machine_id,
+                session_id,
+            )
             raise
 
     async def stop(self) -> None:

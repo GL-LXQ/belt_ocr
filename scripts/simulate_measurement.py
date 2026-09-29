@@ -212,6 +212,7 @@ async def run_measurement_simulation(scenario: str) -> dict:
         machine_row = machine_rows[0]
         machine_config = MachineConfig(
             machine_id=str(machine_row["id"]),
+            machine_name=machine_row["machine_name"],
             camera_serial=machine_row["camera_serial"],
             frequency_meter_serial=machine_row["frequency_meter_serial"],
         )
@@ -296,6 +297,7 @@ async def run_measurement_simulation(scenario: str) -> dict:
 
         camera = Camera(
             machine_config.machine_id,
+            machine_config.machine_name,
             config.capture_window_ms,
             config.camera_timeout_ms,
             publish_event,

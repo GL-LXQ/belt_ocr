@@ -99,7 +99,7 @@ GUI 启动入口创建 Repo、Service 和唯一的 `AppController`，四个正�
 
 GUI 启动时先在运行库确保 `abnormal_events` 表存在。异常事件页进入时经 `AppController`、`AbnormalEventService`、`AbnormalEventRepo` 读取该表，按时间倒序显示异常记录，并支持机器筛选、完整 Session ID 搜索和详情查看。后续异常写入使用中文 `reason`，已有记录原样保留；页面直接显示库中的异常原因，详情展示完整 `payload_json`。
 
-运行链路日志按一轮测量的处理顺序串成时间线：`SystemRuntime` 记录开始启动、加载的启用机器、逐台相机连接、OCR Engine 初始化、DI 初始状态与电平变化和启动完成；`Camera` 记录采集开始、采集完成的帧数与耗时和采集故障；`MachineRuntime` 记录本轮开始、采集结果、开始关闭周期、频率结算、开始保存测量结果、已保存和 Session 释放；`Database` 只在双库初始化完成、写锁竞争准备重试和内容一致的重复写入被跳过时记录。退出链路依次记录 `Runtime开始停止` 和 `Runtime资源释放完成`，监测线程记录启动和结束。正常 DI 轮询、逐帧采集和事件队列收发不产生日志。
+运行链路从数据库读取已启用机器的名称、编号及设备绑定，并把机器名称随 `MachineConfig` 传给相机和单机运行时；终端日志先显示机器名称，再保留 `machine_id`、`session_id` 等定位字段，按 DI 信号、开始测量、相机采集、OCR 排队与识别、频率结算、结果保存和测量结束串成时间线。监测系统另行记录启动、共享 OCR 模型加载、Modbus DI 断线重连和资源释放；正常 DI 轮询、逐帧采集和事件队列收发不产生日志。
 
 开发联调可从仓库根目录运行 `python scripts/simulate_measurement.py normal` 或 `python scripts/simulate_measurement.py review`。正常场景读取 `statistics/imgs` 的 JPG，待复核场景取 `statistics/test_images_without_results` 中按文件名排序的首张 BMP，统一解码为 Mono8 相机帧。脚本通过现有 Camera、TextRecognizer、MachineRuntime 的事件队列完成真实 OCR、50.0 Hz 频率结算和 CLOSE，再由 MachineRuntime 将证据 JPG 与测量结果写入正式配置的业务库；历史记录页按原有查询和图片展示流程查看新记录。模拟只替代相机取流、图片编码和现场输入，不启动真实 MVS 或 Modbus。
 

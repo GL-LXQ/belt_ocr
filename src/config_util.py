@@ -13,6 +13,7 @@ class MachineConfig:
     """一台机器的身份与采集参数。"""
 
     machine_id: str  # 业务库机器表自增编号的字符串形式
+    machine_name: str  # 业务库机器表中的机器名称
     camera_serial: str  # 绑定的相机序列号
     frequency_meter_serial: str  # 绑定的频率仪序列号
     camera_pixel_format: str | None = None  # 相机像素格式，未配置时由相机决定

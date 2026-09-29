@@ -95,11 +95,20 @@ class ModbusClient:
 
         # 客户端未报告已连接时视为连接失败。
         if not self._connected:
-            logger.error("Modbus RTU 连接失败，设备未报告已连接")
+            logger.error(
+                "Modbus RTU连接失败，设备未报告已连接 "
+                "serial_port=%s unit_id=%s",
+                self.serial_port,
+                self.unit_id,
+            )
             return False
 
         # 记录连接成功的串口名称。
-        logger.info("Modbus RTU 已连接: %s", self.serial_port)
+        logger.info(
+            "Modbus RTU连接成功 serial_port=%s unit_id=%s",
+            self.serial_port,
+            self.unit_id,
+        )
         return True
 
     async def disconnect(self) -> None:
@@ -142,12 +151,22 @@ class ModbusClient:
 
             # 响应为异常帧时放弃本次结果。
             if result.isError():
-                logger.warning("读取离散输入失败，地址: %s", address)
+                logger.warning(
+                    "Modbus DI读取失败 start_address=%s count=%s unit_id=%s",
+                    address,
+                    count,
+                    self.unit_id,
+                )
                 return None
 
             # 响应数量不足时放弃本次结果。
             if len(result.bits) < count:
-                logger.warning("离散输入响应数量不足，地址: %s", address)
+                logger.warning(
+                    "Modbus DI响应数量不足 start_address=%s count=%s unit_id=%s",
+                    address,
+                    count,
+                    self.unit_id,
+                )
                 return None
 
             # 按请求数量返回输入状态列表。
@@ -156,12 +175,26 @@ class ModbusClient:
         except OSError as error:
             # 连接或读取时串口失效，复位状态并等待下一轮重连。
             self._connected = False
-            logger.error("连接或读取离散输入时串口通信失败: %s", error)
+            logger.error(
+                "连接或读取Modbus DI时串口通信失败 "
+                "start_address=%s count=%s unit_id=%s error=%s",
+                address,
+                count,
+                self.unit_id,
+                error,
+            )
             return None
 
         except ModbusException as error:
             # 连接或读取时发生 Modbus 协议异常，放弃本次结果。
-            logger.error("连接或读取离散输入时发生 Modbus 异常: %s", error)
+            logger.error(
+                "连接或读取Modbus DI时发生协议异常 "
+                "start_address=%s count=%s unit_id=%s error=%s",
+                address,
+                count,
+                self.unit_id,
+                error,
+            )
             return None
 
     async def _ensure_connected(self) -> bool:

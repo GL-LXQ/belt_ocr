@@ -179,7 +179,7 @@ def create_machine(
         progress_updates.append((machine_id, session_id, stage, status))
 
     machine = MachineRuntime(
-        machine_config=MachineConfig("1", "camera-1", "meter-1"),
+        machine_config=MachineConfig("1", "1号皮带机", "camera-1", "meter-1"),
         config=config,
         camera=camera,
         frequency_adapter=SimpleNamespace(active_session_id=None),
@@ -346,13 +346,16 @@ async def test_finalize_saves_images_before_record(
     assert record[2] == str(expected_directory)
     assert record[3] == 0
 
-    # 核对保存开始与 Session 释放日志及先后顺序。
+    # 核对保存开始与测量周期结束日志及先后顺序。
     log_messages = [log_record.getMessage() for log_record in caplog.records]
     save_message = (
-        "开始保存测量结果 machine_id=1 session_id=session-1 "
-        "evidence_frame_count=1 needs_review=False final_frequency=50.0"
+        "1号皮带机 开始保存本轮测量结果 machine_id=1 session_id=session-1 "
+        "evidence_frame_count=1 needs_review=False final_frequency_hz=50.0"
     )
-    release_message = "Session释放 machine_id=1 session_id=session-1 state=COMMITTED"
+    release_message = (
+        "1号皮带机 当前测量周期已结束，运行时状态已释放 "
+        "machine_id=1 session_id=session-1 final_state=COMMITTED"
+    )
     assert save_message in log_messages
     assert release_message in log_messages
     assert log_messages.index(save_message) < log_messages.index(release_message)
@@ -535,7 +538,9 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
         faulted=False,
         capture_lock=threading.Lock(),
     )
-    camera = Camera("1", 1000, 50, publish_event, machine.on_system_failure)
+    camera = Camera(
+        "1", "1号皮带机", 1000, 50, publish_event, machine.on_system_failure
+    )
     camera.sdk_camera = sdk_camera
     machine.camera = camera
     machine.initialized = True
@@ -1010,7 +1015,10 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
         await machine.queue.put(event)
 
     # 将真实相机适配器和测试设备接入机器。
-    camera = Camera("1", 1000, 50, deliver_capture_event, machine.on_system_failure)
+    camera = Camera(
+        "1", "1号皮带机", 1000, 50, deliver_capture_event,
+        machine.on_system_failure,
+    )
     camera.sdk_camera = sdk_camera
     machine.camera = camera
     machine.initialized = True
@@ -1058,7 +1066,9 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     other_machine, other_database, _, _, _ = create_machine(
         other_directory, (evidence_frame,)
     )
-    other_machine.machine_config = MachineConfig("2", "camera-2", "meter-2")
+    other_machine.machine_config = MachineConfig(
+        "2", "2号皮带机", "camera-2", "meter-2"
+    )
     other_machine.current_session = None
     other_machine.initialized = True
     other_machine.camera.available = True
@@ -1154,7 +1164,7 @@ async def test_busy_camera_does_not_mark_device_faulted(tmp_path: Path) -> None:
     capture_lock = threading.Lock()
     capture_lock.acquire()
     sdk_camera = SimpleNamespace(closed=False, faulted=False, capture_lock=capture_lock)
-    camera = Camera("1", 1000, 50, AsyncMock(), Mock())
+    camera = Camera("1", "1号皮带机", 1000, 50, AsyncMock(), Mock())
     camera.sdk_camera = sdk_camera
     machine.camera = camera
 
@@ -2273,7 +2283,7 @@ async def test_audit_failure_does_not_block_session_cleanup(
 
     # 核对审计写入只尝试一次且周期已释放。
     database.save_abnormal_event.assert_called_once()
-    assert "记录测量失败事件失败" in caplog.text
+    assert "1号皮带机 保存测量失败记录时发生异常" in caplog.text
     assert machine.current_session is None
 
     # 核对系统故障在收尾完成后收到审计异常。
@@ -2325,7 +2335,7 @@ async def test_storage_failure_keeps_root_cause_when_audit_also_fails(
     # 核对审计写入只尝试一次且失败已记录日志。
     database.save_abnormal_event.assert_called_once()
     assert read_abnormal_events(database) == []
-    assert "记录测量失败事件失败" in caplog.text
+    assert "1号皮带机 保存测量失败记录时发生异常" in caplog.text
 
     # 核对系统故障只上报一次，且仍是原始证据写入根因。
     machine.on_system_failure.assert_called_once()

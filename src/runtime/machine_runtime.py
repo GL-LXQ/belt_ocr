@@ -239,13 +239,21 @@ class MachineRuntime:
         """
         # 上一轮尚未结束时跳过本次 START。
         if self.current_session is not None:
-            logger.warning("上一轮尚未结束，跳过 START machine_id=%s", self.machine_config.machine_id)
+            logger.warning(
+                "%s 收到启动信号，但当前测量尚未结束，已忽略本次启动 "
+                "machine_id=%s current_session_id=%s",
+                self.machine_config.machine_name,
+                self.machine_config.machine_id,
+                self.current_session.session_id,
+            )
             return
 
         # 本机发生设备故障后不再受理 START。
         if self.machine_failure_reason is not None:
             logger.warning(
-                "机器故障，跳过 START machine_id=%s reason=%s",
+                "%s 收到启动信号，但机器处于故障状态，已忽略本次启动 "
+                "machine_id=%s reason=%s",
+                self.machine_config.machine_name,
                 self.machine_config.machine_id,
                 self.machine_failure_reason,
             )
@@ -254,7 +262,9 @@ class MachineRuntime:
         # 等待现场复位时跳过本次 START。
         if self.waiting_cycle_reset:
             logger.warning(
-                "等待现场复位，跳过 START machine_id=%s",
+                "%s 收到启动信号，但仍在等待现场关闭复位，暂不启动新测量 "
+                "machine_id=%s",
+                self.machine_config.machine_name,
                 self.machine_config.machine_id,
             )
             return
@@ -266,7 +276,9 @@ class MachineRuntime:
 
             # 记录本轮未受理及本机相机状态。
             logger.error(
-                "本轮未受理 machine_id=%s camera_available=%s is_capturing=%s",
+                "%s 收到启动信号，但相机当前不可用于新测量，本轮未启动 "
+                "machine_id=%s camera_available=%s camera_capturing=%s",
+                self.machine_config.machine_name,
                 self.machine_config.machine_id,
                 self.camera.available,
                 self.camera.is_capturing,
@@ -289,7 +301,9 @@ class MachineRuntime:
 
         # 记录本轮开始日志。
         logger.info(
-            "开始测量 machine_id=%s session_id=%s unfinished_ocr_tasks=%s",
+            "%s 开始新的测量 machine_id=%s session_id=%s "
+            "unfinished_ocr_tasks=%s",
+            self.machine_config.machine_name,
             session.machine_id,
             session.session_id,
             len(self.unfinished_recognition_tasks),
@@ -378,7 +392,9 @@ class MachineRuntime:
 
         # 记录本轮进入关闭处理，正常关闭没有中断原因。
         logger.info(
-            "开始关闭周期 machine_id=%s session_id=%s interrupted=%s failure_reason=%s",
+            "%s 开始结束当前测量 machine_id=%s session_id=%s "
+            "interrupted=%s reason=%s",
+            self.machine_config.machine_name,
             session.machine_id,
             session.session_id,
             interrupted,
@@ -419,7 +435,9 @@ class MachineRuntime:
 
         # 记录本轮频率结算结果。
         logger.info(
-            "频率结算 machine_id=%s session_id=%s frequency_count=%s frequency_state=%s final_frequency=%s",
+            "%s 频率采集已结束，确定本轮最终频率 machine_id=%s session_id=%s "
+            "reading_count=%s result=%s final_frequency_hz=%s",
+            self.machine_config.machine_name,
             session.machine_id,
             session.session_id,
             len(session.measurement_frequencies),
@@ -526,9 +544,12 @@ class MachineRuntime:
         # 事件不属于当前周期时隔离并结束。
         if session is None or event.session_id != session.session_id:
             logger.warning(
-                "隔离未知或已结算事件 machine_id=%s session_id=%s event=%s",
+                "%s 收到不属于当前测量周期的事件，已忽略 machine_id=%s "
+                "event_session_id=%s current_session_id=%s event_type=%s",
+                self.machine_config.machine_name,
                 event.machine_id,
                 event.session_id,
+                session.session_id if session is not None else None,
                 event.event_type,
             )
             return
@@ -564,7 +585,10 @@ class MachineRuntime:
         # 本轮不在处理中时丢弃迟到结果并结束。
         if session.state != SessionState.RUNNING:
             logger.warning(
-                "忽略迟到结果 session_id=%s state=%s event=%s",
+                "%s 收到已经结束测量周期的迟到结果，已忽略 "
+                "machine_id=%s session_id=%s session_state=%s event_type=%s",
+                self.machine_config.machine_name,
+                session.machine_id,
                 session.session_id,
                 session.state.value,
                 event.event_type,
@@ -585,7 +609,9 @@ class MachineRuntime:
 
                 # 记录本轮采集帧数和统计。
                 logger.info(
-                    "采集结果已接收 machine_id=%s session_id=%s frame_count=%s capture_summary=%s",
+                    "%s 相机采集结果已进入测量流程 machine_id=%s session_id=%s "
+                    "frame_count=%s capture_summary=%s",
+                    self.machine_config.machine_name,
                     session.machine_id,
                     session.session_id,
                     len(capture_result.frames),
@@ -630,7 +656,8 @@ class MachineRuntime:
                 self.unfinished_recognition_tasks.add(task)
                 task.add_done_callback(self.handle_recognition_task_finished)
                 logger.info(
-                    "OCR任务已创建 machine_id=%s session_id=%s",
+                    "%s 本轮OCR流程已启动 machine_id=%s session_id=%s",
+                    self.machine_config.machine_name,
                     session.machine_id,
                     session.session_id,
                 )
@@ -698,10 +725,13 @@ class MachineRuntime:
                 # 记录本轮 OCR 超时与后台任务数量。
                 if event.event_type == EventType.OCR_TIMEOUT:
                     logger.info(
-                        "OCR识别超时 machine_id=%s session_id=%s "
-                        "current_task=%s unfinished_ocr_tasks=%s",
+                        "%s OCR处理超过结果等待期限，当前测量将按超时处理 "
+                        "machine_id=%s session_id=%s timeout_ms=%s "
+                        "current_task_exists=%s unfinished_ocr_tasks=%s",
+                        self.machine_config.machine_name,
                         session.machine_id,
                         session.session_id,
+                        self.config.ocr_result_timeout_ms,
                         self.current_recognition_task is not None,
                         len(self.unfinished_recognition_tasks),
                     )
@@ -753,7 +783,8 @@ class MachineRuntime:
 
         # 记录本机设备故障。
         logger.error(
-            "机器故障 machine_id=%s session_id=%s reason=%s",
+            "%s 发生机器故障 machine_id=%s session_id=%s reason=%s",
+            self.machine_config.machine_name,
             session.machine_id,
             session.session_id,
             failure_reason,
@@ -793,7 +824,8 @@ class MachineRuntime:
 
         # 打印机器、周期和错误明细。
         logger.error(
-            "测量失败 machine_id=%s session_id=%s errors=%s",
+            "%s 当前测量失败 machine_id=%s session_id=%s errors=%s",
+            self.machine_config.machine_name,
             session.machine_id,
             session.session_id,
             session.errors,
@@ -813,7 +845,8 @@ class MachineRuntime:
             # 审计写入失败时记录日志并保留异常对象。
             audit_error = error
             logger.exception(
-                "记录测量失败事件失败 machine_id=%s session_id=%s",
+                "%s 保存测量失败记录时发生异常 machine_id=%s session_id=%s",
+                self.machine_config.machine_name,
                 session.machine_id,
                 session.session_id,
             )
@@ -885,7 +918,9 @@ class MachineRuntime:
 
         # 记录本轮 Session 已满足释放条件。
         logger.info(
-            "Session释放 machine_id=%s session_id=%s state=%s",
+            "%s 当前测量周期已结束，运行时状态已释放 "
+            "machine_id=%s session_id=%s final_state=%s",
+            self.machine_config.machine_name,
             session.machine_id,
             session.session_id,
             session.state.value,
@@ -905,23 +940,17 @@ class MachineRuntime:
             返回示例：
                 None  # 任务已回收，当前任务所属的结束周期已尝试清理
         """
-        # 记录识别任务结束时的绑定关系与未结束任务数量。
-        logger.info(
-            "OCR后台任务结束 machine_id=%s is_current=%s cancelled=%s "
-            "unfinished_before=%s",
-            self.machine_config.machine_id,
-            self.current_recognition_task is task,
-            task.cancelled(),
-            len(self.unfinished_recognition_tasks),
-        )
-
         # 从未结束任务集合中移除已经完成的识别任务。
         self.unfinished_recognition_tasks.discard(task)
 
-        # 记录回收后的未结束任务数量。
+        # 记录识别任务回收后的绑定关系与剩余数量。
         logger.info(
-            "OCR后台任务已回收 machine_id=%s unfinished_after=%s",
+            "%s OCR后台任务已结束并回收 machine_id=%s is_current=%s "
+            "cancelled=%s remaining_ocr_tasks=%s",
+            self.machine_config.machine_name,
             self.machine_config.machine_id,
+            self.current_recognition_task is task,
+            task.cancelled(),
             len(self.unfinished_recognition_tasks),
         )
 
@@ -1019,7 +1048,9 @@ class MachineRuntime:
                 # 从实际等待共享资源时开始计时。
                 wait_started = time.monotonic()
                 logger.info(
-                    "OCR等待共享识别资源 machine_id=%s session_id=%s",
+                    "%s OCR识别正在排队，等待前一任务完成 "
+                    "machine_id=%s session_id=%s",
+                    self.machine_config.machine_name,
                     session.machine_id,
                     session.session_id,
                 )
@@ -1031,8 +1062,9 @@ class MachineRuntime:
                     ):
                         # 记录获得资源时的等待时长。
                         logger.info(
-                            "OCR获得共享识别资源 machine_id=%s session_id=%s "
+                            "%s OCR排队结束 machine_id=%s session_id=%s "
                             "wait_seconds=%.3f",
+                            self.machine_config.machine_name,
                             session.machine_id,
                             session.session_id,
                             time.monotonic() - wait_started,
@@ -1041,8 +1073,9 @@ class MachineRuntime:
                         # 周期已失效时直接结束。
                         if session.state != SessionState.RUNNING:
                             logger.info(
-                                "OCR获得资源后发现Session已失效，跳过识别 "
-                                "machine_id=%s session_id=%s state=%s",
+                                "%s OCR排队结束时本轮测量已失效，已取消识别 "
+                                "machine_id=%s session_id=%s session_state=%s",
+                                self.machine_config.machine_name,
                                 session.machine_id,
                                 session.session_id,
                                 session.state.value,
@@ -1059,7 +1092,8 @@ class MachineRuntime:
                         # 记录本轮 OCR 实际开始时间和处理期限。
                         processing_started = time.monotonic()
                         logger.info(
-                            "OCR开始识别 machine_id=%s session_id=%s timeout_ms=%s",
+                            "%s OCR开始识别 machine_id=%s session_id=%s timeout_ms=%s",
+                            self.machine_config.machine_name,
                             session.machine_id,
                             session.session_id,
                             self.config.ocr_result_timeout_ms,
@@ -1076,8 +1110,9 @@ class MachineRuntime:
                         except OCRProcessingError:
                             # 记录本轮 OCR 执行失败的耗时。
                             logger.info(
-                                "OCR识别执行失败 machine_id=%s session_id=%s "
+                                "%s OCR识别执行失败 machine_id=%s session_id=%s "
                                 "elapsed_seconds=%.3f",
+                                self.machine_config.machine_name,
                                 session.machine_id,
                                 session.session_id,
                                 time.monotonic() - processing_started,
@@ -1086,8 +1121,9 @@ class MachineRuntime:
 
                         # 记录本轮 OCR 执行时长。
                         logger.info(
-                            "OCR识别完成 machine_id=%s session_id=%s "
+                            "%s OCR识别完成 machine_id=%s session_id=%s "
                             "elapsed_seconds=%.3f",
+                            self.machine_config.machine_name,
                             session.machine_id,
                             session.session_id,
                             time.monotonic() - processing_started,
@@ -1096,8 +1132,10 @@ class MachineRuntime:
                 except OCRResourceWaitTimeoutError:
                     # 向当前周期交付识别资源等待超时。
                     logger.warning(
-                        "OCR等待共享识别资源超时 machine_id=%s session_id=%s "
+                        "%s OCR排队等待超时，本轮识别失败 "
+                        "machine_id=%s session_id=%s "
                         "wait_timeout_ms=%s",
+                        self.machine_config.machine_name,
                         session.machine_id,
                         session.session_id,
                         self.config.ocr_lock_wait_timeout_ms,
@@ -1110,7 +1148,12 @@ class MachineRuntime:
                     return
         except OCRProcessingError as error:
             # 预处理或 OCR 已知错误按本轮失败交付。
-            logger.exception("OCR 处理失败 session_id=%s", session.session_id)
+            logger.exception(
+                "%s OCR流程处理失败 machine_id=%s session_id=%s",
+                self.machine_config.machine_name,
+                session.machine_id,
+                session.session_id,
+            )
             await asyncio.sleep(0)
             event_type, payload = EventType.OCR_FAILED, str(error)
 
@@ -1123,7 +1166,12 @@ class MachineRuntime:
                 await self.publish_event(RuntimeEvent(event_type, session.machine_id, session.session_id, payload))
             except Exception:
                 # 记录结果交付异常并结束后台任务。
-                logger.exception("OCR 结果交付失败 session_id=%s", session.session_id)
+                logger.exception(
+                    "%s OCR结果交付到测量流程失败 machine_id=%s session_id=%s",
+                    self.machine_config.machine_name,
+                    session.machine_id,
+                    session.session_id,
+                )
                 raise
 
     async def handle_frequency_measured(
@@ -1241,7 +1289,9 @@ class MachineRuntime:
 
         # 记录本轮待保存的证据图片数量和最终结果。
         logger.info(
-            "开始保存测量结果 machine_id=%s session_id=%s evidence_frame_count=%s needs_review=%s final_frequency=%s",
+            "%s 开始保存本轮测量结果 machine_id=%s session_id=%s "
+            "evidence_frame_count=%s needs_review=%s final_frequency_hz=%s",
+            self.machine_config.machine_name,
             session.machine_id,
             session.session_id,
             len(evidence_frames),
@@ -1275,7 +1325,8 @@ class MachineRuntime:
         except EvidenceWriteError as error:
             # 记录证据图片写入失败。
             logger.exception(
-                "证据图片写入失败 machine_id=%s session_id=%s",
+                "%s 保存证据图片失败 machine_id=%s session_id=%s",
+                self.machine_config.machine_name,
                 session.machine_id,
                 session.session_id,
             )
@@ -1300,7 +1351,8 @@ class MachineRuntime:
                 else "测量结果入库失败"
             )
             logger.exception(
-                "数据库提交失败 machine_id=%s session_id=%s",
+                "%s 保存测量记录到数据库失败 machine_id=%s session_id=%s",
+                self.machine_config.machine_name,
                 session.machine_id,
                 session.session_id,
             )
@@ -1332,7 +1384,8 @@ class MachineRuntime:
 
         # 记录本轮保存结果。
         logger.info(
-            "已保存 machine_id=%s session_id=%s",
+            "%s 本轮测量结果保存完成 machine_id=%s session_id=%s",
+            self.machine_config.machine_name,
             session.machine_id,
             session.session_id,
         )

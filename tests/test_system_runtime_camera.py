@@ -67,6 +67,7 @@ async def test_camera_connection_failure_preserves_other_machine(
         machine_id: SimpleNamespace(
             machine_config=MachineConfig(
                 machine_id=machine_id,
+                machine_name=f"{machine_id}号皮带机",
                 camera_serial=f"camera-{machine_id}",
                 frequency_meter_serial=f"meter-{machine_id}",
                 camera_pixel_format="Mono8",
@@ -189,6 +190,7 @@ def test_initialize_machines_passes_camera_state_notification(
     runtime = SystemRuntime(config)
     enabled_machine = {
         "id": 1,
+        "machine_name": "1号皮带机",
         "camera_serial": "camera-1",
         "frequency_meter_serial": "meter-1",
     }
@@ -237,8 +239,18 @@ def test_initialize_machines_copies_common_camera_parameters(
     )
     runtime = SystemRuntime(config)
     machine_rows = [
-        {"id": 1, "camera_serial": "camera-1", "frequency_meter_serial": "meter-1"},
-        {"id": 2, "camera_serial": "camera-2", "frequency_meter_serial": "meter-2"},
+        {
+            "id": 1,
+            "machine_name": "1号皮带机",
+            "camera_serial": "camera-1",
+            "frequency_meter_serial": "meter-1",
+        },
+        {
+            "id": 2,
+            "machine_name": "2号皮带机",
+            "camera_serial": "camera-2",
+            "frequency_meter_serial": "meter-2",
+        },
     ]
     monkeypatch.setattr(
         "runtime.system_runtime.MachineRepo.list_enabled", Mock(return_value=machine_rows)
@@ -248,6 +260,8 @@ def test_initialize_machines_copies_common_camera_parameters(
     runtime.initialize_machines()
     for machine in runtime.machines.values():
         machine_config = machine.machine_config
+        assert machine_config.machine_name == f"{machine_config.machine_id}号皮带机"
+        assert machine.camera.machine_name == machine_config.machine_name
         assert machine_config.camera_pixel_format == "Mono8"
         assert machine_config.camera_exposure_time_us == 80.0
         assert machine_config.camera_gain == 0.0
@@ -289,7 +303,7 @@ async def test_all_camera_connections_failed_stops_startup(
     )
     runtime = SystemRuntime(config)
     machine = SimpleNamespace(
-        machine_config=MachineConfig("1", "camera-1", "meter-1"),
+        machine_config=MachineConfig("1", "1号皮带机", "camera-1", "meter-1"),
         camera=SimpleNamespace(sdk_camera=None),
         discard_pending_events=Mock(),
         release_resources=AsyncMock(),
@@ -341,7 +355,7 @@ async def test_ocr_initialization_failure_stops_startup(
     )
     runtime = SystemRuntime(config)
     machine = SimpleNamespace(
-        machine_config=MachineConfig("1", "camera-1", "meter-1"),
+        machine_config=MachineConfig("1", "1号皮带机", "camera-1", "meter-1"),
         camera=SimpleNamespace(sdk_camera=None),
         discard_pending_events=Mock(),
         release_resources=AsyncMock(),

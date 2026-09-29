@@ -133,7 +133,7 @@ async def test_mvs_capture_error_publishes_machine_failure() -> None:
     )
     publish_event = AsyncMock()
     on_system_failure = Mock()
-    camera = Camera("1", 1000, 50, publish_event, on_system_failure)
+    camera = Camera("1", "1号皮带机", 1000, 50, publish_event, on_system_failure)
     camera.sdk_camera = sdk_camera
     capture_task = CaptureTask(sdk_camera, time.monotonic(), 1.0, 50)
     camera.current_capture = capture_task
@@ -174,7 +174,7 @@ async def test_unknown_capture_error_uses_system_failure_callback() -> None:
     )
     publish_event = AsyncMock()
     on_system_failure = Mock()
-    camera = Camera("1", 1000, 50, publish_event, on_system_failure)
+    camera = Camera("1", "1号皮带机", 1000, 50, publish_event, on_system_failure)
     camera.sdk_camera = sdk_camera
 
     # 启动采集并等待任务完成回调处理原始异常。
