@@ -212,18 +212,32 @@ def read_abnormal_events(database: Database) -> list[tuple]:
         ).fetchall()
 
 
-def test_ocr_lock_wait_timeout_configuration() -> None:
+def test_ocr_lock_wait_timeout_configuration(tmp_path: Path) -> None:
     """确认共享 OCR 锁等待期限从配置读取并要求正数。
 
     Args:
-        无外部参数。
+        tmp_path: pytest 提供的临时目录。
 
     Returns:
         返回示例：
             None  # 配置值为 10000 毫秒，零值被拒绝
     """
-    # 读取现场配置并核对共享锁等待期限。
-    configuration_directory = Path(__file__).resolve().parents[1] / "config"
+    # 将待现场填写的相机枚举值替换为测试用值。
+    source_directory = Path(__file__).resolve().parents[1] / "config"
+    configuration_directory = tmp_path / "config"
+    configuration_directory.mkdir()
+    configuration_text = (source_directory / "config.yaml").read_text(encoding="utf-8")
+    configuration_text = configuration_text.replace(
+        "camera_line_selector: null", "camera_line_selector: Line2"
+    )
+    configuration_text = configuration_text.replace(
+        "camera_line_source: null", "camera_line_source: ExposureStartActive"
+    )
+    (configuration_directory / "config.yaml").write_text(
+        configuration_text, encoding="utf-8"
+    )
+
+    # 读取测试配置并核对共享锁等待期限。
     configuration = load_config(configuration_directory)
     assert configuration.ocr_lock_wait_timeout_ms == 10000
 

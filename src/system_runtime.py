@@ -96,11 +96,18 @@ class SystemRuntime:
 
         # 遍历启用机器，逐台建立运行对象并登记。
         for machine_row in enabled_machines:
-            # 用业务库自增编号的字符串形式作为机器编号，组装机器身份配置。
+            # 组装机器身份与公共相机运行参数。
             machine_config = MachineConfig(
                 machine_id=str(machine_row["id"]),
                 camera_serial=machine_row["camera_serial"],
                 frequency_meter_serial=machine_row["frequency_meter_serial"],
+                camera_pixel_format=self.config.camera_pixel_format,
+                camera_exposure_time_us=self.config.camera_exposure_time_us,
+                camera_gain=self.config.camera_gain,
+                camera_line_selector=self.config.camera_line_selector,
+                camera_line_mode=self.config.camera_line_mode,
+                camera_line_source=self.config.camera_line_source,
+                camera_strobe_enabled=self.config.camera_strobe_enabled,
             )
 
             # 建立本机采集器，接入事件入口与系统故障回调。
@@ -223,6 +230,10 @@ class SystemRuntime:
                         pixel_format=machine_config.camera_pixel_format,
                         exposure_time_us=machine_config.camera_exposure_time_us,
                         gain=machine_config.camera_gain,
+                        line_selector=machine_config.camera_line_selector,
+                        line_mode=machine_config.camera_line_mode,
+                        line_source=machine_config.camera_line_source,
+                        strobe_enabled=machine_config.camera_strobe_enabled,
                     )
                 # 记录单台相机设备连接失败。
                 except MvsError as error:
@@ -246,9 +257,18 @@ class SystemRuntime:
 
                 # 记录本机相机连接成功。
                 logger.info(
-                    "相机连接成功 machine_id=%s camera_serial=%s",
+                    "相机连接成功 machine_id=%s camera_serial=%s "
+                    "pixel_format=%s exposure_time_us=%s gain=%s "
+                    "line_selector=%s line_mode=%s line_source=%s strobe_enabled=%s",
                     machine_config.machine_id,
                     machine_config.camera_serial,
+                    machine_config.camera_pixel_format,
+                    machine_config.camera_exposure_time_us,
+                    machine_config.camera_gain,
+                    machine_config.camera_line_selector,
+                    machine_config.camera_line_mode,
+                    machine_config.camera_line_source,
+                    machine_config.camera_strobe_enabled,
                 )
 
                 # 打开成功时通知界面相机已连接。

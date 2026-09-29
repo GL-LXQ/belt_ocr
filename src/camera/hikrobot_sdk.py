@@ -388,14 +388,22 @@ class MvsSdk:
         pixel_format: str | None = None,
         exposure_time_us: float | None = None,
         gain: float | None = None,
+        line_selector: str | None = None,
+        line_mode: str | None = None,
+        line_source: str | None = None,
+        strobe_enabled: bool | None = None,
     ) -> MvsCamera:
-        """按序列号打开相机，配置连续模式及指定的曝光和像素参数。
+        """按序列号打开相机，写入采集、图像和频闪参数。
 
         Args:
             serial: 相机真实序列号。
             pixel_format: 可选 SDK 像素格式名称，省略时保持设备设置。
             exposure_time_us: 可选手动曝光时间，单位微秒。
             gain: 可选手动增益，使用设备节点单位。
+            line_selector: 可选输出线路名称。
+            line_mode: 可选线路模式名称。
+            line_source: 可选线路信号源名称。
+            strobe_enabled: 可选频闪输出使能值。
 
         Returns:
             返回示例：
@@ -427,38 +435,68 @@ class MvsSdk:
             if return_code != self.binding.errors.MV_OK:
                 raise MvsError(f"打开相机 {serial} 失败（OpenDevice({serial})），错误码：0x{return_code:08X}")
 
-            # 汇总需要写入的枚举参数。
-            enum_parameters = {
-                "AcquisitionMode": "Continuous",
-                "TriggerMode": "Off",
-            }
+            # 汇总连续采集模式与关闭触发模式。
+            enum_parameters = [
+                ("AcquisitionMode", "Continuous"),
+                ("TriggerMode", "Off"),
+            ]
 
-            # 按传入参数追加像素格式、手动曝光和手动增益开关。
+            # 按配置补充像素格式与手动曝光、增益开关。
             if pixel_format is not None:
-                enum_parameters["PixelFormat"] = pixel_format
+                enum_parameters.append(("PixelFormat", pixel_format))
             if exposure_time_us is not None:
-                enum_parameters["ExposureAuto"] = "Off"
+                enum_parameters.append(("ExposureAuto", "Off"))
             if gain is not None:
-                enum_parameters["GainAuto"] = "Off"
+                enum_parameters.append(("GainAuto", "Off"))
 
-            # 逐项写入枚举参数。
-            for name, value in enum_parameters.items():
-                return_code = handle.MV_CC_SetEnumValueByString(name, value)
+            # 依次写入采集和图像枚举参数。
+            for parameter_name, parameter_value in enum_parameters:
+                return_code = handle.MV_CC_SetEnumValueByString(
+                    parameter_name, parameter_value
+                )
                 if return_code != self.binding.errors.MV_OK:
-                    raise MvsError(f"设置相机参数 {name} 失败，错误码：0x{return_code:08X}")
+                    raise MvsError(
+                        f"设置相机参数 {parameter_name} 失败，"
+                        f"错误码：0x{return_code:08X}"
+                    )
 
             # 汇总需要写入的浮点参数。
-            float_parameters = {
-                "ExposureTime": exposure_time_us,
-                "Gain": gain,
-            }
+            float_parameters = [("ExposureTime", exposure_time_us), ("Gain", gain)]
 
             # 逐项写入已提供的手动曝光和增益。
-            for name, value in float_parameters.items():
-                if value is not None:
-                    return_code = handle.MV_CC_SetFloatValue(name, value)
+            for parameter_name, parameter_value in float_parameters:
+                if parameter_value is not None:
+                    return_code = handle.MV_CC_SetFloatValue(
+                        parameter_name, parameter_value
+                    )
                     if return_code != self.binding.errors.MV_OK:
-                        raise MvsError(f"设置相机参数 {name} 失败，错误码：0x{return_code:08X}")
+                        raise MvsError(
+                            f"设置相机参数 {parameter_name} 失败，"
+                            f"错误码：0x{return_code:08X}"
+                        )
+
+            # 先选择输出线路，再写入该线路的模式和信号源。
+            line_parameters = [
+                ("LineSelector", line_selector),
+                ("LineMode", line_mode),
+                ("LineSource", line_source),
+            ]
+            for parameter_name, parameter_value in line_parameters:
+                if parameter_value is not None:
+                    return_code = handle.MV_CC_SetEnumValueByString(
+                        parameter_name, parameter_value
+                    )
+                    if return_code != self.binding.errors.MV_OK:
+                        raise MvsError(
+                            f"设置相机参数 {parameter_name} 失败，"
+                            f"错误码：0x{return_code:08X}"
+                        )
+
+            # 按配置写入频闪输出使能值。
+            if strobe_enabled is not None:
+                return_code = handle.MV_CC_SetBoolValue("StrobeEnable", strobe_enabled)
+                if return_code != self.binding.errors.MV_OK:
+                    raise MvsError(f"设置相机参数 StrobeEnable 失败，错误码：0x{return_code:08X}")
 
             # 为 GigE 相机设置 SDK 推荐的网络包大小。
             if device["transport_type"] == self.binding.parameters.MV_GIGE_DEVICE:

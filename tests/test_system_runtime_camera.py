@@ -69,6 +69,13 @@ async def test_camera_connection_failure_preserves_other_machine(
                 machine_id=machine_id,
                 camera_serial=f"camera-{machine_id}",
                 frequency_meter_serial=f"meter-{machine_id}",
+                camera_pixel_format="Mono8",
+                camera_exposure_time_us=80.0,
+                camera_gain=0.0,
+                camera_line_selector="Line2",
+                camera_line_mode="Strobe",
+                camera_line_source="ExposureStartActive",
+                camera_strobe_enabled=True,
             ),
             camera=SimpleNamespace(sdk_camera=None),
             frequency_adapter=SimpleNamespace(listen_measurements=wait_for_worker),
@@ -130,6 +137,16 @@ async def test_camera_connection_failure_preserves_other_machine(
         await startup_task
         assert runtime.machines["1"].camera.sdk_camera is None
         assert runtime.machines["2"].camera.sdk_camera is healthy_camera
+        camera_sdk.open_camera.assert_any_call(
+            "camera-2",
+            pixel_format="Mono8",
+            exposure_time_us=80.0,
+            gain=0.0,
+            line_selector="Line2",
+            line_mode="Strobe",
+            line_source="ExposureStartActive",
+            strobe_enabled=True,
+        )
         camera_state_notification.assert_any_call("1", "连接失败", "相机未连接")
         runtime.initialize_machines.assert_called_once_with(
             None, camera_state_notification, None, None
@@ -189,6 +206,55 @@ def test_initialize_machines_passes_camera_state_notification(
     assert runtime.machines["1"].notify_ocr_result is ocr_notification
     assert runtime.machines["1"].notify_camera_state is camera_state_notification
     assert runtime.machines["1"].notify_cycle_closed is cycle_closed_notification
+
+
+def test_initialize_machines_copies_common_camera_parameters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """确认公共相机参数写入每台机器的配置。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+        monkeypatch: pytest 提供的属性替换工具。
+
+    Returns:
+        返回示例：
+            None  # 机器配置包含全部公共相机参数
+    """
+    # 建立带有完整相机参数的运行配置。
+    config = AppConfig(
+        database_path=tmp_path / "measurements.sqlite3",
+        evidence_directory=tmp_path / "evidence",
+        mvs_development_directory=tmp_path,
+        camera_pixel_format="Mono8",
+        camera_exposure_time_us=80.0,
+        camera_gain=0.0,
+        camera_line_selector="Line2",
+        camera_line_mode="Strobe",
+        camera_line_source="ExposureStartActive",
+        camera_strobe_enabled=True,
+    )
+    runtime = SystemRuntime(config)
+    machine_rows = [
+        {"id": 1, "camera_serial": "camera-1", "frequency_meter_serial": "meter-1"},
+        {"id": 2, "camera_serial": "camera-2", "frequency_meter_serial": "meter-2"},
+    ]
+    monkeypatch.setattr(
+        "system_runtime.MachineRepo.list_enabled", Mock(return_value=machine_rows)
+    )
+
+    # 初始化机器并核对每台机器保存的参数。
+    runtime.initialize_machines()
+    for machine in runtime.machines.values():
+        machine_config = machine.machine_config
+        assert machine_config.camera_pixel_format == "Mono8"
+        assert machine_config.camera_exposure_time_us == 80.0
+        assert machine_config.camera_gain == 0.0
+        assert machine_config.camera_line_selector == "Line2"
+        assert machine_config.camera_line_mode == "Strobe"
+        assert machine_config.camera_line_source == "ExposureStartActive"
+        assert machine_config.camera_strobe_enabled is True
 
 
 @pytest.mark.asyncio

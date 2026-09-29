@@ -18,6 +18,10 @@ class MachineConfig:
     camera_pixel_format: str | None = None  # 相机像素格式，未配置时由相机决定
     camera_exposure_time_us: float | None = None  # 相机曝光时间，单位微秒
     camera_gain: float | None = None  # 相机增益
+    camera_line_selector: str | None = None  # 相机输出线路
+    camera_line_mode: str | None = None  # 相机线路模式
+    camera_line_source: str | None = None  # 相机线路信号源
+    camera_strobe_enabled: bool | None = None  # 是否启用相机频闪输出
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,13 @@ class AppConfig:
     mvs_development_directory: Path  # MVS SDK 开发目录
     capture_window_ms: int = 1000  # 单轮采集窗口，毫秒
     camera_timeout_ms: int = 50  # 单次取帧超时，毫秒
+    camera_pixel_format: str | None = None  # 公共相机像素格式
+    camera_exposure_time_us: float | None = None  # 公共相机曝光时间，微秒
+    camera_gain: float | None = None  # 公共相机增益
+    camera_line_selector: str | None = None  # 公共相机输出线路
+    camera_line_mode: str | None = None  # 公共相机线路模式
+    camera_line_source: str | None = None  # 公共相机线路信号源
+    camera_strobe_enabled: bool | None = None  # 是否启用公共相机频闪输出
     frequency_interval_ms: int = 100  # 频率读取间隔配置
     minimum_frequency_hz: float = 0.01  # 有效频率下限
     maximum_frequency_hz: float = 10000.0  # 有效频率上限
@@ -98,6 +109,24 @@ class AppConfig:
         if not 0 < self.minimum_frequency_hz < self.maximum_frequency_hz:
             raise ValueError("频率范围必须是递增的正数范围。")
 
+        # 校验手动曝光时间和增益的数值范围。
+        if (
+            self.camera_exposure_time_us is not None
+            and self.camera_exposure_time_us <= 0
+        ):
+            raise ValueError("camera_exposure_time_us 必须大于零。")
+        if self.camera_gain is not None and self.camera_gain < 0:
+            raise ValueError("camera_gain 不能小于零。")
+
+        # 启用频闪时检查线路选择、模式和信号源是否已填写。
+        if self.camera_strobe_enabled is True:
+            for parameter_name in (
+                "camera_line_selector", "camera_line_mode", "camera_line_source"
+            ):
+                parameter_value = getattr(self, parameter_name)
+                if not isinstance(parameter_value, str) or not parameter_value.strip():
+                    raise ValueError(f"启用相机频闪时必须配置 {parameter_name}。")
+
         # 检查运行库与业务库不是同一个文件。
         if self.recovery_path.resolve() == self.database_path.resolve():
             raise ValueError("恢复库与最终结果库必须使用不同文件。")
@@ -131,6 +160,13 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
                 "mvs_dll_directory": None,  # 使用默认动态库目录
                 "capture_window_ms": 1000,  # 采集窗口，毫秒
                 "camera_timeout_ms": 50,  # 取帧超时，毫秒
+                "camera_pixel_format": "Mono8",  # 相机像素格式
+                "camera_exposure_time_us": 80.0,  # 相机曝光时间，微秒
+                "camera_gain": 0.0,  # 相机增益
+                "camera_line_selector": None,  # 相机输出线路待现场填写
+                "camera_line_mode": "Strobe",  # 相机线路模式
+                "camera_line_source": None,  # 相机线路信号源待现场填写
+                "camera_strobe_enabled": True,  # 相机频闪输出使能
                 "ocr_lock_wait_timeout_ms": 10000,  # 等待共享 OCR 锁的期限，毫秒
                 "ocr_result_timeout_ms": 30000,  # OCR 处理期限，毫秒
                 "frequency_interval_ms": 100,  # 频率读取间隔配置
@@ -202,6 +238,13 @@ def load_config(configuration_directory: Path) -> AppConfig:
                 mvs_development_directory=Path("D:/app/HIK/MVS/Development"),  # SDK 路径
                 capture_window_ms=1000,  # 采集窗口
                 camera_timeout_ms=50,  # 单次取帧超时
+                camera_pixel_format="Mono8",  # 相机像素格式
+                camera_exposure_time_us=80.0,  # 相机曝光时间，微秒
+                camera_gain=0.0,  # 相机增益
+                camera_line_selector="现场线路值",  # 相机输出线路
+                camera_line_mode="Strobe",  # 相机线路模式
+                camera_line_source="现场信号源值",  # 相机线路信号源
+                camera_strobe_enabled=True,  # 相机频闪输出使能
                 frequency_interval_ms=100,  # 频率读取间隔配置
                 minimum_frequency_hz=0.01,  # 最低有效频率
                 maximum_frequency_hz=10000.0,  # 最高有效频率

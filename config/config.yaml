@@ -17,6 +17,19 @@ camera:
   capture_window_ms: 1000  # 单轮采集窗口，毫秒
   camera_timeout_ms: 50  # 单次取帧超时，毫秒
 
+  # 每次打开相机后写入的公共运行参数。
+  camera_pixel_format: Mono8
+  camera_exposure_time_us: 80.0
+  camera_gain: 0.0
+
+  # 按当前相机 MVS 中“线路选择器”的实际值填写，例如 Line2。
+  camera_line_selector: null
+  camera_line_mode: Strobe
+
+  # 按当前 MVS 中用于频闪的 Line Source 实际值填写。
+  camera_line_source: null
+  camera_strobe_enabled: true
+
 # 共享 OCR 锁的等待期限与获得锁后的处理期限。
 ocr:
   ocr_lock_wait_timeout_ms: 10000  # 等待共享 OCR 识别锁的最大时间，毫秒
