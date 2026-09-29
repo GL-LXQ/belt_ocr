@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class OCRProcessingError(Exception):
-    """表示 OCR 模型没有按预期完成本轮处理。"""
+    """表示本轮 OCR 处理过程中发生了可识别的处理错误。"""
 
 
 class OCRResourceWaitTimeoutError(TimeoutError):
@@ -676,7 +676,7 @@ class TextRecognizer:
         优先选择最长的连续编号组；没有连续编号时，选择置信度最高的前三条。
 
         Args:
-            candidates: 已去重并过滤低置信度结果的 8 字符候选。
+            candidates: 已去重并过滤低置信度候选的 8 字符候选。
 
         Returns:
             返回示例：
