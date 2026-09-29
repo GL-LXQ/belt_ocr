@@ -4,13 +4,14 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QFrame, QGridLayout, QSizePolicy
 from PySide6.QtTest import QTest
 from qfluentwidgets import FluentWindow, InfoBar, MaskDialogBase, MessageBox
 
 from src.controller.controller import AppController, Result
 from ui.main_window import MainWindow
-from ui.pages.realtime_page import MachineCard
+from ui.pages.realtime_page import RealtimePage
 
 
 @pytest.fixture
@@ -134,11 +135,18 @@ def test_realtime_resize_reflows_existing_cards_without_query(
         cards = tuple(window.realtime_page.machine_cards)
         query_count = controller.list_enabled_machines.call_count
         assert window.realtime_page.card_column_count == 3
+        detail_panel = window.realtime_page.detail_panel
+        assert detail_panel.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Maximum
+        assert detail_panel.height() < window.realtime_page.scroll_area.height()
+        scroll_area = window.realtime_page.scroll_area
+        assert detail_panel.geometry().top() == scroll_area.geometry().top()
 
         window.resize(1280, 720)
         window.navigationInterface.expand()
         QTest.qWait(300)
         qt_application.processEvents()
+        assert window.size().width() == 1280
+        assert window.size().height() == 720
         assert window.realtime_page.card_column_count == 2
         assert tuple(window.realtime_page.machine_cards) == cards
         assert controller.list_enabled_machines.call_count == query_count
@@ -155,41 +163,104 @@ def test_realtime_resize_reflows_existing_cards_without_query(
         window.deleteLater()
 
 
-def test_machine_card_keeps_long_ocr_text_selectable(
-    qt_application: QApplication,
-) -> None:
-    """验证长文字在卡片中完整显示并可复制。
+def test_machine_detail_keeps_long_ocr_text_selectable(qt_application) -> None:
+    """验证详情保留全文且大量 OCR 不撑高摘要卡。
 
     Args:
-        qt_application: 测试使用的 Qt 应用。
+        qt_application: Qt 应用实例。
 
     Returns:
-        None  # OCR 全文保留在可选择的纯文本标签中
+        None  # 全文可复制，摘要高度固定
     """
-    card = MachineCard(
-        {
-            "title": "长机器名称" * 8,
-            "tone": "idle",
-            "status": "未启动",
-            "state": "未启动监测",
-            "frequency": "--",
-        }
-    )
+    page = RealtimePage(make_ui_controller())
     try:
-        card.resize(360, card.sizeHint().height())
-        card.show()
+        page.show()
+        qt_application.processEvents()
+        card = page.machine_cards[0]
+        ordered_lines = tuple(f"{number:020d}" for number in range(40))
+        page.update_measurement_progress("1", "first", "session_start", "success")
         qt_application.processEvents()
         initial_height = card.sizeHint().height()
-        ordered_lines = tuple(f"{number:020d}" for number in range(40))
-        card.set_ocr_result(ordered_lines, ordered_lines)
+        page.update_ocr_result("1", "first", ordered_lines, ordered_lines)
         qt_application.processEvents()
-        assert ordered_lines[-1] in card.ocr_result_label.text()
-        assert card.ocr_result_label.text().count("\n") >= 42
-        assert card.ocr_result_label.textInteractionFlags()
-        assert card.sizeHint().height() > initial_height
+
+        # 核对全文、只读属性和剪贴板复制。
+        editor = page.detail_panel.ocr_text
+        assert editor.parentWidget().objectName() == "detailOcrPanel"
+        assert editor.frameShape() == QFrame.Shape.NoFrame
+        assert editor.height() == 120
+        assert all(line in editor.toPlainText() for line in ordered_lines)
+        assert ordered_lines[-1] in editor.toPlainText()
+        assert editor.isReadOnly()
+        editor.selectAll()
+        editor.copy()
+        assert QApplication.clipboard().text() == editor.toPlainText()
+        assert card.ocr_result_label.text() == ordered_lines[0]
+        assert card.sizeHint().height() == initial_height
     finally:
-        card.close()
-        card.deleteLater()
+        page.close()
+        page.deleteLater()
+
+
+def test_dashboard_selection_reload_and_summary(qt_application) -> None:
+    """验证机器选择、重载保持和总览状态更新。
+
+    Args:
+        qt_application: Qt 应用实例。
+
+    Returns:
+        None  # 选择、详情和统计随状态同步
+    """
+    controller = make_ui_controller()
+    page = RealtimePage(controller)
+    try:
+        page.show()
+        qt_application.processEvents()
+        assert page.selected_machine_id == "1"
+        QTest.mouseClick(page.machine_cards[1], Qt.MouseButton.LeftButton)
+        assert page.selected_machine_id == "2"
+        assert sum(card.property("selected") for card in page.machine_cards) == 1
+        assert page.detail_panel.title.text() == "第 2 台机器"
+        assert page.detail_panel.camera_label.text() == "Camera · CAM-2"
+        metrics_layout = page.detail_panel.layout().itemAt(4).layout()
+        assert isinstance(metrics_layout, QGridLayout)
+        state_widget = metrics_layout.itemAtPosition(1, 0).widget()
+        assert state_widget is page.detail_panel.state_label
+        frequency_widget = metrics_layout.itemAtPosition(1, 1).widget()
+        assert frequency_widget is page.detail_panel.frequency_label
+        page.reload_machines()
+        assert page.selected_machine_id == "2"
+
+        # 连接与测量故障按机器编号合并统计。
+        query_count = controller.list_enabled_machines.call_count
+        page.update_connection_state("1", "相机已连接", "")
+        page.update_measurement_progress("2", "first", "session_start", "success")
+        page.update_connection_state("2", "相机故障", "故障")
+        page.update_measurement_progress("2", "first", "image_capture", "failed")
+        assert [card.value_label.text() for card in page.summary_cards] == [
+            "5", "1", "1", "1",
+        ]
+        assert page.detail_panel.badge.text() == "相机故障"
+        page.update_cycle_closed("2", "first")
+        assert page.summary_cards[2].value_label.text() == "0"
+        page.finish_monitoring("")
+        assert page.summary_cards[1].value_label.text() == "0"
+        assert controller.list_enabled_machines.call_count == query_count
+
+        # 删除选中机器后退回首台，空列表清空详情。
+        remaining_machines = page.machines[:1]
+        machine_data = controller.list_enabled_machines.return_value.data
+        machine_data["machines"] = remaining_machines
+        page.reload_machines()
+        assert page.selected_machine_id == "1"
+        controller.list_enabled_machines.return_value.data["machines"] = []
+        page.reload_machines()
+        assert page.selected_machine_id is None
+        assert page.detail_panel.title.text() == "未选择机器"
+    finally:
+        page.close()
+        page.deleteLater()
+
 
 
 def test_machine_editor_and_delete_confirmation_use_mask_and_cancel(
@@ -225,6 +296,8 @@ def test_machine_editor_and_delete_confirmation_use_mask_and_cancel(
                 0  # 用户取消删除
             """
             message_box.show()
+            message_box.window().activateWindow()
+            QTest.qWait(50)
             qt_application.processEvents()
             assert message_box.cancelButton.isDefault()
             assert not message_box.yesButton.isDefault()

@@ -130,13 +130,13 @@ def test_machine_card_sets_and_clears_ocr_result() -> None:
 
     MachineCard.set_ocr_result(card, result_lines, ("A" * 20, "2926215C", "003"))
     ocr_result_label.setText.assert_called_once_with(
-        "20  2378244 VEGA × 5EPJ1152\n8  2926 215C\n3  003\n2  --"
+        "2378244 VEGA × 5EPJ1152"
     )
 
     MachineCard.set_ocr_result(card, (), ())
-    ocr_result_label.setText.assert_called_with("20  --\n8  --\n3  --\n2  --")
+    ocr_result_label.setText.assert_called_with("--")
     MachineCard.clear_ocr_result(card)
-    assert ocr_result_label.setText.call_args_list[-1].args == ("20  --\n8  --\n3  --\n2  --",)
+    assert ocr_result_label.setText.call_args_list[-1].args == ("--",)
 
 
 def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
@@ -156,8 +156,8 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
     service = Mock()
     service.list_enabled_machines.return_value = {
         "machines": [
-            {"id": 1, "machine_name": "机器 1"},
-            {"id": 2, "machine_name": "机器 2"},
+            {"id": 1, "machine_name": "机器 1", "camera_serial": "CAM-1"},
+            {"id": 2, "machine_name": "机器 2", "camera_serial": "CAM-2"},
         ],
     }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
@@ -168,15 +168,15 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
         page.update_measurement_progress("1", "first", "session_start", "success")
         page.update_ocr_result("1", "first", ordered_lines, normalized_lines)
         expected_text = "20  长文字\n8  2926 215C\n    2926 216C\n    2926 217C\n3  <b>003</b>\n2  14"
-        assert page.cards_by_machine_id["1"].ocr_result_label.text() == expected_text
+        assert page.detail_panel.ocr_text.toPlainText() == expected_text
         assert page.cards_by_machine_id["1"].ocr_result_label.textFormat() == Qt.TextFormat.PlainText
-        assert page.cards_by_machine_id["2"].ocr_result_label.text() == "20  --\n8  --\n3  --\n2  --"
+        assert page.cards_by_machine_id["2"].ocr_result_label.text() == "--"
 
         # 入库进度、连接状态和刷新均保留已完成文字。
         page.update_measurement_progress("1", "first", "evidence_storage", "success")
         page.update_connection_state("1", "已停止", "")
         page.reload_machines()
-        assert page.cards_by_machine_id["1"].ocr_result_label.text() == expected_text
+        assert page.detail_panel.ocr_text.toPlainText() == expected_text
         assert page.cards_by_machine_id["1"].progress_session_id == "first"
 
         # 新周期同时清空缓存和控件，刷新不恢复上一轮文字。
@@ -187,12 +187,12 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
         page.update_ocr_result("1", "first", ordered_lines, normalized_lines)
         page.update_measurement_progress("1", "first", "evidence_storage", "success")
         assert page.ocr_results_by_machine_id["1"] == ("second", (), ())
-        assert page.cards_by_machine_id["1"].ocr_result_label.text() == "20  --\n8  --\n3  --\n2  --"
+        assert page.cards_by_machine_id["1"].ocr_result_label.text() == "--"
 
         # 第二台机器独立接收本轮结果。
         page.update_measurement_progress("2", "other", "session_start", "success")
         page.update_ocr_result("2", "other", ("12",), ("12",))
-        assert page.cards_by_machine_id["2"].ocr_result_label.text().endswith("2  12")
+        assert page.cards_by_machine_id["2"].ocr_result_label.text() == "12"
         assert page.ocr_results_by_machine_id["1"] == ("second", (), ())
     finally:
         page.close()
@@ -217,8 +217,8 @@ def test_page_animates_only_current_machine_and_session(
     service = Mock()
     service.list_enabled_machines.return_value = {
         "machines": [
-            {"id": 1, "machine_name": "机器 1"},
-            {"id": 2, "machine_name": "机器 2"},
+            {"id": 1, "machine_name": "机器 1", "camera_serial": "CAM-1"},
+            {"id": 2, "machine_name": "机器 2", "camera_serial": "CAM-2"},
         ],
     }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
@@ -253,7 +253,7 @@ def test_page_animates_only_current_machine_and_session(
         page.update_cycle_closed("1", "first")
         assert first_animation._machine_state.name == "STOPPING"
         first_card = page.cards_by_machine_id["1"]
-        assert first_card.ocr_result_label.text().endswith("3  003\n2  --")
+        assert first_card.ocr_result_label.text() == "003"
         page.update_measurement_progress("1", "second", "session_start", "success")
 
         # 成功状态分别结束本轮的扫描和频率波形。
@@ -277,7 +277,7 @@ def test_page_animates_only_current_machine_and_session(
         page.update_cycle_closed("2", "other")
         assert second_animation._machine_state.name == "STOPPING"
         assert first_animation._machine_state.name == "STARTING"
-        assert first_card.ocr_result_label.text() == "20  --\n8  --\n3  --\n2  --"
+        assert first_card.ocr_result_label.text() == "--"
     finally:
         page.close()
         page.deleteLater()
@@ -311,7 +311,7 @@ def test_failed_subprocess_stops_its_animation_without_closing_belt(
     # 创建单台机器并启动对应子动画。
     service = Mock()
     service.list_enabled_machines.return_value = {
-        "machines": [{"id": 1, "machine_name": "机器 1"}],
+        "machines": [{"id": 1, "machine_name": "机器 1", "camera_serial": "CAM-1"}],
     }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
     try:
@@ -347,8 +347,8 @@ def test_page_refresh_and_monitoring_stop_restore_safe_animation(
     service = Mock()
     service.list_enabled_machines.return_value = {
         "machines": [
-            {"id": 1, "machine_name": "机器 1"},
-            {"id": 2, "machine_name": "机器 2"},
+            {"id": 1, "machine_name": "机器 1", "camera_serial": "CAM-1"},
+            {"id": 2, "machine_name": "机器 2", "camera_serial": "CAM-2"},
         ],
     }
     page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
@@ -423,7 +423,7 @@ def test_runtime_thread_delivers_text_from_background_thread(
     # 创建页面和不访问设备的运行时替身。
     machine_service = Mock()
     machine_service.list_enabled_machines.return_value = {
-        "machines": [{"id": 1, "machine_name": "机器 1"}],
+        "machines": [{"id": 1, "machine_name": "机器 1", "camera_serial": "CAM-1"}],
     }
     controller = AppController(machine_service, Mock(), Mock(), Path("config"))
     page = RealtimePage(controller)
@@ -471,7 +471,7 @@ def test_runtime_thread_delivers_text_from_background_thread(
         assert runtime_thread.failure_message == ""
         assert controller.runtime_thread is None
         assert page.ocr_results_by_machine_id["1"] == ("session", ("003",), ("003",))
-        assert page.cards_by_machine_id["1"].ocr_result_label.text() == "20  --\n8  --\n3  003\n2  --"
+        assert page.cards_by_machine_id["1"].ocr_result_label.text() == "003"
         assert not page.measurement_states_by_machine_id["1"]["machine_running"]
         runtime.stop.assert_awaited_once()
     finally:

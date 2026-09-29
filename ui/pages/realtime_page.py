@@ -1,6 +1,6 @@
 """实时监测页面、机器卡片和步骤进度组件。"""
 
-from PySide6.QtCore import QEvent, QSize, Qt
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -16,17 +16,19 @@ from qfluentwidgets import (
     CaptionLabel,
     FluentIcon,
     InfoBar,
+    PlainTextEdit,
     PrimaryPushButton,
     PushButton,
     ScrollArea,
     SimpleCardWidget,
     SubtitleLabel,
     TitleLabel,
+    setCustomStyleSheet,
 )
 
 from src.controller.controller import AppController
 from ui.belt_animation import BeltAnimationWidget
-from ui.theme import create_icon
+from ui.theme import COLORS, create_icon
 
 
 # 本轮处理阶段按界面展示顺序排列。
@@ -149,8 +151,51 @@ class StepProgress(QFrame):
             connector.setGeometry(left, left_dot.center().y(), right - left, 2)
 
 
+def format_ocr_result_text(ordered_lines, normalized_lines) -> str:
+    """按字符长度分类生成完整 OCR 展示文字。
+
+    Args:
+        ordered_lines: 保留原始格式的文字。
+        normalized_lines: 逐条对应的去空格文字。
+
+    Returns:
+        "20  --\n8  --\n3  --\n2  --"  # 各类别的完整文字
+    """
+    # 按固定类别收集对应的原始文字。
+    grouped_lines = {
+        20: [],
+        8: [],
+        3: [],
+        2: [],
+    }
+    for ordered_line, normalized_line in zip(ordered_lines, normalized_lines):
+        character_count = len(normalized_line)
+        if character_count in grouped_lines:
+            grouped_lines[character_count].append(ordered_line)
+
+    # 为每类首行添加类别标识，后续结果单独换行。
+    result_lines = []
+    for character_count, category_lines in grouped_lines.items():
+        display_lines = category_lines or ["--"]
+        result_lines.append(f"{character_count}  {display_lines[0]}")
+        result_lines.extend(f"    {line}" for line in display_lines[1:])
+    return "\n".join(result_lines)
+
 class MachineCard(SimpleCardWidget):
-    """展示一台机器的动画、状态、频率和进度。"""
+    """展示一台机器的动画、状态、频率和 OCR 摘要。"""
+
+    clicked = Signal(str)
+
+    def paintEvent(self, event):
+        """绘制 QSS 定义的卡片背景和边框。
+
+        Args:
+            event: 绘制事件。
+
+        Returns:
+            None  # 卡片表面已绘制
+        """
+        QFrame.paintEvent(self, event)
 
     def __init__(self, data: dict):
         """构建机器卡片并填入展示数据。
@@ -164,9 +209,12 @@ class MachineCard(SimpleCardWidget):
         """
         super().__init__()
         self.setObjectName("machineCard")
+        self.machine_id = data["machine_id"]
+        self.set_selected(False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.progress_session_id = ""
         self.progress_statuses = {}
-        self.setMinimumWidth(280)
+        self.setMinimumWidth(260)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 18)
@@ -183,18 +231,16 @@ class MachineCard(SimpleCardWidget):
         heading.addStretch()
         heading.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(heading)
-        heading_divider = QFrame()
-        heading_divider.setFrameShape(QFrame.Shape.HLine)
-        heading_divider.setObjectName("cardDivider")
-        layout.addWidget(heading_divider)
+
+
+        # 显示相机序列号。
+        self.camera_label = CaptionLabel(f"Camera · {data['camera_serial']}")
+        layout.addWidget(self.camera_label)
 
         # 在卡片画面区域显示皮带机动画。
         self.belt_animation = BeltAnimationWidget()
         layout.addWidget(self.belt_animation)
-        animation_divider = QFrame()
-        animation_divider.setFrameShape(QFrame.Shape.HLine)
-        animation_divider.setObjectName("cardDivider")
-        layout.addWidget(animation_divider)
+
 
         # 在同一行显示当前状态与实时频率。
         metrics = QHBoxLayout()
@@ -209,36 +255,68 @@ class MachineCard(SimpleCardWidget):
         frequency_panel.setSpacing(4)
         frequency_panel.addWidget(CaptionLabel("实时频率"))
         self.frequency_label = BodyLabel()
+        self.frequency_label.setObjectName("frequencyValue")
         frequency_panel.addWidget(self.frequency_label)
         metrics.addLayout(state_panel, 2)
         metrics.addLayout(frequency_panel, 1)
         layout.addLayout(metrics)
-        metrics_divider = QFrame()
-        metrics_divider.setFrameShape(QFrame.Shape.HLine)
-        metrics_divider.setObjectName("cardDivider")
-        layout.addWidget(metrics_divider)
 
-        # 让 OCR 文字独占整行并支持复制。
-        layout.addWidget(CaptionLabel("OCR 识别结果"))
+
+        # 在浅色信息块中显示单行 OCR 摘要。
+        summary_panel = QFrame()
+        summary_panel.setObjectName("ocrSummaryPanel")
+        summary_layout = QVBoxLayout(summary_panel)
+        summary_layout.setContentsMargins(10, 8, 10, 8)
+        summary_layout.addWidget(CaptionLabel("OCR 摘要"))
         self.ocr_result_label = QLabel("--")
         self.ocr_result_label.setObjectName("ocrResult")
         self.ocr_result_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.ocr_result_label.setWordWrap(True)
-        self.ocr_result_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
+        self.ocr_result_label.setFixedHeight(20)
+        self.ocr_result_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
         )
-        layout.addWidget(self.ocr_result_label)
+        self.ocr_result_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        summary_layout.addWidget(self.ocr_result_label)
+        layout.addWidget(summary_panel)
         self.clear_ocr_result()
-        ocr_divider = QFrame()
-        ocr_divider.setFrameShape(QFrame.Shape.HLine)
-        ocr_divider.setObjectName("cardDivider")
-        layout.addWidget(ocr_divider)
 
-        # 创建本轮步骤进度区域。
-        self.steps = StepProgress()
-        layout.addWidget(self.steps)
+
+
+        # 弱化相机信息和字段标题。
+        for label in self.findChildren(CaptionLabel):
+            label.setStyleSheet(f"color: {COLORS['muted']};")
 
         self.update_data(data)
+
+    def set_selected(self, selected: bool):
+        """刷新卡片选中边框。
+
+        Args:
+            selected: 是否选中当前卡片。
+
+        Returns:
+            None  # 选中属性和样式已刷新
+        """
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        """点击卡片时发送机器编号。
+
+        Args:
+            event: 鼠标释放事件。
+
+        Returns:
+            None  # 左键点击发送选中信号
+        """
+        QFrame.mouseReleaseEvent(self, event)
+        self.isPressed = False
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.machine_id)
 
     def update_data(self, data: dict):
         """将机器展示数据应用到已有控件。
@@ -279,7 +357,7 @@ class MachineCard(SimpleCardWidget):
     def set_ocr_result(
         self, ordered_lines: tuple[str, ...], normalized_lines: tuple[str, ...]
     ) -> None:
-        """按去空格文字长度分类显示原始 OCR 文字。
+        """显示第一条 OCR 文字摘要。
 
         Args:
             ordered_lines: 保留原始格式的最终文字。
@@ -287,39 +365,160 @@ class MachineCard(SimpleCardWidget):
 
         Returns:
             返回示例：
-                None  # 按 20、8、3、2 分类显示，每条结果单独换行
+                None  # 仅显示第一条结果或占位文字
         """
-        # 按固定类别收集对应的原始文字。
-        grouped_lines = {
-            20: [],
-            8: [],
-            3: [],
-            2: [],
-        }
-        for ordered_line, normalized_line in zip(ordered_lines, normalized_lines):
-            character_count = len(normalized_line)
-            if character_count in grouped_lines:
-                grouped_lines[character_count].append(ordered_line)
-
-        # 为每类首行添加类别标识，后续结果单独换行。
-        result_lines = []
-        for character_count, category_lines in grouped_lines.items():
-            display_lines = category_lines or ["--"]
-            result_lines.append(f"{character_count}  {display_lines[0]}")
-            result_lines.extend(f"    {line}" for line in display_lines[1:])
-        self.ocr_result_label.setText("\n".join(result_lines))
+        self.ocr_result_label.setText(ordered_lines[0] if ordered_lines else "--")
 
     def clear_ocr_result(self) -> None:
-        """将四类 OCR 结果恢复为占位文字。
+        """将 OCR 摘要恢复为占位文字。
 
         Args:
             无。
 
         Returns:
             返回示例：
-                None  # 四个类别均显示 --
+                None  # 摘要显示 --
         """
-        self.ocr_result_label.setText("20  --\n8  --\n3  --\n2  --")
+        self.ocr_result_label.setText("--")
+
+
+class SummaryCard(SimpleCardWidget):
+    """显示一项内存状态统计。"""
+
+    def paintEvent(self, event):
+        """绘制 QSS 定义的卡片背景和边框。
+
+        Args:
+            event: 绘制事件。
+
+        Returns:
+            None  # 卡片表面已绘制
+        """
+        QFrame.paintEvent(self, event)
+
+    def __init__(self, title: str, description: str):
+        """创建统计标题、数字和说明。
+
+        Args:
+            title: 统计标题。
+            description: 统计说明。
+
+        Returns:
+            None  # 创建统计卡片
+        """
+        super().__init__()
+        self.setObjectName("summaryCard")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setSpacing(4)
+
+        # 按顺序显示统计标题、数值和说明。
+        layout.addWidget(CaptionLabel(title))
+        self.value_label = QLabel("0")
+        self.value_label.setObjectName("summaryValue")
+        layout.addWidget(self.value_label)
+        layout.addWidget(CaptionLabel(description))
+
+        # 弱化统计标题和说明。
+        for label in self.findChildren(CaptionLabel):
+            label.setStyleSheet(f"color: {COLORS['muted']};")
+
+
+class MachineDetailPanel(SimpleCardWidget):
+    """显示选中机器的完整结果和进度。"""
+
+    def paintEvent(self, event):
+        """绘制 QSS 定义的卡片背景和边框。
+
+        Args:
+            event: 绘制事件。
+
+        Returns:
+            None  # 卡片表面已绘制
+        """
+        QFrame.paintEvent(self, event)
+
+    def __init__(self):
+        """创建固定宽度的机器详情区。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 创建详情控件
+        """
+        super().__init__()
+        self.setObjectName("machineDetailPanel")
+        self.setFixedWidth(320)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Maximum,
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(6)
+        layout.addWidget(SubtitleLabel("机器详情"))
+
+        # 显示机器名称、徽标和相机编号。
+        heading = QHBoxLayout()
+        self.title = BodyLabel("未选择机器")
+        self.title.setWordWrap(True)
+        self.badge = QLabel()
+        self.badge.setObjectName("machineBadge")
+        heading.addWidget(self.title, 1)
+        heading.addWidget(self.badge)
+        layout.addLayout(heading)
+        self.camera_label = CaptionLabel("Camera · --")
+        layout.addWidget(self.camera_label)
+
+        # 并排显示主状态和实时频率的标题与数值。
+        layout.addSpacing(4)
+        metrics_layout = QGridLayout()
+        metrics_layout.setContentsMargins(0, 0, 0, 0)
+        metrics_layout.setHorizontalSpacing(12)
+        metrics_layout.setVerticalSpacing(4)
+        metrics_layout.addWidget(CaptionLabel("当前状态"), 0, 0)
+        metrics_layout.addWidget(CaptionLabel("实时频率"), 0, 1)
+        self.state_label = BodyLabel("--")
+        self.state_label.setWordWrap(True)
+        metrics_layout.addWidget(self.state_label, 1, 0)
+        self.frequency_label = BodyLabel("--")
+        self.frequency_label.setObjectName("frequencyValue")
+        metrics_layout.addWidget(self.frequency_label, 1, 1)
+        metrics_layout.setColumnStretch(0, 1)
+        metrics_layout.setColumnStretch(1, 1)
+        layout.addLayout(metrics_layout)
+
+        # 在浅灰信息卡中显示完整 OCR。
+        layout.addSpacing(4)
+        layout.addWidget(CaptionLabel("OCR 识别结果"))
+        ocr_panel = QFrame()
+        ocr_panel.setObjectName("detailOcrPanel")
+        ocr_layout = QVBoxLayout(ocr_panel)
+        ocr_layout.setContentsMargins(12, 10, 12, 10)
+        self.ocr_text = PlainTextEdit()
+        self.ocr_text.setObjectName("detailOcrText")
+        self.ocr_text.setReadOnly(True)
+        self.ocr_text.setFrameShape(QFrame.Shape.NoFrame)
+        self.ocr_text.setFixedHeight(120)
+        ocr_style = (
+            "PlainTextEdit {"
+            f"background: transparent; color: {COLORS['text']};"
+            "border: none; padding: 0;}"
+        )
+        setCustomStyleSheet(self.ocr_text, ocr_style, ocr_style)
+        ocr_layout.addWidget(self.ocr_text)
+        layout.addWidget(ocr_panel)
+
+        # 显示当前周期的完整步骤。
+        layout.addSpacing(4)
+        layout.addWidget(CaptionLabel("本轮处理"))
+        self.steps = StepProgress()
+        layout.addWidget(self.steps)
+
+        # 弱化详情字段标题。
+        for label in self.findChildren(CaptionLabel):
+            label.setStyleSheet(f"color: {COLORS['muted']};")
 
 
 class RealtimePage(QWidget):
@@ -343,10 +542,11 @@ class RealtimePage(QWidget):
         self.connection_states = {}
         self.ocr_results_by_machine_id = {}
         self.measurement_states_by_machine_id = {}
+        self.selected_machine_id: str | None = None
         self.cards_by_machine_id = {}
         outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(24, 24, 24, 24)
-        outer_layout.setSpacing(20)
+        outer_layout.setContentsMargins(24, 6, 24, 6)
+        outer_layout.setSpacing(4)
 
         # 固定页面标题和监测操作区。
         header = QHBoxLayout()
@@ -364,11 +564,39 @@ class RealtimePage(QWidget):
         self.stop_button.setEnabled(False)
         outer_layout.addLayout(header)
 
+        # 显示四项内存状态总览。
+        summary_layout = QHBoxLayout()
+        self.summary_cards = []
+        for title, description in (
+            ("机器总数", "当前启用机器"),
+            ("相机已连接", "相机连接正常"),
+            ("测量中", "当前测量周期"),
+            ("故障 / 失败", "连接或本轮测量异常"),
+        ):
+            summary_card = SummaryCard(title, description)
+            self.summary_cards.append(summary_card)
+            summary_layout.addWidget(summary_card, 1)
+        outer_layout.addLayout(summary_layout)
+
+        # 显示设备区域标题和说明。
+        section_layout = QVBoxLayout()
+        section_layout.setSpacing(4)
+        section_layout.addWidget(SubtitleLabel("我的机器"))
+        section_layout.addWidget(
+            CaptionLabel("实时查看各检测机器的连接、测量、频率与识别状态")
+        )
+        outer_layout.addLayout(section_layout)
+        body_layout = QHBoxLayout()
+        body_layout.setSpacing(16)
+        outer_layout.addLayout(body_layout, 1)
+
         # 将机器卡片放入可滚动区域。
         self.scroll_area = ScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        outer_layout.addWidget(self.scroll_area)
+        body_layout.addWidget(self.scroll_area, 1)
+        self.detail_panel = MachineDetailPanel()
+        body_layout.addWidget(self.detail_panel, 0, Qt.AlignmentFlag.AlignTop)
         content = QWidget()
         content.setObjectName("monitorContent")
         layout = QVBoxLayout(content)
@@ -457,17 +685,23 @@ class RealtimePage(QWidget):
             hint.setStyleSheet("color: #73849B;")
             self.empty_hint = hint
             self.cards_layout.addWidget(hint, 0, 0)
+            self.selected_machine_id = None
+            self.refresh_selected_machine_detail()
+            self.update_dashboard_summary()
             return
 
         # 按机器编号创建卡片，并恢复最近一次连接结果。
         for machine in self.machines:
             card = MachineCard({
+                "machine_id": str(machine["id"]),
+                "camera_serial": machine["camera_serial"],
                 "title": machine["machine_name"],
                 "tone": "idle",
                 "status": "未启动",
                 "state": "未启动监测",
                 "frequency": "--",
             })
+            card.clicked.connect(self.select_machine)
             self.machine_cards.append(card)
             machine_id = str(machine["id"])
             self.cards_by_machine_id[machine_id] = card
@@ -484,7 +718,6 @@ class RealtimePage(QWidget):
             if measurement_state is not None:
                 card.progress_session_id = measurement_state["session_id"]
                 card.progress_statuses = measurement_state["progress_statuses"].copy()
-                card.steps.update_steps(card.progress_statuses)
 
                 # 运行中的周期恢复皮带和仍在执行的子动画。
                 if measurement_state["machine_running"]:
@@ -501,6 +734,102 @@ class RealtimePage(QWidget):
             status, reason = self.connection_states.get(machine_id, ("未启动", ""))
             self.update_connection_state(machine_id, status, reason)
 
+        # 恢复仍存在的选择，否则选中首台机器。
+        selected_machine_id = self.selected_machine_id
+        if selected_machine_id not in self.cards_by_machine_id:
+            selected_machine_id = str(self.machines[0]["id"])
+        self.select_machine(selected_machine_id)
+        self.update_dashboard_summary()
+
+    def update_dashboard_summary(self):
+        """根据已有内存状态刷新总览数字。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 四项统计数字已刷新
+        """
+        connected_count = sum(
+            status == "相机已连接" for status, reason in self.connection_states.values()
+        )
+        running_count = sum(
+            state["machine_running"]
+            for state in self.measurement_states_by_machine_id.values()
+        )
+
+        # 合并连接故障和本轮失败的机器编号。
+        failed_machine_ids = {
+            machine_id
+            for machine_id, (status, reason) in self.connection_states.items()
+            if status in ("连接失败", "相机故障", "监测失败")
+        }
+        failed_machine_ids.update(
+            machine_id
+            for machine_id, state in self.measurement_states_by_machine_id.items()
+            if "failed" in state["progress_statuses"].values()
+        )
+        values = (
+            len(self.machines),
+            connected_count,
+            running_count,
+            len(failed_machine_ids),
+        )
+        for summary_card, value in zip(self.summary_cards, values):
+            summary_card.value_label.setText(str(value))
+
+    def select_machine(self, machine_id: str):
+        """选中指定机器并刷新详情。
+
+        Args:
+            machine_id: 当前卡片的机器编号。
+
+        Returns:
+            None  # 仅指定卡片选中，详情已同步
+        """
+        self.selected_machine_id = machine_id
+        for current_machine_id, card in self.cards_by_machine_id.items():
+            card.set_selected(current_machine_id == machine_id)
+        self.refresh_selected_machine_detail()
+
+    def refresh_selected_machine_detail(self):
+        """将选中机器的已有展示状态映射到详情栏。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 详情文字和步骤已刷新，无机器时显示占位
+        """
+        panel = self.detail_panel
+        card = self.cards_by_machine_id.get(self.selected_machine_id)
+        panel.title.setText(card.title.text() if card else "未选择机器")
+        panel.camera_label.setText(card.camera_label.text() if card else "Camera · --")
+        panel.state_label.setText(card.state_label.text() if card else "--")
+        panel.frequency_label.setText(card.frequency_label.text() if card else "--")
+
+        # 同步主状态徽标和故障说明。
+        panel.badge.setText(card.badge.text() if card else "未选择")
+        panel.badge.setProperty("tone", card.property("tone") if card else "idle")
+        panel.badge.style().unpolish(panel.badge)
+        panel.badge.style().polish(panel.badge)
+        panel.setToolTip(card.toolTip() if card else "")
+
+        # 从已有缓存恢复全文和步骤。
+        cached_result = self.ocr_results_by_machine_id.get(self.selected_machine_id)
+        result_text = format_ocr_result_text(
+            cached_result[1] if cached_result else (),
+            cached_result[2] if cached_result else (),
+        )
+        if panel.ocr_text.toPlainText() != result_text:
+            panel.ocr_text.setPlainText(result_text)
+        measurement_state = self.measurement_states_by_machine_id.get(
+            self.selected_machine_id
+        )
+        panel.steps.update_steps(
+            measurement_state["progress_statuses"] if measurement_state else {}
+        )
+
     def reflow_cards(self):
         """按滚动区宽度重新排列已有机器卡片。
 
@@ -513,7 +842,7 @@ class RealtimePage(QWidget):
         if not self.machine_cards:
             return
         available_width = self.scroll_area.viewport().width()
-        column_count = max(1, min(3, (available_width + 16) // 376))
+        column_count = max(1, min(3, (available_width + 16) // 292))
         if column_count == self.card_column_count:
             return
 
@@ -604,12 +933,17 @@ class RealtimePage(QWidget):
         """
         # 保留状态，并跳过运行期间已从列表移除的机器。
         self.connection_states[machine_id] = (status, reason)
+        self.update_dashboard_summary()
         card = self.cards_by_machine_id.get(machine_id)
         if card is None:
             return
 
-        # 将连接结果转换为卡片文字和颜色，频率及测量进度保持未接入。
-        tone = "waiting" if status in ("连接中", "停止中", "连接失败", "相机故障", "监测失败") else "idle"
+        # 将连接结果转换为卡片文字和颜色。
+        tone = "idle"
+        if status in ("连接中", "停止中"):
+            tone = "waiting"
+        elif status in ("连接失败", "相机故障", "监测失败", "测量失败"):
+            tone = "error"
         card.update_data({
             "title": card.title.text(),
             "tone": tone,
@@ -618,6 +952,8 @@ class RealtimePage(QWidget):
             "frequency": "--",
         })
         card.setToolTip(reason)
+        if machine_id == self.selected_machine_id:
+            self.refresh_selected_machine_detail()
 
     def update_measurement_progress(
         self, machine_id: str, session_id: str, stage: str, status: str
@@ -655,6 +991,7 @@ class RealtimePage(QWidget):
         progress_statuses = measurement_state["progress_statuses"]
         progress_statuses[stage] = status
         progress_failed = "failed" in progress_statuses.values()
+        self.update_dashboard_summary()
 
         # 找到对应机器的卡片。
         card = self.cards_by_machine_id.get(machine_id)
@@ -667,9 +1004,6 @@ class RealtimePage(QWidget):
             card.progress_statuses = {}
             card.clear_ocr_result()
         card.progress_statuses = progress_statuses.copy()
-
-        # 更新本轮进度节点。
-        card.steps.update_steps(progress_statuses)
 
         # 按当前周期的启动和运行进度开启动画。
         if is_new_session:
@@ -693,6 +1027,8 @@ class RealtimePage(QWidget):
 
         # 相机故障时保留卡片主状态和故障原因。
         if self.connection_states.get(machine_id, ("", ""))[0] == "相机故障":
+            if machine_id == self.selected_machine_id:
+                self.refresh_selected_machine_detail()
             return
 
         # 更新卡片当前测量状态。
@@ -700,11 +1036,14 @@ class RealtimePage(QWidget):
         status_title = PROGRESS_STATUS_TITLES[status]
         card.update_data({
             "title": card.title.text(),
-            "tone": "waiting" if status == "failed" else "running",
+            "tone": "error" if status == "failed" else "running",
             "status": "测量失败" if status == "failed" else "测量中",
             "state": f"{stage_title}{status_title}",
             "frequency": card.frequency_label.text(),
         })
+
+        if machine_id == self.selected_machine_id:
+            self.refresh_selected_machine_detail()
 
     def update_cycle_closed(self, machine_id: str, session_id: str) -> None:
         """关闭对应机器当前周期的皮带动画。
@@ -724,6 +1063,9 @@ class RealtimePage(QWidget):
 
         # 将当前周期标记为停止。
         measurement_state["machine_running"] = False
+        self.update_dashboard_summary()
+        if machine_id == self.selected_machine_id:
+            self.refresh_selected_machine_detail()
 
         # 收起当前卡片的皮带。
         card = self.cards_by_machine_id.get(machine_id)
@@ -762,6 +1104,9 @@ class RealtimePage(QWidget):
         if card is not None:
             card.set_ocr_result(ordered_lines, normalized_lines)
 
+        if machine_id == self.selected_machine_id:
+            self.refresh_selected_machine_detail()
+
     def finish_monitoring(self, failure_message: str):
         """显示最终停止结果并恢复启动入口。
 
@@ -787,6 +1132,9 @@ class RealtimePage(QWidget):
                 status = "监测失败" if failure_message else "已停止"
                 reason = failure_message or "相机连接已释放"
             self.update_connection_state(machine_id, status, reason)
+
+        self.update_dashboard_summary()
+        self.refresh_selected_machine_detail()
 
         # 恢复操作按钮，并展示没有对应卡片的初始化故障。
         self.start_button.setEnabled(True)

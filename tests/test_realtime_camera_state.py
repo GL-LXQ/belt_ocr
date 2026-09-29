@@ -27,7 +27,6 @@ def test_camera_fault_remains_visible_after_measurement_progress(
     card = SimpleNamespace(
         title=SimpleNamespace(text=Mock(return_value="机器 1")),
         frequency_label=SimpleNamespace(text=Mock(return_value="--")),
-        steps=SimpleNamespace(update_steps=Mock()),
         update_data=Mock(),
         setToolTip=Mock(),
         progress_session_id="session-1",
@@ -35,6 +34,9 @@ def test_camera_fault_remains_visible_after_measurement_progress(
         belt_animation=Mock(),
     )
     page = SimpleNamespace(
+        selected_machine_id="1",
+        update_dashboard_summary=Mock(),
+        refresh_selected_machine_detail=Mock(),
         connection_states={},
         cards_by_machine_id={"1": card},
         ocr_results_by_machine_id={"1": ("session-1", (), ())},
@@ -50,15 +52,24 @@ def test_camera_fault_remains_visible_after_measurement_progress(
     # 显示相机设备故障和原始原因。
     RealtimePage.update_connection_state(page, "1", "相机故障", "GetImageBuffer 失败")
     card_data = card.update_data.call_args.args[0]
-    assert card_data["tone"] == "waiting"
+    assert card_data["tone"] == "error"
     assert card_data["status"] == "相机故障"
     assert card_data["state"] == "相机故障"
     card.setToolTip.assert_called_once_with("GetImageBuffer 失败")
 
     # 更新测量失败进度并核对故障卡片未被覆盖。
     card.update_data.reset_mock()
-    RealtimePage.update_measurement_progress(page, "1", "session-1", "image_capture", "failed")
-    card.steps.update_steps.assert_called_once_with({"image_capture": "failed"})
+    RealtimePage.update_measurement_progress(
+        page,
+        "1",
+        "session-1",
+        "image_capture",
+        "failed",
+    )
+    assert page.measurement_states_by_machine_id["1"]["progress_statuses"] == {
+        "image_capture": "failed",
+    }
+    assert page.refresh_selected_machine_detail.call_count == 2
     card.belt_animation.stop_capture.assert_called_once_with()
     card.update_data.assert_not_called()
     assert page.connection_states["1"] == ("相机故障", "GetImageBuffer 失败")

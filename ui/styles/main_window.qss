@@ -70,3 +70,46 @@ QFrame#abnormalEventDetailContent, QFrame#historyEvidencePreviewContent {
     border: 1px solid @border;
     border-radius: 12px;
 }
+
+/* 设置实时总览、设备卡片和详情的白色表面。 */
+QWidget#summaryCard, QWidget#machineCard, QWidget#machineDetailPanel {
+    background: @white;
+    border: 1px solid @border;
+    border-radius: 12px;
+}
+QWidget#machineCard[selected="true"] {
+    border: 2px solid @blue;
+}
+QLabel#summaryValue {
+    color: @text;
+    font-size: 28px;
+    font-weight: bold;
+}
+QLabel#frequencyValue {
+    color: @text;
+    font-size: 24px;
+    font-weight: bold;
+}
+QLabel#machineBadge[tone="error"] {
+    background: #FDE8E8;
+    color: #B42318;
+}
+
+/* 设置 OCR 摘要和详情信息卡。 */
+QFrame#ocrSummaryPanel {
+    background: @background;
+    border: none;
+    border-radius: 8px;
+    color: @text;
+}
+QFrame#detailOcrPanel {
+    background: #F5F6F8;
+    border: none;
+    border-radius: 8px;
+}
+QPlainTextEdit#detailOcrText {
+    background: transparent;
+    border: none;
+    color: @text;
+}
+QWidget#realtime CaptionLabel { color: @muted; }

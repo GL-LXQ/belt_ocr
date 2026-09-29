@@ -77,7 +77,7 @@ class MainWindow(FluentWindow):
                 PAGES[page_key][0],
                 position=NavigationItemPosition.BOTTOM,
             )
-        self.navigationInterface.setExpandWidth(208)
+        self.navigationInterface.setExpandWidth(188)
         self.stackedWidget.currentChanged.connect(self.update_current_page)
 
         # 在现有标题栏显示时钟和连接状态。
@@ -123,7 +123,7 @@ class MainWindow(FluentWindow):
         self.setWindowIcon(create_icon("logo", "white"))
         self.resize(1600, 900)
         self.setMinimumSize(1280, 720)
-        self.setMicaEffectEnabled(True)
+        self.setMicaEffectEnabled(False)
 
         # 选择目标系统中的界面字体并居中窗口。
         families = QFontDatabase.families()
