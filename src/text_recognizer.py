@@ -61,7 +61,7 @@ class TextRecognizer:
         self.ocr_engine: BeltOCREngine | None = None
 
     @asynccontextmanager
-    async def use_processing_resource(
+    async def acquire_ocr_access(
         self,
         wait_timeout_seconds: float,
     ) -> AsyncIterator[None]:

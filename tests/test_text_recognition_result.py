@@ -53,7 +53,7 @@ async def test_processing_resource_timeout_preserves_current_owner() -> None:
             返回示例：
                 None  # 已退出共享资源上下文
         """
-        async with recognizer.use_processing_resource(1):
+        async with recognizer.acquire_ocr_access(1):
             owner_acquired.set()
             await owner_release.wait()
 
@@ -63,7 +63,7 @@ async def test_processing_resource_timeout_preserves_current_owner() -> None:
         # 连续两个等待者均不能提前进入共享资源。
         for wait_attempt in range(2):
             with pytest.raises(OCRResourceWaitTimeoutError):
-                async with recognizer.use_processing_resource(0.01):
+                async with recognizer.acquire_ocr_access(0.01):
                     pytest.fail("资源仍被占用时不应进入")
             assert not owner_task.done()
     finally:
@@ -72,7 +72,7 @@ async def test_processing_resource_timeout_preserves_current_owner() -> None:
         await owner_task
 
     # 原占用者退出后下一请求可以进入。
-    async with recognizer.use_processing_resource(0.1):
+    async with recognizer.acquire_ocr_access(0.1):
         pass
 
 

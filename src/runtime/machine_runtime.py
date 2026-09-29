@@ -1026,7 +1026,7 @@ class MachineRuntime:
 
                 try:
                     # 限时取得共享 OCR 处理资源。
-                    async with self.text_recognizer.use_processing_resource(
+                    async with self.text_recognizer.acquire_ocr_access(
                         self.config.ocr_lock_wait_timeout_ms / 1000
                     ):
                         # 记录获得资源时的等待时长。

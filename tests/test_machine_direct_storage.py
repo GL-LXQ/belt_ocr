@@ -68,7 +68,7 @@ async def hold_ocr_processing_resource(
             None  # 已释放共享 OCR 处理资源
     """
     # 取得资源并等待测试放行。
-    async with recognizer.use_processing_resource(1):
+    async with recognizer.acquire_ocr_access(1):
         acquired.set()
         await release.wait()
 
@@ -1255,7 +1255,7 @@ async def test_preparation_error_fails_only_current_session(tmp_path: Path) -> N
     recognizer = TextRecognizer()
     recognizer.prepare_frames_for_ocr = Mock(side_effect=OCRProcessingError("图片初筛失败"))
     recognizer.recognize_qualified_frames = Mock()
-    recognizer.use_processing_resource = Mock(wraps=recognizer.use_processing_resource)
+    recognizer.acquire_ocr_access = Mock(wraps=recognizer.acquire_ocr_access)
     machine.text_recognizer = recognizer
     machine.publish_event = AsyncMock(side_effect=machine.handle_event)
 
@@ -1266,7 +1266,7 @@ async def test_preparation_error_fails_only_current_session(tmp_path: Path) -> N
     assert published_event.payload == "图片初筛失败"
     assert session.state == SessionState.FAILED
     assert session.errors == ["图片初筛失败", "OCR 识别执行失败"]
-    recognizer.use_processing_resource.assert_not_called()
+    recognizer.acquire_ocr_access.assert_not_called()
     recognizer.recognize_qualified_frames.assert_not_called()
     machine.on_system_failure.assert_not_called()
     database.close()
@@ -1301,7 +1301,7 @@ async def test_no_qualified_frames_complete_without_ocr_lock(tmp_path: Path) -> 
         recognizer, resource_acquired, resource_release
     ))
     await resource_acquired.wait()
-    recognizer.use_processing_resource = Mock(wraps=recognizer.use_processing_resource)
+    recognizer.acquire_ocr_access = Mock(wraps=recognizer.acquire_ocr_access)
 
     try:
         # 在原占用者不释放资源时完成本轮初筛结果交付。
@@ -1316,7 +1316,7 @@ async def test_no_qualified_frames_complete_without_ocr_lock(tmp_path: Path) -> 
         assert session.ocr_result.review_frames == (evidence_frame,)
 
         # 核对本轮没有占用共享资源、启动超时或调用 OCR Engine。
-        recognizer.use_processing_resource.assert_not_called()
+        recognizer.acquire_ocr_access.assert_not_called()
         recognizer.recognize_qualified_frames.assert_not_called()
         recognizer.recognize_images.assert_not_called()
         assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
@@ -1371,14 +1371,14 @@ async def test_invalid_session_after_preparation_skips_ocr(tmp_path: Path) -> No
 
     recognizer.prepare_frames_for_ocr = Mock(side_effect=prepare_frames)
     recognizer.recognize_qualified_frames = Mock()
-    recognizer.use_processing_resource = Mock(wraps=recognizer.use_processing_resource)
+    recognizer.acquire_ocr_access = Mock(wraps=recognizer.acquire_ocr_access)
     machine.text_recognizer = recognizer
     machine.publish_event = AsyncMock()
 
     # 运行识别任务并核对失效周期被提前丢弃。
     await machine.run_ocr_pipeline(session, (evidence_frame.camera_frame,))
     recognizer.prepare_frames_for_ocr.assert_called_once()
-    recognizer.use_processing_resource.assert_not_called()
+    recognizer.acquire_ocr_access.assert_not_called()
     recognizer.recognize_qualified_frames.assert_not_called()
     assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
     machine.publish_event.assert_not_awaited()
@@ -1655,7 +1655,7 @@ async def test_invalid_session_waiting_for_ocr_resource_skips_timeout_and_infere
         recognizer, resource_acquired, resource_release
     ))
     await resource_acquired.wait()
-    recognizer.use_processing_resource = Mock(wraps=recognizer.use_processing_resource)
+    recognizer.acquire_ocr_access = Mock(wraps=recognizer.acquire_ocr_access)
     machine.publish_event = AsyncMock()
     recognition_task = asyncio.create_task(machine.run_ocr_pipeline(
         session, (evidence_frame.camera_frame,)
@@ -1663,10 +1663,10 @@ async def test_invalid_session_waiting_for_ocr_resource_skips_timeout_and_infere
     try:
         # 周期在等待共享资源期间失效。
         for wait_attempt in range(100):
-            if recognizer.use_processing_resource.called:
+            if recognizer.acquire_ocr_access.called:
                 break
             await asyncio.sleep(0.01)
-        assert recognizer.use_processing_resource.called
+        assert recognizer.acquire_ocr_access.called
         session.state = SessionState.FAILED
         resource_release.set()
         await resource_holder_task
@@ -1841,7 +1841,7 @@ async def test_cancelled_ocr_resource_wait_does_not_release_current_owner(
         recognizer, resource_acquired, resource_release
     ))
     await resource_acquired.wait()
-    recognizer.use_processing_resource = Mock(wraps=recognizer.use_processing_resource)
+    recognizer.acquire_ocr_access = Mock(wraps=recognizer.acquire_ocr_access)
     machine.publish_event = AsyncMock()
     recognition_task = asyncio.create_task(machine.run_ocr_pipeline(
         session, (evidence_frame.camera_frame,)
@@ -1849,10 +1849,10 @@ async def test_cancelled_ocr_resource_wait_does_not_release_current_owner(
     try:
         # 取消仍在等待共享资源的识别任务。
         for wait_attempt in range(100):
-            if recognizer.use_processing_resource.called:
+            if recognizer.acquire_ocr_access.called:
                 break
             await asyncio.sleep(0.01)
-        assert recognizer.use_processing_resource.called
+        assert recognizer.acquire_ocr_access.called
         session.state = SessionState.FAILED
         recognition_task.cancel()
         await asyncio.gather(recognition_task, return_exceptions=True)
@@ -1860,7 +1860,7 @@ async def test_cancelled_ocr_resource_wait_does_not_release_current_owner(
         # 核对取消没有释放资源或执行识别。
         assert not resource_holder_task.done()
         with pytest.raises(OCRResourceWaitTimeoutError):
-            async with recognizer.use_processing_resource(0.01):
+            async with recognizer.acquire_ocr_access(0.01):
                 pytest.fail("原任务仍占用资源时不应进入")
         assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
         machine.text_recognizer.recognize_qualified_frames.assert_not_called()
@@ -2110,7 +2110,7 @@ async def test_shutdown_waits_for_detached_ocr_task(tmp_path: Path) -> None:
                 None  # 旧识别结束且共享资源已释放
         """
         # 在共享资源上下文内等待阻塞识别结束。
-        async with recognizer.use_processing_resource(1):
+        async with recognizer.acquire_ocr_access(1):
             await run_blocking_operation(finish_old_ocr)
 
     # 启动已解绑的旧任务并发起退出。
@@ -2131,7 +2131,7 @@ async def test_shutdown_waits_for_detached_ocr_task(tmp_path: Path) -> None:
         await asyncio.sleep(0)
         assert old_task.done()
         assert not machine.unfinished_recognition_tasks
-        async with recognizer.use_processing_resource(0.1):
+        async with recognizer.acquire_ocr_access(0.1):
             pass
     finally:
         # 放行可能尚未结束的线程并关闭测试库。
@@ -2185,7 +2185,7 @@ async def test_unknown_ocr_error_reaches_system_failure_callback(
     machine.on_system_failure.assert_called_once_with(error)
     machine.publish_event.assert_not_awaited()
     assert machine.current_recognition_task is None
-    async with recognizer.use_processing_resource(0.1):
+    async with recognizer.acquire_ocr_access(0.1):
         pass
     assert session.ocr_state == OCRState.RUNNING
     assert read_abnormal_events(database) == []
