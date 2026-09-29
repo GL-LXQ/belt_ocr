@@ -15,7 +15,7 @@ from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
 from enums import EventType, FrequencyState, OCRState, ProgressStage, ProgressStatus, SessionState
 from camera.hikrobot_sdk import CameraFrame, MvsError
-from models import MeasurementSession, CapturedFrame, RuntimeEvent, PublishEvent
+from models import MeasurementSession, MeasurementFrame, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
 from text_recognizer import (
     OCRProcessingError,
@@ -994,7 +994,7 @@ class MachineRuntime:
         """
         try:
             # 在线程中整理原始帧并执行初筛。
-            captured_frames, qualified_frames = await run_blocking_operation(
+            measurement_frames, qualified_frames = await run_blocking_operation(
                 self.text_recognizer.prepare_frames_for_ocr,
                 session.session_id,
                 session.capture_id,
@@ -1012,7 +1012,7 @@ class MachineRuntime:
             # 初筛为空时直接交付人工复核结果。
             if not qualified_frames:
                 result = self.text_recognizer.create_no_qualified_frames_result(
-                    captured_frames
+                    measurement_frames
                 )
                 event_type, payload = EventType.OCR_COMPLETED, result
             else:
@@ -1070,7 +1070,7 @@ class MachineRuntime:
                             result = await run_blocking_operation(
                                 self.text_recognizer.recognize_qualified_frames,
                                 session.session_id,
-                                captured_frames,
+                                measurement_frames,
                                 qualified_frames,
                             )
                         except OCRProcessingError:
@@ -1343,7 +1343,7 @@ class MachineRuntime:
     def save_evidence_images_and_measurement_record(
         self,
         record: MeasurementRecord,
-        evidence_frames: tuple[CapturedFrame, ...],
+        evidence_frames: tuple[MeasurementFrame, ...],
     ) -> None:
         """逐张保存证据图片，再写入本轮测量记录。
 
@@ -1380,7 +1380,7 @@ class MachineRuntime:
     def encode_and_save_evidence_images(
         self,
         record: MeasurementRecord,
-        evidence_frames: tuple[CapturedFrame, ...],
+        evidence_frames: tuple[MeasurementFrame, ...],
         created_image_paths: list[Path],
     ) -> None:
         """逐帧编码并保存本轮尚不存在的证据图片。

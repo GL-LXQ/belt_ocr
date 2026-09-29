@@ -23,7 +23,7 @@ from runtime.machine_runtime import EvidenceWriteError, ImageEncodingError, Mach
 from models import (
     MeasurementSession,
     CaptureResult,
-    CapturedFrame,
+    MeasurementFrame,
     FrequencyMeasurement,
     OCRResult,
     RuntimeEvent,
@@ -73,33 +73,35 @@ async def hold_ocr_processing_resource(
         await release.wait()
 
 
-def create_frame(session_id: str, frame_id: str, image_data: bytes) -> CapturedFrame:
+def create_frame(
+    session_id: str, frame_id: str, image_bytes: bytes
+) -> MeasurementFrame:
     """建立带图片内容的测试帧。
 
     Args:
         session_id: 测量周期编号。
         frame_id: 图片编号。
-        image_data: 图片测试内容。
+        image_bytes: 图片测试内容。
 
     Returns:
         返回示例：
-            CapturedFrame(...)  # 带编号和图片内容的测试帧
+            MeasurementFrame(...)  # 带编号和图片内容的测试帧
     """
-    return CapturedFrame(
+    return MeasurementFrame(
         session_id=session_id,
         capture_id="capture-1",
         camera_serial="camera-1",
         frame_id=frame_id,
         captured_at="2026-09-23T00:00:00+00:00",
         captured_monotonic=0.0,
-        camera_frame=SimpleNamespace(data=image_data),
+        camera_frame=SimpleNamespace(image_bytes=image_bytes),
     )
 
 
 def create_machine(
     temporary_directory: Path,
-    selected_frames: tuple[CapturedFrame, ...],
-    review_frames: tuple[CapturedFrame, ...] = (),
+    selected_frames: tuple[MeasurementFrame, ...],
+    review_frames: tuple[MeasurementFrame, ...] = (),
     review_reason: str | None = None,
 ) -> tuple[MachineRuntime, Database, MeasurementSession, list, list]:
     """建立可直接结算的机器、数据库和周期。
@@ -146,7 +148,7 @@ def create_machine(
                 b"image"  # 测试图片字节
         """
         encoding_threads.append(threading.get_ident())
-        return camera_frame.data
+        return camera_frame.image_bytes
 
     # 组装机器依赖并记录进度通知。
     camera = SimpleNamespace(
@@ -522,9 +524,9 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
             返回示例：
                 b"image-one"  # 首帧编码结果
         """
-        if camera_frame.data == b"image-two":
+        if camera_frame.image_bytes == b"image-two":
             raise MvsError("SaveImageEx3 编码失败")
-        return camera_frame.data
+        return camera_frame.image_bytes
 
     # 使用真实相机可用状态检查本轮失败后的机器状态。
     sdk_camera = SimpleNamespace(
@@ -588,9 +590,9 @@ async def test_unknown_encoding_failure_removes_new_images(tmp_path: Path) -> No
             返回示例：
                 b"image-one"  # 首帧的图片字节
         """
-        if camera_frame.data == b"image-two":
+        if camera_frame.image_bytes == b"image-two":
             raise RuntimeError("编码失败")
-        return camera_frame.data
+        return camera_frame.image_bytes
 
     machine.camera.sdk_camera.encode_image = encode_first_image
     with pytest.raises(ImageEncodingError):
@@ -1350,7 +1352,7 @@ async def test_invalid_session_after_preparation_skips_ocr(tmp_path: Path) -> No
         capture_id: str,
         camera_serial: str,
         frames: tuple[object, ...],
-    ) -> tuple[tuple[CapturedFrame, ...], tuple[CapturedFrame, ...]]:
+    ) -> tuple[tuple[MeasurementFrame, ...], tuple[MeasurementFrame, ...]]:
         """结束当前周期并返回已经整理的测试帧。
 
         Args:
@@ -1427,14 +1429,14 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
 
     def process_frames(
         session_id: str,
-        captured_frames: tuple[object, ...],
+        measurement_frames: tuple[object, ...],
         qualified_frames: tuple[object, ...],
     ) -> OCRResult:
         """等待测试放行后返回正常 OCR 结果。
 
         Args:
             session_id: 本轮测量周期编号。
-            captured_frames: 本轮全部原始帧。
+            measurement_frames: 本轮全部原始帧。
             qualified_frames: 本轮合格帧。
 
         Returns:
@@ -1551,14 +1553,14 @@ async def test_ocr_processing_timeout_fails_current_session(tmp_path: Path) -> N
 
     def process_frames(
         session_id: str,
-        captured_frames: tuple[object, ...],
+        measurement_frames: tuple[object, ...],
         qualified_frames: tuple[object, ...],
     ) -> object:
         """等待测试放行后结束 OCR 执行。
 
         Args:
             session_id: 本轮测量周期编号。
-            captured_frames: 本轮全部原始帧。
+            measurement_frames: 本轮全部原始帧。
             qualified_frames: 本轮合格帧。
 
         Returns:
@@ -1906,14 +1908,14 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
 
     def process_frames(
         session_id: str,
-        captured_frames: tuple[object, ...],
+        measurement_frames: tuple[object, ...],
         qualified_frames: tuple[object, ...],
     ) -> object:
         """按周期等待测试放行后返回对应 OCR 结果。
 
         Args:
             session_id: 本次识别所属的周期编号。
-            captured_frames: 本次识别的全部原始帧。
+            measurement_frames: 本次识别的全部原始帧。
             qualified_frames: 本次识别的合格帧。
 
         Returns:

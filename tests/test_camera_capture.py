@@ -41,23 +41,25 @@ def test_mono8_frame_conversion_checks_pixels_and_size() -> None:
         height=2,
         pixel_type=PIXEL_TYPE_MONO8,
         lost_packet_count=0,
-        data=bytes([1, 2, 3, 4, 5, 6]),
+        image_bytes=bytes([1, 2, 3, 4, 5, 6]),
     )
 
     # 核对数组的像素类型、尺寸和顺序。
-    image = convert_mono8_frame_to_array(frame)
-    assert image.dtype == np.uint8
-    assert image.shape == (2, 3)
-    np.testing.assert_array_equal(image, [[1, 2, 3], [4, 5, 6]])
+    image_numpy = convert_mono8_frame_to_array(frame)
+    assert image_numpy.dtype == np.uint8
+    assert image_numpy.shape == (2, 3)
+    np.testing.assert_array_equal(image_numpy, [[1, 2, 3], [4, 5, 6]])
 
     # 拒绝非 Mono8 像素格式。
     with pytest.raises(ValueError, match="仅支持 Mono8"):
         convert_mono8_frame_to_array(replace(frame, pixel_type=0))
 
     # 拒绝短于或长于图像尺寸的字节数据。
-    for invalid_data in (frame.data[:-1], frame.data + b"\x07"):
+    for invalid_image_bytes in (frame.image_bytes[:-1], frame.image_bytes + b"\x07"):
         with pytest.raises(ValueError, match="字节数与尺寸不符"):
-            convert_mono8_frame_to_array(replace(frame, data=invalid_data))
+            convert_mono8_frame_to_array(
+                replace(frame, image_bytes=invalid_image_bytes)
+            )
 
 
 def test_single_empty_frame_does_not_end_capture() -> None:
@@ -70,8 +72,8 @@ def test_single_empty_frame_does_not_end_capture() -> None:
         返回示例：
             None  # 无帧后成功读取下一帧
     """
-    captured_frame = object()
-    read_results = iter((None, captured_frame))
+    camera_frame = object()
+    read_results = iter((None, camera_frame))
     sdk_camera = SimpleNamespace(
         received_frame_count=0,
         start_grabbing=Mock(),
@@ -100,7 +102,7 @@ def test_single_empty_frame_does_not_end_capture() -> None:
     sdk_camera.read_frame = Mock(side_effect=read_frame)
     capture_task = CaptureTask(sdk_camera, time.monotonic(), 1.0, 50)
     result = capture_task.run_capture()
-    assert result.frames == (captured_frame,)
+    assert result.frames == (camera_frame,)
     assert result.statistics["received_frame_count"] == 1
     assert sdk_camera.read_frame.call_count == 2
     sdk_camera.stop_grabbing.assert_called_once()

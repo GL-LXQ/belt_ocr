@@ -21,14 +21,14 @@ def test_bmp_and_jpg_are_loaded_as_mono8_frames(tmp_path: Path) -> None:
             None  # 两种格式的原始像素、尺寸和帧编号已核对
     """
     # 在同一目录创建 BMP 和 JPG 测试图片。
-    image = np.array(
+    image_numpy = np.array(
         [[0, 40, 80, 120], [30, 90, 150, 210], [255, 200, 100, 50]],
         dtype=np.uint8,
     )
     bmp_path = tmp_path / "first.bmp"
     jpg_path = tmp_path / "second.jpg"
-    assert cv2.imwrite(str(bmp_path), image)
-    assert cv2.imwrite(str(jpg_path), image)
+    assert cv2.imwrite(str(bmp_path), image_numpy)
+    assert cv2.imwrite(str(jpg_path), image_numpy)
 
     # 按实际解码结果核对两张 Mono8 相机帧。
     frames = load_camera_frames(tmp_path, "camera-1")
@@ -36,11 +36,11 @@ def test_bmp_and_jpg_are_loaded_as_mono8_frames(tmp_path: Path) -> None:
     assert [frame.frame_number for frame in frames] == [1, 2]
     assert all(frame.pixel_type == PIXEL_TYPE_MONO8 for frame in frames)
     for frame, image_path in zip(frames, (bmp_path, jpg_path)):
-        expected_image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        expected_image_numpy = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
         assert (frame.width, frame.height) == (4, 3)
-        assert len(frame.data) == frame.width * frame.height
+        assert len(frame.image_bytes) == frame.width * frame.height
         np.testing.assert_array_equal(
-            convert_mono8_frame_to_array(frame), expected_image
+            convert_mono8_frame_to_array(frame), expected_image_numpy
         )
 
 
@@ -55,9 +55,9 @@ def test_simulated_camera_delivers_frames_and_encodes_jpg(tmp_path: Path) -> Non
             None  # 交付计数、结束状态和证据 JPG 已核对
     """
     # 准备两张编号不同的 BMP 输入帧。
-    image = np.arange(80, dtype=np.uint8).reshape(8, 10)
-    assert cv2.imwrite(str(tmp_path / "first.bmp"), image)
-    assert cv2.imwrite(str(tmp_path / "second.bmp"), image)
+    image_numpy = np.arange(80, dtype=np.uint8).reshape(8, 10)
+    assert cv2.imwrite(str(tmp_path / "first.bmp"), image_numpy)
+    assert cv2.imwrite(str(tmp_path / "second.bmp"), image_numpy)
     frames = load_camera_frames(tmp_path, "camera-1")
     camera_sdk = SimulatedCameraSdk("camera-1", frames)
 

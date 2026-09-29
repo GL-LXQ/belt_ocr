@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 PIXEL_TYPE_MONO8 = 0x01080001
@@ -22,7 +23,7 @@ class MvsError(RuntimeError):
 
 @dataclass(frozen=True)
 class CameraFrame:
-    """保存独立图像字节和 SDK 帧元数据。"""
+    """保存 SDK 原始帧元数据和独立图像像素字节。"""
 
     camera_serial: str  # 拍到本帧的相机序列号
     frame_number: int  # SDK 帧编号
@@ -33,10 +34,10 @@ class CameraFrame:
     height: int  # 图像高度
     pixel_type: int  # SDK 像素格式编号
     lost_packet_count: int  # SDK 报告的丢包数
-    data: bytes  # 复制出的独立图像字节
+    image_bytes: bytes  # 复制出的独立图像像素字节
 
 
-def convert_mono8_frame_to_array(frame: CameraFrame) -> np.ndarray:
+def convert_mono8_frame_to_array(frame: CameraFrame) -> NDArray[np.uint8]:
     """将 Mono8 相机帧转换为二维灰度图数组。
 
     Args:
@@ -58,13 +59,15 @@ def convert_mono8_frame_to_array(frame: CameraFrame) -> np.ndarray:
 
     # 核对原始字节数与图像尺寸。
     expected_length = frame.width * frame.height
-    if len(frame.data) != expected_length:
+    if len(frame.image_bytes) != expected_length:
         raise ValueError(
-            f"Mono8 图像字节数与尺寸不符: 收到 {len(frame.data)}，预期 {expected_length}"
+            f"Mono8 图像字节数与尺寸不符: 收到 {len(frame.image_bytes)}，预期 {expected_length}"
         )
 
     # 将原始字节恢复为二维灰度图。
-    return np.frombuffer(frame.data, dtype=np.uint8).reshape(frame.height, frame.width)
+    return np.frombuffer(frame.image_bytes, dtype=np.uint8).reshape(
+        frame.height, frame.width
+    )
 
 
 @dataclass
@@ -129,7 +132,7 @@ class MvsCamera:
                     height=1,  # 图像高度
                     pixel_type=17301505,  # SDK 像素格式编号
                     lost_packet_count=0,  # SDK 报告的丢包数
-                    data=b"\x01\x02",  # 独立图像字节
+                    image_bytes=b"\x01\x02",  # 独立图像字节
                 )
         """
         # 已收到停止通知时不再取帧。
@@ -173,7 +176,7 @@ class MvsCamera:
                 height=int(information.nExtendHeight or information.nHeight),
                 pixel_type=int(information.enPixelType),
                 lost_packet_count=int(information.nLostPacket),
-                data=ctypes.string_at(frame_buffer.pBufAddr, frame_length),
+                image_bytes=ctypes.string_at(frame_buffer.pBufAddr, frame_length),
             )
         finally:
             # 无论复制成功或失败，都归还本次取得的 SDK Buffer。
@@ -196,14 +199,16 @@ class MvsCamera:
                 b"\xff\xd8...\xff\xd9"  # 完整 JPG 文件字节，示例省略图片内容
         """
         # 为当前帧建立输入缓存和图片输出缓存。
-        source_buffer = (ctypes.c_ubyte * len(frame.data)).from_buffer_copy(frame.data)
+        source_buffer = (ctypes.c_ubyte * len(frame.image_bytes)).from_buffer_copy(
+            frame.image_bytes
+        )
         output_capacity = frame.width * frame.height * 4 + 2048
         output_buffer = (ctypes.c_ubyte * output_capacity)()
 
         # 填入原始图像地址、字节数、像素格式和尺寸。
         parameters = self.binding.parameters.MV_SAVE_IMAGE_PARAM_EX3()
         parameters.pData = ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_ubyte))
-        parameters.nDataLen = len(frame.data)
+        parameters.nDataLen = len(frame.image_bytes)
         parameters.enPixelType = frame.pixel_type
         parameters.nWidth = frame.width
         parameters.nHeight = frame.height

@@ -57,10 +57,10 @@ def load_camera_frames(
     # 将每张图片转换成相机交付的灰度像素字节。
     frames = []
     for frame_number, image_path in enumerate(image_paths, start=1):
-        image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
-        if image is None:
+        image_numpy = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        if image_numpy is None:
             raise ValueError(f"测试图片无法读取：{image_path}")
-        height, width = image.shape
+        height, width = image_numpy.shape
         frames.append(CameraFrame(
             camera_serial=camera_serial,
             frame_number=frame_number,
@@ -71,7 +71,7 @@ def load_camera_frames(
             height=height,
             pixel_type=PIXEL_TYPE_MONO8,
             lost_packet_count=0,
-            data=image.tobytes(),
+            image_bytes=image_numpy.tobytes(),
         ))
     return tuple(frames)
 
@@ -161,8 +161,8 @@ class SimulatedCameraSdk:
             返回示例：
                 b"\xff\xd8..."  # JPG 图片字节
         """
-        image = convert_mono8_frame_to_array(frame)
-        encoded, image_data = cv2.imencode(".jpg", image)
+        image_numpy = convert_mono8_frame_to_array(frame)
+        encoded, image_data = cv2.imencode(".jpg", image_numpy)
         if not encoded:
             raise RuntimeError("模拟证据图片编码失败")
         return image_data.tobytes()

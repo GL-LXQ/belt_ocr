@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from models import CapturedFrame, OCRResult
+from models import MeasurementFrame, OCRResult
 from camera.hikrobot_sdk import CameraFrame, convert_mono8_frame_to_array
 from ocr.config import load_config as load_ocr_config
 from ocr.engine import BeltOCREngine
@@ -113,7 +113,7 @@ class TextRecognizer:
         capture_id: str,
         camera_serial: str,
         frames: tuple[CameraFrame, ...],
-    ) -> tuple[tuple[CapturedFrame, ...], tuple[CapturedFrame, ...]]:
+    ) -> tuple[tuple[MeasurementFrame, ...], tuple[MeasurementFrame, ...]]:
         """整理本轮原始帧并筛选合格图片。
 
         Args:
@@ -124,7 +124,7 @@ class TextRecognizer:
 
         Returns:
             返回示例：
-                captured_frame = CapturedFrame(
+                measurement_frame = MeasurementFrame(
                     session_id="session",  # 测量周期编号
                     capture_id="capture",  # 采集编号
                     camera_serial="CAM01",  # 相机序列号
@@ -141,12 +141,12 @@ class TextRecognizer:
                         height=1,  # 图像高度
                         pixel_type=17301505,  # 像素格式编号
                         lost_packet_count=0,  # 丢包数
-                        data=b"\x01\x02",  # 原始图像字节
+                        image_bytes=b"\x01\x02",  # 原始图像字节
                     ),
                 )
                 (
-                    (captured_frame,),  # 本轮全部原始帧
-                    (captured_frame,),  # 按原顺序筛选的合格帧
+                    (measurement_frame,),  # 本轮全部原始帧
+                    (measurement_frame,),  # 按原顺序筛选的合格帧
                 )
         """
         # 本轮没有帧时直接失败。
@@ -154,7 +154,7 @@ class TextRecognizer:
             raise ValueError(f"session_id={session_id} 本轮没有采集到任何帧。")
 
         # 逐帧整理相机原始图片及其所属周期。
-        captured_frames = []
+        measurement_frames = []
         for frame in frames:
             # 按单调接收时间换算本帧的 UTC 时间。
             captured_at = datetime.now(timezone.utc) - timedelta(
@@ -162,7 +162,7 @@ class TextRecognizer:
             )
 
             # 登记带周期身份和采集编号的图片。
-            captured_frames.append(CapturedFrame(
+            measurement_frames.append(MeasurementFrame(
                 session_id=session_id,
                 capture_id=capture_id,
                 camera_serial=camera_serial,
@@ -173,21 +173,21 @@ class TextRecognizer:
             ))
 
         # 固定本轮全部原始帧，并筛选合格图片。
-        captured_frames = tuple(captured_frames)
-        qualified_frames = self.select_qualified_frames(captured_frames)
-        return captured_frames, qualified_frames
+        measurement_frames = tuple(measurement_frames)
+        qualified_frames = self.select_qualified_frames(measurement_frames)
+        return measurement_frames, qualified_frames
 
     def create_no_qualified_frames_result(
-        self, captured_frames: tuple[CapturedFrame, ...]
+        self, measurement_frames: tuple[MeasurementFrame, ...]
     ) -> OCRResult:
         """生成初筛没有合格图片时的人工复核结果。
 
         Args:
-            captured_frames: 本轮全部原始帧。
+            measurement_frames: 本轮全部原始帧。
 
         Returns:
             返回示例：
-                captured_frame = CapturedFrame(
+                measurement_frame = MeasurementFrame(
                     session_id="session",  # 测量周期编号
                     capture_id="capture",  # 采集编号
                     camera_serial="CAM01",  # 相机序列号
@@ -204,7 +204,7 @@ class TextRecognizer:
                         height=1,  # 图像高度
                         pixel_type=17301505,  # 像素格式编号
                         lost_packet_count=0,  # 丢包数
-                        data=b"\x01\x02",  # 原始图像字节
+                        image_bytes=b"\x01\x02",  # 原始图像字节
                     ),
                 )
                 OCRResult(
@@ -212,7 +212,7 @@ class TextRecognizer:
                     normalized_lines=(),  # 去空白文字
                     selected_frames=(),  # 选中的证据图片
                     line_frame_ids=(),  # 文字对应的图片编号
-                    review_frames=(captured_frame,),  # 待复核原始帧
+                    review_frames=(measurement_frame,),  # 待复核原始帧
                     review_reason="初筛后没有合格图片",  # 复核原因
                 )
         """
@@ -222,26 +222,26 @@ class TextRecognizer:
             normalized_lines=(),
             selected_frames=(),
             line_frame_ids=(),
-            review_frames=captured_frames,
+            review_frames=measurement_frames,
             review_reason="初筛后没有合格图片",
         )
 
     def recognize_qualified_frames(
         self,
         session_id: str,
-        captured_frames: tuple[CapturedFrame, ...],
-        qualified_frames: tuple[CapturedFrame, ...],
+        measurement_frames: tuple[MeasurementFrame, ...],
+        qualified_frames: tuple[MeasurementFrame, ...],
     ) -> OCRResult:
         """识别合格图片并终选文字和证据图片。
 
         Args:
             session_id: 测量周期编号。
-            captured_frames: 本轮全部原始帧。
+            measurement_frames: 本轮全部原始帧。
             qualified_frames: 本轮经过初筛的合格帧。
 
         Returns:
             返回示例：
-                selected_frame = CapturedFrame(
+                selected_frame = MeasurementFrame(
                     session_id="session",  # 测量周期编号
                     capture_id="capture",  # 采集编号
                     camera_serial="CAM01",  # 相机序列号
@@ -258,7 +258,7 @@ class TextRecognizer:
                         height=1,  # 图像高度
                         pixel_type=17301505,  # 像素格式编号
                         lost_packet_count=0,  # 丢包数
-                        data=b"\x01\x02",  # 原始图像字节
+                        image_bytes=b"\x01\x02",  # 原始图像字节
                     ),
                 )
                 OCRResult(
@@ -329,7 +329,7 @@ class TextRecognizer:
                 normalized_lines=(),
                 selected_frames=(),
                 line_frame_ids=(),
-                review_frames=captured_frames,
+                review_frames=measurement_frames,
                 review_reason=review_reason,
             )
 
@@ -339,11 +339,13 @@ class TextRecognizer:
             normalized_lines=normalized_lines,
             selected_frames=selected_frames,
             line_frame_ids=line_frame_ids,
-            review_frames=captured_frames if review_reason else (),
+            review_frames=measurement_frames if review_reason else (),
             review_reason=review_reason,
         )
 
-    def select_qualified_frames(self, frames: tuple[CapturedFrame, ...]) -> tuple[CapturedFrame, ...]:
+    def select_qualified_frames(
+        self, frames: tuple[MeasurementFrame, ...]
+    ) -> tuple[MeasurementFrame, ...]:
         """从本轮全部图片中选出符合 OCR 条件的帧，目前原样返回全部图片。
 
         Args:
@@ -352,7 +354,7 @@ class TextRecognizer:
         Returns:
             返回示例：
                 (
-                    CapturedFrame(
+                    MeasurementFrame(
                         session_id="session",  # 测量周期编号
                         capture_id="capture",  # 采集编号
                         camera_serial="CAM01",  # 相机序列号
@@ -369,7 +371,7 @@ class TextRecognizer:
                             height=1,  # 图像高度
                             pixel_type=17301505,  # 像素格式编号
                             lost_packet_count=0,  # 丢包数
-                            data=b"\x01\x02",  # 原始图像字节
+                            image_bytes=b"\x01\x02",  # 原始图像字节
                         ),
                     ),
                 )
@@ -377,11 +379,11 @@ class TextRecognizer:
         # 原样返回全部图片。
         return frames
 
-    def recognize_images(self, images: list[CameraFrame]) -> list[dict]:
+    def recognize_images(self, camera_frames: list[CameraFrame]) -> list[dict]:
         """逐张转换相机帧并用共享 OCR Engine 识别。
 
         Args:
-            images: 按顺序排列的合格相机原始帧。
+            camera_frames: 按顺序排列的合格相机原始帧。
 
         Returns:
             返回示例：
@@ -405,9 +407,9 @@ class TextRecognizer:
         """
         # 按输入顺序转换并识别每张相机帧。
         image_results = []
-        for frame in images:
+        for camera_frame in camera_frames:
             try:
-                image = convert_mono8_frame_to_array(frame)
+                image_numpy = convert_mono8_frame_to_array(camera_frame)
             except ValueError as error:
                 raise OCRProcessingError(str(error)) from error
 
@@ -415,7 +417,7 @@ class TextRecognizer:
             self.initialize()
 
             # 保存当前帧的识别结果。
-            image_results.append(self.ocr_engine.process_image(image))
+            image_results.append(self.ocr_engine.process_image(image_numpy))
 
         return image_results
 
@@ -426,11 +428,11 @@ class TextRecognizer:
     def generate_final_text_and_images(
         self,
         frame_results: list[dict],
-        frames: tuple[CapturedFrame, ...],
+        frames: tuple[MeasurementFrame, ...],
     ) -> tuple[
         tuple[str, ...],
         tuple[str, ...],
-        tuple[CapturedFrame, ...],
+        tuple[MeasurementFrame, ...],
         tuple[tuple[str, ...], ...],
         str | None,
     ]:
@@ -452,7 +454,7 @@ class TextRecognizer:
                     ("0 03",),  # 按 20、8、3、2 类别顺序排列的大写文字
                     ("003",),  # 与最终文字逐项对应的去空白文字
                     (  # 最终选中的内存图片，同一图片只保留一次
-                        CapturedFrame(
+                        MeasurementFrame(
                             session_id="session",  # 测量周期编号
                             capture_id="capture",  # 采集编号
                             camera_serial="CAM01",  # 相机序列号
@@ -469,7 +471,7 @@ class TextRecognizer:
                                 height=1,  # 图像高度
                                 pixel_type=17301505,  # 像素格式编号
                                 lost_packet_count=0,  # 丢包数
-                                data=b"\x01\x02",  # 原始图像字节
+                                image_bytes=b"\x01\x02",  # 原始图像字节
                             ),
                         ),
                     ),

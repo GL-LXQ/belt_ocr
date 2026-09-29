@@ -36,8 +36,8 @@ PublishEvent = Callable[[RuntimeEvent], Awaitable[None]]
 
 
 @dataclass(frozen=True)
-class CapturedFrame:
-    """为相机原始帧登记测量周期和图片身份。"""
+class MeasurementFrame:
+    """为相机原始帧登记本轮 MeasurementSession 和采集身份。"""
 
     session_id: str  # 本帧所属的测量周期编号
     capture_id: str  # 本轮采集编号，用于生成图片编号
@@ -63,9 +63,9 @@ class OCRResult:
 
     ordered_lines: tuple[str, ...]  # 最终文字的顺序列表
     normalized_lines: tuple[str, ...]  # 最终文字的去空格列表
-    selected_frames: tuple[CapturedFrame, ...]  # 最终选中的内存图片
+    selected_frames: tuple[MeasurementFrame, ...]  # 最终选中的内存图片
     line_frame_ids: tuple[tuple[str, ...], ...]  # 每条文字对应的证据图片编号
-    review_frames: tuple[CapturedFrame, ...] = ()  # 待复核时保留的全部原始帧
+    review_frames: tuple[MeasurementFrame, ...] = ()  # 待复核时保留的全部原始帧
     review_reason: str | None = None  # 待复核原因
 
 

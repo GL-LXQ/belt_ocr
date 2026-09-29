@@ -126,17 +126,17 @@ def recognize_model_results(model_results: object) -> OCRResult:
         height=1,
         pixel_type=17301505,
         lost_packet_count=0,
-        data=b"image",
+        image_bytes=b"image",
     )
 
     # 先整理原始帧，再用指定模型结果运行 OCR。
     recognizer = TextRecognizer()
     recognizer.recognize_images = Mock(return_value=model_results)
-    captured_frames, qualified_frames = recognizer.prepare_frames_for_ocr(
+    measurement_frames, qualified_frames = recognizer.prepare_frames_for_ocr(
         "session-1", "capture-1", "camera-1", (camera_frame,)
     )
     return recognizer.recognize_qualified_frames(
-        "session-1", captured_frames, qualified_frames
+        "session-1", measurement_frames, qualified_frames
     )
 
 
@@ -161,7 +161,7 @@ def test_prepare_frames_for_ocr_preserves_frame_identity_and_filter_order() -> N
         height=1,
         pixel_type=PIXEL_TYPE_MONO8,
         lost_packet_count=0,
-        data=b"\x01\x02",
+        image_bytes=b"\x01\x02",
     )
     second_frame = replace(first_frame, frame_number=2)
     third_frame = replace(first_frame, frame_number=3)
@@ -169,28 +169,30 @@ def test_prepare_frames_for_ocr_preserves_frame_identity_and_filter_order() -> N
     # 调用初筛并保留其返回顺序。
     recognizer = TextRecognizer()
     recognizer.select_qualified_frames = Mock(
-        side_effect=lambda captured_frames: (captured_frames[2], captured_frames[0])
+        side_effect=lambda measurement_frames: (
+            measurement_frames[2], measurement_frames[0]
+        )
     )
-    captured_frames, qualified_frames = recognizer.prepare_frames_for_ocr(
+    measurement_frames, qualified_frames = recognizer.prepare_frames_for_ocr(
         "session-1", "capture-1", "camera-1",
         (first_frame, second_frame, third_frame),
     )
 
     # 核对每张原始帧的身份与完整顺序。
-    assert [frame.camera_frame for frame in captured_frames] == [
+    assert [frame.camera_frame for frame in measurement_frames] == [
         first_frame, second_frame, third_frame
     ]
-    assert [frame.frame_id for frame in captured_frames] == [
+    assert [frame.frame_id for frame in measurement_frames] == [
         "capture-1-1", "capture-1-2", "capture-1-3"
     ]
-    assert all(frame.session_id == "session-1" for frame in captured_frames)
-    assert all(frame.capture_id == "capture-1" for frame in captured_frames)
-    assert all(frame.camera_serial == "camera-1" for frame in captured_frames)
+    assert all(frame.session_id == "session-1" for frame in measurement_frames)
+    assert all(frame.capture_id == "capture-1" for frame in measurement_frames)
+    assert all(frame.camera_serial == "camera-1" for frame in measurement_frames)
 
     # 核对合格帧与原始帧共用对象并保留初筛顺序。
-    recognizer.select_qualified_frames.assert_called_once_with(captured_frames)
-    assert qualified_frames == (captured_frames[2], captured_frames[0])
-    assert qualified_frames[0] is captured_frames[2]
+    recognizer.select_qualified_frames.assert_called_once_with(measurement_frames)
+    assert qualified_frames == (measurement_frames[2], measurement_frames[0])
+    assert qualified_frames[0] is measurement_frames[2]
 
 
 def test_recognize_images_reuses_engine_and_preserves_order(
@@ -231,10 +233,12 @@ def test_recognize_images_reuses_engine_and_preserves_order(
         height=2,
         pixel_type=PIXEL_TYPE_MONO8,
         lost_packet_count=0,
-        data=bytes([1, 2, 3, 4]),
+        image_bytes=bytes([1, 2, 3, 4]),
     )
-    second_frame = replace(first_frame, frame_number=2, data=bytes([5, 6, 7, 8]))
-    third_frame = replace(first_frame, frame_number=3, data=bytes([9, 10, 11, 12]))
+    second_frame = replace(first_frame, frame_number=2, image_bytes=bytes([5, 6, 7, 8]))
+    third_frame = replace(
+        first_frame, frame_number=3, image_bytes=bytes([9, 10, 11, 12])
+    )
 
     # 分两次识别并核对每张图片的结果顺序。
     recognizer = TextRecognizer()
@@ -311,7 +315,7 @@ def test_recognize_qualified_frames_consumes_engine_result() -> None:
         height=1,
         pixel_type=PIXEL_TYPE_MONO8,
         lost_packet_count=0,
-        data=b"\x01\x02",
+        image_bytes=b"\x01\x02",
     )
     engine = Mock()
     engine.process_image.return_value = {
@@ -322,11 +326,11 @@ def test_recognize_qualified_frames_consumes_engine_result() -> None:
     recognizer.ocr_engine = engine
 
     # 整理原始帧后执行识别并核对原有终选结果。
-    captured_frames, qualified_frames = recognizer.prepare_frames_for_ocr(
+    measurement_frames, qualified_frames = recognizer.prepare_frames_for_ocr(
         "session-1", "capture-1", "camera-1", (frame,)
     )
     result = recognizer.recognize_qualified_frames(
-        "session-1", captured_frames, qualified_frames
+        "session-1", measurement_frames, qualified_frames
     )
     assert result.ordered_lines == tuple(line["text"] for line in RELIABLE_MODEL_LINES)
     assert result.review_reason is None
@@ -356,14 +360,14 @@ def test_recognize_images_keeps_known_and_unknown_error_boundaries() -> None:
         height=1,
         pixel_type=PIXEL_TYPE_MONO8,
         lost_packet_count=0,
-        data=b"\x01\x02",
+        image_bytes=b"\x01\x02",
     )
     engine = Mock()
     recognizer = TextRecognizer()
     recognizer.ocr_engine = engine
 
     # 非 Mono8 和错误字节长度转为 OCRProcessingError。
-    invalid_frames = (replace(frame, pixel_type=0), replace(frame, data=b"\x01"))
+    invalid_frames = (replace(frame, pixel_type=0), replace(frame, image_bytes=b"\x01"))
     for invalid_frame in invalid_frames:
         with pytest.raises(OCRProcessingError):
             recognizer.recognize_images([invalid_frame])
