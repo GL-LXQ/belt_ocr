@@ -26,7 +26,7 @@ START 后创建本轮 Session，同时开始相机采集和频率收集；频率
 
 原始帧 → `filter_qualified_frames()` 筛帧（当前原样返回全部图片）→ `recognize_images()` 逐帧转换 Mono8 图像并调用共享 OCR Engine → `generate_final_text_and_images()` 按现有规则终选文字与证据图片。识别结果按帧顺序返回；明确的帧格式和结果结构错误按本轮 OCR 失败处理，未分类异常交给 Runtime 全局故障流程。
 
-START 时只启动 `CYCLE_TIMEOUT`；相机采集完成后 OCR 任务在 `ocr_lock_wait_timeout_ms` 内等待共享 `processing_lock`，等锁超时经独立事件将本轮失败写入 `abnormal_events`，等待真实 CLOSE 后释放 Session。拿到锁并确认 Session 仍有效时才启动 `OCR_TIMEOUT` 和实际识别；`ocr_result_timeout_ms` 只计算获得锁后的 OCR 处理时间，正常识别完成时取消该期限。后续 Session 各自独立等待并记录等锁失败。
+START 时只启动 `CYCLE_TIMEOUT`；相机采集完成后 OCR 任务在 `ocr_lock_wait_timeout_ms` 内等待共享 OCR 处理资源，资源由 `TextRecognizer` 内部串行管理，`Machine` 不直接管理 OCR 锁。等待超时经独立事件将本轮失败写入 `abnormal_events`，等待真实 CLOSE 后释放 Session。获得资源并确认 Session 仍有效时才启动 `OCR_TIMEOUT` 和实际识别；`ocr_result_timeout_ms` 只计算获得资源后的 OCR 处理时间，正常识别完成时取消该期限。后续 Session 各自独立等待并记录资源等待失败。
 
 独立 OCR 项目的核心代码与原始配置 `config.yaml` 位于 `src/ocr/`：Runtime 在至少一台相机连接成功后，通过共享 `TextRecognizer` 加载配置并初始化一次 `BeltOCREngine`，等待模型准备完成后才启动机器任务并开放 START；三台机器及后续测量周期复用同一实例，独立调用识别入口时也由 `TextRecognizer` 兜底初始化。Engine 的路径入口仍按配置保存 JSON；内存入口 `process_image(image)` 返回 `image_path=None` 且不保存 JSON，两种入口共用尺寸处理、ROI、预处理、识别、过滤与文字块分组流程。
 
@@ -40,7 +40,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 
 日期取本轮开始时间的本地日期，`evidence_directory` 当前为 `runtime/evidence`。
 
-随后通过 `Database` 写入 SQLite 测量记录，并释放本轮 Session，机器重新等待下一次 START。正常轮与待复核轮都写入记录，待复核轮保存全部原始帧并置 `needs_review=1`；OCR 抛错、超时、无采集帧和周期中断只清理本轮，不写记录。OCR 失败或超时后若现场尚未 CLOSE，失败 Session 保留至真实 CLOSE；`current_recognition_task` 仅表示当前 Session 的任务，`unfinished_recognition_tasks` 保存全部未结束任务，因此 CLOSE 后不再等待旧 OCR 任务即可释放，旧任务沿用共享识别锁独立收尾，迟到结果不会进入新 Session，退出时仍等待全部 OCR 任务。
+随后通过 `Database` 写入 SQLite 测量记录，并释放本轮 Session，机器重新等待下一次 START。正常轮与待复核轮都写入记录，待复核轮保存全部原始帧并置 `needs_review=1`；OCR 抛错、超时、无采集帧和周期中断只清理本轮，不写记录。OCR 失败或超时后若现场尚未 CLOSE，失败 Session 保留至真实 CLOSE；`current_recognition_task` 仅表示当前 Session 的任务，`unfinished_recognition_tasks` 保存全部未结束任务，因此 CLOSE 后不再等待旧 OCR 任务即可释放。旧任务继续持有共享 OCR 处理资源直到实际底层识别结束，随后资源才允许下一轮使用；迟到结果不会进入新 Session，退出时仍等待全部 OCR 任务。
 
 退出时，`SystemRuntime` 停止相机并等待本机任务结束；`Machine` 仅将尚未完成的 Session 标记为失败、记录退出原因，再清空当前周期。已写入数据库的 Session 即使因任务引用暂时留在机器中，也保持 `COMMITTED` 状态，不写入退出失败事件。
 

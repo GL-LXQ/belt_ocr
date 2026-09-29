@@ -256,6 +256,14 @@ def test_initialize_machines_copies_common_camera_parameters(
         assert machine_config.camera_line_source == "ExposureStartActive"
         assert machine_config.camera_strobe_enabled is True
 
+    # 确认两台机器复用 Runtime 持有的同一个 OCR 处理器。
+    assert runtime.machines["1"].text_recognizer is runtime.text_recognizer
+    assert runtime.machines["2"].text_recognizer is runtime.text_recognizer
+    assert (
+        runtime.machines["1"].text_recognizer
+        is runtime.machines["2"].text_recognizer
+    )
+
 
 @pytest.mark.asyncio
 async def test_all_camera_connections_failed_stops_startup(

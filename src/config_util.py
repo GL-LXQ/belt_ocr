@@ -43,7 +43,7 @@ class AppConfig:
     frequency_interval_ms: int = 100  # 频率读取间隔配置
     minimum_frequency_hz: float = 0.01  # 有效频率下限
     maximum_frequency_hz: float = 10000.0  # 有效频率上限
-    ocr_lock_wait_timeout_ms: int = 10000  # 等待共享 OCR 锁的期限，毫秒
+    ocr_lock_wait_timeout_ms: int = 10000  # 等待共享 OCR 处理资源的期限，毫秒
     ocr_result_timeout_ms: int = 30000  # OCR 处理期限，毫秒
     max_cycle_open_ms: int = 60000  # 周期关闭期限，毫秒
     event_queue_capacity: int = 128  # 单机事件队列容量
@@ -167,7 +167,7 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
                 "camera_line_mode": "Strobe",  # 相机线路模式
                 "camera_line_source": None,  # 相机线路信号源待现场填写
                 "camera_strobe_enabled": True,  # 相机频闪输出使能
-                "ocr_lock_wait_timeout_ms": 10000,  # 等待共享 OCR 锁的期限，毫秒
+                "ocr_lock_wait_timeout_ms": 10000,  # 等待共享 OCR 处理资源的期限，毫秒
                 "ocr_result_timeout_ms": 30000,  # OCR 处理期限，毫秒
                 "frequency_interval_ms": 100,  # 频率读取间隔配置
                 "minimum_frequency_hz": 0.01,  # 最低有效频率
@@ -248,7 +248,7 @@ def load_config(configuration_directory: Path) -> AppConfig:
                 frequency_interval_ms=100,  # 频率读取间隔配置
                 minimum_frequency_hz=0.01,  # 最低有效频率
                 maximum_frequency_hz=10000.0,  # 最高有效频率
-                ocr_lock_wait_timeout_ms=10000,  # 等待共享 OCR 锁的期限
+                ocr_lock_wait_timeout_ms=10000,  # 等待共享 OCR 处理资源的期限
                 ocr_result_timeout_ms=30000,  # OCR 处理期限
                 max_cycle_open_ms=60000,  # 周期关闭期限
                 event_queue_capacity=128,  # 单机事件队列容量

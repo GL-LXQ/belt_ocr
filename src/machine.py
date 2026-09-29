@@ -17,7 +17,11 @@ from enums import EventType, FrequencyState, OCRState, ProgressStage, ProgressSt
 from camera.hikrobot_sdk import CameraFrame, MvsError
 from models import BeltSession, CapturedFrame, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
-from text_recognition import OCRProcessingError, TextRecognizer
+from text_recognition import (
+    OCRProcessingError,
+    OCRResourceWaitTimeoutError,
+    TextRecognizer,
+)
 from database import (
     CommitIntegrityConflictError,
     Database,
@@ -668,7 +672,7 @@ class Machine:
                 if deadline is not None:
                     deadline.cancel()
 
-            # 等待共享识别锁超时。
+            # 等待共享 OCR 处理资源超时。
             case EventType.OCR_LOCK_WAIT_TIMEOUT:
                 # 只处理仍在等待识别结果的周期。
                 if session.ocr_state != OCRState.RUNNING:
@@ -977,7 +981,7 @@ class Machine:
         self.frequency_adapter.active_session_id = None
 
     async def recognize_session(self, session: BeltSession, frames: tuple[CameraFrame, ...]) -> None:
-        """等待共享锁并执行整轮 OCR，向所属周期交付一次结果。
+        """等待共享 OCR 处理资源并执行整轮识别，向所属周期交付结果。
 
         Args:
             session: 原测量周期，任务执行前检查其状态。
@@ -987,7 +991,7 @@ class Machine:
             返回示例：
                 None  # 最终结果或失败原因通过事件交付
         """
-        # 记录等待共享识别锁的起点。
+        # 记录等待共享识别资源的起点。
         wait_started = time.monotonic()
         logger.info(
             "OCR等待共享识别资源 machine_id=%s session_id=%s",
@@ -995,13 +999,85 @@ class Machine:
             session.session_id,
         )
 
-        # 限时等待共享识别锁。
         try:
-            await asyncio.wait_for(
-                self.text_recognizer.processing_lock.acquire(),
-                timeout=self.config.ocr_lock_wait_timeout_ms / 1000,
-            )
-        except asyncio.TimeoutError:
+            # 限时取得共享 OCR 处理资源。
+            async with self.text_recognizer.use_processing_resource(
+                self.config.ocr_lock_wait_timeout_ms / 1000
+            ):
+                # 记录获得资源时的等待时长。
+                logger.info(
+                    "OCR获得共享识别资源 machine_id=%s session_id=%s "
+                    "wait_seconds=%.3f",
+                    session.machine_id,
+                    session.session_id,
+                    time.monotonic() - wait_started,
+                )
+
+                # 周期已失效时直接结束。
+                if session.state != SessionState.RUNNING:
+                    logger.info(
+                        "OCR获得资源后发现Session已失效，跳过识别 "
+                        "machine_id=%s session_id=%s state=%s",
+                        session.machine_id,
+                        session.session_id,
+                        session.state.value,
+                    )
+                    return
+
+                # 获得资源后启动本轮 OCR 处理期限。
+                self.schedule_timeout(
+                    session,
+                    EventType.OCR_TIMEOUT,
+                    self.config.ocr_result_timeout_ms,
+                )
+
+                # 记录本轮 OCR 实际开始时间和处理期限。
+                processing_started = time.monotonic()
+                logger.info(
+                    "OCR开始识别 machine_id=%s session_id=%s timeout_ms=%s",
+                    session.machine_id,
+                    session.session_id,
+                    self.config.ocr_result_timeout_ms,
+                )
+
+                # 在线程中执行原始帧整理、筛帧、识别和终选。
+                try:
+                    result = await run_blocking_operation(
+                        self.text_recognizer.process_session_frames,
+                        session.session_id,
+                        session.capture_id,
+                        session.camera_serial,
+                        frames,
+                    )
+                except OCRProcessingError as error:
+                    # 记录整轮处理失败。
+                    logger.info(
+                        "OCR识别执行失败 machine_id=%s session_id=%s "
+                        "elapsed_seconds=%.3f",
+                        session.machine_id,
+                        session.session_id,
+                        time.monotonic() - processing_started,
+                    )
+                    logger.exception("OCR 处理失败 session_id=%s", session.session_id)
+
+                    # 让出一次事件循环控制权。
+                    await asyncio.sleep(0)
+
+                    # 按识别失败交付原因。
+                    event_type, payload = EventType.OCR_FAILED, str(error)
+                else:
+                    # 记录本轮 OCR 执行时长。
+                    logger.info(
+                        "OCR识别完成 machine_id=%s session_id=%s "
+                        "elapsed_seconds=%.3f",
+                        session.machine_id,
+                        session.session_id,
+                        time.monotonic() - processing_started,
+                    )
+
+                    # 按识别成功交付结果。
+                    event_type, payload = EventType.OCR_COMPLETED, result
+        except OCRResourceWaitTimeoutError:
             # 向当前周期交付识别资源等待超时。
             logger.warning(
                 "OCR等待共享识别资源超时 machine_id=%s session_id=%s "
@@ -1016,82 +1092,6 @@ class Machine:
                 session.session_id,
             ))
             return
-
-        try:
-            # 记录获得共享识别锁时的等待时长。
-            logger.info(
-                "OCR获得共享识别资源 machine_id=%s session_id=%s wait_seconds=%.3f",
-                session.machine_id,
-                session.session_id,
-                time.monotonic() - wait_started,
-            )
-
-            # 周期已失效时直接结束。
-            if session.state != SessionState.RUNNING:
-                logger.info(
-                    "OCR获得资源后发现Session已失效，跳过识别 "
-                    "machine_id=%s session_id=%s state=%s",
-                    session.machine_id,
-                    session.session_id,
-                    session.state.value,
-                )
-                return
-
-            # 获得共享识别锁后启动本轮 OCR 处理期限。
-            self.schedule_timeout(
-                session,
-                EventType.OCR_TIMEOUT,
-                self.config.ocr_result_timeout_ms,
-            )
-
-            # 记录本轮 OCR 实际开始时间和处理期限。
-            processing_started = time.monotonic()
-            logger.info(
-                "OCR开始识别 machine_id=%s session_id=%s timeout_ms=%s",
-                session.machine_id,
-                session.session_id,
-                self.config.ocr_result_timeout_ms,
-            )
-
-            # 在线程中执行原始帧整理、筛帧、识别和终选。
-            try:
-                result = await run_blocking_operation(
-                    self.text_recognizer.process_session_frames,
-                    session.session_id,
-                    session.capture_id,
-                    session.camera_serial,
-                    frames,
-                )
-            except OCRProcessingError as error:
-                # 记录整轮处理失败。
-                logger.info(
-                    "OCR识别执行失败 machine_id=%s session_id=%s "
-                    "elapsed_seconds=%.3f",
-                    session.machine_id,
-                    session.session_id,
-                    time.monotonic() - processing_started,
-                )
-                logger.exception("OCR 处理失败 session_id=%s", session.session_id)
-
-                # 让出一次事件循环控制权。
-                await asyncio.sleep(0)
-
-                # 按识别失败交付原因。
-                event_type, payload = EventType.OCR_FAILED, str(error)
-            else:
-                # 记录本轮 OCR 执行时长。
-                logger.info(
-                    "OCR识别完成 machine_id=%s session_id=%s elapsed_seconds=%.3f",
-                    session.machine_id,
-                    session.session_id,
-                    time.monotonic() - processing_started,
-                )
-
-                # 按识别成功交付结果。
-                event_type, payload = EventType.OCR_COMPLETED, result
-        finally:
-            # 释放本轮持有的共享识别锁。
-            self.text_recognizer.processing_lock.release()
 
         # 释放原始帧引用。
         frames = ()

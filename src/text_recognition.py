@@ -6,6 +6,8 @@ import math
 import re
 import time
 from collections import defaultdict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -22,6 +24,10 @@ class OCRProcessingError(Exception):
     """表示模型没有按约定完成本轮 OCR 处理。"""
 
 
+class OCRResourceWaitTimeoutError(TimeoutError):
+    """表示等待共享 OCR 处理资源超过期限。"""
+
+
 def _serial_number_of(candidate: dict) -> int:
     """取 8 字符候选前七位数字的整数值。
 
@@ -36,21 +42,52 @@ def _serial_number_of(candidate: dict) -> int:
 
 
 class TextRecognizer:
-    """提供共享串行处理锁与无业务状态的 OCR 主流程。"""
+    """封装共享 OCR Engine 的独占处理资源和无业务状态的 OCR 主流程。"""
 
     def __init__(self) -> None:
-        """创建三台机器共用的整轮处理锁和 OCR Engine 空位。
+        """创建三台机器共用的 OCR 处理资源和 Engine 空位。
 
         Args:
             无外部参数。
 
         Returns:
             返回示例：
-                None  # 处理锁和 OCR Engine 空位已创建
+                None  # OCR 处理资源和 Engine 空位已创建
         """
-        # 创建三台机器共用的整轮处理锁与 OCR Engine 空位。
-        self.processing_lock = asyncio.Lock()
+        # 创建三台机器共用的独占处理资源。
+        self._processing_lock = asyncio.Lock()
+
+        # 登记共享 OCR Engine 空位。
         self.ocr_engine: BeltOCREngine | None = None
+
+    @asynccontextmanager
+    async def use_processing_resource(
+        self,
+        wait_timeout_seconds: float,
+    ) -> AsyncIterator[None]:
+        """限时取得共享 OCR 处理资源，并在退出时自动释放。
+
+        Args:
+            wait_timeout_seconds: 等待处理资源的最长期限，单位秒。
+
+        Returns:
+            返回示例：
+                None  # 上下文内独占共享 OCR 处理资源
+        """
+        # 限时等待共享 OCR 处理资源。
+        try:
+            await asyncio.wait_for(
+                self._processing_lock.acquire(),
+                timeout=wait_timeout_seconds,
+            )
+        except asyncio.TimeoutError as error:
+            raise OCRResourceWaitTimeoutError("等待共享 OCR 处理资源超时") from error
+
+        # 在调用方退出上下文时释放本次取得的资源。
+        try:
+            yield
+        finally:
+            self._processing_lock.release()
 
     def initialize(self) -> None:
         """加载配置并创建三台机器共用的 OCR Engine。

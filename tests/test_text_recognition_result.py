@@ -1,5 +1,6 @@
 """验证 OCR 主流程组装最终文字与证据图片。"""
 
+import asyncio
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -11,7 +12,11 @@ import pytest
 import text_recognition
 from camera.hikrobot_sdk import PIXEL_TYPE_MONO8, CameraFrame
 from models import OCRResult
-from text_recognition import OCRProcessingError, TextRecognizer
+from text_recognition import (
+    OCRProcessingError,
+    OCRResourceWaitTimeoutError,
+    TextRecognizer,
+)
 
 
 RELIABLE_MODEL_LINES = (
@@ -20,6 +25,55 @@ RELIABLE_MODEL_LINES = (
     {"text": "123", "confidence": 0.95},
     {"text": "12", "confidence": 0.95},
 )
+
+
+@pytest.mark.asyncio
+async def test_processing_resource_timeout_preserves_current_owner() -> None:
+    """确认资源等待超时不会放行当前占用者之外的请求。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 原占用者退出前其他请求持续无法进入
+    """
+    # 启动一个持续占用共享 OCR 资源的任务。
+    recognizer = TextRecognizer()
+    owner_acquired = asyncio.Event()
+    owner_release = asyncio.Event()
+
+    async def hold_resource() -> None:
+        """占用共享 OCR 资源直到测试放行。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 已退出共享资源上下文
+        """
+        async with recognizer.use_processing_resource(1):
+            owner_acquired.set()
+            await owner_release.wait()
+
+    owner_task = asyncio.create_task(hold_resource())
+    await owner_acquired.wait()
+    try:
+        # 连续两个等待者均不能提前进入共享资源。
+        for wait_attempt in range(2):
+            with pytest.raises(OCRResourceWaitTimeoutError):
+                async with recognizer.use_processing_resource(0.01):
+                    pytest.fail("资源仍被占用时不应进入")
+            assert not owner_task.done()
+    finally:
+        # 放行原占用者并等待资源释放。
+        owner_release.set()
+        await owner_task
+
+    # 原占用者退出后下一请求可以进入。
+    async with recognizer.use_processing_resource(0.1):
+        pass
 
 
 def recognize_model_lines(model_lines: list[dict]) -> OCRResult:
