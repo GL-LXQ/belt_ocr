@@ -132,15 +132,15 @@ def recognize_model_results(model_results: object) -> OCRResult:
     # 先整理原始帧，再用指定模型结果运行 OCR。
     recognizer = TextRecognizer()
     recognizer.recognize_images = Mock(return_value=model_results)
-    captured_frames, qualified_frames = recognizer.prepare_session_frames(
+    captured_frames, qualified_frames = recognizer.prepare_frames_for_ocr(
         "session-1", "capture-1", "camera-1", (camera_frame,)
     )
-    return recognizer.process_session_frames(
+    return recognizer.recognize_qualified_frames(
         "session-1", captured_frames, qualified_frames
     )
 
 
-def test_prepare_session_frames_preserves_frame_identity_and_filter_order() -> None:
+def test_prepare_frames_for_ocr_preserves_frame_identity_and_filter_order() -> None:
     """确认预处理保留原始帧身份，并按初筛结果顺序返回合格帧。
 
     Args:
@@ -168,10 +168,10 @@ def test_prepare_session_frames_preserves_frame_identity_and_filter_order() -> N
 
     # 调用初筛并保留其返回顺序。
     recognizer = TextRecognizer()
-    recognizer.filter_qualified_frames = Mock(
+    recognizer.select_qualified_frames = Mock(
         side_effect=lambda captured_frames: (captured_frames[2], captured_frames[0])
     )
-    captured_frames, qualified_frames = recognizer.prepare_session_frames(
+    captured_frames, qualified_frames = recognizer.prepare_frames_for_ocr(
         "session-1", "capture-1", "camera-1",
         (first_frame, second_frame, third_frame),
     )
@@ -188,7 +188,7 @@ def test_prepare_session_frames_preserves_frame_identity_and_filter_order() -> N
     assert all(frame.camera_serial == "camera-1" for frame in captured_frames)
 
     # 核对合格帧与原始帧共用对象并保留初筛顺序。
-    recognizer.filter_qualified_frames.assert_called_once_with(captured_frames)
+    recognizer.select_qualified_frames.assert_called_once_with(captured_frames)
     assert qualified_frames == (captured_frames[2], captured_frames[0])
     assert qualified_frames[0] is captured_frames[2]
 
@@ -290,7 +290,7 @@ def test_initialize_reuses_shared_engine_without_inference(
     engine.process_image.assert_not_called()
 
 
-def test_process_session_frames_consumes_engine_result() -> None:
+def test_recognize_qualified_frames_consumes_engine_result() -> None:
     """确认真实识别入口的 blocks 可直接进入现有文字终选。
 
     Args:
@@ -322,10 +322,10 @@ def test_process_session_frames_consumes_engine_result() -> None:
     recognizer.ocr_engine = engine
 
     # 整理原始帧后执行识别并核对原有终选结果。
-    captured_frames, qualified_frames = recognizer.prepare_session_frames(
+    captured_frames, qualified_frames = recognizer.prepare_frames_for_ocr(
         "session-1", "capture-1", "camera-1", (frame,)
     )
-    result = recognizer.process_session_frames(
+    result = recognizer.recognize_qualified_frames(
         "session-1", captured_frames, qualified_frames
     )
     assert result.ordered_lines == tuple(line["text"] for line in RELIABLE_MODEL_LINES)

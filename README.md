@@ -24,7 +24,7 @@ START 后由 `MachineRuntime` 创建本轮 `MeasurementSession`，将相机采�
 
 相机模块保留 `CameraFrame` 的原始字节供 JPG 证据编码使用；文字识别时，`convert_mono8_frame_to_array()` 确认 Mono8 格式和字节数，再按帧尺寸恢复二维 `uint8` 灰度图。
 
-原始帧先由 `prepare_session_frames()` 在线程中整理为带周期身份的 `CapturedFrame`，再调用 `filter_qualified_frames()` 初筛；这一步不占用共享 OCR 资源，当前初筛仍原样返回全部图片。初筛为空时直接生成包含全部原始帧的人工复核结果并交给现有 `OCR_COMPLETED` 流程；有合格帧时才开始等待共享资源，获得资源后由 `process_session_frames()` 调用 `recognize_images()` 逐帧转换 Mono8 图像并使用共享 OCR Engine，最后由 `generate_final_text_and_images()` 终选文字与证据图片。预处理后和获得资源后都检查 Session 状态；明确的预处理、帧格式和模型结果结构错误按本轮 OCR 失败处理，未分类异常交给 Runtime 全局故障流程。
+原始帧先由 `prepare_frames_for_ocr()` 在线程中整理为带周期身份的 `CapturedFrame`，再调用 `select_qualified_frames()` 初筛；这一步不占用共享 OCR 资源，当前初筛仍原样返回全部图片。初筛为空时直接生成包含全部原始帧的人工复核结果并交给现有 `OCR_COMPLETED` 流程；有合格帧时才开始等待共享资源，获得资源后由 `recognize_qualified_frames()` 调用 `recognize_images()` 逐帧转换 Mono8 图像并使用共享 OCR Engine，最后由 `generate_final_text_and_images()` 终选文字与证据图片。预处理后和获得资源后都检查 Session 状态；明确的预处理、帧格式和模型结果结构错误按本轮 OCR 失败处理，未分类异常交给 Runtime 全局故障流程。
 
 START 时只启动 `CYCLE_TIMEOUT`；相机采集完成后 OCR 任务在 `ocr_lock_wait_timeout_ms` 内等待共享 OCR 处理资源，资源由 `TextRecognizer` 内部串行管理，`MachineRuntime` 不直接管理 OCR 锁。等待超时经独立事件将本轮失败写入 `abnormal_events`，等待真实 CLOSE 后释放 Session。获得资源并确认 Session 仍有效时才启动 `OCR_TIMEOUT` 和实际识别；`ocr_result_timeout_ms` 只计算获得资源后的 OCR 处理时间，正常识别完成时取消该期限。后续 Session 各自独立等待并记录资源等待失败。
 

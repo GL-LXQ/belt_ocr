@@ -107,7 +107,7 @@ class TextRecognizer:
         config_path = Path(__file__).resolve().parent / "ocr" / "config.yaml"
         self.ocr_engine = BeltOCREngine(load_ocr_config(config_path))
 
-    def prepare_session_frames(
+    def prepare_frames_for_ocr(
         self,
         session_id: str,
         capture_id: str,
@@ -174,7 +174,7 @@ class TextRecognizer:
 
         # 固定本轮全部原始帧，并筛选合格图片。
         captured_frames = tuple(captured_frames)
-        qualified_frames = self.filter_qualified_frames(captured_frames)
+        qualified_frames = self.select_qualified_frames(captured_frames)
         return captured_frames, qualified_frames
 
     def create_no_qualified_frames_result(
@@ -226,7 +226,7 @@ class TextRecognizer:
             review_reason="初筛后没有合格图片",
         )
 
-    def process_session_frames(
+    def recognize_qualified_frames(
         self,
         session_id: str,
         captured_frames: tuple[CapturedFrame, ...],
@@ -343,8 +343,8 @@ class TextRecognizer:
             review_reason=review_reason,
         )
 
-    def filter_qualified_frames(self, frames: tuple[CapturedFrame, ...]) -> tuple[CapturedFrame, ...]:
-        """预留纯黑、截断等质量筛选，目前原样返回全部图片。
+    def select_qualified_frames(self, frames: tuple[CapturedFrame, ...]) -> tuple[CapturedFrame, ...]:
+        """从本轮全部图片中选出符合 OCR 条件的帧，目前原样返回全部图片。
 
         Args:
             frames: 按采集顺序排列的内存图片。

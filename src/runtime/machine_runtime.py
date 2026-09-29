@@ -625,7 +625,7 @@ class MachineRuntime:
                 session.ocr_state = OCRState.RUNNING
 
                 # 启动整轮识别任务并登记当前任务与未结束任务集合。
-                task = asyncio.create_task(self.recognize_session(session, capture_result.frames))
+                task = asyncio.create_task(self.run_ocr_pipeline(session, capture_result.frames))
                 self.current_recognition_task = task
                 self.unfinished_recognition_tasks.add(task)
                 task.add_done_callback(self.handle_recognition_task_finished)
@@ -979,10 +979,10 @@ class MachineRuntime:
         self.current_session = None
         self.frequency_adapter.active_session_id = None
 
-    async def recognize_session(
+    async def run_ocr_pipeline(
         self, session: MeasurementSession, frames: tuple[CameraFrame, ...]
     ) -> None:
-        """预处理本轮帧并按需独占共享 OCR 资源后交付结果。
+        """执行本轮 OCR 流程，含预处理、初筛、等待共享资源、识别与结果交付。
 
         Args:
             session: 原测量周期，任务执行前检查其状态。
@@ -995,7 +995,7 @@ class MachineRuntime:
         try:
             # 在线程中整理原始帧并执行初筛。
             captured_frames, qualified_frames = await run_blocking_operation(
-                self.text_recognizer.prepare_session_frames,
+                self.text_recognizer.prepare_frames_for_ocr,
                 session.session_id,
                 session.capture_id,
                 session.camera_serial,
@@ -1068,7 +1068,7 @@ class MachineRuntime:
                         # 在线程中识别合格帧并终选文字和证据图片。
                         try:
                             result = await run_blocking_operation(
-                                self.text_recognizer.process_session_frames,
+                                self.text_recognizer.recognize_qualified_frames,
                                 session.session_id,
                                 captured_frames,
                                 qualified_frames,
