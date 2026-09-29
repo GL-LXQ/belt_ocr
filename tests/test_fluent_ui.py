@@ -160,7 +160,7 @@ def test_fixed_navigation_and_title_bar_stay_aligned(
         assert "#F7F8FA" in panel.styleSheet()
 
         # 核对导航宽度及标题栏在缩放前后的边界。
-        for width, height in ((1600, 900), (1280, 720)):
+        for width, height in ((1600, 900), (1320, 720)):
             window.resize(width, height)
             qt_application.processEvents()
             assert panel.displayMode.name == "EXPAND"
@@ -208,34 +208,101 @@ def test_realtime_resize_reflows_existing_cards_without_query(
         query_count = controller.list_enabled_machines.call_count
         assert window.navigationInterface.panel.displayMode.name == "EXPAND"
         assert window.realtime_page.card_column_count == 3
-        assert all(280 <= card.width() <= 330 for card in cards)
+        assert all(card.width() == 310 for card in cards)
+        assert window.minimumWidth() == 1320
+        assert window.realtime_page.scroll_area.width() == 3 * 310 + 2 * 16
         detail_panel = window.realtime_page.detail_panel
+        assert detail_panel.width() == 380
         assert detail_panel.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Maximum
         assert detail_panel.height() < window.realtime_page.scroll_area.height()
         scroll_area = window.realtime_page.scroll_area
         assert detail_panel.mapTo(window, QPoint(0, 0)).y() == (
             scroll_area.mapTo(window, QPoint(0, 0)).y()
         )
+        wide_detail_x = detail_panel.mapTo(window, QPoint(0, 0)).x()
+        second_card_left = cards[1].mapTo(window, QPoint(0, 0)).x()
+        first_card_right = cards[0].mapTo(window, QPoint(cards[0].width(), 0)).x()
+        assert second_card_left - first_card_right == 16
+        third_card_right = cards[2].mapTo(window, QPoint(cards[2].width(), 0)).x()
+        assert wide_detail_x - third_card_right == 16
 
-        window.resize(1280, 720)
+        window.resize(1320, 720)
         QTest.qWait(300)
         qt_application.processEvents()
-        assert window.size().width() == 1280
+        assert window.size().width() == 1320
         assert window.size().height() == 720
         assert window.navigationInterface.panel.displayMode.name == "EXPAND"
         assert window.realtime_page.card_column_count == 2
-        assert all(280 <= card.width() <= 330 for card in cards)
+        assert all(card.width() == 310 for card in cards)
+        assert window.realtime_page.scroll_area.width() == 2 * 310 + 16
+        detail_x = detail_panel.mapTo(window, QPoint(0, 0)).x()
+        second_card_right = cards[1].mapTo(window, QPoint(cards[1].width(), 0)).x()
+        assert detail_x - second_card_right == 16
         assert window.realtime_page.scroll_area.horizontalScrollBar().maximum() == 0
+        assert window.realtime_page.scroll_area.verticalScrollBar().maximum() > 0
         assert tuple(window.realtime_page.machine_cards) == cards
         assert controller.list_enabled_machines.call_count == query_count
         card_at_last_row = window.realtime_page.cards_layout.itemAtPosition(2, 0)
         assert card_at_last_row.widget() is cards[4]
+
+        # 更宽窗口仍保持三列，并把额外宽度留在详情右侧。
+        window.resize(2200, 900)
+        qt_application.processEvents()
+        assert window.realtime_page.card_column_count == 3
+        assert window.realtime_page.scroll_area.width() == 3 * 310 + 2 * 16
+        assert detail_panel.mapTo(window, QPoint(0, 0)).x() == wide_detail_x
+        assert tuple(window.realtime_page.machine_cards) == cards
+        assert controller.list_enabled_machines.call_count == query_count
+
+        # 窗口不能缩小到两列机器卡片无法完整显示的宽度。
+        window.resize(1000, 700)
+        qt_application.processEvents()
+        assert window.width() == 1320
+        assert window.height() == 720
+        assert window.realtime_page.card_column_count == 2
 
         # 机器名称保持可读宽度，窄表格使用内部水平滚动。
         window.switch_page("machines")
         qt_application.processEvents()
         assert window.machines_page.table.columnWidth(1) >= 220
         assert window.machines_page.table.horizontalScrollBar().maximum() > 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_machine_list_width_uses_actual_machine_count(
+    qt_application: QApplication,
+) -> None:
+    """验证机器较少时列表只占已有卡片的宽度。
+
+    Args:
+        qt_application: 测试使用的 Qt 应用。
+
+    Returns:
+        None  # 单台和两台机器都不会留下虚拟卡片列
+    """
+    controller = make_ui_controller()
+    machine_data = controller.list_enabled_machines.return_value.data
+    all_machines = machine_data["machines"]
+    machine_data["machines"] = all_machines[:1]
+    window = MainWindow(controller)
+    try:
+        window.resize(1320, 720)
+        window.show()
+        qt_application.processEvents()
+        page = window.realtime_page
+        assert page.card_column_count == 2
+        assert page.scroll_area.width() == 310
+        assert page.scroll_area.horizontalScrollBar().maximum() == 0
+
+        # 加入第二台机器后只增加一列卡片及其间距。
+        machine_data["machines"] = all_machines[:2]
+        page.reload_machines()
+        qt_application.processEvents()
+        assert page.card_column_count == 2
+        assert page.scroll_area.width() == 2 * 310 + 16
+        assert page.scroll_area.horizontalScrollBar().maximum() == 0
     finally:
         window.close()
         window.deleteLater()
@@ -504,7 +571,7 @@ def test_machine_editor_preserves_validation_and_save_order(
         # 保存成功后关闭表单，再读取并选中列表记录。
         controller.create_machine.return_value = Result.ok({"machine_id": 1})
         page.save_button.click()
-        QTest.qWait(150)
+        QTest.qWait(300)
         assert not page.editor.isVisible()
         assert not page.save_button.isEnabled()
         assert page.table.selectedItems()[0].text() == "1"

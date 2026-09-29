@@ -188,7 +188,7 @@ class MainWindow(FluentWindow):
         self.setWindowTitle("BeltVision | 实时监测")
         self.setWindowIcon(create_icon("logo", "white"))
         self.resize(1600, 900)
-        self.setMinimumSize(1280, 720)
+        self.setMinimumSize(1320, 720)
         self.setMicaEffectEnabled(False)
 
         # 选择目标系统中的界面字体并居中窗口。
