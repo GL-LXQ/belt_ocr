@@ -1,5 +1,6 @@
 """验证 Fluent 窗口和实时卡片的界面交互。"""
 
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -7,7 +8,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 from qfluentwidgets import FluentWindow, InfoBar, MaskDialogBase, MessageBox
 
-from src.controller.controller import Result
+from src.controller.controller import AppController, Result
 from ui.main_window import MainWindow
 from ui.pages.realtime_page import MachineCard
 
@@ -305,5 +306,55 @@ def test_machine_editor_preserves_validation_and_save_order(
         page.create_machine()
         assert page.save_button.isEnabled()
     finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_fluent_window_waits_for_monitoring_before_close(
+    qt_application: QApplication,
+) -> None:
+    """验证重复关闭仅请求停止一次，监测结束后窗口关闭。
+
+    Args:
+        qt_application: 测试使用的 Qt 应用。
+
+    Returns:
+        None  # 监测运行时关闭被拦截，结束信号发出后窗口关闭
+    """
+    machine_service = Mock()
+    machine_service.list_enabled_machines.return_value = {"machines": []}
+    machine_service.list_machines.return_value = {"machines": []}
+    controller = AppController(machine_service, Mock(), Mock(), Path("config"))
+    runtime_thread = Mock()
+    controller.runtime_thread = runtime_thread
+    controller.stop_monitoring = Mock(wraps=controller.stop_monitoring)
+    window = MainWindow(controller)
+    try:
+        # 运行中的首次关闭等待监测清理。
+        window.show()
+        qt_application.processEvents()
+        assert window.isVisible()
+        window.close()
+        qt_application.processEvents()
+        assert window.isVisible()
+        assert window.realtime_page.closing_requested
+        controller.stop_monitoring.assert_called_once_with()
+        runtime_thread.stop_requested.set.assert_called_once_with()
+
+        # 再次关闭仍等待结束，且不重复提交停止请求。
+        window.close()
+        qt_application.processEvents()
+        assert window.isVisible()
+        controller.stop_monitoring.assert_called_once_with()
+        runtime_thread.stop_requested.set.assert_called_once_with()
+
+        # 模拟 Controller 清理线程后发出结束信号。
+        controller.runtime_thread = None
+        assert not controller.is_monitoring_running().data["running"]
+        controller.monitoring_finished_signal.emit("")
+        qt_application.processEvents()
+        assert not window.isVisible()
+    finally:
+        controller.runtime_thread = None
         window.close()
         window.deleteLater()

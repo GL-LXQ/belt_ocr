@@ -81,9 +81,9 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 
 GUI 启动入口创建 Repo、Service 和唯一的 `AppController`，四个正式页面通过 `AppController` 请求机器、历史和异常事件数据，再进入对应 Service 与 Repo。实时监测由 `AppController` 创建、启动、停止并释放 `src/system_runtime_thread.py` 中的 `SystemRuntimeThread`（`QThread`）；该线程仅负责在后台运行 `SystemRuntime`，不处理业务判断。`Machine` 的相机状态、测量进度、OCR 文字和周期关闭通知经 `SystemRuntime`、`SystemRuntimeThread`、`AppController` 的 Qt 信号进入 `RealtimePage`，页面按机器编号及当前 Session 更新 `MachineCard`。窗口关闭时先请求 Controller 停止监测，待 Runtime 完成资源释放并发出结束信号后再退出。页面仍负责卡片动画、OCR 分类显示和当前周期缓存；机器卡片展示动画、状态、OCR 结果、频率和进度，频率数值仍未正式接入。实时页不再创建系统日志演示表格，运行日志仍由各模块按原链路记录。
 
-桌面入口在创建 `QApplication` 后初始化浅色 Fluent 主题，`FluentWindow` 一次创建并持有四个正式页面和三个占位页。导航切换复用页面实例；进入历史页、异常页时各自通过 Controller 刷新一次，实时页缩放时仅重排已有机器卡片。机器表单、历史详情和异常详情在主窗口遮罩中展示，保存与查询仍沿用页面到 Controller、Service、Repo 的原有数据流，关闭窗口时继续等待监测线程完成资源释放。
+桌面入口在创建 `QApplication` 后初始化浅色 Fluent 主题，`FluentWindow` 一次创建并持有四个正式页面和三个占位页。导航切换复用页面实例；进入历史页、异常页时各自通过 Controller 刷新一次，实时页缩放时仅重排已有机器卡片。机器表单、历史详情和异常详情在主窗口遮罩中展示；历史详情从记录目录读取 JPG 证据，缩略图在同样的遮罩中打开大图。保存与查询仍沿用页面到 Controller、Service、Repo 的原有数据流，关闭窗口时继续等待监测线程完成资源释放。
 
-实时监测页点击深绿色的“启动监测”按钮后，`RealtimePage` 将启动请求交给 `AppController`；启动成功时禁用启动按钮并启用停止按钮，收到监测结束通知后恢复按钮状态。
+实时监测页点击 Fluent 主按钮“启动监测”后，`RealtimePage` 将启动请求交给 `AppController`；启动成功时禁用启动按钮并启用停止按钮，收到监测结束通知后恢复按钮状态。
 
 业务 Service 向 `AppController` 返回数据或抛出业务异常；遇到已知 SQLite、JSON 故障时，Service 将技术详情记入日志，并把对外异常转换为可展示的固定提示。`AppController` 将结果包装为 `Result.ok(...)` 或 `Result.error(...)`，UI 继续读取 `success`、`data`、`message` 三个字段。
 

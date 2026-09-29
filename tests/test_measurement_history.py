@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QDate, QTimer
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
-from qfluentwidgets import InfoBar
+from qfluentwidgets import InfoBar, MaskDialogBase
 
 from config_util import AppConfig
 from database import Database, MeasurementRecord
@@ -1125,10 +1125,26 @@ def test_history_detail_shows_evidence_images_and_opens_large_image(
                 返回示例：
                     None  # 已记录大图状态并关闭窗口
             """
-            image_dialog = QApplication.activeModalWidget()
-            image_label = image_dialog.findChild(QLabel)
-            large_images.append(image_label.pixmap().size())
-            image_dialog.accept()
+            image_dialog = next(
+                widget
+                for widget in page.findChildren(MaskDialogBase)
+                if widget.windowTitle() == "review-frame-1.jpg"
+            )
+            try:
+                preview_content = image_dialog.widget
+                assert preview_content.objectName() == "historyEvidencePreviewContent"
+                assert any(
+                    label.text() == "review-frame-1.jpg"
+                    for label in image_dialog.findChildren(QLabel)
+                )
+                assert any(
+                    button.text() == "关闭"
+                    for button in image_dialog.findChildren(QPushButton)
+                )
+                image_label = image_dialog.findChild(QLabel, "historyEvidenceImage")
+                large_images.append(image_label.pixmap().size())
+            finally:
+                image_dialog.accept()
 
         QTimer.singleShot(0, inspect_and_close_image_dialog)
         review_thumbnails[0].click()

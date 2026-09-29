@@ -63,9 +63,9 @@ QWidget#beltAnimation {
     border-radius: 6px;
 }
 
-/* 设置三个遮罩弹窗的中心内容。 */
+/* 设置遮罩弹窗的中心内容。 */
 QFrame#machineEditorContent, QFrame#historyDetailContent,
-QFrame#abnormalEventDetailContent {
+QFrame#abnormalEventDetailContent, QFrame#historyEvidencePreviewContent {
     background: @white;
     border: 1px solid @border;
     border-radius: 12px;
