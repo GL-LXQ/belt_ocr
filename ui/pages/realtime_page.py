@@ -214,11 +214,12 @@ class MachineCard(SimpleCardWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.progress_session_id = ""
         self.progress_statuses = {}
-        self.setMinimumWidth(260)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.setMinimumWidth(280)
+        self.setMaximumWidth(330)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(16, 12, 16, 14)
+        layout.setSpacing(9)
 
         # 创建机器标题和状态徽标。
         heading = QHBoxLayout()
@@ -266,7 +267,7 @@ class MachineCard(SimpleCardWidget):
         summary_panel = QFrame()
         summary_panel.setObjectName("ocrSummaryPanel")
         summary_layout = QVBoxLayout(summary_panel)
-        summary_layout.setContentsMargins(10, 8, 10, 8)
+        summary_layout.setContentsMargins(10, 6, 10, 6)
         summary_layout.addWidget(CaptionLabel("OCR 摘要"))
         self.ocr_result_label = QLabel("--")
         self.ocr_result_label.setObjectName("ocrResult")
@@ -521,7 +522,7 @@ class MachineDetailPanel(SimpleCardWidget):
         self.ocr_text.setObjectName("detailOcrText")
         self.ocr_text.setReadOnly(True)
         self.ocr_text.setFrameShape(QFrame.Shape.NoFrame)
-        self.ocr_text.setFixedHeight(110)
+        self.ocr_text.setFixedHeight(100)
         ocr_style = (
             "PlainTextEdit {"
             f"background: transparent; color: {COLORS['text']};"
@@ -601,6 +602,7 @@ class RealtimePage(QWidget):
 
         # 显示四项内存状态总览。
         summary_layout = QHBoxLayout()
+        summary_layout.setSpacing(16)
         self.summary_cards = []
         for title, description in (
             ("机器总数", "当前启用机器"),
@@ -631,6 +633,11 @@ class RealtimePage(QWidget):
         self.scroll_area.viewport().setObjectName("machineScrollViewport")
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        # 设置机器列表的浅灰滑块和透明轨道。
+        vertical_scroll_bar = self.scroll_area.scrollDelagate.vScrollBar
+        vertical_scroll_bar.setHandleColor("#D5DAE1", "#D5DAE1")
+        vertical_scroll_bar.setGrooveColor("transparent", "transparent")
+        vertical_scroll_bar.setArrowColor("transparent", "transparent")
         body_layout.addWidget(self.scroll_area, 1)
         self.detail_panel = MachineDetailPanel()
         body_layout.addWidget(self.detail_panel, 0, Qt.AlignmentFlag.AlignTop)
@@ -644,7 +651,9 @@ class RealtimePage(QWidget):
         # 网格靠上排列，空余高度留在底部。
         cards_layout = QGridLayout()
         cards_layout.setSpacing(16)
-        cards_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        cards_layout.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
         self.cards_layout = cards_layout
         self.machine_cards = []
         self.empty_hint = None
@@ -890,7 +899,7 @@ class RealtimePage(QWidget):
         if not self.machine_cards:
             return
         available_width = self.scroll_area.viewport().width()
-        column_count = max(1, min(3, (available_width + 16) // 292))
+        column_count = max(1, min(3, (available_width + 16) // 316))
         if column_count == self.card_column_count:
             return
 
@@ -906,8 +915,6 @@ class RealtimePage(QWidget):
                 card_index // column_count,
                 card_index % column_count,
             )
-        for column_index in range(column_count):
-            self.cards_layout.setColumnStretch(column_index, 1)
         self.card_column_count = column_count
         self.scroll_area.widget().updateGeometry()
 

@@ -134,7 +134,9 @@ def test_realtime_resize_reflows_existing_cards_without_query(
         qt_application.processEvents()
         cards = tuple(window.realtime_page.machine_cards)
         query_count = controller.list_enabled_machines.call_count
+        assert window.navigationInterface.panel.displayMode.name == "EXPAND"
         assert window.realtime_page.card_column_count == 3
+        assert all(280 <= card.width() <= 330 for card in cards)
         detail_panel = window.realtime_page.detail_panel
         assert detail_panel.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Maximum
         assert detail_panel.height() < window.realtime_page.scroll_area.height()
@@ -142,12 +144,14 @@ def test_realtime_resize_reflows_existing_cards_without_query(
         assert detail_panel.geometry().top() == scroll_area.geometry().top()
 
         window.resize(1280, 720)
-        window.navigationInterface.expand()
         QTest.qWait(300)
         qt_application.processEvents()
         assert window.size().width() == 1280
         assert window.size().height() == 720
+        assert window.navigationInterface.panel.displayMode.name == "EXPAND"
         assert window.realtime_page.card_column_count == 2
+        assert all(280 <= card.width() <= 330 for card in cards)
+        assert window.realtime_page.scroll_area.horizontalScrollBar().maximum() == 0
         assert tuple(window.realtime_page.machine_cards) == cards
         assert controller.list_enabled_machines.call_count == query_count
         card_at_last_row = window.realtime_page.cards_layout.itemAtPosition(2, 0)
@@ -188,7 +192,7 @@ def test_machine_detail_keeps_long_ocr_text_selectable(qt_application) -> None:
         editor = page.detail_panel.ocr_text
         assert editor.parentWidget().objectName() == "detailOcrPanel"
         assert editor.frameShape() == QFrame.Shape.NoFrame
-        assert editor.height() == 110
+        assert editor.height() == 100
         assert all(line in editor.toPlainText() for line in ordered_lines)
         assert ordered_lines[-1] in editor.toPlainText()
         assert editor.isReadOnly()

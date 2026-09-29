@@ -109,6 +109,8 @@ class MainWindow(FluentWindow):
         self.set_connection_status(True)
         self.setup_clock()
         self.apply_style()
+        # 默认展开现有导航面板。
+        self.navigationInterface.expand(False)
 
     def setup_window(self):
         """设置窗口标题、尺寸、图标和字体。

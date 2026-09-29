@@ -54,8 +54,8 @@ class BeltAnimationWidget(QWidget):
         self.frequency_phase = 0.0
         self.setObjectName("beltAnimation")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setMinimumHeight(140)
-        self.setMaximumHeight(240)
+        self.setMinimumHeight(125)
+        self.setMaximumHeight(175)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
         # 创建皮带展开和收缩动画。
