@@ -107,14 +107,14 @@ class TextRecognizer:
         config_path = Path(__file__).resolve().parent / "ocr" / "config.yaml"
         self.ocr_engine = BeltOCREngine(load_ocr_config(config_path))
 
-    def process_session_frames(
+    def prepare_session_frames(
         self,
         session_id: str,
         capture_id: str,
         camera_serial: str,
         frames: tuple[CameraFrame, ...],
-    ) -> OCRResult:
-        """将整轮原始帧顺序处理为最终文字和对应原始图片。
+    ) -> tuple[tuple[CapturedFrame, ...], tuple[CapturedFrame, ...]]:
+        """整理本轮原始帧并筛选合格图片。
 
         Args:
             session_id: 测量周期编号。
@@ -124,34 +124,29 @@ class TextRecognizer:
 
         Returns:
             返回示例：
-                OCRResult(
-                    ordered_lines=("ABC",),  # 最终文字顺序
-                    normalized_lines=("ABC",),  # 去空白文字顺序
-                    selected_frames=(  # 最终选中的内存图片
-                        CapturedFrame(
-                            session_id="session",  # 测量周期编号
-                            capture_id="capture",  # 采集编号
-                            camera_serial="CAM01",  # 相机序列号
-                            frame_id="capture-1",  # 图片编号
-                            captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
-                            captured_monotonic=1.0,  # 单调接收时间
-                            camera_frame=CameraFrame(
-                                camera_serial="CAM01",  # 相机序列号
-                                frame_number=1,  # SDK 帧编号
-                                device_timestamp=100,  # 设备时间戳
-                                host_timestamp=200,  # 主机时间戳
-                                received_monotonic=1.0,  # 接收单调时间
-                                width=2,  # 图像宽度
-                                height=1,  # 图像高度
-                                pixel_type=17301505,  # 像素格式编号
-                                lost_packet_count=0,  # 丢包数
-                                data=b"\x01\x02",  # 原始图像字节
-                            ),
-                        ),
+                captured_frame = CapturedFrame(
+                    session_id="session",  # 测量周期编号
+                    capture_id="capture",  # 采集编号
+                    camera_serial="CAM01",  # 相机序列号
+                    frame_id="capture-1",  # 图片编号
+                    captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
+                    captured_monotonic=1.0,  # 单调接收时间
+                    camera_frame=CameraFrame(
+                        camera_serial="CAM01",  # 相机序列号
+                        frame_number=1,  # SDK 帧编号
+                        device_timestamp=100,  # 设备时间戳
+                        host_timestamp=200,  # 主机时间戳
+                        received_monotonic=1.0,  # 接收单调时间
+                        width=2,  # 图像宽度
+                        height=1,  # 图像高度
+                        pixel_type=17301505,  # 像素格式编号
+                        lost_packet_count=0,  # 丢包数
+                        data=b"\x01\x02",  # 原始图像字节
                     ),
-                    line_frame_ids=(("capture-1",),),  # 每条文字对应的图片编号
-                    review_frames=(),  # 正常结果没有待复核图片
-                    review_reason=None,  # 正常结果没有复核原因
+                )
+                (
+                    (captured_frame,),  # 本轮全部原始帧
+                    (captured_frame,),  # 按原顺序筛选的合格帧
                 )
         """
         # 本轮没有帧时直接失败。
@@ -162,7 +157,9 @@ class TextRecognizer:
         captured_frames = []
         for frame in frames:
             # 按单调接收时间换算本帧的 UTC 时间。
-            captured_at = datetime.now(timezone.utc) - timedelta(seconds=time.monotonic() - frame.received_monotonic)
+            captured_at = datetime.now(timezone.utc) - timedelta(
+                seconds=time.monotonic() - frame.received_monotonic
+            )
 
             # 登记带周期身份和采集编号的图片。
             captured_frames.append(CapturedFrame(
@@ -178,17 +175,101 @@ class TextRecognizer:
         # 固定本轮全部原始帧，并筛选合格图片。
         captured_frames = tuple(captured_frames)
         qualified_frames = self.filter_qualified_frames(captured_frames)
+        return captured_frames, qualified_frames
 
-        # 初筛没有合格图片时返回全部原始帧供人工复核。
-        if not qualified_frames:
-            return OCRResult(
-                ordered_lines=(),
-                normalized_lines=(),
-                selected_frames=(),
-                line_frame_ids=(),
-                review_frames=captured_frames,
-                review_reason="初筛后没有合格图片",
-            )
+    def create_no_qualified_frames_result(
+        self, captured_frames: tuple[CapturedFrame, ...]
+    ) -> OCRResult:
+        """生成初筛没有合格图片时的人工复核结果。
+
+        Args:
+            captured_frames: 本轮全部原始帧。
+
+        Returns:
+            返回示例：
+                captured_frame = CapturedFrame(
+                    session_id="session",  # 测量周期编号
+                    capture_id="capture",  # 采集编号
+                    camera_serial="CAM01",  # 相机序列号
+                    frame_id="capture-1",  # 图片编号
+                    captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
+                    captured_monotonic=1.0,  # 单调接收时间
+                    camera_frame=CameraFrame(
+                        camera_serial="CAM01",  # 相机序列号
+                        frame_number=1,  # SDK 帧编号
+                        device_timestamp=100,  # 设备时间戳
+                        host_timestamp=200,  # 主机时间戳
+                        received_monotonic=1.0,  # 接收单调时间
+                        width=2,  # 图像宽度
+                        height=1,  # 图像高度
+                        pixel_type=17301505,  # 像素格式编号
+                        lost_packet_count=0,  # 丢包数
+                        data=b"\x01\x02",  # 原始图像字节
+                    ),
+                )
+                OCRResult(
+                    ordered_lines=(),  # 最终文字
+                    normalized_lines=(),  # 去空白文字
+                    selected_frames=(),  # 选中的证据图片
+                    line_frame_ids=(),  # 文字对应的图片编号
+                    review_frames=(captured_frame,),  # 待复核原始帧
+                    review_reason="初筛后没有合格图片",  # 复核原因
+                )
+        """
+        # 将全部原始帧交给人工复核。
+        return OCRResult(
+            ordered_lines=(),
+            normalized_lines=(),
+            selected_frames=(),
+            line_frame_ids=(),
+            review_frames=captured_frames,
+            review_reason="初筛后没有合格图片",
+        )
+
+    def process_session_frames(
+        self,
+        session_id: str,
+        captured_frames: tuple[CapturedFrame, ...],
+        qualified_frames: tuple[CapturedFrame, ...],
+    ) -> OCRResult:
+        """识别合格图片并终选文字和证据图片。
+
+        Args:
+            session_id: 测量周期编号。
+            captured_frames: 本轮全部原始帧。
+            qualified_frames: 本轮经过初筛的合格帧。
+
+        Returns:
+            返回示例：
+                selected_frame = CapturedFrame(
+                    session_id="session",  # 测量周期编号
+                    capture_id="capture",  # 采集编号
+                    camera_serial="CAM01",  # 相机序列号
+                    frame_id="capture-1",  # 图片编号
+                    captured_at="2026-09-19T00:00:00+00:00",  # UTC 接收时间
+                    captured_monotonic=1.0,  # 单调接收时间
+                    camera_frame=CameraFrame(
+                        camera_serial="CAM01",  # 相机序列号
+                        frame_number=1,  # SDK 帧编号
+                        device_timestamp=100,  # 设备时间戳
+                        host_timestamp=200,  # 主机时间戳
+                        received_monotonic=1.0,  # 接收单调时间
+                        width=2,  # 图像宽度
+                        height=1,  # 图像高度
+                        pixel_type=17301505,  # 像素格式编号
+                        lost_packet_count=0,  # 丢包数
+                        data=b"\x01\x02",  # 原始图像字节
+                    ),
+                )
+                OCRResult(
+                    ordered_lines=("ABC",),  # 最终文字顺序
+                    normalized_lines=("ABC",),  # 去空白文字顺序
+                    selected_frames=(selected_frame,),  # 选中的证据图片
+                    line_frame_ids=(("capture-1",),),  # 文字对应的图片编号
+                    review_frames=(),  # 正常结果没有待复核图片
+                    review_reason=None,  # 正常结果没有复核原因
+                )
+        """
 
         # 调用模型识别本轮全部合格图片。
         image_results = self.recognize_images(

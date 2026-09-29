@@ -1212,6 +1212,9 @@ async def test_ocr_execution_error_fails_and_is_audited(tmp_path: Path) -> None:
     session.ocr_state = OCRState.RUNNING
     session.ocr_result = None
     recognizer = TextRecognizer()
+    recognizer.prepare_session_frames = Mock(
+        return_value=((evidence_frame,), (evidence_frame,))
+    )
     recognizer.process_session_frames = Mock(
         side_effect=OCRProcessingError("模型执行失败")
     )
@@ -1230,6 +1233,156 @@ async def test_ocr_execution_error_fails_and_is_audited(tmp_path: Path) -> None:
     assert len(events) == 1
     assert events[0][2] == "OCR 识别执行失败"
     assert json.loads(events[0][3])["session_errors"] == session.errors
+
+
+@pytest.mark.asyncio
+async def test_preparation_error_fails_only_current_session(tmp_path: Path) -> None:
+    """确认初筛中的已知异常只结束当前测量周期。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 初筛错误按 OCR_FAILED 处理且未触发系统故障
+    """
+    # 建立运行中的周期和会报告已知错误的预处理入口。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.capture_stop_time = None
+    session.ocr_state = OCRState.RUNNING
+    session.ocr_result = None
+    recognizer = TextRecognizer()
+    recognizer.prepare_session_frames = Mock(side_effect=OCRProcessingError("图片初筛失败"))
+    recognizer.process_session_frames = Mock()
+    recognizer.use_processing_resource = Mock(wraps=recognizer.use_processing_resource)
+    machine.text_recognizer = recognizer
+    machine.publish_event = AsyncMock(side_effect=machine.handle_event)
+
+    # 执行预处理并核对失败事件和共享资源调用。
+    await machine.recognize_session(session, (evidence_frame.camera_frame,))
+    published_event = machine.publish_event.await_args.args[0]
+    assert published_event.event_type == EventType.OCR_FAILED
+    assert published_event.payload == "图片初筛失败"
+    assert session.state == SessionState.FAILED
+    assert session.errors == ["图片初筛失败", "OCR 识别执行失败"]
+    recognizer.use_processing_resource.assert_not_called()
+    recognizer.process_session_frames.assert_not_called()
+    machine.on_system_failure.assert_not_called()
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_no_qualified_frames_complete_without_ocr_lock(tmp_path: Path) -> None:
+    """确认初筛为空时直接交付复核结果且不等待共享资源。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 复核结果已交付，原资源占用者仍持有共享锁
+    """
+    # 建立运行中的周期并让其他任务占用共享资源。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.capture_stop_time = None
+    session.ocr_state = OCRState.RUNNING
+    session.ocr_result = None
+    recognizer = TextRecognizer()
+    recognizer.prepare_session_frames = Mock(return_value=((evidence_frame,), ()))
+    recognizer.process_session_frames = Mock()
+    recognizer.recognize_images = Mock()
+    machine.text_recognizer = recognizer
+    machine.publish_event = AsyncMock(side_effect=machine.handle_event)
+    resource_acquired = asyncio.Event()
+    resource_release = asyncio.Event()
+    resource_holder_task = asyncio.create_task(hold_ocr_processing_resource(
+        recognizer, resource_acquired, resource_release
+    ))
+    await resource_acquired.wait()
+    recognizer.use_processing_resource = Mock(wraps=recognizer.use_processing_resource)
+
+    try:
+        # 在原占用者不释放资源时完成本轮初筛结果交付。
+        await asyncio.wait_for(
+            machine.recognize_session(session, (evidence_frame.camera_frame,)),
+            timeout=1,
+        )
+        published_event = machine.publish_event.await_args.args[0]
+        assert published_event.event_type == EventType.OCR_COMPLETED
+        assert session.ocr_state == OCRState.COMPLETED
+        assert session.ocr_result.review_reason == "初筛后没有合格图片"
+        assert session.ocr_result.review_frames == (evidence_frame,)
+
+        # 核对本轮没有占用共享资源、启动超时或调用 OCR Engine。
+        recognizer.use_processing_resource.assert_not_called()
+        recognizer.process_session_frames.assert_not_called()
+        recognizer.recognize_images.assert_not_called()
+        assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+        assert recognizer._processing_lock.locked()
+        assert not resource_holder_task.done()
+    finally:
+        # 放行原占用者并关闭测试库。
+        resource_release.set()
+        await resource_holder_task
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_session_after_preparation_skips_ocr(tmp_path: Path) -> None:
+    """确认预处理结束后失效的周期不进入共享资源等待。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 没有资源等待、处理期限、推理和结果事件
+    """
+    # 建立会在预处理期间失效的测量周期。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    recognizer = TextRecognizer()
+
+    def prepare_frames(
+        session_id: str,
+        capture_id: str,
+        camera_serial: str,
+        frames: tuple[object, ...],
+    ) -> tuple[tuple[CapturedFrame, ...], tuple[CapturedFrame, ...]]:
+        """结束当前周期并返回已经整理的测试帧。
+
+        Args:
+            session_id: 本轮测量周期编号。
+            capture_id: 本轮采集编号。
+            camera_serial: 本轮相机序列号。
+            frames: 本轮相机原始帧。
+
+        Returns:
+            返回示例：
+                (
+                    (evidence_frame,),  # 全部原始帧
+                    (evidence_frame,),  # 合格帧
+                )
+        """
+        session.state = SessionState.FAILED
+        return (evidence_frame,), (evidence_frame,)
+
+    recognizer.prepare_session_frames = Mock(side_effect=prepare_frames)
+    recognizer.process_session_frames = Mock()
+    recognizer.use_processing_resource = Mock(wraps=recognizer.use_processing_resource)
+    machine.text_recognizer = recognizer
+    machine.publish_event = AsyncMock()
+
+    # 运行识别任务并核对失效周期被提前丢弃。
+    await machine.recognize_session(session, (evidence_frame.camera_frame,))
+    recognizer.prepare_session_frames.assert_called_once()
+    recognizer.use_processing_resource.assert_not_called()
+    recognizer.process_session_frames.assert_not_called()
+    assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+    machine.publish_event.assert_not_awaited()
+    database.close()
 
 
 @pytest.mark.asyncio
@@ -1274,17 +1427,15 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
 
     def process_frames(
         session_id: str,
-        capture_id: str,
-        camera_serial: str,
-        frames: tuple[object, ...],
+        captured_frames: tuple[object, ...],
+        qualified_frames: tuple[object, ...],
     ) -> OCRResult:
         """等待测试放行后返回正常 OCR 结果。
 
         Args:
             session_id: 本轮测量周期编号。
-            capture_id: 本轮采集编号。
-            camera_serial: 本轮相机序列号。
-            frames: 本轮原始帧。
+            captured_frames: 本轮全部原始帧。
+            qualified_frames: 本轮合格帧。
 
         Returns:
             返回示例：
@@ -1296,6 +1447,9 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
         return expected_result
 
     recognizer = TextRecognizer()
+    recognizer.prepare_session_frames = Mock(
+        return_value=((evidence_frame,), (evidence_frame,))
+    )
     recognizer.process_session_frames = Mock(side_effect=process_frames)
     machine.text_recognizer = recognizer
     published_events: list[EventType] = []
@@ -1338,6 +1492,12 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
         assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
         assert session.state == SessionState.RUNNING
         assert not published_events
+        machine.text_recognizer.prepare_session_frames.assert_called_once_with(
+            session.session_id,
+            session.capture_id,
+            session.camera_serial,
+            (evidence_frame.camera_frame,),
+        )
         machine.text_recognizer.process_session_frames.assert_not_called()
 
         # 释放占用者后，实际 OCR 开始时才登记处理期限。
@@ -1391,17 +1551,15 @@ async def test_ocr_processing_timeout_fails_current_session(tmp_path: Path) -> N
 
     def process_frames(
         session_id: str,
-        capture_id: str,
-        camera_serial: str,
-        frames: tuple[object, ...],
+        captured_frames: tuple[object, ...],
+        qualified_frames: tuple[object, ...],
     ) -> object:
         """等待测试放行后结束 OCR 执行。
 
         Args:
             session_id: 本轮测量周期编号。
-            capture_id: 本轮采集编号。
-            camera_serial: 本轮相机序列号。
-            frames: 本轮原始帧。
+            captured_frames: 本轮全部原始帧。
+            qualified_frames: 本轮合格帧。
 
         Returns:
             返回示例：
@@ -1413,6 +1571,9 @@ async def test_ocr_processing_timeout_fails_current_session(tmp_path: Path) -> N
         return object()
 
     recognizer = TextRecognizer()
+    recognizer.prepare_session_frames = Mock(
+        return_value=((evidence_frame,), (evidence_frame,))
+    )
     recognizer.process_session_frames = Mock(side_effect=process_frames)
     machine.text_recognizer = recognizer
     published_events: list[EventType] = []
@@ -1483,6 +1644,9 @@ async def test_invalid_session_waiting_for_ocr_resource_skips_timeout_and_infere
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
     recognizer = TextRecognizer()
+    recognizer.prepare_session_frames = Mock(
+        return_value=((evidence_frame,), (evidence_frame,))
+    )
     recognizer.process_session_frames = Mock()
     machine.text_recognizer = recognizer
     resource_acquired = asyncio.Event()
@@ -1491,13 +1655,18 @@ async def test_invalid_session_waiting_for_ocr_resource_skips_timeout_and_infere
         recognizer, resource_acquired, resource_release
     ))
     await resource_acquired.wait()
+    recognizer.use_processing_resource = Mock(wraps=recognizer.use_processing_resource)
     machine.publish_event = AsyncMock()
     recognition_task = asyncio.create_task(machine.recognize_session(
         session, (evidence_frame.camera_frame,)
     ))
     try:
         # 周期在等待共享资源期间失效。
-        await asyncio.sleep(0)
+        for wait_attempt in range(100):
+            if recognizer.use_processing_resource.called:
+                break
+            await asyncio.sleep(0.01)
+        assert recognizer.use_processing_resource.called
         session.state = SessionState.FAILED
         resource_release.set()
         await resource_holder_task
@@ -1538,6 +1707,9 @@ async def test_consecutive_ocr_lock_wait_timeouts_are_recorded_per_session(
     first_session.ocr_result = None
     machine.config = replace(machine.config, ocr_lock_wait_timeout_ms=50)
     recognizer = TextRecognizer()
+    recognizer.prepare_session_frames = Mock(
+        return_value=((evidence_frame,), (evidence_frame,))
+    )
     recognizer.process_session_frames = Mock()
     machine.text_recognizer = recognizer
     resource_acquired = asyncio.Event()
@@ -1658,6 +1830,9 @@ async def test_cancelled_ocr_resource_wait_does_not_release_current_owner(
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
     recognizer = TextRecognizer()
+    recognizer.prepare_session_frames = Mock(
+        return_value=((evidence_frame,), (evidence_frame,))
+    )
     recognizer.process_session_frames = Mock()
     machine.text_recognizer = recognizer
     resource_acquired = asyncio.Event()
@@ -1666,13 +1841,18 @@ async def test_cancelled_ocr_resource_wait_does_not_release_current_owner(
         recognizer, resource_acquired, resource_release
     ))
     await resource_acquired.wait()
+    recognizer.use_processing_resource = Mock(wraps=recognizer.use_processing_resource)
     machine.publish_event = AsyncMock()
     recognition_task = asyncio.create_task(machine.recognize_session(
         session, (evidence_frame.camera_frame,)
     ))
     try:
         # 取消仍在等待共享资源的识别任务。
-        await asyncio.sleep(0)
+        for wait_attempt in range(100):
+            if recognizer.use_processing_resource.called:
+                break
+            await asyncio.sleep(0.01)
+        assert recognizer.use_processing_resource.called
         session.state = SessionState.FAILED
         recognition_task.cancel()
         await asyncio.gather(recognition_task, return_exceptions=True)
@@ -1726,17 +1906,15 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
 
     def process_frames(
         session_id: str,
-        capture_id: str,
-        camera_serial: str,
-        frames: tuple[object, ...],
+        captured_frames: tuple[object, ...],
+        qualified_frames: tuple[object, ...],
     ) -> object:
         """按周期等待测试放行后返回对应 OCR 结果。
 
         Args:
             session_id: 本次识别所属的周期编号。
-            capture_id: 本次识别的采集编号。
-            camera_serial: 本次识别的相机序列号。
-            frames: 本次识别的原始帧。
+            captured_frames: 本次识别的全部原始帧。
+            qualified_frames: 本次识别的合格帧。
 
         Returns:
             返回示例：
@@ -1754,6 +1932,9 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
         return new_result
 
     recognizer = TextRecognizer()
+    recognizer.prepare_session_frames = Mock(
+        return_value=((evidence_frame,), (evidence_frame,))
+    )
     recognizer.process_session_frames = Mock(side_effect=process_frames)
     machine.text_recognizer = recognizer
     machine.publish_event = AsyncMock()
@@ -1982,6 +2163,9 @@ async def test_unknown_ocr_error_reaches_system_failure_callback(
     session.ocr_result = None
     error = error_type("未知识别错误")
     recognizer = TextRecognizer()
+    recognizer.prepare_session_frames = Mock(
+        return_value=((evidence_frame,), (evidence_frame,))
+    )
     recognizer.process_session_frames = Mock(side_effect=error)
     machine.text_recognizer = recognizer
     machine.publish_event = AsyncMock()

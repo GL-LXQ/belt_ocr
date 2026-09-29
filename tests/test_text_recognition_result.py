@@ -129,12 +129,68 @@ def recognize_model_results(model_results: object) -> OCRResult:
         data=b"image",
     )
 
-    # 用指定模型结果运行整轮 OCR。
+    # 先整理原始帧，再用指定模型结果运行 OCR。
     recognizer = TextRecognizer()
     recognizer.recognize_images = Mock(return_value=model_results)
-    return recognizer.process_session_frames(
+    captured_frames, qualified_frames = recognizer.prepare_session_frames(
         "session-1", "capture-1", "camera-1", (camera_frame,)
     )
+    return recognizer.process_session_frames(
+        "session-1", captured_frames, qualified_frames
+    )
+
+
+def test_prepare_session_frames_preserves_frame_identity_and_filter_order() -> None:
+    """确认预处理保留原始帧身份，并按初筛结果顺序返回合格帧。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 全部帧身份及合格帧顺序已核对
+    """
+    # 建立带不同编号的三张相机帧。
+    first_frame = CameraFrame(
+        camera_serial="camera-1",
+        frame_number=1,
+        device_timestamp=1,
+        host_timestamp=1,
+        received_monotonic=time.monotonic(),
+        width=2,
+        height=1,
+        pixel_type=PIXEL_TYPE_MONO8,
+        lost_packet_count=0,
+        data=b"\x01\x02",
+    )
+    second_frame = replace(first_frame, frame_number=2)
+    third_frame = replace(first_frame, frame_number=3)
+
+    # 调用初筛并保留其返回顺序。
+    recognizer = TextRecognizer()
+    recognizer.filter_qualified_frames = Mock(
+        side_effect=lambda captured_frames: (captured_frames[2], captured_frames[0])
+    )
+    captured_frames, qualified_frames = recognizer.prepare_session_frames(
+        "session-1", "capture-1", "camera-1",
+        (first_frame, second_frame, third_frame),
+    )
+
+    # 核对每张原始帧的身份与完整顺序。
+    assert [frame.camera_frame for frame in captured_frames] == [
+        first_frame, second_frame, third_frame
+    ]
+    assert [frame.frame_id for frame in captured_frames] == [
+        "capture-1-1", "capture-1-2", "capture-1-3"
+    ]
+    assert all(frame.session_id == "session-1" for frame in captured_frames)
+    assert all(frame.capture_id == "capture-1" for frame in captured_frames)
+    assert all(frame.camera_serial == "camera-1" for frame in captured_frames)
+
+    # 核对合格帧与原始帧共用对象并保留初筛顺序。
+    recognizer.filter_qualified_frames.assert_called_once_with(captured_frames)
+    assert qualified_frames == (captured_frames[2], captured_frames[0])
+    assert qualified_frames[0] is captured_frames[2]
 
 
 def test_recognize_images_reuses_engine_and_preserves_order(
@@ -265,9 +321,12 @@ def test_process_session_frames_consumes_engine_result() -> None:
     recognizer = TextRecognizer()
     recognizer.ocr_engine = engine
 
-    # 执行整轮识别并核对原有终选结果。
-    result = recognizer.process_session_frames(
+    # 整理原始帧后执行识别并核对原有终选结果。
+    captured_frames, qualified_frames = recognizer.prepare_session_frames(
         "session-1", "capture-1", "camera-1", (frame,)
+    )
+    result = recognizer.process_session_frames(
+        "session-1", captured_frames, qualified_frames
     )
     assert result.ordered_lines == tuple(line["text"] for line in RELIABLE_MODEL_LINES)
     assert result.review_reason is None
