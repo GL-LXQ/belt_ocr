@@ -10,4 +10,4 @@ wheels/
 .venv
 
 # 模拟运行输出
-runtime/
+/runtime/

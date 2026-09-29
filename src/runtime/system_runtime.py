@@ -12,7 +12,7 @@ from camera.hikrobot_sdk import MvsError, load_mvs_sdk
 from config_util import AppConfig, MachineConfig
 from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
-from machine_runtime import MachineRuntime
+from runtime.machine_runtime import MachineRuntime
 from enums import EventType, MachineState, ProgressStage, ProgressStatus
 from models import RuntimeEvent
 from async_utils import run_blocking_operation

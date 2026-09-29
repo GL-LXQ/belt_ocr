@@ -418,7 +418,7 @@ def test_runtime_thread_delivers_text_from_background_thread(
     """
     from unittest.mock import AsyncMock
     from ui.pages.realtime_page import RealtimePage
-    from src.system_runtime_thread import SystemRuntimeThread
+    from src.runtime.system_runtime_thread import SystemRuntimeThread
 
     # 创建页面和不访问设备的运行时替身。
     machine_service = Mock()
@@ -453,9 +453,9 @@ def test_runtime_thread_delivers_text_from_background_thread(
 
     # 替换设备启动入口并绑定真实 Qt 信号。
     runtime.start = start_runtime
-    monkeypatch.setattr("src.system_runtime_thread.load_config", Mock())
+    monkeypatch.setattr("src.runtime.system_runtime_thread.load_config", Mock())
     monkeypatch.setattr(
-        "src.system_runtime_thread.SystemRuntime", Mock(return_value=runtime)
+        "src.runtime.system_runtime_thread.SystemRuntime", Mock(return_value=runtime)
     )
     runtime_thread = SystemRuntimeThread(Path("config"))
     runtime_thread.stop_requested.set()

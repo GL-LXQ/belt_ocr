@@ -11,7 +11,7 @@ import frequency_adapter as frequency_adapter_module
 from config_util import AppConfig, MachineConfig
 from enums import EventType, FrequencyState
 from frequency_adapter import FrequencyAdapter
-from machine_runtime import MachineRuntime
+from runtime.machine_runtime import MachineRuntime
 from models import MeasurementSession, RuntimeEvent
 
 

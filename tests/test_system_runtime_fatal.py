@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from config_util import AppConfig
-from system_runtime import SystemRuntime
+from runtime.system_runtime import SystemRuntime
 
 
 @pytest.mark.asyncio

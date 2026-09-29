@@ -10,7 +10,7 @@ import pytest
 
 from camera.hikrobot_sdk import MvsError
 from config_util import AppConfig, MachineConfig
-from system_runtime import SystemRuntime
+from runtime.system_runtime import SystemRuntime
 
 
 @pytest.mark.asyncio
@@ -94,8 +94,8 @@ async def test_camera_connection_failure_preserves_other_machine(
         read_discrete_inputs=wait_for_input,
         disconnect=AsyncMock(),
     )
-    monkeypatch.setattr("system_runtime.load_mvs_sdk", Mock(return_value=camera_sdk))
-    monkeypatch.setattr("system_runtime.ModbusClient", Mock(return_value=modbus_client))
+    monkeypatch.setattr("runtime.system_runtime.load_mvs_sdk", Mock(return_value=camera_sdk))
+    monkeypatch.setattr("runtime.system_runtime.ModbusClient", Mock(return_value=modbus_client))
     camera_state_notification = Mock()
     initialization_started = threading.Event()
     initialization_finished = threading.Event()
@@ -192,7 +192,7 @@ def test_initialize_machines_passes_camera_state_notification(
         "camera_serial": "camera-1",
         "frequency_meter_serial": "meter-1",
     }
-    monkeypatch.setattr("system_runtime.MachineRepo.list_enabled", Mock(return_value=[enabled_machine]))
+    monkeypatch.setattr("runtime.system_runtime.MachineRepo.list_enabled", Mock(return_value=[enabled_machine]))
     camera_state_notification = Mock()
 
     # 建立机器并核对状态通知回调。
@@ -241,7 +241,7 @@ def test_initialize_machines_copies_common_camera_parameters(
         {"id": 2, "camera_serial": "camera-2", "frequency_meter_serial": "meter-2"},
     ]
     monkeypatch.setattr(
-        "system_runtime.MachineRepo.list_enabled", Mock(return_value=machine_rows)
+        "runtime.system_runtime.MachineRepo.list_enabled", Mock(return_value=machine_rows)
     )
 
     # 初始化机器并核对每台机器保存的参数。
@@ -301,8 +301,8 @@ async def test_all_camera_connections_failed_stops_startup(
         close=Mock(),
     )
     modbus_client = SimpleNamespace(disconnect=AsyncMock())
-    monkeypatch.setattr("system_runtime.load_mvs_sdk", Mock(return_value=camera_sdk))
-    monkeypatch.setattr("system_runtime.ModbusClient", Mock(return_value=modbus_client))
+    monkeypatch.setattr("runtime.system_runtime.load_mvs_sdk", Mock(return_value=camera_sdk))
+    monkeypatch.setattr("runtime.system_runtime.ModbusClient", Mock(return_value=modbus_client))
     runtime.text_recognizer.initialize = Mock()
 
     # 启动全部相机不可用的运行时并核对失败收尾。
@@ -350,8 +350,8 @@ async def test_ocr_initialization_failure_stops_startup(
     runtime.initialize_machines = Mock()
     camera_sdk = SimpleNamespace(open_camera=Mock(return_value=Mock()), close=Mock())
     modbus_client = SimpleNamespace(disconnect=AsyncMock())
-    monkeypatch.setattr("system_runtime.load_mvs_sdk", Mock(return_value=camera_sdk))
-    monkeypatch.setattr("system_runtime.ModbusClient", Mock(return_value=modbus_client))
+    monkeypatch.setattr("runtime.system_runtime.load_mvs_sdk", Mock(return_value=camera_sdk))
+    monkeypatch.setattr("runtime.system_runtime.ModbusClient", Mock(return_value=modbus_client))
 
     # 在相机连接后令 OCR 初始化抛错。
     initialization_error = RuntimeError("OCR 模型加载失败")

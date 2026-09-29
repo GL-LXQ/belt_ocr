@@ -20,7 +20,7 @@ from src.service.measurement_record_service import (
     MeasurementRecordServiceError,
     MeasurementReviewAlreadyCompletedError,
 )
-from src.system_runtime_thread import SystemRuntimeThread
+from src.runtime.system_runtime_thread import SystemRuntimeThread
 
 
 @dataclass

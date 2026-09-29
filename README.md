@@ -81,7 +81,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 → Session 结束
 → 等待下一轮。
 
-GUI 启动入口创建 Repo、Service 和唯一的 `AppController`，四个正式页面通过 `AppController` 请求机器、历史和异常事件数据，再进入对应 Service 与 Repo。实时监测由 `AppController` 创建、启动、停止并释放 `src/system_runtime_thread.py` 中的 `SystemRuntimeThread`（`QThread`）；该线程仅负责在后台运行 `SystemRuntime`，不处理业务判断。`MachineRuntime` 的相机状态、测量进度、OCR 文字和周期关闭通知经 `SystemRuntime`、`SystemRuntimeThread`、`AppController` 的 Qt 信号进入 `RealtimePage`，页面按机器编号及当前 Session 更新 `MachineCard`。窗口关闭时先请求 Controller 停止监测，待 Runtime 完成资源释放并发出结束信号后再退出。页面仍负责卡片动画、OCR 分类显示和当前周期缓存；机器卡片展示动画、状态、OCR 结果、频率和进度，频率数值仍未正式接入。实时页不再创建系统日志演示表格，运行日志仍由各模块按原链路记录。
+GUI 启动入口创建 Repo、Service 和唯一的 `AppController`，四个正式页面通过 `AppController` 请求机器、历史和异常事件数据，再进入对应 Service 与 Repo。实时监测由 `AppController` 创建、启动、停止并释放 `src/runtime/system_runtime_thread.py` 中的 `SystemRuntimeThread`（`QThread`）；该线程仅负责在后台运行 `SystemRuntime`，不处理业务判断。`MachineRuntime` 的相机状态、测量进度、OCR 文字和周期关闭通知经 `SystemRuntime`、`SystemRuntimeThread`、`AppController` 的 Qt 信号进入 `RealtimePage`，页面按机器编号及当前 Session 更新 `MachineCard`。窗口关闭时先请求 Controller 停止监测，待 Runtime 完成资源释放并发出结束信号后再退出。页面仍负责卡片动画、OCR 分类显示和当前周期缓存；机器卡片展示动画、状态、OCR 结果、频率和进度，频率数值仍未正式接入。实时页不再创建系统日志演示表格，运行日志仍由各模块按原链路记录。
 
 桌面入口在创建 `QApplication` 后初始化浅色 Fluent 主题，`FluentWindow` 一次创建并持有四个正式页面和三个占位页。导航切换复用页面实例；进入历史页、异常页时各自通过 Controller 刷新一次，实时页缩放时仅重排已有机器卡片。机器表单、历史详情和异常详情在主窗口遮罩中展示；历史详情从记录目录读取 JPG 证据，缩略图在同样的遮罩中打开大图。保存与查询仍沿用页面到 Controller、Service、Repo 的原有数据流，关闭窗口时继续等待监测线程完成资源释放。
 
@@ -105,8 +105,8 @@ GUI 启动时先在运行库确保 `abnormal_events` 表存在。异常事件页
 
 ## 三、项目结构
 
-* `src/system_runtime.py`：系统启动、机器初始化、IO 信号路由、全局异常和退出。
-* `src/machine_runtime.py`：单台机器运行时实例，负责事件队列、Session 生命周期、OCR 调度和最终结算。
+* `src/runtime/system_runtime.py`：系统启动、机器初始化、IO 信号路由、全局异常和退出。
+* `src/runtime/machine_runtime.py`：单台机器运行时实例，负责事件队列、Session 生命周期、OCR 调度和最终结算。
 * `src/camera/camera.py`：单轮图像采集。
 * `src/camera/hikrobot_sdk.py`：海康 MVS SDK、取帧、JPG 编码和相机关闭。
 * `src/text_recognizer.py`：筛帧、OCR、文字与证据图片终选。
@@ -116,7 +116,7 @@ GUI 启动时先在运行库确保 `abnormal_events` 表存在。异常事件页
 * `src/repo/`：机器等基础数据访问。
 * `src/service/`：机器、测量记录与异常事件业务服务。
 * `src/controller/`：GUI 请求入口、统一结果与实时监测生命周期。
-* `src/system_runtime_thread.py`：运行 SystemRuntime 的后台线程与实时 Qt 信号。
+* `src/runtime/system_runtime_thread.py`：运行 SystemRuntime 的后台线程与实时 Qt 信号。
 * `src/models.py` / `src/enums.py`：Session、事件、帧、OCR 结果及状态定义。
 * `src/config_util.py`：YAML 配置读取与校验。
 * `src/async_utils.py`：在线程中执行阻塞操作的公共封装。

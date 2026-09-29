@@ -25,7 +25,7 @@ from config_util import MachineConfig, load_config
 from database import Database
 from enums import EventType, ProgressStage, ProgressStatus
 from frequency_adapter import FrequencyAdapter
-from machine_runtime import MachineRuntime
+from runtime.machine_runtime import MachineRuntime
 from models import FrequencyMeasurement, RuntimeEvent
 from repo.machine_repo import MachineRepo
 from repo.measurement_record_repo import MeasurementRecordRepo

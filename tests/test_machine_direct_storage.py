@@ -19,7 +19,7 @@ from config_util import AppConfig, MachineConfig, load_config
 from camera.hikrobot_sdk import MvsError
 from database import CommitIntegrityConflictError, Database, MeasurementRecord
 from enums import EventType, OCRState, ProgressStage, ProgressStatus, SessionState
-from machine_runtime import EvidenceWriteError, ImageEncodingError, MachineRuntime
+from runtime.machine_runtime import EvidenceWriteError, ImageEncodingError, MachineRuntime
 from models import (
     MeasurementSession,
     CaptureResult,
@@ -628,7 +628,7 @@ async def test_image_write_failure_skips_database(
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
     write_error = OSError("图片写入失败")
     monkeypatch.setattr(
-        "machine_runtime.save_evidence_image",
+        "runtime.machine_runtime.save_evidence_image",
         Mock(side_effect=write_error),
     )
     await machine.try_finalize(session)
@@ -672,7 +672,7 @@ async def test_unknown_image_write_error_is_not_database_failure(
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
     unknown_error = error_type("未知图片保存错误")
     monkeypatch.setattr(
-        "machine_runtime.save_evidence_image",
+        "runtime.machine_runtime.save_evidence_image",
         Mock(side_effect=unknown_error),
     )
 
@@ -2120,7 +2120,7 @@ async def test_storage_failure_keeps_root_cause_when_audit_also_fails(
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
     write_error = OSError("图片写入失败")
     monkeypatch.setattr(
-        "machine_runtime.save_evidence_image",
+        "runtime.machine_runtime.save_evidence_image",
         Mock(side_effect=write_error),
     )
     database.save_abnormal_event = Mock(

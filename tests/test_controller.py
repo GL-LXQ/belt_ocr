@@ -20,7 +20,7 @@ from src.service.measurement_record_service import (
     MeasurementRecordServiceError,
     MeasurementReviewAlreadyCompletedError,
 )
-from src.system_runtime_thread import SystemRuntimeThread
+from src.runtime.system_runtime_thread import SystemRuntimeThread
 from ui.main_window import MainWindow
 
 
@@ -86,8 +86,8 @@ def test_runtime_thread_runs_and_stops_runtime(monkeypatch: pytest.MonkeyPatch) 
     system_runtime.start = AsyncMock()
     system_runtime.stop = AsyncMock()
     runtime_factory = Mock(return_value=system_runtime)
-    monkeypatch.setattr("src.system_runtime_thread.load_config", load_configuration)
-    monkeypatch.setattr("src.system_runtime_thread.SystemRuntime", runtime_factory)
+    monkeypatch.setattr("src.runtime.system_runtime_thread.load_config", load_configuration)
+    monkeypatch.setattr("src.runtime.system_runtime_thread.SystemRuntime", runtime_factory)
 
     # 提前提交停止请求并直接运行线程入口。
     configuration_directory = Path("config")

@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from config_util import load_config
-from system_runtime import SystemRuntime
+from runtime.system_runtime import SystemRuntime
 import logging
 
 logger = logging.getLogger(__name__)

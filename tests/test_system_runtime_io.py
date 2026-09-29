@@ -10,7 +10,7 @@ import pytest
 
 from config_util import AppConfig
 from enums import EventType
-from system_runtime import SystemRuntime
+from runtime.system_runtime import SystemRuntime
 
 
 @pytest.mark.asyncio
