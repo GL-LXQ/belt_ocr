@@ -722,13 +722,21 @@ class RealtimePage(QWidget):
             summary_layout.addWidget(summary_card, 1)
         outer_layout.addLayout(summary_layout)
 
-        # 显示设备区域标题和说明。
+        # 在总览卡片与机器列表分区之间保留明显的区块间距。
+        outer_layout.addSpacing(10)
+
+        # 显示机器列表分区标题和说明。
         section_layout = QVBoxLayout()
-        section_layout.setSpacing(4)
-        section_layout.addWidget(SubtitleLabel("我的机器"))
-        section_layout.addWidget(
-            CaptionLabel("实时查看各检测机器的连接、测量、频率与识别状态")
-        )
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(3)
+        section_title = QLabel("我的机器")
+        section_title.setObjectName("machineSectionTitle")
+
+        # 设置机器列表分区的辅助说明。
+        section_description = QLabel("实时查看各检测机器的连接、测量、频率与识别状态")
+        section_description.setObjectName("machineSectionDescription")
+        section_layout.addWidget(section_title)
+        section_layout.addWidget(section_description)
         outer_layout.addLayout(section_layout)
         body_layout = QHBoxLayout()
         body_layout.setSpacing(MACHINE_CARD_GAP)
