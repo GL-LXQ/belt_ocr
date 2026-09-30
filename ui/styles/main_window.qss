@@ -459,14 +459,6 @@ QLabel#historyReviewReasonValue {
     font-size: 12px;
 }
 
-/* 统一历史详情的区域标题。 */
-QLabel#historyDetailSectionTitle {
-    color: @text;
-    qproperty-lightColor: @text;
-    font-size: 16px;
-    font-weight: 600;
-}
-
 /* 在历史详情底部显示次级记录信息。 */
 QWidget#historyRecordMetaCard {
     background: #F7F9FC;

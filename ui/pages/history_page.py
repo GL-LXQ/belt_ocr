@@ -230,24 +230,18 @@ class HistoryPage(QWidget):
         self.detail_dialog.setObjectName("historyDetail")
         self.detail_dialog.widget.setObjectName("historyDetailContent")
         self.detail_dialog.widget.setFixedSize(
-            min(900, dialog_parent.width() - 120),
+            min(800, dialog_parent.width() - 140),
             min(740, dialog_parent.height() - 100),
         )
         detail_layout = QVBoxLayout(self.detail_dialog.widget)
         detail_layout.setContentsMargins(24, 24, 24, 24)
-        detail_layout.setSpacing(24)
+        detail_layout.setSpacing(18)
         self.detail_values: dict[str, QLabel] = {}
         selectable_text = Qt.TextInteractionFlag.TextSelectableByMouse
 
-        # 在详情标题下方显示说明。
-        title_layout = QVBoxLayout()
-        title_layout.setSpacing(4)
-        title_layout.addWidget(SubtitleLabel("测量记录详情"))
-        title_layout.addWidget(CaptionLabel("查看本次测量的识别结果、复核信息和证据"))
-
         # 在标题右侧显示当前记录状态。
         detail_heading = QHBoxLayout()
-        detail_heading.addLayout(title_layout)
+        detail_heading.addWidget(SubtitleLabel("记录详情"))
         detail_heading.addStretch()
         status_badge = QLabel("--")
         status_badge.setObjectName("historyDetailStatusBadge")
@@ -264,7 +258,7 @@ class HistoryPage(QWidget):
         detail_body.setObjectName("historyDetailBody")
         body_layout = QVBoxLayout(detail_body)
         body_layout.setContentsMargins(0, 0, 8, 0)
-        body_layout.setSpacing(24)
+        body_layout.setSpacing(16)
 
         # 创建顶部测量摘要卡。
         self.summary_card = SimpleCardWidget()
@@ -304,11 +298,6 @@ class HistoryPage(QWidget):
         body_layout.addWidget(self.summary_card)
 
         # 创建识别结果的并排卡片区域。
-        result_section = QVBoxLayout()
-        result_section.setSpacing(12)
-        result_title = SubtitleLabel("识别结果")
-        result_title.setObjectName("historyDetailSectionTitle")
-        result_section.addWidget(result_title)
         result_layout = QHBoxLayout()
         result_layout.setSpacing(12)
 
@@ -357,8 +346,13 @@ class HistoryPage(QWidget):
         )
         final_layout.addWidget(self.final_result_text, 1)
         result_layout.addWidget(self.final_result_card, 1)
-        result_section.addLayout(result_layout)
-        body_layout.addLayout(result_section)
+
+        # 将只读结果的宽度限制在卡片内。
+        for result_text in (self.detail_ocr_text, self.final_result_text):
+            result_size_policy = result_text.sizePolicy()
+            result_size_policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+            result_text.setSizePolicy(result_size_policy)
+        body_layout.addLayout(result_layout)
 
         # 在浅暖色提示卡中展示复核原因。
         self.review_reason_card = SimpleCardWidget()
@@ -367,7 +361,7 @@ class HistoryPage(QWidget):
         reason_layout = QVBoxLayout(self.review_reason_card)
         reason_layout.setContentsMargins(18, 16, 18, 16)
         reason_layout.setSpacing(10)
-        self.review_reason_title = BodyLabel("需要人工复核")
+        self.review_reason_title = BodyLabel("复核原因")
         self.review_reason_title.setObjectName("historyReviewReasonTitle")
         reason_layout.addWidget(self.review_reason_title)
         self.review_reason_value = QLabel()
@@ -406,12 +400,7 @@ class HistoryPage(QWidget):
         editor_layout.addLayout(review_actions)
         body_layout.addWidget(self.review_editor_section)
 
-        # 创建证据图片的标题和四列网格。
-        evidence_section = QVBoxLayout()
-        evidence_section.setSpacing(12)
-        evidence_title = SubtitleLabel("证据图片")
-        evidence_title.setObjectName("historyDetailSectionTitle")
-        evidence_section.addWidget(evidence_title)
+        # 创建证据图片的四列网格。
         self.evidence_content = QWidget()
         self.evidence_content.setObjectName("historyEvidenceContent")
         self.evidence_grid = QGridLayout(self.evidence_content)
@@ -421,8 +410,7 @@ class HistoryPage(QWidget):
         self.evidence_grid.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
-        evidence_section.addWidget(self.evidence_content)
-        body_layout.addLayout(evidence_section)
+        body_layout.addWidget(self.evidence_content)
 
         # 在详情底部创建记录信息卡。
         self.record_meta_card = SimpleCardWidget()
@@ -431,7 +419,6 @@ class HistoryPage(QWidget):
         record_meta_layout = QVBoxLayout(self.record_meta_card)
         record_meta_layout.setContentsMargins(18, 16, 18, 16)
         record_meta_layout.setSpacing(12)
-        record_meta_layout.addWidget(BodyLabel("记录信息"))
         record_fields = QGridLayout()
         record_fields.setContentsMargins(0, 0, 0, 0)
         record_fields.setHorizontalSpacing(12)
@@ -1031,7 +1018,7 @@ class HistoryPage(QWidget):
         # 根据当前窗口尺寸调整弹窗。
         dialog_parent = self.detail_dialog.parentWidget()
         self.detail_dialog.widget.setFixedSize(
-            min(900, dialog_parent.width() - 120),
+            min(800, dialog_parent.width() - 140),
             min(740, dialog_parent.height() - 100),
         )
 

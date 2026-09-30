@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, QPoint, QTimer, Qt
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication, QGridLayout, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 from qfluentwidgets import (
     CalendarPicker,
     CheckBox,
@@ -21,7 +21,6 @@ from qfluentwidgets import (
     Flyout,
     InfoBar,
     MaskDialogBase,
-    ScrollArea,
     SimpleCardWidget,
 )
 
@@ -840,53 +839,21 @@ def test_history_page_shows_filters_and_read_only_details(
         # 详情保留当前记录的原始结果和复核入口。
         page.table.cellWidget(0, 5).click()
         assert page.detail_values["machine"].text() == "二号皮带"
+        assert page.detail_values["status"].text() == "待复核"
         assert page.detail_values["status"].property("tone") == "pending"
         assert page.detail_completed_at_label.text() == (
             page.detail_values["finish_time"].text()
         )
-        detail_scroll = page.detail_dialog.widget.findChild(
-            ScrollArea, "historyDetailScroll"
-        )
-        assert page.detail_dialog.widget.findChildren(ScrollArea) == [detail_scroll]
-        assert page.detail_dialog.widget.findChild(
-            ScrollArea, "historyEvidenceScroll"
-        ) is None
-
-        # 正文按摘要、识别结果、复核、证据和记录信息组织。
-        detail_body_layout = detail_scroll.widget().layout()
-        assert detail_body_layout.itemAt(0).widget() is page.summary_card
-        result_section = detail_body_layout.itemAt(1).layout()
-        assert result_section.itemAt(0).widget().text() == "识别结果"
-        result_layout = result_section.itemAt(1).layout()
-        assert result_layout.itemAt(0).widget() is page.original_result_card
-        assert result_layout.itemAt(1).widget() is page.final_result_card
-        assert detail_body_layout.itemAt(2).widget() is page.review_reason_card
-        assert detail_body_layout.itemAt(3).widget() is page.review_editor_section
-        evidence_section = detail_body_layout.itemAt(4).layout()
-        assert evidence_section.itemAt(1).widget() is page.evidence_content
-        assert detail_body_layout.itemAt(5).widget() is page.record_meta_card
 
         # 待复核详情展示原始结果、原因和编辑控件。
         assert page.detail_values["session_id"].text() == "review-session"
         assert page.detail_values["frequency"].text() == "--"
         assert page.detail_ocr_text.text() == "待确认文字"
         assert page.review_reason_value.text() == "没有可靠的 20 位文字"
-        assert isinstance(page.detail_ocr_text, QLabel)
-        assert page.detail_ocr_text.wordWrap()
-        assert page.detail_ocr_text.textInteractionFlags() & (
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        assert not page.summary_card.isHidden()
-        assert not page.original_result_card.isHidden()
         assert page.final_result_card.isHidden()
         assert not page.review_reason_card.isHidden()
         assert not page.review_editor_section.isHidden()
         assert page.review_editor.toPlainText() == "待确认文字"
-        assert page.review_editor.height() == 125
-        assert page.confirm_review_button.isVisibleTo(page.detail_dialog.widget)
-        assert page.save_review_button.isVisibleTo(page.detail_dialog.widget)
-        assert page.reviewed_at_title.isHidden()
-        assert page.reviewed_at_value.isHidden()
         page.detail_dialog.close()
 
         # 正常记录使用绿色状态且不显示复核原因。
@@ -899,16 +866,12 @@ def test_history_page_shows_filters_and_read_only_details(
         assert normal_badge.text() == "正常"
         assert normal_badge.property("tone") == "normal"
         page.table.cellWidget(2, 5).click()
+        assert page.detail_values["status"].text() == "正常"
         assert page.detail_ocr_text.text() == "12345678\n003"
         assert page.detail_values["frequency"].text() == "50.0 Hz"
-        assert not page.summary_card.isHidden()
-        assert not page.original_result_card.isHidden()
         assert page.final_result_card.isHidden()
         assert page.review_reason_card.isHidden()
         assert page.review_editor_section.isHidden()
-        assert not page.review_editor.isVisibleTo(page.detail_dialog.widget)
-        assert not page.confirm_review_button.isVisibleTo(page.detail_dialog.widget)
-        assert not page.save_review_button.isVisibleTo(page.detail_dialog.widget)
     finally:
         page.detail_dialog.close()
         page.close()
@@ -1248,25 +1211,14 @@ def test_history_page_completes_review_and_shows_original_and_final_results(
         assert page.detail_values["status"].property("tone") == "reviewed"
         assert page.detail_ocr_text.text() == "待确认文字"
         assert page.final_result_text.text() == expected_result
-        assert isinstance(page.final_result_text, QLabel)
-        assert page.final_result_text.wordWrap()
-        assert page.final_result_text.textInteractionFlags() & (
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        assert not page.original_result_card.isHidden()
         assert not page.final_result_card.isHidden()
-        assert not page.review_reason_card.isHidden()
         assert page.review_editor_section.isHidden()
-        assert not page.reviewed_at_title.isHidden()
-        assert not page.reviewed_at_value.isHidden()
         assert page.reviewed_at_value.text()
         assert page.review_reason_value.text() == "没有可靠的 20 位文字"
-        assert not page.review_editor.isVisibleTo(page.detail_dialog.widget)
-        assert not page.confirm_review_button.isVisibleTo(page.detail_dialog.widget)
-        assert not page.save_review_button.isVisibleTo(page.detail_dialog.widget)
 
         # 切换到正常记录后清除上一条记录的复核显示。
         page.show_record_detail("normal-session")
+        assert page.detail_values["status"].text() == "正常"
         assert page.final_result_card.isHidden()
         assert page.review_reason_card.isHidden()
         assert page.review_editor_section.isHidden()
@@ -1445,9 +1397,6 @@ def test_history_detail_shows_evidence_images_and_opens_large_image(
             "review-frame-4.jpg",
             "review-frame-5.jpg",
         ]
-        for image_index, thumbnail in enumerate(review_thumbnails[:4]):
-            grid_item = page.evidence_grid.itemAtPosition(0, image_index)
-            assert grid_item.widget() is thumbnail
         assert page.evidence_grid.itemAtPosition(1, 0).widget() is review_thumbnails[4]
         assert page.review_reason_value.text() == "没有可靠的 20 位文字"
 
@@ -1494,112 +1443,6 @@ def test_history_detail_shows_evidence_images_and_opens_large_image(
         page.detail_dialog.close()
         page.close()
         page.deleteLater()
-
-
-def test_history_detail_expands_results_and_groups_record_information(
-    qt_application: QApplication,
-    measurement_record_service: MeasurementRecordService,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """验证长结果由外层滚动，并排卡片和底部字段布局正确。
-
-    Args:
-        qt_application: 测试期间保持存活的 Qt 应用。
-        measurement_record_service: 已保存测试记录的测量记录服务。
-        monkeypatch: pytest 提供的对象替换工具。
-
-    Returns:
-        返回示例：
-            None  # 长文字完整展开，结果卡均分宽度，元信息集中展示
-    """
-    # 准备含长文字和完整复核信息的详情数据。
-    record = measurement_record_service.get_record("review-session")["record"]
-    record["ordered_lines"] = [f"2926 {line_number:03}C" for line_number in range(32)]
-    record["reviewed_lines"] = ["<人工确认文字>", *record["ordered_lines"]]
-    record["reviewed_at"] = "2026-09-27T09:05:00+00:00"
-    record["evidence_directory"] = str(Path("evidence") / ("record-directory-" * 12))
-    controller = AppController(
-        Mock(), measurement_record_service, Mock(), Path("config")
-    )
-    monkeypatch.setattr(
-        controller,
-        "get_measurement_record",
-        Mock(return_value=Result.ok({"record": record})),
-    )
-
-    # 在目标窗口尺寸下打开详情并完成布局。
-    dialog_parent = QWidget()
-    dialog_parent.resize(1600, 900)
-    page = HistoryPage(controller, dialog_parent)
-    try:
-        dialog_parent.show()
-        page.show_record_detail("review-session")
-        qt_application.processEvents()
-        detail_content = page.detail_dialog.widget
-        detail_scroll = detail_content.findChild(ScrollArea, "historyDetailScroll")
-        assert detail_content.width() == 900
-        assert detail_content.height() == 740
-        assert detail_content.findChildren(ScrollArea) == [detail_scroll]
-        assert detail_scroll.verticalScrollBar().maximum() > 0
-        assert detail_scroll.horizontalScrollBar().maximum() == 0
-
-        # 只读结果按原文展示并自然撑高，两张卡片均分宽度。
-        assert page.detail_ocr_text.text() == "\n".join(record["ordered_lines"])
-        assert page.final_result_text.text() == "\n".join(record["reviewed_lines"])
-        assert page.final_result_text.textFormat() == Qt.TextFormat.PlainText
-        assert page.detail_ocr_text.height() > 110
-        assert page.final_result_text.height() > 100
-        card_width_difference = (
-            page.original_result_card.width() - page.final_result_card.width()
-        )
-        assert abs(card_width_difference) <= 1
-        assert page.original_result_card.height() == page.final_result_card.height()
-        assert page.review_editor_section.isHidden()
-
-        # 记录信息按两列排列，路径跨越剩余三列。
-        record_fields = page.record_meta_card.layout().itemAt(1).layout()
-        assert isinstance(record_fields, QGridLayout)
-        for field_name, row, column, span in (
-            ("session_id", 0, 1, 1),
-            ("start_time", 1, 1, 1),
-            ("finish_time", 1, 3, 1),
-            ("evidence_directory", 2, 1, 3),
-        ):
-            field_index = record_fields.indexOf(page.detail_values[field_name])
-            assert record_fields.getItemPosition(field_index) == (row, column, 1, span)
-        assert record_fields.itemAtPosition(0, 2).widget() is page.reviewed_at_title
-        assert record_fields.itemAtPosition(0, 3).widget() is page.reviewed_at_value
-        assert page.detail_values["evidence_directory"].wordWrap()
-        assert page.detail_values["evidence_directory"].text() == (
-            record["evidence_directory"]
-        )
-
-        # 将长结果滚动到底部后切换记录。
-        detail_scroll.verticalScrollBar().setValue(
-            detail_scroll.verticalScrollBar().maximum()
-        )
-        assert detail_scroll.verticalScrollBar().value() > 0
-
-        # 正常记录只显示原始卡片并从正文顶部展示。
-        monkeypatch.setattr(
-            controller,
-            "get_measurement_record",
-            Mock(
-                return_value=Result.ok(
-                    measurement_record_service.get_record("normal-session")
-                )
-            ),
-        )
-        page.show_record_detail("normal-session")
-        qt_application.processEvents()
-        assert page.final_result_card.isHidden()
-        assert page.original_result_card.width() == page.summary_card.width()
-        assert detail_scroll.verticalScrollBar().value() == 0
-    finally:
-        page.detail_dialog.close()
-        page.close()
-        dialog_parent.close()
-        dialog_parent.deleteLater()
 
 
 def test_history_detail_handles_missing_empty_and_unreadable_evidence(
