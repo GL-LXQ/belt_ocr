@@ -7,7 +7,6 @@ from PySide6.QtCore import QDate, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -39,7 +38,6 @@ from qfluentwidgets import (
     TableWidget,
     TitleLabel,
     TransparentPushButton,
-    setCustomStyleSheet,
 )
 
 from src.controller.controller import AppController
@@ -226,24 +224,30 @@ class HistoryPage(QWidget):
             返回示例：
                 None  # 详情字段、人工复核控件和关闭按钮已建立
         """
-        # 创建遮罩弹窗和可滚动正文。
+        # 创建遮罩弹窗的主体。
         dialog_parent = self.parentWidget() or self
         self.detail_dialog = MaskDialogBase(dialog_parent)
         self.detail_dialog.setObjectName("historyDetail")
         self.detail_dialog.widget.setObjectName("historyDetailContent")
         self.detail_dialog.widget.setFixedSize(
-            min(900, dialog_parent.width() - 80),
-            min(780, dialog_parent.height() - 80),
+            min(900, dialog_parent.width() - 120),
+            min(740, dialog_parent.height() - 100),
         )
         detail_layout = QVBoxLayout(self.detail_dialog.widget)
-        detail_layout.setContentsMargins(24, 22, 24, 20)
-        detail_layout.setSpacing(14)
+        detail_layout.setContentsMargins(24, 24, 24, 24)
+        detail_layout.setSpacing(24)
         self.detail_values: dict[str, QLabel] = {}
         selectable_text = Qt.TextInteractionFlag.TextSelectableByMouse
 
-        # 在详情标题右侧显示当前记录状态。
+        # 在详情标题下方显示说明。
+        title_layout = QVBoxLayout()
+        title_layout.setSpacing(4)
+        title_layout.addWidget(SubtitleLabel("测量记录详情"))
+        title_layout.addWidget(CaptionLabel("查看本次测量的识别结果、复核信息和证据"))
+
+        # 在标题右侧显示当前记录状态。
         detail_heading = QHBoxLayout()
-        detail_heading.addWidget(TitleLabel("测量记录详情"))
+        detail_heading.addLayout(title_layout)
         detail_heading.addStretch()
         status_badge = QLabel("--")
         status_badge.setObjectName("historyDetailStatusBadge")
@@ -251,111 +255,144 @@ class HistoryPage(QWidget):
         self.detail_values["status"] = status_badge
         detail_layout.addLayout(detail_heading)
 
-        # 创建可滚动的详情正文。
-        detail_scroll = ScrollArea()
-        detail_scroll.setObjectName("historyDetailScroll")
-        detail_scroll.setWidgetResizable(True)
-        detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # 创建统一滚动的详情正文。
+        self.detail_scroll = ScrollArea()
+        self.detail_scroll.setObjectName("historyDetailScroll")
+        self.detail_scroll.setWidgetResizable(True)
+        self.detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
         detail_body = QWidget()
         detail_body.setObjectName("historyDetailBody")
         body_layout = QVBoxLayout(detail_body)
-        body_layout.setContentsMargins(0, 0, 4, 0)
-        body_layout.setSpacing(18)
+        body_layout.setContentsMargins(0, 0, 8, 0)
+        body_layout.setSpacing(24)
 
-        # 在正文顶部显示机器名称和完成时间。
-        identity_layout = QVBoxLayout()
-        identity_layout.setSpacing(4)
+        # 创建顶部测量摘要卡。
+        self.summary_card = SimpleCardWidget()
+        self.summary_card.setObjectName("historyDetailSummaryCard")
+        self.summary_card.setBorderRadius(12)
+        summary_layout = QHBoxLayout(self.summary_card)
+        summary_layout.setContentsMargins(18, 16, 18, 16)
+        summary_layout.setSpacing(24)
+
+        # 在摘要卡左侧显示机器名称和完成时间。
+        machine_layout = QVBoxLayout()
+        machine_layout.setSpacing(4)
         machine_name = SubtitleLabel("--")
         machine_name.setObjectName("historyDetailMachineName")
+        machine_name.setWordWrap(True)
         machine_name.setTextInteractionFlags(selectable_text)
         self.detail_values["machine"] = machine_name
-        identity_layout.addWidget(machine_name)
+        machine_layout.addWidget(machine_name)
         self.detail_completed_at_label = CaptionLabel("--")
         self.detail_completed_at_label.setObjectName("historyDetailFinishedAt")
-        identity_layout.addWidget(self.detail_completed_at_label)
-        body_layout.addLayout(identity_layout)
+        machine_layout.addWidget(self.detail_completed_at_label)
+        summary_layout.addLayout(machine_layout, 1)
 
-        # 在浅灰区域突出最终频率。
-        frequency_card = QFrame()
-        frequency_card.setObjectName("historyDetailFrequencyCard")
-        frequency_layout = QVBoxLayout(frequency_card)
-        frequency_layout.setContentsMargins(16, 12, 16, 12)
-        frequency_layout.setSpacing(6)
-        frequency_layout.addWidget(CaptionLabel("最终频率"))
+        # 在摘要卡右侧显示最终频率。
+        frequency_layout = QVBoxLayout()
+        frequency_layout.setSpacing(4)
+        frequency_caption = CaptionLabel("最终频率")
+        frequency_caption.setAlignment(Qt.AlignmentFlag.AlignRight)
+        frequency_layout.addWidget(frequency_caption)
         frequency_value = QLabel("--")
         frequency_value.setObjectName("historyDetailFrequencyValue")
+        frequency_value.setAlignment(Qt.AlignmentFlag.AlignRight)
+        frequency_value.setTextInteractionFlags(selectable_text)
         frequency_layout.addWidget(frequency_value)
         self.detail_values["frequency"] = frequency_value
-        body_layout.addWidget(frequency_card)
+        summary_layout.addLayout(frequency_layout)
+        body_layout.addWidget(self.summary_card)
 
-        # 在浅灰区域显示原始 OCR 结果。
-        body_layout.addWidget(SubtitleLabel("OCR 识别结果"))
-        ocr_panel = QFrame()
-        ocr_panel.setObjectName("historyDetailOcrPanel")
-        ocr_layout = QVBoxLayout(ocr_panel)
-        ocr_layout.setContentsMargins(14, 10, 14, 10)
-        self.detail_ocr_text = PlainTextEdit()
+        # 创建识别结果的并排卡片区域。
+        result_section = QVBoxLayout()
+        result_section.setSpacing(12)
+        result_title = SubtitleLabel("识别结果")
+        result_title.setObjectName("historyDetailSectionTitle")
+        result_section.addWidget(result_title)
+        result_layout = QHBoxLayout()
+        result_layout.setSpacing(12)
+
+        # 在左侧卡片展示原始 OCR 文字。
+        self.original_result_card = SimpleCardWidget()
+        self.original_result_card.setObjectName("historyOriginalResultCard")
+        self.original_result_card.setBorderRadius(12)
+        original_layout = QVBoxLayout(self.original_result_card)
+        original_layout.setContentsMargins(18, 16, 18, 16)
+        original_layout.setSpacing(12)
+        original_layout.addWidget(BodyLabel("原始 OCR"))
+        self.detail_ocr_text = QLabel("--")
         self.detail_ocr_text.setObjectName("historyDetailOcrText")
-        self.detail_ocr_text.setReadOnly(True)
-        self.detail_ocr_text.setFrameShape(QFrame.Shape.NoFrame)
-        self.detail_ocr_text.setFixedHeight(110)
-        self.detail_ocr_text.layer.hide()
-        ocr_style = (
-            "PlainTextEdit#historyDetailOcrText,"
-            "PlainTextEdit#historyDetailOcrText:hover,"
-            "PlainTextEdit#historyDetailOcrText:focus {"
-            f"background: transparent; color: {COLORS['text']};"
-            "border: none; border-radius: 0; padding: 0; font-size: 13px;}"
+        self.detail_ocr_text.setTextFormat(Qt.TextFormat.PlainText)
+        self.detail_ocr_text.setWordWrap(True)
+        self.detail_ocr_text.setTextInteractionFlags(selectable_text)
+        self.detail_ocr_text.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
         )
-        setCustomStyleSheet(self.detail_ocr_text, ocr_style, ocr_style)
-        ocr_layout.addWidget(self.detail_ocr_text)
-        body_layout.addWidget(ocr_panel)
+        original_layout.addWidget(self.detail_ocr_text, 1)
+        result_layout.addWidget(self.original_result_card, 1)
 
-        # 在 OCR 结果下方显示需要复核的原因。
-        self.review_reason_title = SubtitleLabel("复核原因")
+        # 在右侧卡片标题旁显示确认标记。
+        self.final_result_card = SimpleCardWidget()
+        self.final_result_card.setObjectName("historyFinalResultCard")
+        self.final_result_card.setBorderRadius(12)
+        final_layout = QVBoxLayout(self.final_result_card)
+        final_layout.setContentsMargins(18, 16, 18, 16)
+        final_layout.setSpacing(12)
+        final_heading = QHBoxLayout()
+        final_heading.addWidget(BodyLabel("人工最终结果"))
+        final_heading.addStretch()
+        final_badge = CaptionLabel("✓ 已确认")
+        final_badge.setObjectName("historyFinalResultBadge")
+        final_heading.addWidget(final_badge)
+        final_layout.addLayout(final_heading)
+
+        # 在右侧卡片展示人工最终结果。
+        self.final_result_text = QLabel("--")
+        self.final_result_text.setObjectName("historyFinalResultText")
+        self.final_result_text.setTextFormat(Qt.TextFormat.PlainText)
+        self.final_result_text.setWordWrap(True)
+        self.final_result_text.setTextInteractionFlags(selectable_text)
+        self.final_result_text.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        final_layout.addWidget(self.final_result_text, 1)
+        result_layout.addWidget(self.final_result_card, 1)
+        result_section.addLayout(result_layout)
+        body_layout.addLayout(result_section)
+
+        # 在浅暖色提示卡中展示复核原因。
+        self.review_reason_card = SimpleCardWidget()
+        self.review_reason_card.setObjectName("historyReviewReasonCard")
+        self.review_reason_card.setBorderRadius(12)
+        reason_layout = QVBoxLayout(self.review_reason_card)
+        reason_layout.setContentsMargins(18, 16, 18, 16)
+        reason_layout.setSpacing(10)
+        self.review_reason_title = BodyLabel("需要人工复核")
+        self.review_reason_title.setObjectName("historyReviewReasonTitle")
+        reason_layout.addWidget(self.review_reason_title)
         self.review_reason_value = QLabel()
+        self.review_reason_value.setObjectName("historyReviewReasonValue")
         self.review_reason_value.setWordWrap(True)
         self.review_reason_value.setTextInteractionFlags(selectable_text)
-        body_layout.addWidget(self.review_reason_title)
-        body_layout.addWidget(self.review_reason_value)
+        reason_layout.addWidget(self.review_reason_value)
+        body_layout.addWidget(self.review_reason_card)
 
-        # 显示已复核记录的人工最终结果和复核时间。
-        self.final_result_title = SubtitleLabel("人工最终结果")
-        self.final_result_text = PlainTextEdit()
-        self.final_result_text.setObjectName("historyFinalResultText")
-        self.final_result_text.setReadOnly(True)
-        self.final_result_text.setFrameShape(QFrame.Shape.NoFrame)
-        self.final_result_text.setFixedHeight(100)
-        self.final_result_text.layer.hide()
-        final_result_style = (
-            "PlainTextEdit#historyFinalResultText,"
-            "PlainTextEdit#historyFinalResultText:hover,"
-            "PlainTextEdit#historyFinalResultText:focus {"
-            f"background: #F5F6F8; color: {COLORS['text']};"
-            "border: none; border-radius: 10px; padding: 10px 14px;"
-            "font-size: 13px;}"
-        )
-        setCustomStyleSheet(
-            self.final_result_text,
-            final_result_style,
-            final_result_style,
-        )
-        body_layout.addWidget(self.final_result_title)
-        body_layout.addWidget(self.final_result_text)
-        self.reviewed_at_title = CaptionLabel("复核时间")
-        self.reviewed_at_value = QLabel()
-        body_layout.addWidget(self.reviewed_at_title)
-        body_layout.addWidget(self.reviewed_at_value)
+        # 创建待复核记录的人工编辑区。
+        self.review_editor_section = QWidget()
+        self.review_editor_section.setObjectName("historyReviewEditorSection")
+        editor_layout = QVBoxLayout(self.review_editor_section)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(12)
+        self.review_editor_title = SubtitleLabel("人工复核")
+        editor_layout.addWidget(self.review_editor_title)
+        editor_layout.addWidget(CaptionLabel("可修正 OCR 结果，每行一条"))
+        self.review_editor = PlainTextEdit(self.review_editor_section)
+        self.review_editor.setFixedHeight(125)
+        editor_layout.addWidget(self.review_editor)
 
-        # 将待复核编辑区放在 OCR 结果附近。
-        self.review_editor_title = SubtitleLabel("人工结果")
-        self.review_editor = PlainTextEdit()
-        self.review_editor.setFixedHeight(100)
-        body_layout.addWidget(self.review_editor_title)
-        body_layout.addWidget(self.review_editor)
-
-        # 在编辑区下方保留两种复核操作。
+        # 在编辑区右下方保留两种复核操作。
         review_actions = QHBoxLayout()
+        review_actions.addStretch()
         self.confirm_review_button = PushButton("确认无误")
         self.confirm_review_button.clicked.connect(
             lambda: self.complete_record_review(False)
@@ -366,35 +403,48 @@ class HistoryPage(QWidget):
         )
         review_actions.addWidget(self.confirm_review_button)
         review_actions.addWidget(self.save_review_button)
-        review_actions.addStretch()
-        body_layout.addLayout(review_actions)
+        editor_layout.addLayout(review_actions)
+        body_layout.addWidget(self.review_editor_section)
 
-        # 创建保持图片比例的证据缩略图区域。
-        body_layout.addWidget(SubtitleLabel("证据图片"))
-        self.evidence_scroll = ScrollArea()
-        self.evidence_scroll.setObjectName("historyEvidenceScroll")
-        self.evidence_scroll.setWidgetResizable(True)
-        self.evidence_scroll.setFixedHeight(150)
+        # 创建证据图片的标题和四列网格。
+        evidence_section = QVBoxLayout()
+        evidence_section.setSpacing(12)
+        evidence_title = SubtitleLabel("证据图片")
+        evidence_title.setObjectName("historyDetailSectionTitle")
+        evidence_section.addWidget(evidence_title)
         self.evidence_content = QWidget()
+        self.evidence_content.setObjectName("historyEvidenceContent")
         self.evidence_grid = QGridLayout(self.evidence_content)
-        self.evidence_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.evidence_scroll.setWidget(self.evidence_content)
-        body_layout.addWidget(self.evidence_scroll)
+        self.evidence_grid.setContentsMargins(0, 0, 0, 0)
+        self.evidence_grid.setHorizontalSpacing(12)
+        self.evidence_grid.setVerticalSpacing(12)
+        self.evidence_grid.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        evidence_section.addWidget(self.evidence_content)
+        body_layout.addLayout(evidence_section)
 
-        # 在详情底部显示可复制的记录信息。
-        record_meta_card = QFrame()
-        record_meta_card.setObjectName("historyRecordMetaCard")
-        record_meta_layout = QVBoxLayout(record_meta_card)
-        record_meta_layout.setContentsMargins(16, 14, 16, 14)
-        record_meta_layout.setSpacing(10)
-        record_meta_layout.addWidget(CaptionLabel("记录信息"))
-        record_fields = QFormLayout()
+        # 在详情底部创建记录信息卡。
+        self.record_meta_card = SimpleCardWidget()
+        self.record_meta_card.setObjectName("historyRecordMetaCard")
+        self.record_meta_card.setBorderRadius(12)
+        record_meta_layout = QVBoxLayout(self.record_meta_card)
+        record_meta_layout.setContentsMargins(18, 16, 18, 16)
+        record_meta_layout.setSpacing(12)
+        record_meta_layout.addWidget(BodyLabel("记录信息"))
+        record_fields = QGridLayout()
         record_fields.setContentsMargins(0, 0, 0, 0)
-        for field_name, caption in (
-            ("session_id", "Session ID"),
-            ("start_time", "开始时间"),
-            ("finish_time", "结束时间"),
-            ("evidence_directory", "证据目录"),
+        record_fields.setHorizontalSpacing(12)
+        record_fields.setVerticalSpacing(12)
+        record_fields.setColumnStretch(1, 1)
+        record_fields.setColumnStretch(3, 1)
+
+        # 将记录字段排成两列，证据目录横跨整行。
+        for field_name, caption, row, column, span in (
+            ("session_id", "Session ID", 0, 0, 1),
+            ("start_time", "开始时间", 1, 0, 1),
+            ("finish_time", "结束时间", 1, 2, 1),
+            ("evidence_directory", "证据目录", 2, 0, 3),
         ):
             field_label = QLabel(caption)
             field_label.setObjectName("historyRecordMetaKey")
@@ -406,13 +456,24 @@ class HistoryPage(QWidget):
                 value_label.setSizePolicy(
                     QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
                 )
-            record_fields.addRow(field_label, value_label)
+            record_fields.addWidget(field_label, row, column)
+            record_fields.addWidget(value_label, row, column + 1, 1, span)
             self.detail_values[field_name] = value_label
+
+        # 在首行右侧显示已复核记录的复核时间。
+        self.reviewed_at_title = QLabel("复核时间")
+        self.reviewed_at_title.setObjectName("historyRecordMetaKey")
+        self.reviewed_at_value = QLabel()
+        self.reviewed_at_value.setObjectName("historyRecordMetaValue")
+        self.reviewed_at_value.setWordWrap(True)
+        self.reviewed_at_value.setTextInteractionFlags(selectable_text)
+        record_fields.addWidget(self.reviewed_at_title, 0, 2)
+        record_fields.addWidget(self.reviewed_at_value, 0, 3)
         record_meta_layout.addLayout(record_fields)
-        body_layout.addWidget(record_meta_card)
+        body_layout.addWidget(self.record_meta_card)
         body_layout.addStretch()
-        detail_scroll.setWidget(detail_body)
-        detail_layout.addWidget(detail_scroll, 1)
+        self.detail_scroll.setWidget(detail_body)
+        detail_layout.addWidget(self.detail_scroll, 1)
 
         # 在弹窗底部放置关闭入口。
         actions = QHBoxLayout()
@@ -943,9 +1004,8 @@ class HistoryPage(QWidget):
         self.detail_values["evidence_directory"].setText(record["evidence_directory"])
 
         # 显示原始 OCR 文字和需要复核的原因。
-        self.detail_ocr_text.setPlainText("\n".join(record["ordered_lines"]) or "--")
-        self.review_reason_title.setVisible(needs_review)
-        self.review_reason_value.setVisible(needs_review)
+        self.detail_ocr_text.setText("\n".join(record["ordered_lines"]) or "--")
+        self.review_reason_card.setVisible(needs_review)
         reason_text = (record["review_reason"] or "--") if needs_review else ""
         self.review_reason_value.setText(reason_text)
 
@@ -958,26 +1018,31 @@ class HistoryPage(QWidget):
         self.reviewed_at_value.setText(
             format_history_time(reviewed_at) if completed_review else ""
         )
-        self.final_result_title.setVisible(completed_review)
-        self.final_result_text.setVisible(completed_review)
-        self.final_result_text.setPlainText("\n".join(final_lines) or "--")
+        self.final_result_card.setVisible(completed_review)
+        self.final_result_text.setText("\n".join(final_lines) or "--")
 
         # 为待复核记录预填原始文字并显示操作入口。
-        self.review_editor_title.setVisible(pending_review)
-        self.review_editor.setVisible(pending_review)
+        self.review_editor_section.setVisible(pending_review)
         self.review_editor.setPlainText("\n".join(record["ordered_lines"]))
-        self.confirm_review_button.setVisible(pending_review)
-        self.save_review_button.setVisible(pending_review)
 
         # 读取本轮证据目录并显示可用图片。
         self.populate_evidence_images(record["evidence_directory"])
+
+        # 根据当前窗口尺寸调整弹窗。
         dialog_parent = self.detail_dialog.parentWidget()
         self.detail_dialog.widget.setFixedSize(
-            min(900, dialog_parent.width() - 80),
-            min(780, dialog_parent.height() - 80),
+            min(900, dialog_parent.width() - 120),
+            min(740, dialog_parent.height() - 100),
         )
+
+        # 将详情正文恢复到顶部。
+        self.detail_scroll.verticalScrollBar().setValue(0)
+
+        # 启用复核操作。
         self.confirm_review_button.setEnabled(True)
         self.save_review_button.setEnabled(True)
+
+        # 打开详情弹窗。
         self.detail_dialog.open()
 
     def complete_record_review(self, use_edited_text: bool) -> None:
@@ -1059,7 +1124,7 @@ class HistoryPage(QWidget):
                 lambda checked=False, path=image_path: self.show_evidence_image(path)
             )
             self.evidence_grid.addWidget(
-                thumbnail, readable_image_count // 3, readable_image_count % 3
+                thumbnail, readable_image_count // 4, readable_image_count % 4
             )
             readable_image_count += 1
 
@@ -1067,8 +1132,6 @@ class HistoryPage(QWidget):
         if readable_image_count == 0:
             message = "证据图片读取失败" if image_paths else "暂无证据图片"
             self.evidence_grid.addWidget(QLabel(message), 0, 0)
-
-        self.evidence_scroll.verticalScrollBar().setValue(0)
 
     def show_evidence_image(self, image_path: Path) -> None:
         """打开一张证据图片的大图查看窗口。
