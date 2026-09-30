@@ -69,7 +69,7 @@ class AbnormalEventsPage(QWidget):
 
         # 创建页面标题和说明。
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setContentsMargins(24, 4, 24, 20)
         layout.setSpacing(20)
         title = TitleLabel("异常事件")
         title.setObjectName("pageTitle")

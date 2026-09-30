@@ -60,7 +60,7 @@ class MachinesPage(QWidget):
         self.editing_machine_id = None
         self.field_inputs = {}
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setContentsMargins(24, 4, 24, 20)
         layout.setSpacing(20)
 
         # 在固定页头显示标题和新建入口。

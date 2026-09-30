@@ -109,6 +109,14 @@ def test_fluent_navigation_uses_existing_pages_and_refreshes_once(
         abnormal_page = window.abnormal_events_page
         machines_page = window.machines_page
 
+        # 核对四个正式业务页的最外层边距统一。
+        for page in (realtime_page, history_page, abnormal_page, machines_page):
+            margins = page.layout().contentsMargins()
+            assert margins.left() == 24
+            assert margins.top() == 4
+            assert margins.right() == 24
+            assert margins.bottom() == 20
+
         # 每个页面只在实际进入时触发一次数据读取。
         for page_key in (
             "history", "abnormal_events", "machines", "images", "settings", "logs"
