@@ -41,9 +41,8 @@ frequency:
   minimum_frequency_hz: 0.01  # 有效频率下限，单位赫兹
   maximum_frequency_hz: 10000.0  # 有效频率上限，单位赫兹
 
-# 机器公共初始状态、周期期限与事件队列容量，机器清单从数据库读取。
+# 机器周期期限与事件队列容量，现场启停状态以 Modbus DI 实际读数为准。
 machine:
-  initial_machine_state: CLOSED  # 启动时的现场状态，取 CLOSED、OPEN 或 UNKNOWN
   max_cycle_open_ms: 60000  # 等待 CLOSE 的期限，毫秒
   event_queue_capacity: 128  # 单机事件队列容量
 

@@ -94,8 +94,7 @@ class MeasurementSession:
     capture_summary: dict = field(default_factory=dict)  # 本轮相机采集汇总，包含帧数、耗时和错误信息
     ocr_state: OCRState = OCRState.WAITING  # 本轮文字识别状态
     ocr_result: OCRResult | None = None  # 本轮终选后的文字与图片
-    frequency_window_sealed: bool = False  # 本轮频率列表是否已封闭
     measurement_frequencies: list[FrequencyMeasurement] = field(default_factory=list)  # 本轮收到的频率明细
-    frequency_state: FrequencyState = FrequencyState.RUNNING  # 本轮频率采集状态
+    frequency_state: FrequencyState = FrequencyState.RUNNING  # 频率采集生命周期，仅 RUNNING 接收读数
     final_frequency: FrequencyMeasurement | None = None  # 本轮结算选定的最终频率
     errors: list[str] = field(default_factory=list)  # 本轮累计的错误原因

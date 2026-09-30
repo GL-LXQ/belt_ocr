@@ -5,8 +5,6 @@ from pathlib import Path
 
 import yaml
 
-from enums import MachineState
-
 
 @dataclass(frozen=True)
 class MachineConfig:
@@ -50,7 +48,6 @@ class AppConfig:
     event_queue_capacity: int = 128  # 单机事件队列容量
     shutdown_timeout_ms: int = 10000  # 退出收尾期限，毫秒
     recovery_database_path: Path | None = None  # 运行库路径覆盖值
-    initial_machine_state: MachineState = MachineState.CLOSED  # 启动时的现场状态
     mvs_dll_directory: Path | None = None  # SDK 动态库搜索目录
     modbus_serial_port: str | None = None  # Modbus RTU 串口名称
     modbus_baudrate: int = 9600  # Modbus RTU 波特率
@@ -145,7 +142,7 @@ class AppConfig:
 
 
 def read_configuration_settings(configuration_directory: Path) -> dict:
-    """读取单一配置文件的六个业务段落，并转换路径、初始机器状态和 DI 通道映射键。
+    """读取单一配置文件的六个业务段落，并转换路径和 DI 通道映射键。
 
     Args:
         configuration_directory: 包含 config.yaml 的配置目录。
@@ -173,7 +170,6 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
                 "frequency_interval_ms": 100,  # 频率读取间隔配置
                 "minimum_frequency_hz": 0.01,  # 最低有效频率
                 "maximum_frequency_hz": 10000.0,  # 最高有效频率
-                "initial_machine_state": MachineState.CLOSED,  # 初始机器状态
                 "max_cycle_open_ms": 60000,  # 周期关闭期限，毫秒
                 "event_queue_capacity": 128,  # 单机事件队列容量
                 "modbus_serial_port": None,  # Modbus RTU 串口名称
@@ -214,9 +210,6 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
         if settings.get(path_name):
             settings[path_name] = (configuration_directory / settings[path_name]).resolve()
 
-    # 转换初始机器状态，未配置时使用已关闭。
-    settings["initial_machine_state"] = MachineState(settings.get("initial_machine_state", MachineState.CLOSED))
-
     # 统一 DI 通道映射的机器编号为字符串，兼容 YAML 中的数字键。
     channel_items = (settings.get("io_machine_channels") or {}).items()
     settings["io_machine_channels"] = {str(machine_id): channel for machine_id, channel in channel_items}
@@ -255,7 +248,6 @@ def load_config(configuration_directory: Path) -> AppConfig:
                 event_queue_capacity=128,  # 单机事件队列容量
                 shutdown_timeout_ms=10000,  # 退出收尾期限
                 recovery_database_path=None,  # 运行库路径覆盖值
-                initial_machine_state=MachineState.CLOSED,  # 初始现场状态配置
                 mvs_dll_directory=None,  # SDK 动态库搜索目录
                 modbus_serial_port=None,  # Modbus RTU 串口名称
                 modbus_baudrate=9600,  # Modbus RTU 波特率

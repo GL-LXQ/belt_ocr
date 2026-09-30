@@ -239,8 +239,6 @@ class MachineCard(SimpleCardWidget):
         self.machine_id = data["machine_id"]
         self.set_selected(False)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.progress_session_id = ""
-        self.progress_statuses = {}
         self.setMinimumWidth(MACHINE_CARD_MIN_WIDTH)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(self)
@@ -1200,25 +1198,22 @@ class RealtimePage(QWidget):
                 self.machine_statuses_by_machine_id.get(machine_id, "offline")
             )
 
-            # 恢复当前周期身份和已缓存的文字。
+            # 恢复已缓存的文字。
             cached_result = self.ocr_results_by_machine_id.get(machine_id)
             if cached_result is not None:
-                session_id, ordered_lines, normalized_lines = cached_result
-                card.progress_session_id = session_id
+                ordered_lines = cached_result[1]
+                normalized_lines = cached_result[2]
                 card.set_ocr_result(ordered_lines, normalized_lines)
 
             # 恢复当前周期的进度节点。
             measurement_state = self.measurement_states_by_machine_id.get(machine_id)
             if measurement_state is not None:
-                card.progress_session_id = measurement_state["session_id"]
-                card.progress_statuses = measurement_state["progress_statuses"].copy()
-
                 # 运行中的周期恢复皮带和仍在执行的子动画。
                 if measurement_state["machine_running"]:
                     card.belt_animation.start_machine()
 
                     # 没有失败进度时恢复仍在执行的子动画。
-                    progress_statuses = card.progress_statuses
+                    progress_statuses = measurement_state["progress_statuses"]
                     if "failed" not in progress_statuses.values():
                         if progress_statuses.get("image_capture") == "running":
                             card.belt_animation.start_capture()
@@ -1570,12 +1565,9 @@ class RealtimePage(QWidget):
         if card is None:
             return
 
-        # 新周期清空上一轮的进度和 OCR 展示。
+        # 新周期清空上一轮的 OCR 展示。
         if is_new_session:
-            card.progress_session_id = session_id
-            card.progress_statuses = {}
             card.clear_ocr_result()
-        card.progress_statuses = progress_statuses.copy()
 
         # 按当前周期的启动和运行进度开启动画。
         if is_new_session:

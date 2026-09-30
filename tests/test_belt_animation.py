@@ -335,13 +335,13 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
         page.update_connection_state("1", "已停止", "")
         page.reload_machines()
         assert page.detail_panel.ocr_text.toPlainText() == expected_text
-        assert page.cards_by_machine_id["1"].progress_session_id == "first"
+        assert page.measurement_states_by_machine_id["1"]["session_id"] == "first"
 
         # 新周期同时清空缓存和控件，刷新不恢复上一轮文字。
         page.update_measurement_progress("1", "second", "session_start", "success")
         assert page.ocr_results_by_machine_id["1"] == ("second", (), ())
         page.reload_machines()
-        assert page.cards_by_machine_id["1"].progress_session_id == "second"
+        assert page.measurement_states_by_machine_id["1"]["session_id"] == "second"
         page.update_ocr_result("1", "first", ordered_lines, normalized_lines)
         page.update_measurement_progress("1", "first", "evidence_storage", "success")
         assert page.ocr_results_by_machine_id["1"] == ("second", (), ())
@@ -577,8 +577,8 @@ def test_page_refresh_and_monitoring_stop_restore_safe_animation(
         assert second_animation._machine_state.name == "STOPPED"
         assert not second_animation.capturing
         assert not second_animation.frequency_listening
-        second_card = page.cards_by_machine_id["2"]
-        assert second_card.progress_statuses["image_capture"] == "running"
+        measurement_state = page.measurement_states_by_machine_id["2"]
+        assert measurement_state["progress_statuses"]["image_capture"] == "running"
 
         # 失败时只结束子动画，刷新后也不重新启动。
         page.update_measurement_progress(

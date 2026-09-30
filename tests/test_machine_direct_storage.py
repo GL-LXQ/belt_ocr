@@ -20,6 +20,7 @@ from camera.hikrobot_sdk import MvsError
 from database import CommitIntegrityConflictError, Database, MeasurementRecord
 from enums import (
     EventType,
+    FrequencyState,
     MachineOverallStatus,
     OCRState,
     ProgressStage,
@@ -386,6 +387,75 @@ def test_ocr_lock_wait_timeout_configuration(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "frequency_state",
+    [FrequencyState.SUCCESS, FrequencyState.FAILED],
+)
+async def test_late_frequency_after_close_is_audited(
+    tmp_path: Path,
+    frequency_state: FrequencyState,
+) -> None:
+    """确认频率采集成功或失败结束后，同轮迟到读数仅写入异常事件。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+        frequency_state: CLOSE 后预期的频率采集结果。
+
+    Returns:
+        返回示例：
+            None  # 迟到读数未加入本轮明细，最终频率保持不变且异常已记录
+    """
+    # 建立仍在等待 OCR 的活动周期。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    session.capture_stop_time = None
+    session.ocr_state = OCRState.WAITING
+    session.ocr_result = None
+    machine.frequency_adapter.active_session_id = session.session_id
+    try:
+        # 成功场景先交付有效读数，失败场景保持本轮无有效频率。
+        if frequency_state == FrequencyState.SUCCESS:
+            measurement = FrequencyMeasurement(session.session_id, "meter-1", 50.0)
+            await machine.handle_event(RuntimeEvent(
+                EventType.FREQUENCY_MEASURED,
+                "1",
+                session.session_id,
+                measurement,
+            ))
+
+        # 真实 CLOSE 结束频率采集并保留仍在等待 OCR 的周期。
+        await machine.handle_machine_close()
+        assert session.frequency_state == frequency_state
+        assert machine.frequency_adapter.active_session_id is None
+        assert machine.current_session is session
+
+        # 保存频率采集结束时的明细和最终结果。
+        accepted_frequencies = list(session.measurement_frequencies)
+        final_frequency = session.final_frequency
+
+        # 再交付同轮频率，核对明细和最终结果保持不变。
+        late_measurement = FrequencyMeasurement(session.session_id, "meter-1", 60.0)
+        await machine.handle_event(RuntimeEvent(
+            EventType.FREQUENCY_MEASURED,
+            "1",
+            session.session_id,
+            late_measurement,
+        ))
+        assert session.measurement_frequencies == accepted_frequencies
+        assert session.final_frequency is final_frequency
+        assert session.frequency_state == frequency_state
+
+        # 核对迟到读数记录到当前机器和周期的异常事件中。
+        abnormal_events = read_abnormal_events(database)
+        assert len(abnormal_events) == 1
+        assert abnormal_events[0][:3] == ("1", session.session_id, "迟到的频率读数")
+        machine.on_system_failure.assert_not_called()
+    finally:
+        # 关闭测试数据库。
+        database.close()
+
+
+@pytest.mark.asyncio
 async def test_finalize_saves_images_before_record(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -674,7 +744,9 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
     # 核对相机和机器仍可接收下一轮。
     assert not sdk_camera.faulted
     assert camera.available
-    assert machine.acceptance_state == "READY"
+    assert machine.machine_failure_reason is None
+    assert not machine.waiting_cycle_reset
+    assert machine.current_session is None
     machine.on_system_failure.assert_not_called()
     assert progress_updates[-1][2:] == (ProgressStage.EVIDENCE_STORAGE, ProgressStatus.FAILED)
 
@@ -1154,7 +1226,6 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     assert not camera.available
     assert not camera.is_capturing
     assert machine.machine_failure_reason == "相机采集失败"
-    assert machine.acceptance_state == "FAULT"
     machine.on_system_failure.assert_not_called()
     machine_status_notification.assert_called_once_with("1", "fault")
     camera_state_notification.assert_called_once_with("1", "相机故障", "GetImageBuffer 失败")
@@ -1172,7 +1243,7 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     sdk_camera.faulted = False
     await machine.handle_machine_start()
     assert machine.current_session is None
-    assert machine.acceptance_state == "FAULT"
+    assert machine.machine_failure_reason == "相机采集失败"
 
     # 另一台机器仍能正常创建自己的测量周期。
     other_directory = tmp_path / "other"
@@ -1191,7 +1262,6 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     other_machine.camera.stop = AsyncMock()
     other_machine.camera.delivery_task = asyncio.get_running_loop().create_future()
     try:
-        assert other_machine.acceptance_state == "READY"
         await other_machine.handle_machine_start()
         assert other_machine.current_session is not None
         assert other_machine.current_session.machine_id == "2"
@@ -1254,7 +1324,6 @@ async def test_late_capture_failure_notifies_without_repeating_session_failure(
     assert session.state == SessionState.FAILED
     assert machine.current_session is session
     assert machine.machine_failure_reason == "相机采集失败"
-    assert machine.acceptance_state == "FAULT"
     assert read_abnormal_events(database) == abnormal_events
     assert progress_updates == progress_before_capture_failure
 
@@ -2612,7 +2681,7 @@ async def test_failed_session_releases_when_delivery_task_finishes(tmp_path: Pat
     await asyncio.sleep(0)
     assert camera.delivery_task is None
     assert machine.current_session is None
-    assert machine.acceptance_state == "FAULT"
+    assert machine.machine_failure_reason == "相机采集失败"
 
     # 机器故障登记继续阻止下一轮 START。
     await machine.handle_machine_start()

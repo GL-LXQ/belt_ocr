@@ -60,6 +60,13 @@ async def test_camera_connection_failure_preserves_other_machine(
             返回示例：
                 [False, False]  # 测试任务被取消前不会返回
         """
+        # 首次读取 DI 前，各机器已完成初始化并等待现场状态。
+        assert runtime.accepting_signals
+        for machine in runtime.machines.values():
+            assert machine.initialized
+            assert machine.waiting_cycle_reset
+
+        # 保持首份 DI 未返回，直到测试取消任务。
         await asyncio.Event().wait()
 
     # 建立两台机器和相机连接结果。
@@ -165,6 +172,8 @@ async def test_camera_connection_failure_preserves_other_machine(
         )
         assert runtime.accepting_signals
         for machine in runtime.machines.values():
+            assert machine.initialized
+            assert machine.waiting_cycle_reset
             machine.notify_overall_status.assert_called_once_with()
         assert runtime.failure is None
         runtime.text_recognizer.initialize.assert_called_once_with()

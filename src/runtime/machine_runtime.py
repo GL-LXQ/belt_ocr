@@ -133,45 +133,6 @@ class MachineRuntime:
         self.unfinished_recognition_tasks: set[asyncio.Task[None]] = set()
 
     @property
-    def acceptance_state(self) -> str:
-        """返回本机当前是否可以开始新的测量。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            返回示例：
-                "READY"  # 可以开始新测量
-                "INITIALIZING"  # 本机尚未完成启动准备
-                "FAULT"  # 机器故障或相机不可用
-                "WAIT_CYCLE_RESET"  # 等待现场复位
-                "ACTIVE"  # 当前已有测量
-                "DEGRADED"  # 相机仍被上一轮占用
-        """
-        # 启动准备尚未完成，暂不接收新的测量。
-        if not self.initialized:
-            return "INITIALIZING"
-
-        # 机器故障或相机不可用时，不能开始新的测量。
-        if self.machine_failure_reason is not None or not self.camera.available:
-            return "FAULT"
-
-        # 现场状态还没有复位时，不能开始新的测量。
-        if self.waiting_cycle_reset:
-            return "WAIT_CYCLE_RESET"
-
-        # 当前已有测量正在进行，不能重复启动。
-        if self.current_session is not None:
-            return "ACTIVE"
-
-        # 相机仍在上一轮采集中，不能开始新的测量。
-        if self.camera.is_capturing:
-            return "DEGRADED"
-
-        # 以上条件都正常，可以开始新的测量。
-        return "READY"
-
-    @property
     def overall_status(self) -> MachineOverallStatus:
         """返回当前机器用于实时监测展示的整体状态。
 
@@ -478,9 +439,6 @@ class MachineRuntime:
 
         # 停止把后续频率读数归到本轮测量。
         self.frequency_adapter.active_session_id = None
-
-        # 标记本轮频率采集已经结束，后续读数按迟到数据处理。
-        session.frequency_window_sealed = True
 
         # 根据中断状态、频率状态和已有读数确定最终频率。
         if interrupted or session.frequency_state == FrequencyState.FAILED:
@@ -932,9 +890,8 @@ class MachineRuntime:
                 continue
             self.deadline_tasks.pop(event_type).cancel()
 
-        # 停止把频率读数归到本轮，并停止接收本轮新的频率数据。
+        # 停止把频率读数归到本轮。
         self.frequency_adapter.active_session_id = None
-        session.frequency_window_sealed = True
 
         # 如果频率采集还没有结束，将它标记为失败。
         if session.frequency_state == FrequencyState.RUNNING:
@@ -1258,7 +1215,7 @@ class MachineRuntime:
                 None  # 已保存有效频率，或记录迟到读数后忽略事件
         """
         # 本轮频率采集已经结束时，后续读数只记录为迟到数据。
-        if session.frequency_window_sealed:
+        if session.frequency_state != FrequencyState.RUNNING:
             await run_blocking_operation(
                 self.database.save_abnormal_event, "迟到的频率读数", event
             )

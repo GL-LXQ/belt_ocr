@@ -31,8 +31,6 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
         set_camera_status=Mock(),
         set_machine_status=Mock(),
         setToolTip=Mock(),
-        progress_session_id="session-1",
-        progress_statuses={},
         belt_animation=Mock(),
     )
     page = SimpleNamespace(
@@ -92,8 +90,9 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
         page, "1", "previous-session", "image_capture", "success"
     )
     card.update_data.assert_not_called()
-    assert card.progress_session_id == "session-1"
-    assert card.progress_statuses == {
+    measurement_state = page.measurement_states_by_machine_id["1"]
+    assert measurement_state["session_id"] == "session-1"
+    assert measurement_state["progress_statuses"] == {
         "image_capture": "failed",
     }
 

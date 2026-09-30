@@ -253,7 +253,6 @@ async def test_machine_collects_three_readings_before_close(
     assert len(session.measurement_frequencies) == 3
     assert session.final_frequency is session.measurement_frequencies[-1]
     assert session.frequency_state == FrequencyState.SUCCESS
-    assert session.frequency_window_sealed is True
     assert session.capture_stop_time is not None
     assert adapter.active_session_id is None
     assert system_errors == []

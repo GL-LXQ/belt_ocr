@@ -8,7 +8,7 @@ BeltVision 是运行在工控机上的多皮带机视觉监测系统。一台工
 
 相机运行参数由 `config/config.yaml` 的 `camera` 段读入 `AppConfig`，Runtime 为每台机器写入 `MachineConfig`，打开相机时由 MVS SDK 依次设置 Mono8、关闭自动曝光与自动增益、写入曝光 80 微秒和增益 0，再选择输出线路、设置频闪模式与信号源并使能频闪；参数写入失败时释放相机句柄并按单台连接失败处理。`camera_line_selector` 和 `camera_line_source` 仍需按现场 MVS 实际值填入，启用频闪时缺失任一值会使配置校验失败。
 
-IO 模块通过 Modbus RTU 持续读取 DI 状态。每台机器绑定通道的首份有效读数只建立基线，并用当前电平确认机器是否在等待复位，不产生 START 或 CLOSE；之后的 `False → True` 视为 START，`True → False` 视为 CLOSE。
+IO 模块通过 Modbus RTU 持续读取 DI 状态。Runtime 完成相机和 OCR 初始化后，在开放现场信号入口前将各机器设为 `waiting_cycle_reset=True`，等待首份有效 DI。首读只建立现场基线，不产生 START 或 CLOSE，也不创建半轮测量：`False / CLOSED` 解除等待复位，`True / OPEN` 继续等待真实 CLOSE；之后的 `False → True` 视为 START，`True → False` 视为 CLOSE。断线恢复后的首读同样只重新建立基线。
 
 IO 读取失败时，系统记录日志并清空旧 DI 状态，以 `IO_INTERRUPTED` 结束仍未收到 CLOSE 的采集周期；已经关闭、正在等待识别或入库的周期继续处理。轮询保持运行，通信恢复后的首份有效读数按上述基线规则处理，断线期间发生的电平变化不再与旧状态比较，也不补发 START 或 CLOSE。
 
@@ -61,6 +61,8 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 未知的相机程序异常、IO、识别任务或系统级异常由 `SystemRuntime` 统一处理并停止整个应用；明确的单台相机采集设备异常和普通单轮业务失败只结束当前 Session。
 
 ## 二、数据流向
+
+现场 DI 基线和后续启停边沿进入 `SystemRuntime`，`MachineRuntime.handle_machine_start()` 直接检查当前 Session、机器故障、等待复位和相机状态后受理测量；频率读数仅在 `FrequencyState.RUNNING` 时加入本轮明细，结束后由 `SUCCESS / FAILED` 保存最终结果，迟到的同轮读数写入异常事件。测量通知进入 `RealtimePage.measurement_states_by_machine_id`，页面统一缓存当前 Session、步骤进度和动画运行状态，卡片更新与重建直接读取页面缓存。
 
 实时监测页从现有机器记录读取名称，并从机器整体状态、相机连接状态、测量进度、频率和 OCR 结果刷新机器卡片；卡片分别展示整体状态徽标、相机连接状态、当前流程、实时频率和本轮第一条识别摘要。选中机器后，右侧详情同步整体状态胶囊，继续读取机器记录中的相机序列号并展示完整 OCR 结果。
 

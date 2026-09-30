@@ -13,7 +13,7 @@ from config_util import AppConfig, MachineConfig
 from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
 from runtime.machine_runtime import MachineRuntime
-from enums import EventType, MachineState, ProgressStage, ProgressStatus
+from enums import EventType, ProgressStage, ProgressStatus
 from models import RuntimeEvent
 from async_utils import run_blocking_operation
 from text_recognizer import TextRecognizer
@@ -302,9 +302,9 @@ class SystemRuntime:
             await run_blocking_operation(self.text_recognizer.initialize)
             logger.info("共享OCR模型已准备完成")
 
-            # 按现场初始状态设置各机器的等待复位标志。
+            # 首份有效 DI 到来前，将各机器设为等待现场复位。
             for machine in self.machines.values():
-                machine.waiting_cycle_reset = self.config.initial_machine_state != MachineState.CLOSED
+                machine.waiting_cycle_reset = True
 
                 # 标记本机启动准备完成。
                 machine.initialized = True
