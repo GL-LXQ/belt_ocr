@@ -263,3 +263,124 @@ QLabel#machineSectionDescription {
     font-size: 11px;
     font-weight: 400;
 }
+
+/* 设置历史筛选区和记录表格的白色表面。 */
+QWidget#historyFilterCard, QWidget#historyRecordsCard {
+    background: @white;
+    border: 1px solid @border;
+    border-radius: 12px;
+}
+QWidget#historyDateRange, QWidget#historyStatusWrapper {
+    background: transparent;
+    border: none;
+}
+QTableWidget#historyTable {
+    background: @white;
+    border: none;
+    color: @text;
+    gridline-color: transparent;
+}
+QTableWidget#historyTable QHeaderView::section {
+    background: #F8FAFC;
+    color: @muted;
+    border: none;
+    border-bottom: 1px solid @border;
+    font-weight: 500;
+    padding-left: 8px;
+}
+QTableWidget#historyTable::item:selected {
+    background: #F2F6FC;
+    color: @text;
+}
+QPushButton#historyViewButton {
+    background: transparent;
+    border: none;
+    color: @muted;
+}
+QPushButton#historyViewButton:hover {
+    color: @blue;
+}
+
+/* 显示历史列表和详情共用的状态徽标。 */
+QLabel#historyStatusBadge, QLabel#historyDetailStatusBadge {
+    border: none;
+    border-radius: 11px;
+    padding: 3px 9px;
+    font-size: 12px;
+    font-weight: 500;
+}
+QLabel#historyStatusBadge[tone="normal"],
+QLabel#historyDetailStatusBadge[tone="normal"] {
+    background: #DCF8E9;
+    color: #138B3F;
+}
+QLabel#historyStatusBadge[tone="pending"],
+QLabel#historyDetailStatusBadge[tone="pending"] {
+    background: #FFF0D8;
+    color: #B96600;
+}
+QLabel#historyStatusBadge[tone="reviewed"],
+QLabel#historyDetailStatusBadge[tone="reviewed"] {
+    background: #E2EEFF;
+    color: #2462A8;
+}
+
+/* 将历史详情的业务结果放在浅灰信息区。 */
+QScrollArea#historyDetailScroll, QScrollArea#historyEvidenceScroll {
+    background: transparent;
+    border: none;
+}
+QLabel#historyDetailMachineName {
+    color: @text;
+    font-size: 20px;
+    font-weight: 600;
+}
+QLabel#historyDetailFinishedAt {
+    color: @muted;
+    font-size: 12px;
+}
+QFrame#historyDetailFrequencyCard {
+    background: #F7F9FC;
+    border: none;
+    border-radius: 10px;
+}
+QLabel#historyDetailFrequencyValue {
+    color: @text;
+    font-size: 28px;
+    font-weight: 600;
+}
+QFrame#historyDetailOcrPanel {
+    background: #F5F6F8;
+    border: none;
+    border-radius: 10px;
+}
+QPlainTextEdit#historyDetailOcrText,
+QPlainTextEdit#historyDetailOcrText:hover,
+QPlainTextEdit#historyDetailOcrText:focus {
+    background: transparent;
+    border: none;
+    color: @text;
+    font-size: 13px;
+}
+QPlainTextEdit#historyFinalResultText {
+    background: #F5F6F8;
+    border: none;
+    border-radius: 10px;
+    color: @text;
+    font-size: 13px;
+}
+
+/* 在历史详情底部显示次级记录信息。 */
+QFrame#historyRecordMetaCard {
+    background: #F7F9FC;
+    border: none;
+    border-radius: 10px;
+}
+QLabel#historyRecordMetaKey {
+    color: @muted;
+    font-size: 12px;
+}
+QLabel#historyRecordMetaValue {
+    color: #344054;
+    font-size: 12px;
+}

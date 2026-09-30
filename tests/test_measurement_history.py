@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, QTimer
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
 from qfluentwidgets import InfoBar, MaskDialogBase
 
 from config_util import AppConfig
@@ -30,7 +30,7 @@ from src.service.measurement_record_service import (
 )
 from src.service.machine_service import MachineService
 from ui.main_window import MainWindow
-from ui.pages.history_page import HistoryPage
+from ui.pages.history_page import HistoryPage, format_history_time
 
 
 @pytest.fixture
@@ -592,18 +592,59 @@ def test_history_page_shows_filters_and_read_only_details(
         assert page.unlimited_time_checkbox.isChecked()
         assert not page.start_date_edit.isEnabled()
         assert not page.end_date_edit.isEnabled()
+        assert page.date_range_container.isHidden()
         assert page.table.rowCount() == 4
-        assert page.table.item(0, 1).text() == "99"
+        assert [
+            page.table.horizontalHeaderItem(column).text()
+            for column in range(6)
+        ] == ["机器", "时间", "OCR 结果摘要", "最终频率", "状态", "操作"]
+        assert page.table.columnWidth(0) == 140
+        assert page.table.columnWidth(1) == 170
+        assert page.table.item(0, 0).text() == "99"
+        assert page.table.item(0, 1).text() == format_history_time(
+            "2026-09-27T10:01:00+00:00"
+        )
         assert page.table.item(2, 3).text() == "--"
-        assert page.table.item(2, 4).text() == "待复核"
-        assert page.table.item(2, 4).background().color().name() == "#fff0d8"
+        pending_badge = page.table.cellWidget(2, 4).findChild(
+            QLabel, "historyStatusBadge"
+        )
+        assert pending_badge.text() == "待复核"
+        assert pending_badge.property("tone") == "pending"
+        assert page.table.cellWidget(0, 5).text() == "查看  ›"
 
         # 组合状态和机器筛选，仅保留软删除机器的待复核记录。
         page.status_buttons["pending"].click()
         page.machine_filter.setCurrentIndex(page.machine_filter.findData("2"))
         assert page.table.rowCount() == 1
-        assert page.table.item(0, 1).text() == "二号皮带"
+        assert page.table.item(0, 0).text() == "二号皮带"
+        assert page.table.item(0, 1).text() == format_history_time(
+            "2026-09-27T09:01:00+00:00"
+        )
         page.table.cellWidget(0, 5).click()
+        assert page.detail_values["machine"].text() == "二号皮带"
+        assert page.detail_values["status"].property("tone") == "pending"
+        assert page.detail_completed_at_label.text() == (
+            page.detail_values["finish_time"].text()
+        )
+        frequency_card = page.detail_dialog.widget.findChild(
+            QFrame, "historyDetailFrequencyCard"
+        )
+        ocr_panel = page.detail_dialog.widget.findChild(
+            QFrame, "historyDetailOcrPanel"
+        )
+        record_meta_card = page.detail_dialog.widget.findChild(
+            QFrame, "historyRecordMetaCard"
+        )
+        detail_body_layout = page.detail_values["machine"].parentWidget().layout()
+        assert detail_body_layout.indexOf(frequency_card) < (
+            detail_body_layout.indexOf(ocr_panel)
+        )
+        assert detail_body_layout.indexOf(page.review_editor) < (
+            detail_body_layout.indexOf(page.evidence_scroll)
+        )
+        assert detail_body_layout.indexOf(page.evidence_scroll) < (
+            detail_body_layout.indexOf(record_meta_card)
+        )
         assert page.detail_values["session_id"].text() == "review-session"
         assert page.detail_values["frequency"].text() == "--"
         assert page.detail_ocr_text.toPlainText() == "待确认文字"
@@ -618,8 +659,11 @@ def test_history_page_shows_filters_and_read_only_details(
         page.machine_filter.setCurrentIndex(0)
         page.status_buttons["normal"].click()
         assert page.table.rowCount() == 3
-        assert page.table.item(2, 4).text() == "正常"
-        assert page.table.item(2, 4).background().color().name() == "#dcf8e9"
+        normal_badge = page.table.cellWidget(2, 4).findChild(
+            QLabel, "historyStatusBadge"
+        )
+        assert normal_badge.text() == "正常"
+        assert normal_badge.property("tone") == "normal"
         page.table.cellWidget(2, 5).click()
         assert page.detail_ocr_text.toPlainText() == "12345678\n003"
         assert page.detail_values["frequency"].text() == "50.0 Hz"
@@ -656,8 +700,12 @@ def test_history_page_turns_pages_and_resets_on_filter_changes(
         assert page.current_page == 1
         assert page.table.rowCount() == 20
         assert page.table.item(0, 2).text() == "文字 24"
-        assert page.record_count_label.text() == "共 25 条"
-        assert page.page_label.text() == "第 1 / 2 页"
+        assert page.record_count_label.text() == "25 条"
+        assert page.page_label.text() == "1 / 2"
+        assert page.previous_page_button.text() == "‹"
+        assert page.next_page_button.text() == "›"
+        assert page.previous_page_button.width() == 34
+        assert page.next_page_button.width() == 34
         assert not page.previous_page_button.isEnabled()
         assert page.next_page_button.isEnabled()
 
@@ -678,8 +726,8 @@ def test_history_page_turns_pages_and_resets_on_filter_changes(
         page.status_buttons["pending"].click()
         assert page.current_page == 1
         assert page.table.item(0, 2).text() == "文字 20"
-        assert page.record_count_label.text() == "共 21 条"
-        assert page.page_label.text() == "第 1 / 2 页"
+        assert page.record_count_label.text() == "21 条"
+        assert page.page_label.text() == "1 / 2"
 
         # 机器筛选和重新进入历史页均回第一页。
         page.status_buttons[None].click()
@@ -688,7 +736,7 @@ def test_history_page_turns_pages_and_resets_on_filter_changes(
         assert page.current_page == 1
         assert page.table.rowCount() == 4
         assert page.table.item(0, 2).text() == "文字 24"
-        assert page.record_count_label.text() == "共 4 条"
+        assert page.record_count_label.text() == "4 条"
         page.machine_filter.setCurrentIndex(0)
         page.next_page_button.click()
         page.refresh_history()
@@ -723,6 +771,7 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
     try:
         # 设置无记录的日期并确认默认不限时间仍显示全部记录。
         page.refresh_history()
+        assert page.date_range_container.isHidden()
         selected_date = datetime.fromisoformat(
             "2026-09-27T08:00:00+00:00"
         ).astimezone().date()
@@ -732,7 +781,7 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         previous_qdate = selected_qdate.addDays(-1)
         page.start_date_edit.setDate(previous_qdate)
         page.end_date_edit.setDate(previous_qdate)
-        assert page.record_count_label.text() == "共 25 条"
+        assert page.record_count_label.text() == "25 条"
         page.next_page_button.click()
         assert page.current_page == 2
 
@@ -741,8 +790,9 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert not page.unlimited_time_checkbox.isChecked()
         assert page.start_date_edit.isEnabled()
         assert page.end_date_edit.isEnabled()
+        assert not page.date_range_container.isHidden()
         assert page.current_page == 1
-        assert page.record_count_label.text() == "共 0 条"
+        assert page.record_count_label.text() == "0 条"
 
         # 开始日期超过结束日期时同步结束日期并只查询一次。
         list_measurement_records = Mock(wraps=controller.list_measurement_records)
@@ -752,8 +802,8 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         page.start_date_edit.setDate(selected_qdate)
         assert page.end_date_edit.getDate() == selected_qdate
         assert list_measurement_records.call_count == 1
-        assert page.record_count_label.text() == "共 25 条"
-        assert page.page_label.text() == "第 1 / 2 页"
+        assert page.record_count_label.text() == "25 条"
+        assert page.page_label.text() == "1 / 2"
 
         # 结束日期提前时同步开始日期并回到第一页。
         page.next_page_button.click()
@@ -763,7 +813,7 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert page.start_date_edit.getDate() == previous_qdate
         assert list_measurement_records.call_count == 1
         assert page.current_page == 1
-        assert page.record_count_label.text() == "共 0 条"
+        assert page.record_count_label.text() == "0 条"
 
         # 重新进入历史页恢复不限时间并只读取一次记录。
         list_measurement_records.reset_mock()
@@ -772,9 +822,10 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert page.unlimited_time_checkbox.isChecked()
         assert not page.start_date_edit.isEnabled()
         assert not page.end_date_edit.isEnabled()
+        assert page.date_range_container.isHidden()
         assert page.start_date_edit.getDate() == previous_qdate
         assert page.end_date_edit.getDate() == previous_qdate
-        assert page.record_count_label.text() == "共 25 条"
+        assert page.record_count_label.text() == "25 条"
         assert page.current_page == 1
     finally:
         page.detail_dialog.close()
@@ -815,7 +866,7 @@ def test_history_page_clears_pagination_after_query_failure(
         else:
             assert page.current_page == 1
             assert page.next_page_button.isEnabled()
-        assert page.record_count_label.text() == "共 25 条"
+        assert page.record_count_label.text() == "25 条"
         warning_message = Mock()
         monkeypatch.setattr(InfoBar, "error", warning_message)
 
@@ -838,8 +889,8 @@ def test_history_page_clears_pagination_after_query_failure(
         # 核对旧记录和分页入口已清空。
         assert page.table.rowCount() == 0
         assert page.current_page == 1
-        assert page.record_count_label.text() == "共 0 条"
-        assert page.page_label.text() == "第 1 / 1 页"
+        assert page.record_count_label.text() == "0 条"
+        assert page.page_label.text() == "1 / 1"
         assert not page.previous_page_button.isEnabled()
         assert not page.next_page_button.isEnabled()
         warning_message.assert_called_once_with(
@@ -887,8 +938,8 @@ def test_history_page_returns_to_last_page_after_review_reduces_results(
         assert page.current_page == 1
         assert page.table.rowCount() == 20
         assert page.table.item(0, 2).text() == "文字 20"
-        assert page.record_count_label.text() == "共 20 条"
-        assert page.page_label.text() == "第 1 / 1 页"
+        assert page.record_count_label.text() == "20 条"
+        assert page.page_label.text() == "1 / 1"
         assert not page.previous_page_button.isEnabled()
         assert not page.next_page_button.isEnabled()
     finally:
@@ -940,10 +991,14 @@ def test_history_page_completes_review_and_shows_original_and_final_results(
         page.status_buttons["reviewed"].click()
         assert page.table.rowCount() == 1
         assert page.table.item(0, 2).text() == expected_result.replace("\n", "；")
-        assert page.table.item(0, 4).text() == "已复核"
-        assert page.table.item(0, 4).background().color().name() == "#e2eeff"
+        reviewed_badge = page.table.cellWidget(0, 4).findChild(
+            QLabel, "historyStatusBadge"
+        )
+        assert reviewed_badge.text() == "已复核"
+        assert reviewed_badge.property("tone") == "reviewed"
         page.table.cellWidget(0, 5).click()
         assert page.detail_values["status"].text() == "已复核"
+        assert page.detail_values["status"].property("tone") == "reviewed"
         assert page.detail_ocr_text.toPlainText() == "待确认文字"
         assert page.final_result_text.toPlainText() == expected_result
         assert page.final_result_text.isReadOnly()
@@ -1232,11 +1287,27 @@ def test_main_window_refreshes_only_when_entering_history(
     )
     window = MainWindow(controller)
     try:
+        window.resize(1600, 900)
+        window.show()
+        qt_application.processEvents()
         window.history_page.refresh_history = Mock(
             wraps=window.history_page.refresh_history
         )
         window.switch_page("history")
         assert window.history_page.refresh_history.call_count == 1
+        qt_application.processEvents()
+
+        # 首次显示完成后核对状态徽标和查看按钮的单元格位置。
+        table = window.history_page.table
+        assert table.rowCount() == 4
+        for row_index in range(table.rowCount()):
+            for column_index in (4, 5):
+                widget = table.cellWidget(row_index, column_index)
+                cell_rectangle = table.visualRect(
+                    table.model().index(row_index, column_index)
+                )
+                assert widget.geometry() == cell_rectangle
+
         window.switch_page("history")
         assert window.history_page.refresh_history.call_count == 1
         window.switch_page("realtime")
