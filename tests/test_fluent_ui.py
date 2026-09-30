@@ -856,6 +856,10 @@ def test_machine_detail_sections_follow_selected_machine(qt_application) -> None
         qt_application.processEvents()
         panel = page.detail_panel
 
+        # 核对详情属性区使用本轮流程标题。
+        assert panel.attributes_layout.itemAtPosition(3, 0).widget().text() == "本轮流程"
+        assert panel.attributes_layout.itemAtPosition(3, 1).widget().text() == "相机状态"
+
         # 核对详情分区与三项固定占位统计。
         assert panel.findChild(QFrame, "detailFrequencyCard") is not None
         assert panel.findChild(QFrame, "detailOcrCard") is not None
@@ -953,8 +957,18 @@ def test_dashboard_selection_reload_and_summary(qt_application) -> None:
             label.text() == "--" for label in page.detail_panel.stat_values.values()
         )
         assert not controller.list_measurement_records.called
+
+        # 没有 Session 时刷新不恢复卡片上的旧流程和频率。
+        card = page.cards_by_machine_id["2"]
+        card.update_data({
+            "title": card.title.text(),
+            "state": "字符识别进行中",
+            "frequency": "24.6 Hz",
+        })
         page.reload_machines()
         assert page.selected_machine_id == "2"
+        assert page.cards_by_machine_id["2"].state_label.text() == "--"
+        assert page.cards_by_machine_id["2"].frequency_label.text() == "--"
 
         # 设备总览只统计后端发布的机器整体状态。
         query_count = controller.list_enabled_machines.call_count
@@ -974,8 +988,24 @@ def test_dashboard_selection_reload_and_summary(qt_application) -> None:
         page.update_machine_status("3", "fault")
         assert page.device_overview_card.fault_value.text() == "2"
 
-        # 刷新机器列表后恢复后端整体状态和选中详情。
+        # 设置当前 Session 的流程和实时频率。
+        card = page.cards_by_machine_id["2"]
+        card.set_frequency(24.6)
+        page.update_measurement_progress(
+            "2",
+            "first",
+            "character_recognition",
+            "running",
+        )
+
+        # 刷新机器列表后保留运行中 Session 的流程和实时频率。
         page.reload_machines()
+        assert page.cards_by_machine_id["2"].state_label.text() == "字符识别进行中"
+        assert page.cards_by_machine_id["2"].frequency_label.text() == "24.6 Hz"
+        assert page.detail_panel.state_label.text() == "字符识别进行中"
+        assert page.detail_panel.frequency_label.text() == "24.6 Hz"
+
+        # 刷新后继续恢复后端整体状态和选中详情。
         assert page.cards_by_machine_id["2"].badge.text() == "故障"
         assert page.cards_by_machine_id["3"].badge.text() == "故障"
         assert page.detail_panel.badge.text() == "故障"
@@ -984,6 +1014,20 @@ def test_dashboard_selection_reload_and_summary(qt_application) -> None:
         page.update_cycle_closed("2", "first")
         assert page.device_overview_card.online_value.text() == "1"
         assert page.device_overview_card.fault_value.text() == "2"
+
+        # 已结束 Session 的旧流程和频率不在刷新后恢复。
+        card = page.cards_by_machine_id["2"]
+        card.update_data({
+            "title": card.title.text(),
+            "state": "字符识别已完成",
+            "frequency": "24.6 Hz",
+        })
+        page.reload_machines()
+        assert page.cards_by_machine_id["2"].state_label.text() == "--"
+        assert page.cards_by_machine_id["2"].frequency_label.text() == "--"
+        assert page.detail_panel.state_label.text() == "--"
+        assert page.detail_panel.frequency_label.text() == "--"
+        query_count = controller.list_enabled_machines.call_count
 
         # 后端释放资源后发布离线，设备总览随之归零。
         for machine_id in ("1", "2", "3"):

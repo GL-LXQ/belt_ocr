@@ -810,7 +810,7 @@ class MachineDetailPanel(SimpleCardWidget):
         self.attributes_layout.addWidget(self.camera_serial_label, 1, 0)
         self.attributes_layout.addWidget(self.frequency_meter_serial_label, 1, 1)
         self.attributes_layout.setRowMinimumHeight(2, 14)
-        for column_index, title in enumerate(("当前状态", "相机状态")):
+        for column_index, title in enumerate(("本轮流程", "相机状态")):
             label = CaptionLabel(title)
             label.setObjectName("detailMetaKey")
             self.attributes_layout.addWidget(label, 3, column_index)
@@ -1173,6 +1173,23 @@ class RealtimePage(QWidget):
             返回示例：
                 None  # 卡片已重建并恢复已缓存的显示状态
         """
+        # 查找仍在运行的机器卡片。
+        running_card_data_by_machine_id = {}
+        for machine_id, card in self.cards_by_machine_id.items():
+            measurement_state = self.measurement_states_by_machine_id.get(machine_id)
+            if (
+                measurement_state is None
+                or measurement_state["machine_running"] is not True
+            ):
+                continue
+
+            # 保存当前 Session 的本轮流程和实时频率。
+            running_card_data_by_machine_id[machine_id] = {
+                "session_id": measurement_state["session_id"],
+                "state": card.state_label.text(),
+                "frequency": card.frequency_label.text(),
+            }
+
         # 移除上一次创建的卡片。
         while self.cards_layout.count():
             widget = self.cards_layout.takeAt(0).widget()
@@ -1224,8 +1241,21 @@ class RealtimePage(QWidget):
             # 恢复当前周期的进度节点。
             measurement_state = self.measurement_states_by_machine_id.get(machine_id)
             if measurement_state is not None:
-                # 运行中的周期恢复皮带和仍在执行的子动画。
+                # 恢复运行中周期的卡片显示和动画。
                 if measurement_state["machine_running"]:
+                    # 恢复同一运行中 Session 的流程和频率。
+                    card_data = running_card_data_by_machine_id.get(machine_id)
+                    if (
+                        card_data is not None
+                        and card_data["session_id"] == measurement_state["session_id"]
+                    ):
+                        card.update_data({
+                            "title": card.title.text(),
+                            "state": card_data["state"],
+                            "frequency": card_data["frequency"],
+                        })
+
+                    # 恢复当前周期的皮带动画。
                     card.belt_animation.start_machine()
 
                     # 没有失败进度时恢复仍在执行的子动画。
