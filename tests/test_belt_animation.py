@@ -61,6 +61,105 @@ def test_animation_control_interfaces(qt_application: QApplication) -> None:
     animation_widget.close()
 
 
+@pytest.mark.parametrize("widget_size", ((248, 125), (280, 125), (480, 175)))
+def test_mechanical_scene_renders_at_card_sizes(
+    qt_application: QApplication,
+    widget_size: tuple[int, int],
+) -> None:
+    """验证小卡片和宽卡片的机械场景及独立子动画可以绘制。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用实例。
+        widget_size: 动画区域的宽度和高度。
+
+    Returns:
+        返回示例：
+            None  # 展开、运行、采集、监听和收缩画面均可绘制
+    """
+    animation_widget = BeltAnimationWidget()
+    try:
+        # 按机器卡片可用尺寸绘制停止状态。
+        animation_widget.resize(*widget_size)
+        animation_widget.animation_timer.stop()
+        stopped_image = animation_widget.grab().toImage()
+        assert not stopped_image.isNull()
+        assert animation_widget.scene_renderer.isValid()
+        assert stopped_image.size() == animation_widget.size()
+
+        # 单独开启子动画也更新画面，不启动皮带。
+        animation_widget.start_capture()
+        capture_image = animation_widget.grab().toImage()
+        assert capture_image != stopped_image
+        animation_widget.stop_capture()
+        animation_widget.set_frequency_listening(True)
+        listening_image = animation_widget.grab().toImage()
+        assert listening_image != stopped_image
+        assert animation_widget._machine_state.name == "STOPPED"
+
+        # 展开后推进滚筒位移并检查运行画面。
+        animation_widget.start_machine()
+        animation_widget.extension_animation.setCurrentTime(325)
+        assert not animation_widget.grab().isNull()
+        animation_widget.extension_animation.setCurrentTime(650)
+        animation_widget.start_capture()
+        running_image = animation_widget.grab().toImage()
+        for frame_index in range(35):
+            animation_widget._advance_animation()
+        assert animation_widget.belt_travel > 80
+        assert animation_widget.grab().toImage() != running_image
+        assert animation_widget._machine_state.name == "RUNNING"
+
+        # 关闭后收缩到停止状态，仍保持有效画面。
+        animation_widget.stop_machine()
+        animation_widget.extension_animation.setCurrentTime(325)
+        assert not animation_widget.grab().isNull()
+        animation_widget.extension_animation.setCurrentTime(650)
+        assert animation_widget._machine_state.name == "STOPPED"
+        assert animation_widget.extension == 0.0
+        assert not animation_widget.grab().isNull()
+        assert animation_widget.scene_renderer.isValid()
+    finally:
+        animation_widget.animation_timer.stop()
+        animation_widget.extension_animation.stop()
+        animation_widget.close()
+        animation_widget.deleteLater()
+
+
+def test_machine_restarts_during_retraction(qt_application: QApplication) -> None:
+    """验证上一轮收缩尚未完成时新周期可以重新展开。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用实例。
+
+    Returns:
+        返回示例：
+            None  # 新启动从当前展开比例进入 STARTING 并最终运行
+    """
+    animation_widget = BeltAnimationWidget()
+    try:
+        # 完成启动后推进到收缩中途。
+        animation_widget.start_machine()
+        animation_widget.extension_animation.setCurrentTime(650)
+        animation_widget.stop_machine()
+        animation_widget.extension_animation.setCurrentTime(325)
+        retracted_extension = animation_widget.extension
+        assert animation_widget._machine_state.name == "STOPPING"
+        assert 0.0 < retracted_extension < 1.0
+
+        # 新启动中断收缩，从当前比例展开到运行状态。
+        animation_widget.start_machine()
+        assert animation_widget._machine_state.name == "STARTING"
+        assert animation_widget.extension_animation.startValue() == retracted_extension
+        animation_widget.extension_animation.setCurrentTime(650)
+        assert animation_widget._machine_state.name == "RUNNING"
+        assert animation_widget.extension == 1.0
+    finally:
+        animation_widget.animation_timer.stop()
+        animation_widget.extension_animation.stop()
+        animation_widget.close()
+        animation_widget.deleteLater()
+
+
 def test_capture_and_frequency_controls_can_stop_independently(
     qt_application: QApplication,
 ) -> None:
