@@ -979,7 +979,7 @@ class RealtimePage(QWidget):
         outer_layout.setContentsMargins(24, 16, 24, 20)
         outer_layout.setSpacing(12)
 
-        # 固定页面标题和监测操作区。
+        # 固定页面标题和说明。
         header = QHBoxLayout()
         titles = QVBoxLayout()
         titles.setSpacing(4)
@@ -987,12 +987,6 @@ class RealtimePage(QWidget):
         titles.addWidget(BodyLabel("查看当前机器的检测状态"))
         header.addLayout(titles)
         header.addStretch()
-        self.start_button = PrimaryPushButton(FluentIcon.PLAY, "启动监测")
-        self.stop_button = PushButton(FluentIcon.PAUSE, "停止监测")
-        self.refresh_button = PushButton(FluentIcon.SYNC, "刷新")
-        for button in (self.start_button, self.stop_button, self.refresh_button):
-            header.addWidget(button)
-        self.stop_button.setEnabled(False)
         outer_layout.addLayout(header)
 
         # 按 55 / 45 的比例显示设备总览和今日检测。
@@ -1014,6 +1008,11 @@ class RealtimePage(QWidget):
         machine_section_layout.setVerticalSpacing(12)
         outer_layout.addLayout(machine_section_layout, 1)
 
+        # 创建横跨机器列表与详情的标题行。
+        machine_header_layout = QHBoxLayout()
+        machine_header_layout.setContentsMargins(0, 0, 0, 0)
+        machine_header_layout.setSpacing(8)
+
         # 显示机器列表分区标题和说明。
         section_layout = QVBoxLayout()
         section_layout.setContentsMargins(0, 0, 0, 0)
@@ -1026,7 +1025,22 @@ class RealtimePage(QWidget):
         section_description.setObjectName("machineSectionDescription")
         section_layout.addWidget(section_title)
         section_layout.addWidget(section_description)
-        machine_section_layout.addLayout(section_layout, 0, 0)
+        machine_header_layout.addLayout(section_layout)
+        machine_header_layout.addStretch()
+
+        # 创建机器工作区的三个操作按钮。
+        self.refresh_button = PushButton(FluentIcon.SYNC, "刷新")
+        self.stop_button = PushButton(FluentIcon.PAUSE, "停止监测")
+        self.start_button = PrimaryPushButton(FluentIcon.PLAY, "启动监测")
+        self.stop_button.setEnabled(False)
+
+        # 从左到右排列刷新、停止监测和启动监测。
+        machine_header_layout.addWidget(self.refresh_button)
+        machine_header_layout.addWidget(self.stop_button)
+        machine_header_layout.addWidget(self.start_button)
+
+        # 将机器标题行放入网格第一行并横跨两列。
+        machine_section_layout.addLayout(machine_header_layout, 0, 0, 1, 2)
 
         # 将机器卡片放入可滚动区域。
         self.scroll_area = ScrollArea()

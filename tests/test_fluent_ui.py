@@ -15,7 +15,14 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from PySide6.QtTest import QTest
-from qfluentwidgets import FluentWindow, InfoBar, MaskDialogBase, MessageBox
+from qfluentwidgets import (
+    FluentWindow,
+    InfoBar,
+    MaskDialogBase,
+    MessageBox,
+    PrimaryPushButton,
+    PushButton,
+)
 
 from src.controller.controller import AppController, Result
 from ui.main_window import NAVIGATION_WIDTH, MainWindow
@@ -236,6 +243,26 @@ def test_realtime_resize_reflows_existing_cards_without_query(
         scroll_area = window.realtime_page.scroll_area
         section_title = window.realtime_page.findChild(QLabel, "machineSectionTitle")
 
+        # 获取现有三个操作按钮。
+        refresh_button = window.realtime_page.refresh_button
+        stop_button = window.realtime_page.stop_button
+        start_button = window.realtime_page.start_button
+
+        # 核对三个按钮的类型。
+        assert type(refresh_button) is PushButton
+        assert type(stop_button) is PushButton
+        assert type(start_button) is PrimaryPushButton
+
+        # 核对三个按钮的文字。
+        assert refresh_button.text() == "刷新"
+        assert stop_button.text() == "停止监测"
+        assert start_button.text() == "启动监测"
+
+        # 核对未启动监测时的按钮状态。
+        assert refresh_button.isEnabled()
+        assert not stop_button.isEnabled()
+        assert start_button.isEnabled()
+
         # 核对首次显示时详情与首张机器卡顶部对齐，并位于分区标题下方。
         first_card = cards[0]
         assert detail_panel.mapTo(window, QPoint(0, 0)).y() == (
@@ -301,6 +328,42 @@ def test_realtime_resize_reflows_existing_cards_without_query(
                 window, QPoint(summary_card.width(), 0)
             ).x()
             assert detail_right == summary_right
+
+            # 核对三个按钮处于总览卡下方、机器卡上方。
+            summary_bottom = summary_card.mapTo(
+                window, QPoint(0, summary_card.height())
+            ).y()
+            first_card_top = first_card.mapTo(window, QPoint(0, 0)).y()
+            for button in (refresh_button, stop_button, start_button):
+                button_top = button.mapTo(window, QPoint(0, 0)).y()
+                button_bottom = button.mapTo(window, QPoint(0, button.height())).y()
+                assert button.isVisible()
+                assert summary_bottom < button_top < button_bottom < first_card_top
+
+            # 核对按钮从左到右依次为刷新、停止监测和启动监测。
+            refresh_left = refresh_button.mapTo(window, QPoint(0, 0)).x()
+            stop_left = stop_button.mapTo(window, QPoint(0, 0)).x()
+            start_left = start_button.mapTo(window, QPoint(0, 0)).x()
+            assert refresh_left < stop_left < start_left
+
+            # 核对相邻按钮互不遮挡。
+            refresh_right = refresh_button.mapTo(
+                window, QPoint(refresh_button.width(), 0)
+            ).x()
+            stop_right = stop_button.mapTo(window, QPoint(stop_button.width(), 0)).x()
+            assert refresh_right < stop_left
+            assert stop_right < start_left
+
+            # 核对三个按钮在同一行。
+            assert refresh_button.mapTo(window, QPoint(0, 0)).y() == (
+                stop_button.mapTo(window, QPoint(0, 0)).y()
+            ) == start_button.mapTo(window, QPoint(0, 0)).y()
+
+            # 核对启动监测位于机器工作区右边界。
+            start_right = start_button.mapTo(
+                window, QPoint(start_button.width(), 0)
+            ).x()
+            assert start_right == detail_right
 
             # 核对两张总览卡的高度、宽度比例和内部指标。
             overview_card = page.device_overview_card
