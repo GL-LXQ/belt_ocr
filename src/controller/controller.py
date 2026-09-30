@@ -81,6 +81,7 @@ class AppController(QObject):
     measurement_progress_changed_signal = Signal(str, str, str, str)
     cycle_closed_signal = Signal(str, str)
     ocr_result_changed_signal = Signal(str, str, tuple, tuple)
+    machine_status_changed_signal = Signal(str, str)
     monitoring_finished_signal = Signal(str)
 
     def __init__(
@@ -548,6 +549,11 @@ class AppController(QObject):
         )
         self.runtime_thread.ocr_result_changed_signal.connect(
             self.ocr_result_changed_signal.emit
+        )
+
+        # 原样转发机器整体状态信号。
+        self.runtime_thread.machine_status_changed_signal.connect(
+            self.machine_status_changed_signal.emit
         )
 
         # 连接结束回调。

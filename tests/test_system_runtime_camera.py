@@ -83,6 +83,7 @@ async def test_camera_connection_failure_preserves_other_machine(
             listen_events=wait_for_worker,
             waiting_cycle_reset=False,
             initialized=False,
+            notify_overall_status=Mock(),
         )
         for machine_id in ("1", "2")
     }
@@ -98,6 +99,7 @@ async def test_camera_connection_failure_preserves_other_machine(
     monkeypatch.setattr("runtime.system_runtime.load_mvs_sdk", Mock(return_value=camera_sdk))
     monkeypatch.setattr("runtime.system_runtime.ModbusClient", Mock(return_value=modbus_client))
     camera_state_notification = Mock()
+    machine_status_notification = Mock()
     initialization_started = threading.Event()
     initialization_finished = threading.Event()
     initialization_thread_ids: list[int] = []
@@ -126,12 +128,17 @@ async def test_camera_connection_failure_preserves_other_machine(
     runtime.text_recognizer.initialize = Mock(side_effect=initialize_ocr)
 
     # 启动运行时并核对故障机器与正常机器的连接状态。
-    startup_task = asyncio.create_task(runtime.start(camera_state_notification))
+    startup_task = asyncio.create_task(runtime.start(
+        camera_state_notification,
+        notify_machine_status=machine_status_notification,
+    ))
     try:
         # OCR 初始化未完成时，信号入口和机器任务保持关闭。
         assert await asyncio.to_thread(initialization_started.wait, 5)
         assert not runtime.accepting_signals
         assert not runtime.worker_tasks
+        for machine in runtime.machines.values():
+            machine.notify_overall_status.assert_not_called()
 
         # 放行 OCR 初始化并核对后续启动结果。
         initialization_finished.set()
@@ -150,9 +157,15 @@ async def test_camera_connection_failure_preserves_other_machine(
         )
         camera_state_notification.assert_any_call("1", "连接失败", "相机未连接")
         runtime.initialize_machines.assert_called_once_with(
-            None, camera_state_notification, None, None
+            None,
+            camera_state_notification,
+            None,
+            None,
+            machine_status_notification,
         )
         assert runtime.accepting_signals
+        for machine in runtime.machines.values():
+            machine.notify_overall_status.assert_called_once_with()
         assert runtime.failure is None
         runtime.text_recognizer.initialize.assert_called_once_with()
         assert len(initialization_thread_ids) == 1
@@ -200,14 +213,17 @@ def test_initialize_machines_passes_camera_state_notification(
     # 建立机器并核对状态通知回调。
     ocr_notification = Mock()
     cycle_closed_notification = Mock()
+    machine_status_notification = Mock()
     runtime.initialize_machines(
         notify_camera_state=camera_state_notification,
         notify_ocr_result=ocr_notification,
         notify_cycle_closed=cycle_closed_notification,
+        notify_machine_status=machine_status_notification,
     )
     assert runtime.machines["1"].notify_ocr_result is ocr_notification
     assert runtime.machines["1"].notify_camera_state is camera_state_notification
     assert runtime.machines["1"].notify_cycle_closed is cycle_closed_notification
+    assert runtime.machines["1"].notify_machine_status is machine_status_notification
 
 
 def test_initialize_machines_copies_common_camera_parameters(

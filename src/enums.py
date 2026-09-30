@@ -16,6 +16,14 @@ class MachineState(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class MachineOverallStatus(str, Enum):
+    """定义实时监测展示的机器整体可用状态。"""
+
+    OFFLINE = "offline"
+    ONLINE = "online"
+    FAULT = "fault"
+
+
 class SessionState(str, Enum):
     """定义本次测量任务的处理状态，与机器启停状态分开。"""
 

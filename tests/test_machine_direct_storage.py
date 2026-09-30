@@ -18,7 +18,14 @@ from camera.camera import Camera
 from config_util import AppConfig, MachineConfig, load_config
 from camera.hikrobot_sdk import MvsError
 from database import CommitIntegrityConflictError, Database, MeasurementRecord
-from enums import EventType, OCRState, ProgressStage, ProgressStatus, SessionState
+from enums import (
+    EventType,
+    MachineOverallStatus,
+    OCRState,
+    ProgressStage,
+    ProgressStatus,
+    SessionState,
+)
 from runtime.machine_runtime import EvidenceWriteError, ImageEncodingError, MachineRuntime
 from models import (
     MeasurementSession,
@@ -238,6 +245,110 @@ def read_abnormal_events(database: Database) -> list[tuple]:
             "SELECT machine_id, session_id, reason, payload_json "
             "FROM abnormal_events ORDER BY abnormal_event_id"
         ).fetchall()
+
+
+def test_machine_overall_status_follows_runtime_availability(tmp_path: Path) -> None:
+    """确认机器整体状态按初始化、机器故障和相机可用性顺序判断。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 在线、离线、故障及停止后的状态优先级均已核对
+    """
+    # 建立尚未初始化的机器。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
+    try:
+        assert machine.overall_status == MachineOverallStatus.OFFLINE
+
+        # 初始化后相机可用且没有机器故障时显示在线。
+        machine.initialized = True
+        machine.machine_failure_reason = None
+        machine.camera = SimpleNamespace(available=True)
+        assert machine.overall_status == MachineOverallStatus.ONLINE
+
+        # 相机不可用且没有机器故障时显示离线。
+        machine.camera.available = False
+        assert machine.overall_status == MachineOverallStatus.OFFLINE
+
+        # 已登记的机器故障优先于相机可用性。
+        machine.camera.available = True
+        machine.machine_failure_reason = "相机采集失败"
+        assert machine.overall_status == MachineOverallStatus.FAULT
+        machine.camera.available = False
+        assert machine.overall_status == MachineOverallStatus.FAULT
+
+        # 停止后保留故障原因并显示离线。
+        machine.initialized = False
+        assert machine.overall_status == MachineOverallStatus.OFFLINE
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_faulted_machine_release_notifies_offline(tmp_path: Path) -> None:
+    """确认故障机器释放资源后发布离线状态并保留故障原因。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 资源已释放，离线通知已发送，机器故障原因保持原样
+    """
+    # 建立已故障且没有当前周期的机器。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
+    machine.initialized = True
+    machine.machine_failure_reason = "相机采集失败"
+    machine.current_session = None
+    machine.camera.stop = AsyncMock()
+    machine_status_notification = Mock()
+    machine.notify_machine_status = machine_status_notification
+
+    # 释放资源并核对离线通知。
+    try:
+        await machine.release_resources("测试结束")
+        assert not machine.initialized
+        assert machine.overall_status == MachineOverallStatus.OFFLINE
+        assert machine.machine_failure_reason == "相机采集失败"
+        machine_status_notification.assert_called_once_with("1", "offline")
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_camera_start_notifies_offline(tmp_path: Path) -> None:
+    """确认相机不可用时拒绝新周期并同步离线状态。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 没有创建周期，离线通知已发送且机器未登记故障
+    """
+    # 建立已初始化但相机不可用的机器。
+    evidence_frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
+    machine.initialized = True
+    machine.current_session = None
+    machine.camera.available = False
+    machine.camera.is_capturing = False
+    machine_status_notification = Mock()
+    machine.notify_machine_status = machine_status_notification
+
+    # 尝试启动并核对状态通知与接收结果。
+    try:
+        await machine.handle_machine_start()
+        machine_status_notification.assert_called_once_with("1", "offline")
+        assert machine.current_session is None
+        assert machine.waiting_cycle_reset
+        assert machine.machine_failure_reason is None
+    finally:
+        database.close()
 
 
 def test_ocr_lock_wait_timeout_configuration(tmp_path: Path) -> None:
@@ -991,6 +1102,8 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     camera_state_notification = Mock()
     machine.notify_camera_state = camera_state_notification
     machine.current_session = None
+    machine_status_notification = Mock()
+    machine.notify_machine_status = machine_status_notification
     sdk_camera = SimpleNamespace(
         serial="camera-1",
         closed=False,
@@ -1043,6 +1156,7 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     assert machine.machine_failure_reason == "相机采集失败"
     assert machine.acceptance_state == "FAULT"
     machine.on_system_failure.assert_not_called()
+    machine_status_notification.assert_called_once_with("1", "fault")
     camera_state_notification.assert_called_once_with("1", "相机故障", "GetImageBuffer 失败")
     assert progress_updates[-1][2:] == (
         ProgressStage.IMAGE_CAPTURE,
@@ -1107,6 +1221,8 @@ async def test_late_capture_failure_notifies_without_repeating_session_failure(
     machine, database, session, progress_updates, _ = create_machine(tmp_path, (evidence_frame,))
     camera_state_notification = Mock()
     machine.notify_camera_state = camera_state_notification
+    machine_status_notification = Mock()
+    machine.notify_machine_status = machine_status_notification
     machine.initialized = True
     machine.camera.available = True
     machine.camera.is_capturing = False
@@ -1121,6 +1237,7 @@ async def test_late_capture_failure_notifies_without_repeating_session_failure(
     assert session.state == SessionState.FAILED
     assert session.errors == ["OCR 识别超时"]
     assert machine.machine_failure_reason is None
+    machine_status_notification.assert_not_called()
     abnormal_events = read_abnormal_events(database)
     assert len(abnormal_events) == 1
     progress_before_capture_failure = list(progress_updates)
@@ -1131,6 +1248,7 @@ async def test_late_capture_failure_notifies_without_repeating_session_failure(
     ))
 
     # 核对机器故障和通知已登记，周期失败没有重复结算。
+    machine_status_notification.assert_called_once_with("1", "fault")
     camera_state_notification.assert_called_once_with("1", "相机故障", "StopGrabbing 失败")
     assert session.errors == ["OCR 识别超时"]
     assert session.state == SessionState.FAILED
@@ -1168,12 +1286,19 @@ async def test_busy_camera_does_not_mark_device_faulted(tmp_path: Path) -> None:
     camera.sdk_camera = sdk_camera
     machine.camera = camera
 
+    # 准备已初始化机器的整体状态通知。
+    machine.initialized = True
+    machine_status_notification = Mock()
+    machine.notify_machine_status = machine_status_notification
+
     # 采集锁占用时尝试启动新周期。
     try:
         await machine.handle_machine_start()
         assert machine.current_session is None
         assert machine.waiting_cycle_reset
         assert not sdk_camera.faulted
+        assert machine.overall_status == MachineOverallStatus.ONLINE
+        machine_status_notification.assert_not_called()
     finally:
         capture_lock.release()
 
@@ -1557,6 +1682,14 @@ async def test_ocr_processing_timeout_fails_current_session(tmp_path: Path) -> N
     session.ocr_result = None
     machine.config = replace(machine.config, ocr_result_timeout_ms=40)
     machine.camera.stop = AsyncMock()
+
+    # 准备在线机器的整体状态通知。
+    machine.initialized = True
+    machine.camera.available = True
+    machine_status_notification = Mock()
+    machine.notify_machine_status = machine_status_notification
+
+    # 创建识别执行和超时处理的同步通知。
     processing_started = threading.Event()
     processing_release = threading.Event()
     timeout_handled = asyncio.Event()
@@ -1624,6 +1757,9 @@ async def test_ocr_processing_timeout_fails_current_session(tmp_path: Path) -> N
         assert published_events == [EventType.OCR_TIMEOUT]
         assert session.ocr_state == OCRState.TIMED_OUT
         assert session.state == SessionState.FAILED
+        assert machine.machine_failure_reason is None
+        assert machine.overall_status == MachineOverallStatus.ONLINE
+        machine_status_notification.assert_not_called()
         assert machine.current_session is session
         assert machine.current_recognition_task is None
         assert not recognition_task.done()

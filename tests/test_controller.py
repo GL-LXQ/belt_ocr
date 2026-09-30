@@ -31,6 +31,7 @@ class FakeSystemRuntimeThread(QObject):
     measurement_progress_changed_signal = Signal(str, str, str, str)
     cycle_closed_signal = Signal(str, str)
     ocr_result_changed_signal = Signal(str, str, tuple, tuple)
+    machine_status_changed_signal = Signal(str, str)
     finished = Signal()
 
     def __init__(self) -> None:
@@ -487,14 +488,14 @@ def test_monitoring_signals_are_forwarded(
     controller_services,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证四个后台通知经 Controller 原样转发。
+    """验证五个后台通知经 Controller 原样转发。
 
     Args:
         controller_services: 控制器及三个业务服务。
         monkeypatch: pytest 提供的属性替换工具。
 
     Returns:
-        None  # 界面只接收 Controller 的四个信号
+        None  # 界面只接收 Controller 的五个信号
     """
     controller = controller_services[0]
     runtime_thread = FakeSystemRuntimeThread()
@@ -506,10 +507,12 @@ def test_monitoring_signals_are_forwarded(
     progress_notification = Mock()
     cycle_notification = Mock()
     ocr_notification = Mock()
+    machine_status_notification = Mock()
     controller.camera_state_changed_signal.connect(camera_notification)
     controller.measurement_progress_changed_signal.connect(progress_notification)
     controller.cycle_closed_signal.connect(cycle_notification)
     controller.ocr_result_changed_signal.connect(ocr_notification)
+    controller.machine_status_changed_signal.connect(machine_status_notification)
 
     # 后台通知按原有字段顺序进入 Controller 信号。
     assert controller.start_monitoring().success
@@ -521,12 +524,14 @@ def test_monitoring_signals_are_forwarded(
     runtime_thread.ocr_result_changed_signal.emit(
         "1", "session-1", ("003",), ("003",)
     )
+    runtime_thread.machine_status_changed_signal.emit("1", "online")
     camera_notification.assert_called_once_with("1", "已连接", "")
     progress_notification.assert_called_once_with(
         "1", "session-1", "image_capture", "running"
     )
     cycle_notification.assert_called_once_with("1", "session-1")
     ocr_notification.assert_called_once_with("1", "session-1", ("003",), ("003",))
+    machine_status_notification.assert_called_once_with("1", "online")
 
 
 def test_window_closes_after_monitoring_cleanup(

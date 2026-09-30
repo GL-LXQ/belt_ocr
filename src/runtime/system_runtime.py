@@ -74,6 +74,7 @@ class SystemRuntime:
         notify_camera_state: Callable[[str, str, str], None] | None = None,
         notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
         notify_cycle_closed: Callable[[str, str], None] | None = None,
+        notify_machine_status: Callable[[str, str], None] | None = None,
     ) -> None:
         """在双库初始化之后读取启用机器，并逐台建立相机、频率适配器和机器运行对象。
 
@@ -82,6 +83,8 @@ class SystemRuntime:
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、原文字和去空格文字。
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
             notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
+            notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
+                online、offline 或 fault。
 
         Returns:
             返回示例：
@@ -139,6 +142,7 @@ class SystemRuntime:
                 notify_camera_state,
                 notify_ocr_result,
                 notify_cycle_closed,
+                notify_machine_status,
             )
 
     async def start(
@@ -147,6 +151,7 @@ class SystemRuntime:
         notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None = None,
         notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
         notify_cycle_closed: Callable[[str, str], None] | None = None,
+        notify_machine_status: Callable[[str, str], None] | None = None,
     ) -> None:
         """初始化本次运行的机器状态和存储，启动监听与处理任务。
 
@@ -156,6 +161,8 @@ class SystemRuntime:
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、原文字和去空格文字。
             notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
+            notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
+                online、offline 或 fault。
 
         Returns:
             None: 完成启动并开放信号入口，无返回数据。
@@ -186,6 +193,7 @@ class SystemRuntime:
                 notify_camera_state,
                 notify_ocr_result,
                 notify_cycle_closed,
+                notify_machine_status,
             )
 
             # 记录本次运行加载的启用机器。
@@ -325,6 +333,10 @@ class SystemRuntime:
 
             # 启动 Modbus DI 监听任务。
             self.worker_tasks.append(asyncio.create_task(self.run_worker("Modbus IO监听", self.listen_io)))
+
+            # 完成启动后逐台发布机器整体状态。
+            for machine in self.machines.values():
+                machine.notify_overall_status()
 
             # 记录 Runtime 已正式启动并开放现场信号入口。
             logger.info(

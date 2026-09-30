@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 from xml.etree import ElementTree
 
 import pytest
@@ -620,6 +620,7 @@ def test_runtime_thread_delivers_text_from_background_thread(
         progress_notification,
         ocr_notification,
         cycle_closed_notification,
+        machine_status_notification,
     ) -> None:
         """从监测线程发送启动和最终文字通知。
 
@@ -628,11 +629,13 @@ def test_runtime_thread_delivers_text_from_background_thread(
             progress_notification: 测量进度回调。
             ocr_notification: 最终文字回调。
             cycle_closed_notification: 周期关闭回调。
+            machine_status_notification: 机器整体状态回调。
 
         Returns:
             返回示例：
                 None  # 周期身份和文字已发出
         """
+        machine_status_notification("1", "online")
         progress_notification("1", "session", "session_start", "success")
         ocr_notification("1", "session", ("003",), ("003",))
         cycle_closed_notification("1", "session")
@@ -645,6 +648,14 @@ def test_runtime_thread_delivers_text_from_background_thread(
     )
     runtime_thread = SystemRuntimeThread(Path("config"))
     runtime_thread.stop_requested.set()
+
+    # 模拟资源释放时由后端发布离线状态。
+    runtime.stop.side_effect = (
+        lambda: runtime_thread.machine_status_changed_signal.emit("1", "offline")
+    )
+    machine_status_notification = Mock()
+    controller.machine_status_changed_signal.connect(machine_status_notification)
+
     monkeypatch.setattr(
         "src.controller.controller.SystemRuntimeThread",
         Mock(return_value=runtime_thread),
@@ -658,6 +669,12 @@ def test_runtime_thread_delivers_text_from_background_thread(
         assert controller.runtime_thread is None
         assert page.ocr_results_by_machine_id["1"] == ("session", ("003",), ("003",))
         assert page.cards_by_machine_id["1"].ocr_result_label.text() == "003"
+        assert machine_status_notification.call_args_list == [
+            call("1", "online"),
+            call("1", "offline"),
+        ]
+        assert page.cards_by_machine_id["1"].badge.text() == "离线"
+        assert page.detail_panel.badge.text() == "离线"
         assert not page.measurement_states_by_machine_id["1"]["machine_running"]
         runtime.stop.assert_awaited_once()
     finally:

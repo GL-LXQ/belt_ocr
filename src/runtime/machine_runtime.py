@@ -13,7 +13,15 @@ from uuid import uuid4
 from camera.camera import Camera
 from config_util import MachineConfig, AppConfig
 from frequency_adapter import FrequencyAdapter
-from enums import EventType, FrequencyState, OCRState, ProgressStage, ProgressStatus, SessionState
+from enums import (
+    EventType,
+    FrequencyState,
+    MachineOverallStatus,
+    OCRState,
+    ProgressStage,
+    ProgressStatus,
+    SessionState,
+)
 from camera.hikrobot_sdk import CameraFrame, MvsError
 from models import MeasurementSession, MeasurementFrame, RuntimeEvent, PublishEvent
 from async_utils import run_blocking_operation
@@ -57,6 +65,7 @@ class MachineRuntime:
         notify_camera_state: Callable[[str, str, str], None] | None = None,
         notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
         notify_cycle_closed: Callable[[str, str], None] | None = None,
+        notify_machine_status: Callable[[str, str], None] | None = None,
     ) -> None:
         """初始化单台机器运行时及其业务依赖。
 
@@ -74,6 +83,8 @@ class MachineRuntime:
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
             notify_ocr_result: 可选文字通知函数，接收机器编号、Session ID、原文字和去空格文字。
             notify_cycle_closed: 可选测量关闭通知函数，接收机器编号和 Session ID。
+            notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
+                online、offline 或 fault。
 
         Returns:
             返回示例：
@@ -97,6 +108,7 @@ class MachineRuntime:
         self.notify_measurement_progress = notify_measurement_progress
         self.notify_ocr_result = notify_ocr_result
         self.notify_cycle_closed = notify_cycle_closed
+        self.notify_machine_status = notify_machine_status
 
         # 保存系统故障回调和状态变化通知。
         self.on_system_failure = on_system_failure
@@ -158,6 +170,53 @@ class MachineRuntime:
 
         # 以上条件都正常，可以开始新的测量。
         return "READY"
+
+    @property
+    def overall_status(self) -> MachineOverallStatus:
+        """返回当前机器用于实时监测展示的整体状态。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                MachineOverallStatus.OFFLINE  # 尚未初始化或相机不可用
+                MachineOverallStatus.FAULT  # 初始化后已登记机器故障
+                MachineOverallStatus.ONLINE  # 初始化后相机可用且没有机器故障
+        """
+        # 未初始化或已释放资源的机器显示离线。
+        if not self.initialized:
+            return MachineOverallStatus.OFFLINE
+
+        # 已登记机器级故障的机器显示故障。
+        if self.machine_failure_reason is not None:
+            return MachineOverallStatus.FAULT
+
+        # 尚未建立可用相机连接的机器显示离线。
+        if not self.camera.available:
+            return MachineOverallStatus.OFFLINE
+
+        return MachineOverallStatus.ONLINE
+
+    def notify_overall_status(self) -> None:
+        """把当前机器整体状态发送给界面。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 已发送整体状态，未配置通知时直接返回
+        """
+        # 未配置界面通知时跳过发送。
+        if self.notify_machine_status is None:
+            return
+
+        # 发送机器编号和当前整体状态。
+        self.notify_machine_status(
+            self.machine_config.machine_id,
+            self.overall_status.value,
+        )
 
     async def listen_events(self) -> None:
         """持续监听本机事件队列，按顺序处理事件并反馈处理结果。
@@ -271,6 +330,10 @@ class MachineRuntime:
 
         # 相机不可用或仍在采集时，不能开始新的测量。
         if not self.camera.available or self.camera.is_capturing:
+            # 相机不可用时同步机器整体状态。
+            if not self.camera.available:
+                self.notify_overall_status()
+
             # 等待现场关闭信号完成复位。
             self.waiting_cycle_reset = True
 
@@ -781,6 +844,9 @@ class MachineRuntime:
         # 保存机器故障原因。
         self.machine_failure_reason = failure_reason
 
+        # 发布登记故障后的机器整体状态。
+        self.notify_overall_status()
+
         # 记录机器故障日志。
         logger.error(
             "%s 发生机器故障 machine_id=%s session_id=%s reason=%s",
@@ -973,7 +1039,7 @@ class MachineRuntime:
 
         Returns:
             返回示例：
-                None  # 相机和后台任务已结束，当前测量和频率归属已清空
+                None  # 本机资源已释放，当前测量已清空，整体状态已更新为离线
         """
         # 停止相机并等待采集流程结束；停止失败时按系统故障处理。
         try:
@@ -1007,6 +1073,10 @@ class MachineRuntime:
         # 最后清空当前测量和频率归属。
         self.current_session = None
         self.frequency_adapter.active_session_id = None
+
+        # 资源释放后发布离线状态。
+        self.initialized = False
+        self.notify_overall_status()
 
     async def run_ocr_pipeline(
         self, session: MeasurementSession, frames: tuple[CameraFrame, ...]
