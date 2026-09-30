@@ -11,8 +11,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QDate, QPoint, QTimer, Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QDate, QPoint, Qt
+from PySide6.QtGui import QColor, QDesktopServices, QImage
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 from qfluentwidgets import (
     CalendarPicker,
@@ -20,7 +20,6 @@ from qfluentwidgets import (
     ComboBox,
     Flyout,
     InfoBar,
-    MaskDialogBase,
     SimpleCardWidget,
 )
 
@@ -1336,21 +1335,23 @@ def test_other_review_error_keeps_current_detail(
         page.deleteLater()
 
 
-def test_history_detail_shows_evidence_images_and_opens_large_image(
+def test_history_detail_limits_evidence_preview_and_opens_folder(
     qt_application: QApplication,
     measurement_record_service: MeasurementRecordService,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证正常与待复核记录显示证据，损坏文件不妨碍查看大图。
+    """验证证据预览最多四张，并连接文件夹和大图查看入口。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
         measurement_record_service: 已保存测试记录的测量记录服务。
         tmp_path: pytest 提供的临时目录。
+        monkeypatch: pytest 提供的替换工具。
 
     Returns:
         返回示例：
-            None  # 两类记录可查看图片且损坏图片已跳过
+            None  # 预览数量、更多图片提示和证据查看入口符合预期
     """
     # 在两条记录已有的目录中写入测试图片和一张损坏图片。
     normal_directory = tmp_path / "normal-evidence"
@@ -1370,9 +1371,12 @@ def test_history_detail_shows_evidence_images_and_opens_large_image(
     (review_directory / "broken.jpg").write_bytes(b"not an image")
     (review_directory / "old-frame.ppm").write_bytes(b"legacy image")
 
-    controller = AppController(
-        Mock(), measurement_record_service, Mock(), Path("config")
-    )
+    # 替换系统文件夹打开入口。
+    directory_opener = Mock(return_value=True)
+    monkeypatch.setattr(QDesktopServices, "openUrl", directory_opener)
+
+    # 创建历史记录页面。
+    controller = AppController(Mock(), measurement_record_service, Mock(), Path("config"))
     page = HistoryPage(controller)
     try:
         # 正常记录使用自己的目录并显示一张缩略图。
@@ -1381,11 +1385,13 @@ def test_history_detail_shows_evidence_images_and_opens_large_image(
         normal_thumbnail = page.evidence_grid.itemAt(0).widget()
         assert isinstance(normal_thumbnail, QPushButton)
         assert normal_thumbnail.toolTip() == "normal-frame.jpg"
+        assert page.evidence_more_label.isHidden()
+        assert not page.evidence_actions.isHidden()
         page.detail_dialog.close()
 
-        # 待复核记录显示多张可读取图片并保留复核原因。
+        # 待复核记录只预览按文件名排序的前四张可读取图片。
         page.show_record_detail("review-session")
-        assert page.evidence_grid.count() == 5
+        assert page.evidence_grid.count() == 4
         review_thumbnails = [
             page.evidence_grid.itemAt(index).widget()
             for index in range(page.evidence_grid.count())
@@ -1395,50 +1401,21 @@ def test_history_detail_shows_evidence_images_and_opens_large_image(
             "review-frame-2.jpg",
             "review-frame-3.jpg",
             "review-frame-4.jpg",
-            "review-frame-5.jpg",
         ]
-        assert page.evidence_grid.itemAtPosition(1, 0).widget() is review_thumbnails[4]
-        assert page.review_reason_value.text() == "没有可靠的 20 位文字"
+        assert not page.evidence_more_label.isHidden()
 
-        # 点击缩略图后检查大图并关闭临时窗口。
-        large_images = []
+        # 点击文件夹按钮并核对当前记录的证据目录。
+        page.open_evidence_directory_button.click()
+        directory_opener.assert_called_once()
+        directory_url = directory_opener.call_args.args[0]
+        assert Path(directory_url.toLocalFile()) == review_directory
 
-        def inspect_and_close_image_dialog() -> None:
-            """检查当前大图窗口中的图片并关闭窗口。
-
-            Args:
-                无外部参数。
-
-            Returns:
-                返回示例：
-                    None  # 已记录大图状态并关闭窗口
-            """
-            image_dialog = next(
-                widget
-                for widget in page.findChildren(MaskDialogBase)
-                if widget.windowTitle() == "review-frame-1.jpg"
-            )
-            try:
-                preview_content = image_dialog.widget
-                assert preview_content.objectName() == "historyEvidencePreviewContent"
-                assert any(
-                    label.text() == "review-frame-1.jpg"
-                    for label in image_dialog.findChildren(QLabel)
-                )
-                assert any(
-                    button.text() == "关闭"
-                    for button in image_dialog.findChildren(QPushButton)
-                )
-                image_label = image_dialog.findChild(QLabel, "historyEvidenceImage")
-                large_images.append(image_label.pixmap().size())
-            finally:
-                image_dialog.accept()
-
-        QTimer.singleShot(0, inspect_and_close_image_dialog)
+        # 点击缩略图并核对现有大图查看入口收到的图片路径。
+        page.show_evidence_image = Mock()
         review_thumbnails[0].click()
-        assert len(large_images) == 1
-        assert large_images[0].width() > 0
-        assert large_images[0].height() > 0
+        page.show_evidence_image.assert_called_once_with(
+            review_directory / "review-frame-1.jpg"
+        )
     finally:
         page.detail_dialog.close()
         page.close()
@@ -1450,7 +1427,7 @@ def test_history_detail_handles_missing_empty_and_unreadable_evidence(
     measurement_record_service: MeasurementRecordService,
     tmp_path: Path,
 ) -> None:
-    """验证不存在、空目录和全部损坏的证据目录显示占位。
+    """验证证据目录缺失、为空或全部损坏时的占位和文件夹入口。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
@@ -1459,33 +1436,35 @@ def test_history_detail_handles_missing_empty_and_unreadable_evidence(
 
     Returns:
         返回示例：
-            None  # 证据缺失或损坏时详情仍能打开并显示提示
+            None  # 证据占位文字和文件夹入口符合目录状态
     """
-    controller = AppController(
-        Mock(), measurement_record_service, Mock(), Path("config")
-    )
+    controller = AppController(Mock(), measurement_record_service, Mock(), Path("config"))
     page = HistoryPage(controller)
     try:
         # 记录目录不存在时显示无图片提示。
         page.show_record_detail("normal-session")
         assert page.evidence_grid.itemAt(0).widget().text() == "暂无证据图片"
+        assert page.evidence_actions.isHidden()
         page.detail_dialog.close()
 
         # 记录的证据目录为空时显示同样的提示。
         page.populate_evidence_images("")
         assert page.evidence_grid.itemAt(0).widget().text() == "暂无证据图片"
+        assert page.evidence_actions.isHidden()
 
         # 目录存在但为空时保持相同提示。
         review_directory = tmp_path / "review-evidence"
         review_directory.mkdir()
         page.show_record_detail("review-session")
         assert page.evidence_grid.itemAt(0).widget().text() == "暂无证据图片"
+        assert not page.evidence_actions.isHidden()
         page.detail_dialog.close()
 
         # 只有损坏的 JPG 时显示读取失败，不影响复核原因。
         (review_directory / "broken.jpg").write_bytes(b"not an image")
         page.show_record_detail("review-session")
         assert page.evidence_grid.itemAt(0).widget().text() == "证据图片读取失败"
+        assert not page.evidence_actions.isHidden()
         assert page.review_reason_value.text() == "没有可靠的 20 位文字"
     finally:
         page.detail_dialog.close()

@@ -3,8 +3,8 @@
 from datetime import date, datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QPoint, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
+from PySide6.QtCore import QDate, QPoint, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -211,6 +211,9 @@ class HistoryPage(QWidget):
         content_layout.addLayout(pagination_layout)
         layout.addWidget(content, 1)
 
+        # 保存当前详情记录的有效证据目录。
+        self.current_evidence_directory: Path | None = None
+
         # 创建共用的详情弹窗。
         self.build_detail_dialog()
 
@@ -411,6 +414,25 @@ class HistoryPage(QWidget):
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
         body_layout.addWidget(self.evidence_content)
+
+        # 在证据图片下方创建操作行。
+        self.evidence_actions = QWidget()
+        evidence_actions_layout = QHBoxLayout(self.evidence_actions)
+        evidence_actions_layout.setContentsMargins(0, 0, 0, 0)
+        evidence_actions_layout.setSpacing(12)
+        self.evidence_actions.hide()
+
+        # 在操作行左侧放置更多图片提示。
+        self.evidence_more_label = CaptionLabel("仅展示前 4 张，更多图片请打开文件夹查看")
+        self.evidence_more_label.hide()
+        evidence_actions_layout.addWidget(self.evidence_more_label)
+        evidence_actions_layout.addStretch()
+
+        # 在操作行右侧连接当前证据目录的打开入口。
+        self.open_evidence_directory_button = TransparentPushButton("打开证据文件夹")
+        self.open_evidence_directory_button.clicked.connect(self.open_evidence_directory)
+        evidence_actions_layout.addWidget(self.open_evidence_directory_button)
+        body_layout.addWidget(self.evidence_actions)
 
         # 在详情底部创建记录信息卡。
         self.record_meta_card = SimpleCardWidget()
@@ -1064,14 +1086,14 @@ class HistoryPage(QWidget):
         self.reload_records()
 
     def populate_evidence_images(self, evidence_directory: str) -> None:
-        """读取本轮 JPG 证据并更新详情缩略图。
+        """读取本轮 JPG 证据并更新详情预览和文件夹入口。
 
         Args:
             evidence_directory: 测量记录保存的本轮证据目录。
 
         Returns:
             返回示例：
-                None  # 缩略图或图片占位文字已显示
+                None  # 证据预览、更多图片提示和文件夹入口已更新
         """
         # 清除上一条记录的缩略图和占位文字。
         while self.evidence_grid.count():
@@ -1081,44 +1103,91 @@ class HistoryPage(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
 
-        # 读取记录目录当前层的 JPG 文件。
+        # 保存当前记录的有效证据目录。
         directory = Path(evidence_directory) if evidence_directory else None
+        if directory is not None and directory.is_dir():
+            self.current_evidence_directory = directory
+        else:
+            self.current_evidence_directory = None
+
+        # 根据证据目录更新文件夹入口。
+        self.evidence_actions.setVisible(self.current_evidence_directory is not None)
+        self.open_evidence_directory_button.setEnabled(
+            self.current_evidence_directory is not None
+        )
+
+        # 清除上一条记录的更多图片提示。
+        self.evidence_more_label.hide()
+
+        # 读取记录目录当前层按文件名排序的 JPG 文件。
         image_paths = (
             sorted(directory.glob("*.jpg"))
-            if directory is not None and directory.is_dir()
+            if self.current_evidence_directory is not None
             else []
         )
+
+        # 跳过损坏的 JPG 图片。
         readable_image_count = 0
+        has_more_images = False
         for image_path in image_paths:
             image = QPixmap(str(image_path))
             if image.isNull():
                 continue
+
+            # 检测到第五张可读取图片后停止读取。
+            if readable_image_count >= 4:
+                has_more_images = True
+                break
 
             # 为可读取的图片创建可点击缩略图。
             thumbnail = PushButton()
             thumbnail.setObjectName("evidenceThumbnail")
             thumbnail.setToolTip(image_path.name)
             thumbnail.setAccessibleName(image_path.name)
+
+            # 按现有尺寸缩放缩略图。
             thumbnail_image = image.scaled(
                 QSize(140, 100),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
+
+            # 设置缩略图图标和按钮大小。
             thumbnail.setIcon(QIcon(thumbnail_image))
             thumbnail.setIconSize(QSize(140, 100))
             thumbnail.setFixedSize(160, 120)
+
+            # 将缩略图点击连接到现有大图查看入口。
             thumbnail.clicked.connect(
                 lambda checked=False, path=image_path: self.show_evidence_image(path)
             )
-            self.evidence_grid.addWidget(
-                thumbnail, readable_image_count // 4, readable_image_count % 4
-            )
+
+            # 将缩略图加入证据预览的第一行。
+            self.evidence_grid.addWidget(thumbnail, 0, readable_image_count)
             readable_image_count += 1
+
+        # 在可读取图片超过四张时显示更多图片提示。
+        self.evidence_more_label.setVisible(has_more_images)
 
         # 在没有可显示图片时给出对应提示。
         if readable_image_count == 0:
             message = "证据图片读取失败" if image_paths else "暂无证据图片"
             self.evidence_grid.addWidget(QLabel(message), 0, 0)
+
+    def open_evidence_directory(self) -> None:
+        """使用系统文件管理器打开当前记录的证据目录。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 已请求打开当前证据目录，无有效目录时不执行操作
+        """
+        # 打开当前记录保存的有效证据目录。
+        directory = self.current_evidence_directory
+        if directory is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
 
     def show_evidence_image(self, image_path: Path) -> None:
         """打开一张证据图片的大图查看窗口。
