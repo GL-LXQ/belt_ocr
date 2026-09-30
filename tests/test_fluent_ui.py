@@ -235,7 +235,13 @@ def test_realtime_resize_reflows_existing_cards_without_query(
         assert detail_panel.minimumHeight() == 600
         scroll_area = window.realtime_page.scroll_area
         section_title = window.realtime_page.findChild(QLabel, "machineSectionTitle")
+
+        # 核对首次显示时详情与首张机器卡顶部对齐，并位于分区标题下方。
+        first_card = cards[0]
         assert detail_panel.mapTo(window, QPoint(0, 0)).y() == (
+            first_card.mapTo(window, QPoint(0, 0)).y()
+        )
+        assert detail_panel.mapTo(window, QPoint(0, 0)).y() > (
             section_title.mapTo(window, QPoint(0, 0)).y()
         )
 
@@ -251,10 +257,17 @@ def test_realtime_resize_reflows_existing_cards_without_query(
             window.resize(width, height)
             qt_application.processEvents()
             page = window.realtime_page
-            # 核对详情区始终与左侧分区标题顶部对齐。
+
+            # 核对两侧滚动区与首张机器卡的顶部对齐。
+            first_card = page.machine_cards[0]
             assert page.detail_scroll_area.mapTo(window, QPoint(0, 0)).y() == (
-                section_title.mapTo(window, QPoint(0, 0)).y()
+                page.scroll_area.mapTo(window, QPoint(0, 0)).y()
             )
+            assert page.detail_panel.mapTo(window, QPoint(0, 0)).y() == (
+                first_card.mapTo(window, QPoint(0, 0)).y()
+            )
+
+            # 核对列数、实例复用与机器查询次数。
             assert page.card_column_count == expected_columns
             assert window.navigationInterface.panel.displayMode.name == "EXPAND"
             assert scroll_area.width() > 0
