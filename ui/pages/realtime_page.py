@@ -1485,7 +1485,6 @@ class RealtimePage(QWidget):
         """
         # 保留状态，并跳过运行期间已从列表移除的机器。
         self.connection_states[machine_id] = (status, reason)
-        self.update_dashboard_summary()
         card = self.cards_by_machine_id.get(machine_id)
         if card is None:
             return
@@ -1554,7 +1553,6 @@ class RealtimePage(QWidget):
         progress_statuses = measurement_state["progress_statuses"]
         progress_statuses[stage] = status
         progress_failed = "failed" in progress_statuses.values()
-        self.update_dashboard_summary()
 
         # 证据入库成功后重新读取正式检测统计。
         if stage == "evidence_storage" and status == "success":
@@ -1619,7 +1617,6 @@ class RealtimePage(QWidget):
 
         # 将当前周期标记为停止。
         measurement_state["machine_running"] = False
-        self.update_dashboard_summary()
         if machine_id == self.selected_machine_id:
             self.refresh_selected_machine_detail()
 

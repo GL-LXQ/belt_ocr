@@ -183,6 +183,52 @@ class MeasurementRecordRepo:
             ).fetchone()
         return row[0]
 
+    def count_daily_summary(
+        self,
+        start_finish_time: str,
+        end_finish_time: str,
+    ) -> dict[str, int]:
+        """在一次查询中统计结束时间范围内的全部记录和待复核记录。
+
+        Args:
+            start_finish_time: UTC 结束时间下界，包含该时刻。
+            end_finish_time: UTC 结束时间上界，不包含该时刻。
+
+        Returns:
+            返回示例：
+                {
+                    "recognition_count": 3,  # 时间范围内全部已入库记录数
+                    "pending_review_count": 1,  # 时间范围内尚未复核的记录数
+                }
+        """
+        # 使用同一连接和一条 SQL 读取两项检测统计。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS recognition_count,
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN needs_review = 1 AND reviewed_at IS NULL
+                                THEN 1
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS pending_review_count
+                FROM measurement_records
+                WHERE finish_time >= ? AND finish_time < ?
+                """,
+                (start_finish_time, end_finish_time),
+            ).fetchone()
+
+        # 整理同次查询返回的两项统计值。
+        return {
+            "recognition_count": int(row[0]),
+            "pending_review_count": int(row[1]),
+        }
+
     def list_record_machines(self) -> list[dict]:
         """读取所有出现过测量记录的机器。
 

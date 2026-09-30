@@ -20,7 +20,7 @@ class MeasurementReviewAlreadyCompletedError(MeasurementRecordServiceError):
 
 
 class MeasurementRecordService:
-    """向历史记录页提供查询结果和人工复核操作。"""
+    """提供测量记录查询、统计和人工复核操作。"""
 
     def __init__(self, measurement_record_repo: MeasurementRecordRepo) -> None:
         """保存测量结果表访问对象。
@@ -181,24 +181,11 @@ class MeasurementRecordService:
                 time.min,
             ).astimezone(timezone.utc).isoformat()
 
-            # 统计当天全部已入库记录。
-            recognition_count = self.measurement_record_repo.count_records(
-                start_finish_time=start_finish_time,
-                end_finish_time=end_finish_time,
+            # 一次读取并返回当天全部已入库记录数和待复核记录数。
+            return self.measurement_record_repo.count_daily_summary(
+                start_finish_time,
+                end_finish_time,
             )
-
-            # 统计当天尚未完成人工复核的记录。
-            pending_review_count = self.measurement_record_repo.count_records(
-                review_status="pending",
-                start_finish_time=start_finish_time,
-                end_finish_time=end_finish_time,
-            )
-
-            # 返回当天检测统计。
-            return {
-                "recognition_count": recognition_count,
-                "pending_review_count": pending_review_count,
-            }
         except sqlite3.Error as error:
             # 记录数据库统计读取故障。
             logger.exception("今日检测统计读取失败")

@@ -440,28 +440,117 @@ def test_daily_summary_counts_local_day_records_and_pending_reviews(
     }
 
 
-@pytest.mark.parametrize("completed_counts", [0, 1])
-def test_daily_summary_converts_database_failure(completed_counts: int) -> None:
-    """确认任一统计查询失败时转换为现有服务错误。
+@pytest.mark.parametrize("empty_records", [False, True])
+def test_daily_summary_repo_uses_one_connection_and_query(
+    measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+    empty_records: bool,
+) -> None:
+    """确认单次查询同时统计总数和待复核数，无记录时两项均为零。
 
     Args:
-        completed_counts: 数据库故障前已经完成的统计查询数。
+        measurement_record_service: 已建立业务库的测量记录服务。
+        monkeypatch: pytest 提供的属性替换工具。
+        empty_records: 是否清空全部测量记录。
+
+    Returns:
+        返回示例：
+            None  # 单连接和单查询已核对，非空统计为 3 / 1，空库统计为 0 / 0
+    """
+    # 准备包含三条记录或没有记录的正式测量表。
+    measurement_record_repo = measurement_record_service.measurement_record_repo
+    database_path = measurement_record_repo.database_path
+    with sqlite3.connect(database_path) as connection:
+        if empty_records:
+            connection.execute("DELETE FROM measurement_records")
+        else:
+            connection.execute(
+                "DELETE FROM measurement_records WHERE session_id = ?",
+                ("missing-machine-session",),
+            )
+
+    # 记录本次统计使用的连接和实际执行的 SQL。
+    connection = sqlite3.connect(database_path, timeout=1)
+    queried_statements = []
+    connection.set_trace_callback(queried_statements.append)
+    connection_factory = Mock(return_value=connection)
+    monkeypatch.setattr(sqlite3, "connect", connection_factory)
+
+    # 同时核对两项统计值和单次数据库读取。
+    summary = measurement_record_repo.count_daily_summary(
+        "2026-09-27T00:00:00+00:00",
+        "2026-09-28T00:00:00+00:00",
+    )
+    assert summary == {
+        "recognition_count": 0 if empty_records else 3,
+        "pending_review_count": 0 if empty_records else 1,
+    }
+    connection_factory.assert_called_once_with(database_path, timeout=1)
+    assert len(queried_statements) == 1
+
+
+def test_daily_summary_service_returns_one_repo_query_result() -> None:
+    """确认服务只调用一次总览统计方法，并原样返回结果。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 两项统计直接来自同次 Repo 查询，旧的 count_records 未被调用
+    """
+    # 准备 Repo 一次返回的总览统计。
+    measurement_record_repo = Mock(spec=MeasurementRecordRepo)
+    expected_summary = {
+        "recognition_count": 3,
+        "pending_review_count": 1,
+    }
+    measurement_record_repo.count_daily_summary.return_value = expected_summary
+    service = MeasurementRecordService(measurement_record_repo)
+
+    # 计算当前本地日期对应的 UTC 查询边界。
+    target_date = date(2026, 9, 30)
+    start_finish_time = datetime.combine(target_date, time.min)
+    end_finish_time = datetime.combine(target_date + timedelta(days=1), time.min)
+
+    # 核对服务仅进行一次统计调用并保留原返回对象。
+    assert service.get_daily_summary(target_date) is expected_summary
+    measurement_record_repo.count_daily_summary.assert_called_once_with(
+        start_finish_time.astimezone(timezone.utc).isoformat(),
+        end_finish_time.astimezone(timezone.utc).isoformat(),
+    )
+    measurement_record_repo.count_records.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "database_error",
+    [
+        sqlite3.OperationalError("database is locked"),
+        sqlite3.DatabaseError("database read failed"),
+    ],
+)
+def test_daily_summary_converts_database_failure(database_error: sqlite3.Error) -> None:
+    """确认总览统计查询失败时转换为现有服务错误。
+
+    Args:
+        database_error: 单次总览统计查询抛出的数据库错误。
 
     Returns:
         返回示例：
             None  # 数据库原始错误已转换为今日统计读取提示
     """
-    # 模拟总数查询或待复核查询发生数据库错误。
-    measurement_record_repo = Mock()
-    measurement_record_repo.count_records.side_effect = [
-        *([1] * completed_counts),
-        sqlite3.OperationalError("database is locked"),
-    ]
+    # 模拟单次总览统计发生数据库错误。
+    measurement_record_repo = Mock(spec=MeasurementRecordRepo)
+    measurement_record_repo.count_daily_summary.side_effect = database_error
     service = MeasurementRecordService(measurement_record_repo)
 
     # 核对统计错误使用既有服务异常类型。
-    with pytest.raises(MeasurementRecordServiceError, match="今日检测统计读取失败。"):
+    with pytest.raises(
+        MeasurementRecordServiceError,
+        match="今日检测统计读取失败。",
+    ) as error_info:
         service.get_daily_summary(date(2026, 9, 30))
+    assert error_info.value.__cause__ is database_error
 
 
 def test_measurement_records_combine_date_status_machine_and_pagination(

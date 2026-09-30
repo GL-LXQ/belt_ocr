@@ -59,6 +59,7 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
     }
     card.set_camera_status.assert_called_once_with("相机故障")
     card.setToolTip.assert_called_once_with("GetImageBuffer 失败")
+    page.update_dashboard_summary.assert_not_called()
 
     # 更新测量失败进度并核对当前流程显示最新阶段。
     card.update_data.reset_mock()
@@ -83,6 +84,7 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
     card.set_camera_status.assert_called_once_with("相机故障")
     assert page.connection_states["1"] == ("相机故障", "GetImageBuffer 失败")
     card.set_machine_status.assert_not_called()
+    page.update_dashboard_summary.assert_not_called()
 
     # 旧周期的进度通知不修改当前周期和卡片。
     card.update_data.reset_mock()
@@ -95,6 +97,76 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
     assert measurement_state["progress_statuses"] == {
         "image_capture": "failed",
     }
+
+    # CLOSE 结束当前周期动画并刷新详情，不刷新设备总览。
+    RealtimePage.update_cycle_closed(page, "1", "session-1")
+    assert not measurement_state["machine_running"]
+    assert page.refresh_selected_machine_detail.call_count == 3
+    card.belt_animation.stop_machine.assert_called_once_with()
+    page.update_dashboard_summary.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("stage", "status", "today_refresh_count"),
+    [
+        ("image_capture", "running", 0),
+        ("frequency_collection", "running", 0),
+        ("character_recognition", "running", 0),
+        ("evidence_storage", "success", 1),
+    ],
+)
+def test_measurement_progress_only_refreshes_today_after_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    status: str,
+    today_refresh_count: int,
+) -> None:
+    """确认单轮进度不刷新设备总览，正式入库成功只刷新今日统计。
+
+    Args:
+        monkeypatch: pytest 提供的属性替换工具。
+        stage: 当前周期的处理阶段。
+        status: 当前阶段的处理状态。
+        today_refresh_count: 预期的今日统计刷新次数。
+
+    Returns:
+        返回示例：
+            None  # 设备总览没有刷新，进度和详情继续更新，入库成功读取今日统计
+    """
+    # 为实时页模块加入项目根目录。
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
+    from ui.pages.realtime_page import RealtimePage
+
+    # 建立展示当前周期进度的机器卡片。
+    card = SimpleNamespace(
+        title=SimpleNamespace(text=Mock(return_value="机器 1")),
+        frequency_label=SimpleNamespace(text=Mock(return_value="--")),
+        update_data=Mock(),
+        belt_animation=Mock(),
+    )
+
+    # 准备页面当前周期缓存和两类总览刷新入口。
+    page = SimpleNamespace(
+        selected_machine_id="1",
+        cards_by_machine_id={"1": card},
+        measurement_states_by_machine_id={
+            "1": {
+                "session_id": "session-1",
+                "progress_statuses": {},
+                "machine_running": True,
+            },
+        },
+        update_dashboard_summary=Mock(),
+        refresh_today_detection_summary=Mock(),
+        refresh_selected_machine_detail=Mock(),
+    )
+
+    # 核对进度更新仅在正式入库成功时读取今日统计。
+    RealtimePage.update_measurement_progress(page, "1", "session-1", stage, status)
+    page.update_dashboard_summary.assert_not_called()
+    assert page.refresh_today_detection_summary.call_count == today_refresh_count
+    card.update_data.assert_called_once()
+    page.refresh_selected_machine_detail.assert_called_once_with()
 
 
 @pytest.mark.parametrize("status", ["online", "offline", "fault"])
