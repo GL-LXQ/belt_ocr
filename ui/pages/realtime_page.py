@@ -229,11 +229,14 @@ class MachineCard(SimpleCardWidget):
 
         # 创建机器标题和状态徽标。
         heading = QHBoxLayout()
+        heading.setSpacing(8)
         self.title = SubtitleLabel()
         self.title.setObjectName("machineTitle")
         self.title.setWordWrap(True)
         self.badge = QLabel()
         self.badge.setObjectName("machineBadge")
+        self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.badge.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         heading.addWidget(self.title)
         heading.addStretch()
         heading.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
