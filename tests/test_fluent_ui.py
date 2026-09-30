@@ -359,11 +359,14 @@ def test_realtime_resize_reflows_existing_cards_without_query(
                 stop_button.mapTo(window, QPoint(0, 0)).y()
             ) == start_button.mapTo(window, QPoint(0, 0)).y()
 
-            # 核对启动监测位于机器工作区右边界。
+            # 核对启动监测与机器列表右边缘对齐。
             start_right = start_button.mapTo(
                 window, QPoint(start_button.width(), 0)
             ).x()
-            assert start_right == detail_right
+            machine_list_right = page.scroll_area.mapTo(
+                window, QPoint(page.scroll_area.width(), 0)
+            ).x()
+            assert start_right == machine_list_right
 
             # 核对两张总览卡的高度、宽度比例和内部指标。
             overview_card = page.device_overview_card

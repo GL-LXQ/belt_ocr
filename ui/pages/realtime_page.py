@@ -1008,7 +1008,7 @@ class RealtimePage(QWidget):
         machine_section_layout.setVerticalSpacing(12)
         outer_layout.addLayout(machine_section_layout, 1)
 
-        # 创建横跨机器列表与详情的标题行。
+        # 创建机器列表列的标题行。
         machine_header_layout = QHBoxLayout()
         machine_header_layout.setContentsMargins(0, 0, 0, 0)
         machine_header_layout.setSpacing(8)
@@ -1039,8 +1039,8 @@ class RealtimePage(QWidget):
         machine_header_layout.addWidget(self.stop_button)
         machine_header_layout.addWidget(self.start_button)
 
-        # 将机器标题行放入网格第一行并横跨两列。
-        machine_section_layout.addLayout(machine_header_layout, 0, 0, 1, 2)
+        # 将机器标题行放入网格第一行的机器列表列。
+        machine_section_layout.addLayout(machine_header_layout, 0, 0)
 
         # 将机器卡片放入可滚动区域。
         self.scroll_area = ScrollArea()
