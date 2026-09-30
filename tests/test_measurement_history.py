@@ -359,6 +359,111 @@ def test_measurement_records_filter_by_local_day_boundaries(
     ]
 
 
+def test_daily_summary_counts_local_day_records_and_pending_reviews(
+    measurement_record_service: MeasurementRecordService,
+) -> None:
+    """确认今日统计包含当天正式记录，并只统计尚未复核的记录。
+
+    Args:
+        measurement_record_service: 已建立业务库的测量记录服务。
+
+    Returns:
+        返回示例：
+            None  # 当天记录和复核状态已统计，日期边界与历史查询一致
+    """
+    # 按本地日期计算当天的 UTC 边界。
+    target_date = date(2026, 9, 30)
+    start_finish_time = datetime.combine(
+        target_date,
+        time.min,
+    ).astimezone(timezone.utc)
+    end_finish_time = datetime.combine(
+        target_date + timedelta(days=1),
+        time.min,
+    ).astimezone(timezone.utc)
+
+    # 准备当天三类记录和日期边界两侧的记录。
+    records = [
+        ("normal-session", start_finish_time, 0, None),
+        ("pending-session", start_finish_time + timedelta(hours=12), 1, None),
+        (
+            "reviewed-session",
+            end_finish_time - timedelta(microseconds=1),
+            1,
+            end_finish_time.isoformat(),
+        ),
+        ("yesterday-session", start_finish_time - timedelta(microseconds=1), 1, None),
+        ("tomorrow-session", end_finish_time, 1, None),
+    ]
+
+    # 将测试记录写入正式测量结果表。
+    database_path = measurement_record_service.measurement_record_repo.database_path
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DELETE FROM measurement_records")
+        connection.executemany(
+            "INSERT INTO measurement_records "
+            "(session_id, machine_id, start_time, finish_time, ordered_lines, "
+            "evidence_directory, needs_review, reviewed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    session_id,
+                    "1",
+                    finish_time.isoformat(),
+                    finish_time.isoformat(),
+                    '["文字"]',
+                    str(database_path.parent / session_id),
+                    needs_review,
+                    reviewed_at,
+                )
+                for session_id, finish_time, needs_review, reviewed_at in records
+            ],
+        )
+
+    # 核对当天统计与历史页面的日期范围一致。
+    summary = measurement_record_service.get_daily_summary(target_date)
+    assert summary == {
+        "recognition_count": 3,
+        "pending_review_count": 1,
+    }
+    history = measurement_record_service.list_records(
+        start_date=target_date,
+        end_date=target_date,
+    )
+    assert history["total"] == summary["recognition_count"]
+
+    # 完成复核后重新查询，识别总数保持不变。
+    measurement_record_service.complete_review("pending-session", None)
+    assert measurement_record_service.get_daily_summary(target_date) == {
+        "recognition_count": 3,
+        "pending_review_count": 0,
+    }
+
+
+@pytest.mark.parametrize("completed_counts", [0, 1])
+def test_daily_summary_converts_database_failure(completed_counts: int) -> None:
+    """确认任一统计查询失败时转换为现有服务错误。
+
+    Args:
+        completed_counts: 数据库故障前已经完成的统计查询数。
+
+    Returns:
+        返回示例：
+            None  # 数据库原始错误已转换为今日统计读取提示
+    """
+    # 模拟总数查询或待复核查询发生数据库错误。
+    measurement_record_repo = Mock()
+    measurement_record_repo.count_records.side_effect = [
+        *([1] * completed_counts),
+        sqlite3.OperationalError("database is locked"),
+    ]
+    service = MeasurementRecordService(measurement_record_repo)
+
+    # 核对统计错误使用既有服务异常类型。
+    with pytest.raises(MeasurementRecordServiceError, match="今日检测统计读取失败。"):
+        service.get_daily_summary(date(2026, 9, 30))
+
+
 def test_measurement_records_combine_date_status_machine_and_pagination(
     paged_measurement_record_service: MeasurementRecordService,
 ) -> None:

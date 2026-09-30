@@ -381,6 +381,32 @@ class AppController(QObject):
         except MeasurementRecordServiceError as error:
             return Result.error(str(error))
 
+    def get_today_measurement_summary(self) -> Result:
+        """读取今天的已入库识别数量和待复核数量。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                Result(
+                    success=True,  # 查询是否成功
+                    data={  # 今日检测统计
+                        "recognition_count": 128,  # 今日全部已入库记录数
+                        "pending_review_count": 6,  # 今日未完成复核的记录数
+                    },
+                    message="",  # 失败提示
+                )
+        """
+        # 读取本地今天的统计并转换预期服务故障。
+        try:
+            summary_data = self.measurement_record_service.get_daily_summary(
+                date.today()
+            )
+            return Result.ok(summary_data)
+        except MeasurementRecordServiceError as error:
+            return Result.error(str(error))
+
     def get_measurement_record(self, session_id: str) -> Result:
         """检查周期编号并读取测量详情。
 

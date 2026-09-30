@@ -5,7 +5,15 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QApplication, QFrame, QGridLayout, QLabel, QSizePolicy
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
+    QLabel,
+    QSizePolicy,
+)
 from PySide6.QtTest import QTest
 from qfluentwidgets import FluentWindow, InfoBar, MaskDialogBase, MessageBox
 
@@ -61,6 +69,10 @@ def make_ui_controller() -> Mock:
     )
     controller.list_abnormal_events.return_value = Result.ok({"events": []})
     controller.is_monitoring_running.return_value = Result.ok({"running": False})
+    controller.get_today_measurement_summary.return_value = Result.ok({
+        "recognition_count": 128,
+        "pending_review_count": 6,
+    })
     return controller
 
 
@@ -271,11 +283,22 @@ def test_realtime_resize_reflows_existing_cards_without_query(
             detail_right = detail_panel.mapTo(
                 window, QPoint(detail_panel.width(), 0)
             ).x()
-            summary_card = page.summary_cards[-1]
+            summary_card = page.today_detection_card
             summary_right = summary_card.mapTo(
                 window, QPoint(summary_card.width(), 0)
             ).x()
             assert detail_right == summary_right
+
+            # 核对两张总览卡的高度、宽度比例和内部指标。
+            overview_card = page.device_overview_card
+            assert overview_card.height() == summary_card.height() == 128
+            assert overview_card.width() > summary_card.width()
+            assert abs(overview_card.width() / summary_card.width() - 11 / 9) < 0.01
+            assert len(page.findChildren(QFrame, "summaryCard")) == 2
+            assert overview_card.findChild(QLabel, "summaryTitle").text() == "设备总览"
+            assert summary_card.findChild(QLabel, "summaryTitle").text() == "今日检测"
+            assert summary_card.recognition_value.text() == "128"
+            assert summary_card.pending_review_value.text() == "6"
 
             if width == 1320:
                 assert scroll_area.verticalScrollBar().maximum() > 0
@@ -342,6 +365,185 @@ def test_machine_list_fills_available_width_with_few_machines(
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_summary_cards_use_light_shadows_and_metric_colors(qt_application) -> None:
+    """确认顶部两张卡使用轻量阴影，并仅对非零异常数字着色。
+
+    Args:
+        qt_application: Qt 应用实例。
+
+    Returns:
+        返回示例：
+            None  # 顶部卡片样式和零值恢复已核对，机器卡与详情没有新增阴影
+    """
+    # 创建使用项目 QSS 的真实窗口。
+    window = MainWindow(make_ui_controller())
+    try:
+        window.show()
+        qt_application.processEvents()
+        page = window.realtime_page
+
+        # 核对两张总览卡的阴影、图标和分隔线。
+        for card, separator_count in (
+            (page.device_overview_card, 2),
+            (page.today_detection_card, 1),
+        ):
+            shadow = card.graphicsEffect()
+            assert isinstance(shadow, QGraphicsDropShadowEffect)
+            assert shadow.blurRadius() == 20
+            assert shadow.offset().x() == 0
+            assert shadow.offset().y() == 3
+            assert shadow.color() == QColor(16, 24, 40, 18)
+            assert card.cursor().shape() == Qt.CursorShape.ArrowCursor
+            icon_container = card.findChild(QLabel, "summaryIconContainer")
+            assert icon_container.width() == icon_container.height() == 32
+            assert not icon_container.pixmap().isNull()
+            assert len(card.findChildren(QFrame, "summaryMetricSeparator")) == (
+                separator_count
+            )
+
+        # 非零故障为红色，待复核为橙色。
+        page.device_overview_card.set_values(5, 3, 1)
+        page.today_detection_card.set_values(128, 6)
+        fault_value = page.device_overview_card.fault_value
+        pending_value = page.today_detection_card.pending_review_value
+        assert fault_value.palette().color(QPalette.ColorRole.WindowText) == (
+            QColor("#B42318")
+        )
+        assert pending_value.palette().color(QPalette.ColorRole.WindowText) == (
+            QColor("#A76200")
+        )
+
+        # 数字归零后恢复普通深灰。
+        page.device_overview_card.set_values(5, 3, 0)
+        page.today_detection_card.set_values(128, 0)
+        assert fault_value.palette().color(QPalette.ColorRole.WindowText) == (
+            QColor("#182230")
+        )
+        assert pending_value.palette().color(QPalette.ColorRole.WindowText) == (
+            QColor("#182230")
+        )
+
+        # 机器卡片和详情继续使用原有表面。
+        assert all(card.graphicsEffect() is None for card in page.machine_cards)
+        assert page.detail_panel.graphicsEffect() is None
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_today_detection_refreshes_after_storage_and_page_show(qt_application) -> None:
+    """确认今日统计在正式入库、手动刷新和返回页面时重新查询。
+
+    Args:
+        qt_application: Qt 应用实例。
+
+    Returns:
+        返回示例：
+            None  # OCR 回调未提前计数，入库与页面刷新均读取正式统计
+    """
+    # 创建真实窗口并记录初始化后的统计查询次数。
+    controller = make_ui_controller()
+    window = MainWindow(controller)
+    page = window.realtime_page
+    try:
+        assert controller.get_today_measurement_summary.call_count == 1
+        window.show()
+        qt_application.processEvents()
+        query_count = controller.get_today_measurement_summary.call_count
+
+        # OCR 结果和正在执行的入库阶段不触发统计查询。
+        page.update_measurement_progress("1", "session", "session_start", "success")
+        page.update_ocr_result("1", "session", ("003",), ("003",))
+        page.update_measurement_progress("1", "session", "evidence_storage", "running")
+        assert controller.get_today_measurement_summary.call_count == query_count
+
+        # 正式入库成功后读取新的统计值。
+        controller.get_today_measurement_summary.return_value = Result.ok({
+            "recognition_count": 129,
+            "pending_review_count": 6,
+        })
+        page.update_measurement_progress("1", "session", "evidence_storage", "success")
+        assert controller.get_today_measurement_summary.call_count == query_count + 1
+        assert page.today_detection_card.recognition_value.text() == "129"
+
+        # 旧周期的迟到入库通知不影响当前统计。
+        page.update_measurement_progress("1", "old", "evidence_storage", "success")
+        assert controller.get_today_measurement_summary.call_count == query_count + 1
+
+        # 点击现有刷新按钮时重新读取统计。
+        page.refresh_button.click()
+        assert controller.get_today_measurement_summary.call_count == query_count + 2
+
+        # 从其他页面返回后同步已完成复核的统计。
+        window.switch_page("history")
+        qt_application.processEvents()
+        controller.get_today_measurement_summary.return_value = Result.ok({
+            "recognition_count": 129,
+            "pending_review_count": 0,
+        })
+        window.switch_page("realtime")
+        qt_application.processEvents()
+        assert controller.get_today_measurement_summary.call_count == query_count + 3
+        assert page.today_detection_card.pending_review_value.text() == "0"
+        pending_value = page.today_detection_card.pending_review_value
+        assert pending_value.property("tone") == "normal"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_today_detection_failure_keeps_monitoring_updates(
+    qt_application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """确认统计查询失败时显示占位符且继续更新实时监测。
+
+    Args:
+        qt_application: Qt 应用实例。
+        monkeypatch: pytest 提供的属性替换工具。
+        caplog: pytest 提供的日志捕获工具。
+
+    Returns:
+        返回示例：
+            None  # 统计失败没有弹窗或阻断状态与进度更新，恢复后正常显示
+    """
+    # 准备统计读取失败并记录永久错误提示调用。
+    controller = make_ui_controller()
+    controller.get_today_measurement_summary.return_value = Result.error("读取失败")
+    error_notification = Mock()
+    monkeypatch.setattr("ui.pages.realtime_page.InfoBar.error", error_notification)
+    page = RealtimePage(controller)
+    try:
+        page.show()
+        qt_application.processEvents()
+        assert page.today_detection_card.recognition_value.text() == "--"
+        assert page.today_detection_card.pending_review_value.text() == "--"
+        assert "今日检测统计读取失败" in caplog.text
+
+        # 统计失败期间继续接收机器状态和本轮进度。
+        page.update_machine_status("1", "online")
+        page.update_measurement_progress("1", "session", "session_start", "success")
+        page.update_measurement_progress("1", "session", "evidence_storage", "success")
+        assert page.device_overview_card.online_value.text() == "1"
+        assert page.cards_by_machine_id["1"].state_label.text() == "证据入库已完成"
+        error_notification.assert_not_called()
+
+        # 下一次成功查询恢复真实数量。
+        controller.get_today_measurement_summary.return_value = Result.ok({
+            "recognition_count": 0,
+            "pending_review_count": 0,
+        })
+        page.refresh_today_detection_summary()
+        assert page.today_detection_card.recognition_value.text() == "0"
+        assert page.today_detection_card.pending_review_value.text() == "0"
+        pending_value = page.today_detection_card.pending_review_value
+        assert pending_value.property("tone") == "normal"
+    finally:
+        page.close()
+        page.deleteLater()
 
 
 def test_machine_detail_keeps_long_ocr_text_selectable(qt_application) -> None:
@@ -576,22 +778,23 @@ def test_dashboard_selection_reload_and_summary(qt_application) -> None:
         page.reload_machines()
         assert page.selected_machine_id == "2"
 
-        # 连接与测量故障按机器编号合并统计。
+        # 设备总览只统计后端发布的机器整体状态。
         query_count = controller.list_enabled_machines.call_count
         page.update_connection_state("1", "相机已连接", "")
+        page.update_machine_status("1", "online")
         page.update_measurement_progress("2", "first", "session_start", "success")
         page.update_connection_state("2", "相机故障", "故障")
         page.update_measurement_progress("2", "first", "image_capture", "failed")
         page.update_machine_status("2", "fault")
-        assert [card.value_label.text() for card in page.summary_cards] == [
-            "5", "1", "1", "1",
-        ]
+        assert page.device_overview_card.total_value.text() == "5"
+        assert page.device_overview_card.online_value.text() == "1"
+        assert page.device_overview_card.fault_value.text() == "1"
         assert page.detail_panel.badge.text() == "故障"
         assert page.detail_panel.camera_state_label.text() == "相机故障"
 
         # 单独登记的机器级故障也进入总览。
         page.update_machine_status("3", "fault")
-        assert page.summary_cards[3].value_label.text() == "2"
+        assert page.device_overview_card.fault_value.text() == "2"
 
         # 刷新机器列表后恢复后端整体状态和选中详情。
         page.reload_machines()
@@ -601,9 +804,15 @@ def test_dashboard_selection_reload_and_summary(qt_application) -> None:
         query_count = controller.list_enabled_machines.call_count
 
         page.update_cycle_closed("2", "first")
-        assert page.summary_cards[2].value_label.text() == "0"
+        assert page.device_overview_card.online_value.text() == "1"
+        assert page.device_overview_card.fault_value.text() == "2"
+
+        # 后端释放资源后发布离线，设备总览随之归零。
+        for machine_id in ("1", "2", "3"):
+            page.update_machine_status(machine_id, "offline")
         page.finish_monitoring("")
-        assert page.summary_cards[1].value_label.text() == "0"
+        assert page.device_overview_card.online_value.text() == "0"
+        assert page.device_overview_card.fault_value.text() == "0"
         assert controller.list_enabled_machines.call_count == query_count
 
         # 删除选中机器后退回首台，空列表清空详情。
@@ -757,6 +966,10 @@ def test_fluent_window_waits_for_monitoring_before_close(
     machine_service.list_enabled_machines.return_value = {"machines": []}
     machine_service.list_machines.return_value = {"machines": []}
     controller = AppController(machine_service, Mock(), Mock(), Path("config"))
+    controller.measurement_record_service.get_daily_summary.return_value = {
+        "recognition_count": 0,
+        "pending_review_count": 0,
+    }
     runtime_thread = Mock()
     controller.runtime_thread = runtime_thread
     controller.stop_monitoring = Mock(wraps=controller.stop_monitoring)

@@ -121,6 +121,10 @@ def controller_services() -> tuple[AppController, Mock, Mock, Mock]:
     """
     machine_service = Mock()
     measurement_record_service = Mock()
+    measurement_record_service.get_daily_summary.return_value = {
+        "recognition_count": 0,
+        "pending_review_count": 0,
+    }
     abnormal_event_service = Mock()
     controller = AppController(
         machine_service,
@@ -259,6 +263,55 @@ def test_machine_required_fields_are_checked(
     assert not result.success
     assert result.data == {"field": field}
     machine_service.update_machine.assert_not_called()
+
+
+def test_today_measurement_summary_uses_local_date(controller_services) -> None:
+    """确认今日统计入口使用本地日期并原样返回服务数据。
+
+    Args:
+        controller_services: 控制器及三个业务服务。
+
+    Returns:
+        返回示例：
+            None  # 当天日期已转发，服务统计已放入成功结果
+    """
+    # 准备今日识别和待复核统计。
+    controller = controller_services[0]
+    measurement_record_service = controller_services[2]
+    summary_data = {
+        "recognition_count": 128,
+        "pending_review_count": 6,
+    }
+    measurement_record_service.get_daily_summary.return_value = summary_data
+
+    # 请求今天的统计并核对日期与返回值。
+    target_date = date.today()
+    assert controller.get_today_measurement_summary() == Result.ok(summary_data)
+    measurement_record_service.get_daily_summary.assert_called_once_with(target_date)
+
+
+def test_today_summary_converts_service_failure(controller_services) -> None:
+    """确认今日统计服务故障转换为界面失败结果。
+
+    Args:
+        controller_services: 控制器及三个业务服务。
+
+    Returns:
+        返回示例：
+            None  # 服务异常已转换，Controller 未修改监测状态
+    """
+    # 准备今日统计读取故障。
+    controller = controller_services[0]
+    measurement_record_service = controller_services[2]
+    measurement_record_service.get_daily_summary.side_effect = (
+        MeasurementRecordServiceError("今日检测统计读取失败。")
+    )
+
+    # 核对失败提示和监测线程状态。
+    assert controller.get_today_measurement_summary() == Result.error(
+        "今日检测统计读取失败。"
+    )
+    assert controller.runtime_thread is None
 
 
 def test_history_parameters_and_review_failure(controller_services) -> None:

@@ -157,10 +157,47 @@ QLabel#machineTitle {
     font-size: 17px;
     font-weight: 600;
 }
-QLabel#summaryValue {
+/* 设置顶部总览的标题和说明。 */
+QLabel#summaryTitle {
     color: @text;
-    font-size: 28px;
+    font-size: 14px;
     font-weight: 600;
+}
+QLabel#summaryDescription {
+    color: @muted;
+    font-size: 11px;
+}
+
+/* 设置顶部总览的图标底座。 */
+QLabel#summaryIconContainer {
+    background: #EFF6FF;
+    border: none;
+    border-radius: 8px;
+}
+
+/* 设置顶部总览的数值和指标名称。 */
+QLabel#summaryMetricValue {
+    color: @text;
+    font-size: 30px;
+    font-weight: 600;
+}
+QLabel#summaryMetricLabel {
+    color: @muted;
+    font-size: 12px;
+}
+
+/* 仅为非零故障和待复核数字着色。 */
+QLabel#summaryMetricValue[tone="fault"] {
+    color: #B42318;
+}
+QLabel#summaryMetricValue[tone="warning"] {
+    color: #A76200;
+}
+
+/* 设置顶部总览指标之间的浅灰竖线。 */
+QFrame#summaryMetricSeparator {
+    background: #E9E9EC;
+    border: none;
 }
 QLabel#frequencyValue {
     color: @text;

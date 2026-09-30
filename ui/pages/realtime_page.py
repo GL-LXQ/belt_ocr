@@ -1,9 +1,12 @@
 """实时监测页面、机器卡片和步骤进度组件。"""
 
+import logging
+
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
+    QGraphicsDropShadowEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -29,6 +32,9 @@ from qfluentwidgets import (
 from src.controller.controller import AppController
 from ui.belt_animation import BeltAnimationWidget
 from ui.theme import COLORS, create_icon
+
+
+logger = logging.getLogger(__name__)
 
 
 # 本轮处理阶段按界面展示顺序排列。
@@ -476,8 +482,8 @@ class MachineCard(SimpleCardWidget):
         self.ocr_result_label.setText("--")
 
 
-class SummaryCard(SimpleCardWidget):
-    """显示一项内存状态统计。"""
+class DeviceOverviewCard(SimpleCardWidget):
+    """展示启用机器的总数、在线数和故障数。"""
 
     def paintEvent(self, event):
         """绘制 QSS 定义的卡片背景和边框。
@@ -490,32 +496,252 @@ class SummaryCard(SimpleCardWidget):
         """
         QFrame.paintEvent(self, event)
 
-    def __init__(self, title: str, description: str):
-        """创建统计标题、数字和说明。
+    def __init__(self) -> None:
+        """创建设备总览的标题区和三列指标。
 
         Args:
-            title: 统计标题。
-            description: 统计说明。
+            无外部参数。
 
         Returns:
-            None  # 创建统计卡片
+            返回示例：
+                None  # 设备总览卡片已创建，三项指标初始为零
         """
+        # 设置总览卡片的固定高度。
         super().__init__()
         self.setObjectName("summaryCard")
+        self.setFixedHeight(128)
+
+        # 设置卡片内容的留白和间距。
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 8, 16, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(8)
 
-        # 按顺序显示统计标题、数值和说明。
-        layout.addWidget(CaptionLabel(title))
-        self.value_label = QLabel("0")
-        self.value_label.setObjectName("summaryValue")
-        layout.addWidget(self.value_label)
-        layout.addWidget(CaptionLabel(description))
+        # 在浅蓝色底座中显示 Fluent 设备图标。
+        icon_container = QLabel()
+        icon_container.setObjectName("summaryIconContainer")
+        icon_container.setFixedSize(32, 32)
+        icon_container.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon = FluentIcon.IOT.icon(color=QColor(COLORS["blue"]))
+        icon_container.setPixmap(icon.pixmap(17, 17))
 
-        # 弱化统计标题和说明。
-        for label in self.findChildren(CaptionLabel):
-            label.setStyleSheet(f"color: {COLORS['muted']};")
+        # 创建设备总览标题和副标题。
+        title = QLabel("设备总览")
+        title.setObjectName("summaryTitle")
+        description = QLabel("当前启用设备的运行状态")
+        description.setObjectName("summaryDescription")
+
+        # 纵向排列标题和说明。
+        titles_layout = QVBoxLayout()
+        titles_layout.setSpacing(0)
+        titles_layout.addWidget(title)
+        titles_layout.addWidget(description)
+
+        # 横向排列标题区的图标和文字。
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(10)
+        header_layout.addWidget(icon_container)
+        header_layout.addLayout(titles_layout, 1)
+        layout.addLayout(header_layout)
+
+        # 创建三项指标的数值控件。
+        self.total_value = QLabel("0")
+        self.online_value = QLabel("0")
+        self.fault_value = QLabel("0")
+        metrics_layout = QHBoxLayout()
+        metrics_layout.setSpacing(0)
+
+        # 将三项指标均分到横向三列。
+        for metric_index, (value_label, metric_title) in enumerate((
+            (self.total_value, "总机器"),
+            (self.online_value, "在线机器"),
+            (self.fault_value, "故障机器"),
+        )):
+            # 在相邻指标之间插入浅灰色竖线。
+            if metric_index > 0:
+                separator = QFrame()
+                separator.setObjectName("summaryMetricSeparator")
+                separator.setFixedSize(1, 44)
+                metrics_layout.addWidget(separator, 0, Qt.AlignmentFlag.AlignVCenter)
+
+            # 设置当前指标的数值和名称。
+            value_label.setObjectName("summaryMetricValue")
+            value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            metric_label = QLabel(metric_title)
+            metric_label.setObjectName("summaryMetricLabel")
+            metric_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            # 纵向排列当前指标的数值和名称。
+            metric_layout = QVBoxLayout()
+            metric_layout.setSpacing(0)
+            metric_layout.addWidget(value_label)
+            metric_layout.addWidget(metric_label)
+            metrics_layout.addLayout(metric_layout, 1)
+        layout.addLayout(metrics_layout, 1)
+
+        # 为顶部总览卡片添加轻量阴影。
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setOffset(0, 3)
+        shadow.setColor(QColor(16, 24, 40, 18))
+        self.setGraphicsEffect(shadow)
+
+    def set_values(self, total_count: int, online_count: int, fault_count: int) -> None:
+        """更新设备总览的三项数量和故障数字颜色。
+
+        Args:
+            total_count: 当前启用机器总数。
+            online_count: 后端整体状态为 online 的机器数。
+            fault_count: 后端整体状态为 fault 的机器数。
+
+        Returns:
+            返回示例：
+                None  # 三项数量已显示，非零故障数使用红色
+        """
+        # 更新设备总数、在线数和故障数。
+        self.total_value.setText(str(total_count))
+        self.online_value.setText(str(online_count))
+        self.fault_value.setText(str(fault_count))
+
+        # 仅将非零故障数字设置为故障颜色。
+        self.fault_value.setProperty("tone", "fault" if fault_count > 0 else "normal")
+        self.fault_value.style().unpolish(self.fault_value)
+        self.fault_value.style().polish(self.fault_value)
+        self.fault_value.update()
+
+
+class TodayDetectionCard(SimpleCardWidget):
+    """展示今日正式入库的识别数量和待复核数量。"""
+
+    def paintEvent(self, event):
+        """绘制 QSS 定义的卡片背景和边框。
+
+        Args:
+            event: 绘制事件。
+
+        Returns:
+            返回示例：
+                None  # 卡片表面已绘制
+        """
+        QFrame.paintEvent(self, event)
+
+    def __init__(self) -> None:
+        """创建今日检测的标题区和两列指标。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 今日检测卡片已创建，两项指标初始为占位符
+        """
+        # 设置总览卡片的固定高度。
+        super().__init__()
+        self.setObjectName("summaryCard")
+        self.setFixedHeight(128)
+
+        # 设置卡片内容的留白和间距。
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(8)
+
+        # 在浅蓝色底座中显示 Fluent 文档图标。
+        icon_container = QLabel()
+        icon_container.setObjectName("summaryIconContainer")
+        icon_container.setFixedSize(32, 32)
+        icon_container.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon = FluentIcon.DOCUMENT.icon(color=QColor(COLORS["blue"]))
+        icon_container.setPixmap(icon.pixmap(17, 17))
+
+        # 创建今日检测标题和副标题。
+        title = QLabel("今日检测")
+        title.setObjectName("summaryTitle")
+        description = QLabel("今日检测结果与待处理情况")
+        description.setObjectName("summaryDescription")
+
+        # 纵向排列标题和说明。
+        titles_layout = QVBoxLayout()
+        titles_layout.setSpacing(0)
+        titles_layout.addWidget(title)
+        titles_layout.addWidget(description)
+
+        # 横向排列标题区的图标和文字。
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(10)
+        header_layout.addWidget(icon_container)
+        header_layout.addLayout(titles_layout, 1)
+        layout.addLayout(header_layout)
+
+        # 创建两项指标的数值控件。
+        self.recognition_value = QLabel("--")
+        self.pending_review_value = QLabel("--")
+        metrics_layout = QHBoxLayout()
+        metrics_layout.setSpacing(0)
+
+        # 将两项指标均分到横向两列。
+        for metric_index, (value_label, metric_title) in enumerate((
+            (self.recognition_value, "今日识别"),
+            (self.pending_review_value, "待复核"),
+        )):
+            # 在相邻指标之间插入浅灰色竖线。
+            if metric_index > 0:
+                separator = QFrame()
+                separator.setObjectName("summaryMetricSeparator")
+                separator.setFixedSize(1, 44)
+                metrics_layout.addWidget(separator, 0, Qt.AlignmentFlag.AlignVCenter)
+
+            # 设置当前指标的数值和名称。
+            value_label.setObjectName("summaryMetricValue")
+            value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            metric_label = QLabel(metric_title)
+            metric_label.setObjectName("summaryMetricLabel")
+            metric_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            # 纵向排列当前指标的数值和名称。
+            metric_layout = QVBoxLayout()
+            metric_layout.setSpacing(0)
+            metric_layout.addWidget(value_label)
+            metric_layout.addWidget(metric_label)
+            metrics_layout.addLayout(metric_layout, 1)
+        layout.addLayout(metrics_layout, 1)
+
+        # 为顶部总览卡片添加轻量阴影。
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setOffset(0, 3)
+        shadow.setColor(QColor(16, 24, 40, 18))
+        self.setGraphicsEffect(shadow)
+
+    def set_values(
+        self,
+        recognition_count: int | None,
+        pending_review_count: int | None,
+    ) -> None:
+        """更新今日检测数量和待复核数字颜色。
+
+        Args:
+            recognition_count: 今日已入库记录数，读取失败时为 None。
+            pending_review_count: 今日待复核记录数，读取失败时为 None。
+
+        Returns:
+            返回示例：
+                None  # 两项数量或占位符已显示，非零待复核数使用橙色
+        """
+        # 更新今日识别和待复核数量，读取失败时显示占位符。
+        self.recognition_value.setText(
+            "--" if recognition_count is None else str(recognition_count)
+        )
+        self.pending_review_value.setText(
+            "--" if pending_review_count is None else str(pending_review_count)
+        )
+
+        # 仅将非零待复核数字设置为提醒颜色。
+        tone = "normal"
+        if pending_review_count is not None and pending_review_count > 0:
+            tone = "warning"
+        self.pending_review_value.setProperty("tone", tone)
+        self.pending_review_value.style().unpolish(self.pending_review_value)
+        self.pending_review_value.style().polish(self.pending_review_value)
+        self.pending_review_value.update()
 
 
 class MachineDetailPanel(SimpleCardWidget):
@@ -771,19 +997,13 @@ class RealtimePage(QWidget):
         self.stop_button.setEnabled(False)
         outer_layout.addLayout(header)
 
-        # 显示四项内存状态总览。
+        # 按 55 / 45 的比例显示设备总览和今日检测。
         summary_layout = QHBoxLayout()
         summary_layout.setSpacing(16)
-        self.summary_cards = []
-        for title, description in (
-            ("机器总数", "当前启用机器"),
-            ("相机已连接", "相机连接正常"),
-            ("测量中", "当前测量周期"),
-            ("故障 / 失败", "连接或本轮测量异常"),
-        ):
-            summary_card = SummaryCard(title, description)
-            self.summary_cards.append(summary_card)
-            summary_layout.addWidget(summary_card, 1)
+        self.device_overview_card = DeviceOverviewCard()
+        self.today_detection_card = TodayDetectionCard()
+        summary_layout.addWidget(self.device_overview_card, 11)
+        summary_layout.addWidget(self.today_detection_card, 9)
         outer_layout.addLayout(summary_layout)
 
         # 在总览卡片与机器列表分区之间保留明显的区块间距。
@@ -913,6 +1133,22 @@ class RealtimePage(QWidget):
         self.reflow_cards()
         self.scroll_area.widget().updateGeometry()
 
+        # 读取正式入库的今日检测统计。
+        self.refresh_today_detection_summary()
+
+    def showEvent(self, event) -> None:
+        """页面重新显示时同步今日识别和待复核数量。
+
+        Args:
+            event: Qt 页面显示事件。
+
+        Returns:
+            返回示例：
+                None  # 页面已显示，今日检测统计已重新读取
+        """
+        super().showEvent(event)
+        self.refresh_today_detection_summary()
+
     def populate_cards(self):
         """按当前机器记录重建机器卡片区。
 
@@ -1000,52 +1236,53 @@ class RealtimePage(QWidget):
         self.update_dashboard_summary()
 
     def update_dashboard_summary(self):
-        """根据已有内存状态刷新总览数字。
+        """根据后端统一机器整体状态刷新设备总览。
 
         Args:
             无。
 
         Returns:
-            None  # 四项统计数字已刷新
+            返回示例：
+                None  # 启用机器总数、在线机器数和故障机器数已刷新
         """
-        connected_count = sum(
-            status == "相机已连接" for status, reason in self.connection_states.values()
-        )
-        running_count = sum(
-            state["machine_running"]
-            for state in self.measurement_states_by_machine_id.values()
-        )
+        # 读取后端发布的机器整体状态。
+        machine_statuses = self.machine_statuses_by_machine_id.values()
 
-        # 汇总相机连接故障的机器编号。
-        failed_machine_ids = {
-            machine_id
-            for machine_id, (status, reason) in self.connection_states.items()
-            if status in ("连接失败", "相机故障", "监测失败")
-        }
+        # 统计在线机器数。
+        online_count = sum(status == "online" for status in machine_statuses)
 
-        # 合并本轮测量失败的机器编号。
-        failed_machine_ids.update(
-            machine_id
-            for machine_id, state in self.measurement_states_by_machine_id.items()
-            if "failed" in state["progress_statuses"].values()
-        )
+        # 统计后端发布的故障机器数。
+        fault_count = sum(status == "fault" for status in machine_statuses)
 
-        # 将后端登记的机器级故障加入总览。
-        failed_machine_ids.update(
-            machine_id
-            for machine_id, status in self.machine_statuses_by_machine_id.items()
-            if status == "fault"
-        )
-
-        # 刷新四项总览数字。
-        values = (
+        # 刷新设备总览的三项数量。
+        self.device_overview_card.set_values(
             len(self.machines),
-            connected_count,
-            running_count,
-            len(failed_machine_ids),
+            online_count,
+            fault_count,
         )
-        for summary_card, value in zip(self.summary_cards, values):
-            summary_card.value_label.setText(str(value))
+
+    def refresh_today_detection_summary(self) -> None:
+        """通过 Controller 读取并显示今天的正式检测统计。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 今日统计已显示，读取失败时显示占位符并记录日志
+        """
+        # 请求今天的正式入库统计。
+        result = self.controller.get_today_measurement_summary()
+        if not result.success:
+            self.today_detection_card.set_values(None, None)
+            logger.warning("今日检测统计读取失败：%s", result.message)
+            return
+
+        # 更新今日识别数量和待复核数量。
+        self.today_detection_card.set_values(
+            result.data["recognition_count"],
+            result.data["pending_review_count"],
+        )
 
     def select_machine(self, machine_id: str):
         """选中指定机器并刷新详情。
@@ -1323,6 +1560,10 @@ class RealtimePage(QWidget):
         progress_statuses[stage] = status
         progress_failed = "failed" in progress_statuses.values()
         self.update_dashboard_summary()
+
+        # 证据入库成功后重新读取正式检测统计。
+        if stage == "evidence_storage" and status == "success":
+            self.refresh_today_detection_summary()
 
         # 找到对应机器的卡片。
         card = self.cards_by_machine_id.get(machine_id)

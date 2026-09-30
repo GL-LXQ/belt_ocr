@@ -164,3 +164,68 @@ def test_machine_status_caches_notification_without_card(
     assert page.machine_statuses_by_machine_id["1"] == "online"
     page.update_dashboard_summary.assert_not_called()
     page.refresh_selected_machine_detail.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "machine_statuses, online_count, fault_count",
+    [
+        (
+            {
+                "1": "online",
+                "2": "online",
+                "3": "fault",
+                "4": "offline",
+            },
+            2,
+            1,
+        ),
+        ({}, 0, 0),
+    ],
+)
+def test_device_overview_counts_only_backend_machine_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+    machine_statuses: dict[str, str],
+    online_count: int,
+    fault_count: int,
+) -> None:
+    """确认设备总览只统计后端整体状态，未收到状态的机器不计入在线或故障。
+
+    Args:
+        monkeypatch: pytest 提供的属性替换工具。
+        machine_statuses: 后端已发送的机器整体状态。
+        online_count: 预期在线机器数。
+        fault_count: 预期故障机器数。
+
+    Returns:
+        返回示例：
+            None  # 相机状态和单轮失败未参与设备总览统计
+    """
+    # 为实时页模块加入项目根目录。
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
+    from ui.pages.realtime_page import RealtimePage
+
+    # 准备与后端整体状态不同的相机和测量状态。
+    page = SimpleNamespace(
+        machines=[{"id": machine_id} for machine_id in range(1, 5)],
+        machine_statuses_by_machine_id=machine_statuses,
+        device_overview_card=SimpleNamespace(set_values=Mock()),
+        connection_states={
+            "1": ("相机故障", "取帧失败"),
+            "3": ("相机已连接", ""),
+            "4": ("相机已连接", ""),
+        },
+        measurement_states_by_machine_id={
+            "2": {
+                "progress_statuses": {
+                    "character_recognition": "failed",
+                },
+                "machine_running": True,
+            },
+        },
+    )
+
+    # 核对设备总览仅使用后端整体状态。
+    RealtimePage.update_dashboard_summary(page)
+    page.device_overview_card.set_values.assert_called_once_with(
+        4, online_count, fault_count
+    )

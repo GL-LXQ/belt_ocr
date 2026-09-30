@@ -308,7 +308,13 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
             },
         ],
     }
-    page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
+    # 为页面初始化提供今日检测统计。
+    controller = AppController(service, Mock(), Mock(), Path("config"))
+    controller.measurement_record_service.get_daily_summary.return_value = {
+        "recognition_count": 0,
+        "pending_review_count": 0,
+    }
+    page = RealtimePage(controller)
     ordered_lines = ("14", "2926 215C", "<b>003</b>", "2926 216C", "2926 217C", "长文字")
     normalized_lines = ("14", "2926215C", "003", "2926216C", "2926217C", "A" * 20)
     try:
@@ -383,7 +389,13 @@ def test_page_animates_only_current_machine_and_session(
             },
         ],
     }
-    page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
+    # 为页面初始化提供今日检测统计。
+    controller = AppController(service, Mock(), Mock(), Path("config"))
+    controller.measurement_record_service.get_daily_summary.return_value = {
+        "recognition_count": 0,
+        "pending_review_count": 0,
+    }
+    page = RealtimePage(controller)
     try:
         page.update_measurement_progress("1", "first", "session_start", "success")
         first_animation = page.cards_by_machine_id["1"].belt_animation
@@ -482,7 +494,13 @@ def test_failed_subprocess_stops_its_animation_without_closing_belt(
             },
         ],
     }
-    page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
+    # 为页面初始化提供今日检测统计。
+    controller = AppController(service, Mock(), Mock(), Path("config"))
+    controller.measurement_record_service.get_daily_summary.return_value = {
+        "recognition_count": 0,
+        "pending_review_count": 0,
+    }
+    page = RealtimePage(controller)
     try:
         page.update_measurement_progress("1", "session", "session_start", "success")
         page.update_measurement_progress("1", "session", stage, "running")
@@ -530,7 +548,13 @@ def test_page_refresh_and_monitoring_stop_restore_safe_animation(
             },
         ],
     }
-    page = RealtimePage(AppController(service, Mock(), Mock(), Path("config")))
+    # 为页面初始化提供今日检测统计。
+    controller = AppController(service, Mock(), Mock(), Path("config"))
+    controller.measurement_record_service.get_daily_summary.return_value = {
+        "recognition_count": 0,
+        "pending_review_count": 0,
+    }
+    page = RealtimePage(controller)
     try:
         for machine_id in ("1", "2"):
             page.update_measurement_progress(
@@ -612,6 +636,10 @@ def test_runtime_thread_delivers_text_from_background_thread(
         ],
     }
     controller = AppController(machine_service, Mock(), Mock(), Path("config"))
+    controller.measurement_record_service.get_daily_summary.return_value = {
+        "recognition_count": 0,
+        "pending_review_count": 0,
+    }
     page = RealtimePage(controller)
     runtime = SimpleNamespace(failure=None, stop=AsyncMock())
 

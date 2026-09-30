@@ -155,6 +155,57 @@ class MeasurementRecordService:
             # 抛出可直接展示的业务提示。
             raise MeasurementRecordServiceError("历史记录读取失败。") from error
 
+    def get_daily_summary(self, target_date: date) -> dict[str, int]:
+        """统计指定本地日期内已入库的识别记录和待复核记录。
+
+        Args:
+            target_date: 按系统本地时区统计的日期。
+
+        Returns:
+            返回示例：
+                {
+                    "recognition_count": 128,  # 当天全部已入库记录数
+                    "pending_review_count": 6,  # 当天尚未完成人工复核的记录数
+                }
+        """
+        try:
+            # 将本地日期零点转换为 UTC 下界。
+            start_finish_time = datetime.combine(
+                target_date,
+                time.min,
+            ).astimezone(timezone.utc).isoformat()
+
+            # 将次日本地零点转换为 UTC 排他上界。
+            end_finish_time = datetime.combine(
+                target_date + timedelta(days=1),
+                time.min,
+            ).astimezone(timezone.utc).isoformat()
+
+            # 统计当天全部已入库记录。
+            recognition_count = self.measurement_record_repo.count_records(
+                start_finish_time=start_finish_time,
+                end_finish_time=end_finish_time,
+            )
+
+            # 统计当天尚未完成人工复核的记录。
+            pending_review_count = self.measurement_record_repo.count_records(
+                review_status="pending",
+                start_finish_time=start_finish_time,
+                end_finish_time=end_finish_time,
+            )
+
+            # 返回当天检测统计。
+            return {
+                "recognition_count": recognition_count,
+                "pending_review_count": pending_review_count,
+            }
+        except sqlite3.Error as error:
+            # 记录数据库统计读取故障。
+            logger.exception("今日检测统计读取失败")
+
+            # 转换为现有测量记录服务错误。
+            raise MeasurementRecordServiceError("今日检测统计读取失败。") from error
+
     def get_record(self, session_id: str) -> dict[str, dict | None]:
         """读取一条测量记录并转换详情字段。
 
