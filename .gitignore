@@ -9,5 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
+# pytest 临时测试目录
+pytest-of-meiwe/
+
 # 模拟运行输出
 /runtime/
