@@ -1,7 +1,7 @@
 """实时监测页面、机器卡片和步骤进度组件。"""
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -240,21 +240,41 @@ class MachineCard(SimpleCardWidget):
         layout.addLayout(heading)
 
 
-        # 显示相机序列号。
-        self.camera_label = CaptionLabel(f"Camera · {data['camera_serial']}")
-        layout.addWidget(self.camera_label)
+        # 在机器名称下方创建相机连接状态行。
+        camera_status_row = QHBoxLayout()
+        camera_status_row.setContentsMargins(0, 0, 0, 0)
+        camera_status_row.setSpacing(6)
+
+        # 创建相机连接状态色点。
+        self.camera_status_dot = QLabel()
+        self.camera_status_dot.setObjectName("cameraStatusDot")
+        self.camera_status_dot.setFixedSize(7, 7)
+
+        # 显示相机连接状态文字。
+        self.camera_status_label = CaptionLabel("未启动")
+        self.camera_status_label.setObjectName("cameraStatusText")
+
+        # 将色点和文字加入状态行。
+        camera_status_row.addWidget(
+            self.camera_status_dot,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+        camera_status_row.addWidget(self.camera_status_label)
+        camera_status_row.addStretch()
+        layout.addLayout(camera_status_row)
 
         # 在卡片画面区域显示皮带机动画。
         self.belt_animation = BeltAnimationWidget()
         layout.addWidget(self.belt_animation)
 
 
-        # 在同一行显示当前状态与实时频率。
+        # 在同一行显示当前流程与实时频率。
         metrics = QHBoxLayout()
         metrics.setSpacing(16)
         state_panel = QVBoxLayout()
         state_panel.setSpacing(4)
-        state_panel.addWidget(CaptionLabel("当前状态"))
+        state_panel.addWidget(CaptionLabel("当前流程"))
         self.state_label = BodyLabel()
         self.state_label.setWordWrap(True)
         state_panel.addWidget(self.state_label)
@@ -274,7 +294,7 @@ class MachineCard(SimpleCardWidget):
         summary_panel.setObjectName("ocrSummaryPanel")
         summary_layout = QVBoxLayout(summary_panel)
         summary_layout.setContentsMargins(10, 6, 10, 6)
-        summary_layout.addWidget(CaptionLabel("OCR 摘要"))
+        summary_layout.addWidget(CaptionLabel("本轮识别"))
         self.ocr_result_label = QLabel("--")
         self.ocr_result_label.setObjectName("ocrResult")
         self.ocr_result_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -291,7 +311,7 @@ class MachineCard(SimpleCardWidget):
 
 
 
-        # 弱化相机信息和字段标题。
+        # 弱化相机状态文字和字段标题。
         for label in self.findChildren(CaptionLabel):
             label.setStyleSheet(f"color: {COLORS['muted']};")
 
@@ -347,6 +367,33 @@ class MachineCard(SimpleCardWidget):
         self.badge.style().unpolish(self.badge)
         self.badge.style().polish(self.badge)
         self.update()
+
+    def set_camera_status(self, status: str) -> None:
+        """更新机器卡片的相机连接状态。
+
+        Args:
+            status: 已有的相机连接状态文字。
+
+        Returns:
+            返回示例：
+                None  # 相机状态文字和色点已刷新
+        """
+        # 更新相机连接状态文字。
+        self.camera_status_label.setText(status)
+
+        # 将连接状态映射到色点样式。
+        tone = "idle"
+        if status == "相机已连接":
+            tone = "normal"
+        elif status in ("连接中", "停止中"):
+            tone = "waiting"
+        elif status in ("连接失败", "相机故障", "监测失败"):
+            tone = "error"
+
+        # 刷新相机状态色点。
+        self.camera_status_dot.setProperty("tone", tone)
+        self.camera_status_dot.style().unpolish(self.camera_status_dot)
+        self.camera_status_dot.style().polish(self.camera_status_dot)
 
     def set_frequency(self, frequency: float | None) -> None:
         """更新卡片实时频率文字。
@@ -457,19 +504,20 @@ class MachineDetailPanel(SimpleCardWidget):
         super().__init__()
         self.setObjectName("machineDetailPanel")
         self.setFixedWidth(MACHINE_DETAIL_WIDTH)
+        self.setMinimumHeight(600)
         self.setSizePolicy(
             QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Preferred,
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(0)
         section_label = CaptionLabel("机器详情")
         section_label.setObjectName("detailSectionLabel")
         layout.addWidget(section_label)
 
         # 显示机器名称和状态徽标。
-        layout.addSpacing(4)
+        layout.addSpacing(5)
         heading = QHBoxLayout()
         self.title = SubtitleLabel("未选择机器")
         self.title.setObjectName("detailMachineName")
@@ -481,11 +529,11 @@ class MachineDetailPanel(SimpleCardWidget):
         layout.addLayout(heading)
 
         # 在两列网格中展示设备序列号和当前状态。
-        layout.addSpacing(10)
+        layout.addSpacing(18)
         self.attributes_layout = QGridLayout()
         self.attributes_layout.setContentsMargins(0, 0, 0, 0)
         self.attributes_layout.setHorizontalSpacing(24)
-        self.attributes_layout.setVerticalSpacing(3)
+        self.attributes_layout.setVerticalSpacing(5)
         for column_index, title in enumerate(("相机序列号", "频率仪序列号")):
             label = CaptionLabel(title)
             label.setObjectName("detailMetaKey")
@@ -498,7 +546,7 @@ class MachineDetailPanel(SimpleCardWidget):
         self.frequency_meter_serial_label.setWordWrap(True)
         self.attributes_layout.addWidget(self.camera_serial_label, 1, 0)
         self.attributes_layout.addWidget(self.frequency_meter_serial_label, 1, 1)
-        self.attributes_layout.setRowMinimumHeight(2, 7)
+        self.attributes_layout.setRowMinimumHeight(2, 14)
         for column_index, title in enumerate(("当前状态", "相机状态")):
             label = CaptionLabel(title)
             label.setObjectName("detailMetaKey")
@@ -516,26 +564,17 @@ class MachineDetailPanel(SimpleCardWidget):
         layout.addLayout(self.attributes_layout)
 
         # 在浅灰分区卡中突出当前实时频率。
-        layout.addSpacing(10)
+        layout.addSpacing(18)
         frequency_card = QFrame()
         frequency_card.setObjectName("detailFrequencyCard")
         frequency_layout = QVBoxLayout(frequency_card)
-        frequency_layout.setContentsMargins(14, 8, 14, 8)
-        frequency_layout.setSpacing(4)
+        frequency_layout.setContentsMargins(16, 12, 16, 12)
+        frequency_layout.setSpacing(6)
 
-        # 显示蓝色图标和频率标题。
-        frequency_heading = QHBoxLayout()
-        frequency_heading.setSpacing(6)
-        frequency_icon = QLabel()
-        frequency_icon.setPixmap(
-            FluentIcon.SPEED_HIGH.icon(color=QColor(COLORS["blue"])).pixmap(16, 16)
-        )
-        frequency_heading.addWidget(frequency_icon)
+        # 显示实时频率标题。
         frequency_title = CaptionLabel("实时频率")
         frequency_title.setObjectName("detailCardTitle")
-        frequency_heading.addWidget(frequency_title)
-        frequency_heading.addStretch()
-        frequency_layout.addLayout(frequency_heading)
+        frequency_layout.addWidget(frequency_title)
 
         # 在标题下方显示当前频率值。
         self.frequency_label = QLabel("--")
@@ -543,106 +582,90 @@ class MachineDetailPanel(SimpleCardWidget):
         frequency_layout.addWidget(self.frequency_label)
         layout.addWidget(frequency_card)
 
-        # 在独立的 OCR 分区卡中保留可复制的完整分类文字。
-        layout.addSpacing(8)
+        # 组织 OCR 标题和可复制的完整分类文字。
+        layout.addSpacing(18)
         ocr_card = QFrame()
         ocr_card.setObjectName("detailOcrCard")
         ocr_card_layout = QVBoxLayout(ocr_card)
-        ocr_card_layout.setContentsMargins(12, 8, 12, 8)
-        ocr_card_layout.setSpacing(6)
+        ocr_card_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_card_layout.setSpacing(8)
 
-        # 显示蓝色图标和 OCR 标题。
-        ocr_heading = QHBoxLayout()
-        ocr_heading.setSpacing(6)
-        ocr_icon = QLabel()
-        ocr_icon.setPixmap(
-            FluentIcon.DOCUMENT.icon(color=QColor(COLORS["blue"])).pixmap(16, 16)
-        )
-        ocr_heading.addWidget(ocr_icon)
+        # 显示 OCR 识别结果标题。
         ocr_title = CaptionLabel("OCR 识别结果")
         ocr_title.setObjectName("detailCardTitle")
-        ocr_heading.addWidget(ocr_title)
-        ocr_heading.addStretch()
-        ocr_card_layout.addLayout(ocr_heading)
+        ocr_card_layout.addWidget(ocr_title)
 
         # 在浅灰区域中显示可复制的完整 OCR 文本。
         ocr_panel = QFrame()
         ocr_panel.setObjectName("detailOcrPanel")
         ocr_layout = QVBoxLayout(ocr_panel)
-        ocr_layout.setContentsMargins(12, 6, 12, 6)
+        ocr_layout.setContentsMargins(14, 10, 14, 10)
         self.ocr_text = PlainTextEdit()
         self.ocr_text.setObjectName("detailOcrText")
         self.ocr_text.setReadOnly(True)
         self.ocr_text.setFrameShape(QFrame.Shape.NoFrame)
         self.ocr_text.setFixedHeight(110)
+
+        # 隐藏文本框的焦点装饰并统一默认、悬浮和聚焦背景。
+        self.ocr_text.layer.hide()
         ocr_style = (
-            "PlainTextEdit {"
+            "PlainTextEdit#detailOcrText,"
+            "PlainTextEdit#detailOcrText:hover,"
+            "PlainTextEdit#detailOcrText:focus {"
             f"background: transparent; color: {COLORS['text']};"
-            "border: none; padding: 0; font-size: 13px;}"
+            "border: none; border-radius: 0; padding: 0; font-size: 13px;}"
         )
         setCustomStyleSheet(self.ocr_text, ocr_style, ocr_style)
         ocr_layout.addWidget(self.ocr_text)
         ocr_card_layout.addWidget(ocr_panel)
         layout.addWidget(ocr_card)
 
-        # 在蓝色图标标题下显示本轮处理步骤。
-        layout.addSpacing(10)
-        progress_heading = QHBoxLayout()
-        progress_heading.setSpacing(6)
-        progress_icon = QLabel()
-        progress_icon.setPixmap(
-            FluentIcon.CHECKBOX.icon(color=QColor(COLORS["blue"])).pixmap(16, 16)
-        )
-        progress_heading.addWidget(progress_icon)
+        # 显示本轮处理标题和步骤。
+        layout.addSpacing(18)
         progress_title = CaptionLabel("本轮处理")
         progress_title.setObjectName("detailSectionLabel")
-        progress_heading.addWidget(progress_title)
-        progress_heading.addStretch()
-        layout.addLayout(progress_heading)
-        layout.addSpacing(4)
+        layout.addWidget(progress_title)
+        layout.addSpacing(8)
         self.steps = StepProgress()
         layout.addWidget(self.steps)
 
         # 在详情底部并排显示三项固定占位统计。
-        layout.addSpacing(10)
+        layout.addSpacing(18)
         stats_bar = QFrame()
         stats_bar.setObjectName("detailStatsBar")
         stats_layout = QHBoxLayout(stats_bar)
-        stats_layout.setContentsMargins(0, 0, 0, 0)
+        stats_layout.setContentsMargins(10, 10, 10, 10)
         stats_layout.setSpacing(0)
         self.stat_values = {}
-        for index, (title, icon) in enumerate((
-            ("运行时长", FluentIcon.DATE_TIME),
-            ("今日识别数量", FluentIcon.DOCUMENT),
-            ("今日待复核数量", FluentIcon.INFO),
+        for index, title in enumerate((
+            "运行时长",
+            "今日识别数量",
+            "今日待复核数量",
         )):
             # 在相邻统计项之间显示竖向分隔线。
             if index:
                 divider = QFrame()
                 divider.setObjectName("detailStatDivider")
-                divider.setFixedSize(1, 38)
+                divider.setFixedSize(1, 36)
                 stats_layout.addWidget(divider, 0, Qt.AlignmentFlag.AlignVCenter)
 
-            # 将图标和标题放在统计项首行。
+            # 设置统计项的内部间距。
             stat_item = QFrame()
             stat_item.setObjectName("detailStatItem")
             stat_layout = QVBoxLayout(stat_item)
-            stat_layout.setContentsMargins(2, 0, 2, 0)
-            stat_layout.setSpacing(4)
-            stat_heading = QHBoxLayout()
-            stat_heading.setSpacing(3)
-            stat_icon = QLabel()
-            stat_icon.setPixmap(icon.icon(color=QColor(COLORS["blue"])).pixmap(12, 12))
-            stat_heading.addWidget(stat_icon)
+            stat_layout.setContentsMargins(6, 0, 6, 0)
+            stat_layout.setSpacing(5)
+
+            # 居中显示统计项标题。
             stat_title = QLabel(title)
             stat_title.setObjectName("detailStatTitle")
-            stat_heading.addWidget(stat_title)
-            stat_heading.addStretch()
-            stat_layout.addLayout(stat_heading)
+            stat_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            stat_layout.addWidget(stat_title)
 
             # 在标题下方保存固定占位值。
             stat_value = QLabel("--")
             stat_value.setObjectName("detailStatValue")
+            stat_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
             stat_layout.addWidget(stat_value)
             stats_layout.addWidget(stat_item, 1)
             self.stat_values[title] = stat_value
@@ -883,7 +906,6 @@ class RealtimePage(QWidget):
         for machine in self.machines:
             card = MachineCard({
                 "machine_id": str(machine["id"]),
-                "camera_serial": machine["camera_serial"],
                 "title": machine["machine_name"],
                 "tone": "idle",
                 "status": "未启动",
@@ -1163,19 +1185,35 @@ class RealtimePage(QWidget):
         if card is None:
             return
 
-        # 将连接结果转换为卡片文字和颜色。
+        # 将连接结果转换为整体状态和当前流程。
         tone = "idle"
-        if status in ("连接中", "停止中"):
+        overall_status = status
+        current_state = status
+        if status == "未启动":
+            current_state = "未启动监测"
+        elif status == "连接中":
             tone = "waiting"
+            current_state = "正在连接相机"
+        elif status == "相机已连接":
+            tone = "running"
+            overall_status = "正常"
+            current_state = "等待启停信号"
+        elif status == "停止中":
+            tone = "waiting"
+            current_state = "正在停止监测"
+        elif status == "已停止":
+            current_state = "监测已停止"
         elif status in ("连接失败", "相机故障", "监测失败", "测量失败"):
             tone = "error"
+            overall_status = "故障"
         card.update_data({
             "title": card.title.text(),
             "tone": tone,
-            "status": status,
-            "state": "等待启停信号接入" if status == "相机已连接" else status,
+            "status": overall_status,
+            "state": current_state,
             "frequency": "--",
         })
+        card.set_camera_status(status)
         card.setToolTip(reason)
         if machine_id == self.selected_machine_id:
             self.refresh_selected_machine_detail()
@@ -1250,19 +1288,19 @@ class RealtimePage(QWidget):
         elif stage == "frequency_collection" and status == "success":
             card.belt_animation.set_frequency_listening(False)
 
-        # 相机故障时保留卡片主状态和故障原因。
-        if self.connection_states.get(machine_id, ("", ""))[0] == "相机故障":
-            if machine_id == self.selected_machine_id:
-                self.refresh_selected_machine_detail()
-            return
+        # 根据相机故障和测量结果确定整体状态。
+        connection_status = self.connection_states.get(machine_id, ("", ""))[0]
+        is_fault = progress_failed or connection_status in (
+            "连接失败", "相机故障", "监测失败", "测量失败"
+        )
 
-        # 更新卡片当前测量状态。
+        # 更新卡片整体状态和当前测量流程。
         stage_title = PROGRESS_STAGE_TITLES[stage]
         status_title = PROGRESS_STATUS_TITLES[status]
         card.update_data({
             "title": card.title.text(),
-            "tone": "error" if status == "failed" else "running",
-            "status": "测量失败" if status == "failed" else "测量中",
+            "tone": "error" if is_fault else "running",
+            "status": "故障" if is_fault else "正常",
             "state": f"{stage_title}{status_title}",
             "frequency": card.frequency_label.text(),
         })

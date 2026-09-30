@@ -1,4 +1,4 @@
-"""验证相机故障通知在实时页中的显示优先级。"""
+"""验证相机故障与测量进度在实时页中分别展示。"""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,17 +7,17 @@ from unittest.mock import Mock
 import pytest
 
 
-def test_camera_fault_remains_visible_after_measurement_progress(
+def test_camera_fault_and_latest_measurement_progress_are_both_visible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """确认测量进度更新节点时保留相机故障状态和提示。
+    """确认相机故障保留在连接状态，当前流程显示最新测量阶段。
 
     Args:
         monkeypatch: pytest 提供的属性替换工具。
 
     Returns:
         返回示例：
-            None  # 卡片保持相机故障状态，进度节点完成更新
+            None  # 相机状态和最新失败阶段分别保留
     """
     # 为实时页模块加入项目根目录。
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
@@ -28,6 +28,7 @@ def test_camera_fault_remains_visible_after_measurement_progress(
         title=SimpleNamespace(text=Mock(return_value="机器 1")),
         frequency_label=SimpleNamespace(text=Mock(return_value="--")),
         update_data=Mock(),
+        set_camera_status=Mock(),
         setToolTip=Mock(),
         progress_session_id="session-1",
         progress_statuses={},
@@ -53,11 +54,12 @@ def test_camera_fault_remains_visible_after_measurement_progress(
     RealtimePage.update_connection_state(page, "1", "相机故障", "GetImageBuffer 失败")
     card_data = card.update_data.call_args.args[0]
     assert card_data["tone"] == "error"
-    assert card_data["status"] == "相机故障"
+    assert card_data["status"] == "故障"
     assert card_data["state"] == "相机故障"
+    card.set_camera_status.assert_called_once_with("相机故障")
     card.setToolTip.assert_called_once_with("GetImageBuffer 失败")
 
-    # 更新测量失败进度并核对故障卡片未被覆盖。
+    # 更新测量失败进度并核对当前流程显示最新阶段。
     card.update_data.reset_mock()
     RealtimePage.update_measurement_progress(
         page,
@@ -71,5 +73,9 @@ def test_camera_fault_remains_visible_after_measurement_progress(
     }
     assert page.refresh_selected_machine_detail.call_count == 2
     card.belt_animation.stop_capture.assert_called_once_with()
-    card.update_data.assert_not_called()
+    card_data = card.update_data.call_args.args[0]
+    assert card_data["tone"] == "error"
+    assert card_data["status"] == "故障"
+    assert card_data["state"] == "图像采集失败"
+    card.set_camera_status.assert_called_once_with("相机故障")
     assert page.connection_states["1"] == ("相机故障", "GetImageBuffer 失败")

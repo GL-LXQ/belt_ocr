@@ -219,8 +219,8 @@ def test_realtime_resize_reflows_existing_cards_without_query(
         assert window.minimumWidth() == 1320
         detail_panel = window.realtime_page.detail_panel
         assert detail_panel.width() == 380
-        assert detail_panel.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Maximum
-        assert detail_panel.height() < window.realtime_page.scroll_area.height()
+        assert detail_panel.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Preferred
+        assert detail_panel.minimumHeight() == 600
         scroll_area = window.realtime_page.scroll_area
         section_title = window.realtime_page.findChild(QLabel, "machineSectionTitle")
         assert detail_panel.mapTo(window, QPoint(0, 0)).y() == (
@@ -383,6 +383,80 @@ def test_machine_detail_keeps_long_ocr_text_selectable(qt_application) -> None:
         page.deleteLater()
 
 
+def test_machine_card_shows_distinct_statuses(qt_application) -> None:
+    """验证机器卡片分别展示整体状态、相机状态和当前流程。
+
+    Args:
+        qt_application: Qt 应用实例。
+
+    Returns:
+        None  # 卡片文案、状态色点和详情序列号保持对应
+    """
+    page = RealtimePage(make_ui_controller())
+    try:
+        page.show()
+        qt_application.processEvents()
+        card = page.machine_cards[0]
+        card_labels = [label.text() for label in card.findChildren(QLabel)]
+        assert "Camera · CAM-1" not in card_labels
+        assert "当前流程" in card_labels
+        assert "本轮识别" in card_labels
+        assert card.badge.text() == "未启动"
+        assert card.camera_status_label.text() == "未启动"
+        assert card.camera_status_dot.property("tone") == "idle"
+        assert card.state_label.text() == "未启动监测"
+        assert page.detail_panel.camera_serial_label.text() == "CAM-1"
+
+        # 核对连接状态分别刷新整体徽标和相机色点。
+        page.update_connection_state("1", "连接中", "")
+        assert card.badge.text() == "连接中"
+        assert card.camera_status_dot.property("tone") == "waiting"
+        assert card.state_label.text() == "正在连接相机"
+        page.update_connection_state("1", "相机已连接", "")
+        assert card.badge.text() == "正常"
+        assert card.camera_status_label.text() == "相机已连接"
+        assert card.camera_status_dot.property("tone") == "normal"
+        assert card.state_label.text() == "等待启停信号"
+
+        # 核对测量阶段和频率更新不会改变相机连接状态。
+        card.set_frequency(24.6)
+        page.update_measurement_progress("1", "first", "session_start", "success")
+        page.update_measurement_progress(
+            "1",
+            "first",
+            "character_recognition",
+            "running",
+        )
+        assert card.badge.text() == "正常"
+        assert card.state_label.text() == "字符识别进行中"
+        assert card.frequency_label.text() == "24.6 Hz"
+        assert card.camera_status_label.text() == "相机已连接"
+
+        # 核对相机故障和测量失败分别显示在相机状态与当前流程。
+        page.update_connection_state("1", "相机故障", "故障原因")
+        page.update_measurement_progress(
+            "1",
+            "first",
+            "character_recognition",
+            "running",
+        )
+        assert card.badge.text() == "故障"
+        assert card.state_label.text() == "字符识别进行中"
+        page.update_measurement_progress(
+            "1",
+            "first",
+            "character_recognition",
+            "failed",
+        )
+        assert card.badge.text() == "故障"
+        assert card.camera_status_label.text() == "相机故障"
+        assert card.camera_status_dot.property("tone") == "error"
+        assert card.state_label.text() == "字符识别失败"
+    finally:
+        page.close()
+        page.deleteLater()
+
+
 def test_machine_detail_sections_follow_selected_machine(qt_application) -> None:
     """验证频率、OCR、步骤和占位统计随详情卡完整显示。
 
@@ -474,7 +548,7 @@ def test_dashboard_selection_reload_and_summary(qt_application) -> None:
         assert [card.value_label.text() for card in page.summary_cards] == [
             "5", "1", "1", "1",
         ]
-        assert page.detail_panel.badge.text() == "相机故障"
+        assert page.detail_panel.badge.text() == "故障"
         assert page.detail_panel.camera_state_label.text() == "相机故障"
         page.update_cycle_closed("2", "first")
         assert page.summary_cards[2].value_label.text() == "0"

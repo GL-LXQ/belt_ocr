@@ -77,6 +77,30 @@ QLabel#machineBadge[tone="waiting"] {
     background: #FFF1DD;
     color: #A76200;
 }
+
+/* 显示机器卡片的轻量相机连接状态。 */
+QLabel#cameraStatusDot {
+    background: @secondary;
+    border: none;
+    border-radius: 3px;
+}
+QLabel#cameraStatusDot[tone="normal"] {
+    background: @normal;
+}
+QLabel#cameraStatusDot[tone="waiting"] {
+    background: @warning;
+}
+QLabel#cameraStatusDot[tone="error"] {
+    background: @error;
+}
+QLabel#cameraStatusDot[tone="idle"] {
+    background: @secondary;
+}
+QLabel#cameraStatusText {
+    color: @muted;
+    font-size: 11px;
+    font-weight: 400;
+}
 QLabel#machineStatus {
     background: #EEF2F7;
     color: #60748E;
@@ -147,6 +171,10 @@ QLabel#machineBadge[tone="error"] {
     background: #FDE8E8;
     color: #B42318;
 }
+QWidget#machineCard QLabel#machineBadge[tone="idle"] {
+    background: #EEF2F7;
+    color: #60748E;
+}
 QLabel#detailMachineName {
     color: @text;
     font-size: 18px;
@@ -169,7 +197,7 @@ QWidget#machineDetailPanel QLabel#machineBadge[tone="idle"] {
 QFrame#detailFrequencyCard {
     background: #F7F9FC;
     border: none;
-    border-radius: 12px;
+    border-radius: 10px;
 }
 QLabel#detailFrequencyValue {
     color: @text;
@@ -177,17 +205,22 @@ QLabel#detailFrequencyValue {
     font-weight: 600;
 }
 QFrame#detailOcrCard {
-    background: @white;
-    border: 1px solid #EEF1F5;
-    border-radius: 12px;
+    background: transparent;
+    border: none;
 }
-QFrame#detailStatsBar, QFrame#detailStatItem {
+QFrame#detailStatsBar {
+    background: #F7F9FC;
+    border: none;
+    border-radius: 10px;
+}
+QFrame#detailStatItem {
     background: transparent;
     border: none;
 }
 QLabel#detailStatTitle {
     color: @muted;
-    font-size: 10px;
+    font-size: 11px;
+    font-weight: 400;
 }
 QLabel#detailStatValue {
     color: @text;
@@ -207,7 +240,7 @@ QFrame#ocrSummaryPanel {
     color: @text;
 }
 QFrame#detailOcrPanel {
-    background: #F5F6F8;
+    background: #F7F9FC;
     border: none;
     border-radius: 10px;
 }
