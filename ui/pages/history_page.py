@@ -46,6 +46,7 @@ from src.controller.controller import AppController
 from ui.theme import COLORS
 
 
+MACHINE_COLUMN = 0
 TIME_COLUMN = 1
 
 
@@ -95,9 +96,15 @@ class HistoryPage(QWidget):
         super().__init__(parent)
         self.setObjectName("history")
         self.controller = controller
+
+        # 保存已应用的筛选条件和可选机器。
         self.selected_review_status: str | None = None
+        self.selected_machine_id: str | None = None
+        self.record_machines = []
         self.selected_start_date: date | None = None
         self.selected_end_date: date | None = None
+
+        # 初始化历史记录分页。
         self.current_page = 1
         self.page_size = 20
 
@@ -115,7 +122,7 @@ class HistoryPage(QWidget):
         heading.addWidget(subtitle)
         layout.addLayout(heading)
 
-        # 在筛选卡片中建立状态和机器条件。
+        # 在筛选卡片中建立状态筛选。
         filter_card = SimpleCardWidget()
         filter_card.setObjectName("historyFilterCard")
         filter_layout = QVBoxLayout(filter_card)
@@ -150,12 +157,6 @@ class HistoryPage(QWidget):
         self.status_filter.setCurrentItem("all")
         filters.addWidget(self.status_filter)
         filters.addStretch()
-        self.machine_filter = ComboBox()
-        self.machine_filter.setObjectName("historyMachineFilter")
-        self.machine_filter.addItem("全部机器", userData=None)
-        self.machine_filter.setMinimumWidth(170)
-        self.machine_filter.currentIndexChanged.connect(self.select_machine)
-        filters.addWidget(self.machine_filter)
         filter_layout.addLayout(filters)
 
         layout.addWidget(filter_card)
@@ -169,7 +170,7 @@ class HistoryPage(QWidget):
         self.table.setColumnCount(6)
         self.table.setObjectName("historyTable")
         self.table.setHorizontalHeaderLabels((
-            "机器", "时间 ▾", "OCR 结果摘要", "最终频率", "状态", "操作"
+            "机器 ▾", "时间 ▾", "OCR 结果摘要", "最终频率", "状态", "操作"
         ))
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(52)
@@ -182,6 +183,7 @@ class HistoryPage(QWidget):
         table_header = self.table.horizontalHeader()
         table_header.setSectionsClickable(True)
         table_header.sectionClicked.connect(self.handle_header_clicked)
+        self.update_machine_filter_header()
         self.update_time_filter_header()
         table_header.setFixedHeight(40)
         table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
@@ -451,24 +453,13 @@ class HistoryPage(QWidget):
             # 显示机器选项读取错误。
             InfoBar.error("历史记录读取失败", result.message, duration=-1, parent=self)
             return
-        machines = result.data["machines"]
+        self.record_machines = result.data["machines"]
 
-        # 更新机器选项并保留仍然存在的筛选值。
-        selected_machine_id = self.machine_filter.currentData()
-        self.machine_filter.blockSignals(True)
-        self.machine_filter.clear()
-        self.machine_filter.addItem("全部机器", userData=None)
-        for machine in machines:
-            machine_id = machine["machine_id"]
-            machine_name = machine["machine_name"]
-            caption = (
-                f"{machine_name}（{machine_id}#）"
-                if machine_name != machine_id else f"{machine_id}#"
-            )
-            self.machine_filter.addItem(caption, userData=machine_id)
-        selected_index = self.machine_filter.findData(selected_machine_id)
-        self.machine_filter.setCurrentIndex(max(selected_index, 0))
-        self.machine_filter.blockSignals(False)
+        # 保留仍然存在的机器筛选，清除已失效的机器条件。
+        machine_ids = {machine["machine_id"] for machine in self.record_machines}
+        if self.selected_machine_id not in machine_ids:
+            self.selected_machine_id = None
+        self.update_machine_filter_header()
 
         # 读取当前状态和机器条件下的记录。
         self.current_page = 1
@@ -488,31 +479,132 @@ class HistoryPage(QWidget):
         self.current_page = 1
         self.reload_records()
 
-    def select_machine(self) -> None:
-        """切换机器筛选并读取第一页记录。
+    def apply_machine_filter(self, machine_id: str | None) -> None:
+        """应用机器筛选或恢复全部机器并读取第一页记录。
 
         Args:
-            无外部参数。
+            machine_id: 所选机器编号，None 表示全部机器。
 
         Returns:
             返回示例：
-                None  # 列表已按所选机器从第一页刷新
+                None  # 机器表头和第一页记录已按所选机器刷新
         """
+        # 保存已应用的机器条件并回到第一页。
+        self.selected_machine_id = machine_id
         self.current_page = 1
+
+        # 刷新机器表头并读取记录。
+        self.update_machine_filter_header()
         self.reload_records()
 
     def handle_header_clicked(self, column: int) -> None:
-        """点击时间表头时打开日期筛选弹层。
+        """点击机器或时间表头时打开对应筛选弹层。
 
         Args:
             column: 点击的表格列索引。
 
         Returns:
             返回示例：
-                None  # 时间列打开弹层，其他列保持不变
+                None  # 机器或时间列打开弹层，其他列保持不变
         """
-        if column == TIME_COLUMN:
+        if column == MACHINE_COLUMN:
+            self.show_machine_filter_flyout()
+        elif column == TIME_COLUMN:
             self.show_time_filter_flyout()
+
+    def update_machine_filter_header(self) -> None:
+        """刷新机器表头的所选机器提示和文字颜色。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 机器表头已显示当前应用条件，表头文字保持不变
+        """
+        # 全部机器使用默认提示和文字颜色。
+        header_item = self.table.horizontalHeaderItem(MACHINE_COLUMN)
+        if self.selected_machine_id is None:
+            header_item.setToolTip("点击筛选机器")
+            header_item.setData(Qt.ItemDataRole.ForegroundRole, None)
+        else:
+            # 读取所选机器名称。
+            machine_name = next(
+                machine["machine_name"]
+                for machine in self.record_machines
+                if machine["machine_id"] == self.selected_machine_id
+            )
+
+            # 更新已应用机器条件的表头提示。
+            header_item.setToolTip(machine_name)
+            header_item.setForeground(QColor(COLORS["blue"]))
+
+    def show_machine_filter_flyout(self) -> None:
+        """建立临时机器选项并在机器表头下方显示筛选弹层。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 弹层已打开，确定或重置后应用条件并关闭
+        """
+        # 创建机器筛选弹层正文。
+        view = FlyoutView(title="机器筛选", content="", isClosable=False)
+        content = QWidget()
+        content.setObjectName("historyMachineFilterFlyout")
+        content.setFixedWidth(320)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(16, 10, 16, 12)
+        content_layout.setSpacing(12)
+
+        # 用当前机器列表填充临时下拉框。
+        machine_combo_box = ComboBox(content)
+        machine_combo_box.addItem("全部机器", userData=None)
+        for machine in self.record_machines:
+            machine_id = machine["machine_id"]
+            machine_name = machine["machine_name"]
+            caption = (
+                f"{machine_name}（{machine_id}#）"
+                if machine_name != machine_id else f"{machine_id}#"
+            )
+            machine_combo_box.addItem(caption, userData=machine_id)
+
+        # 恢复已应用的机器选项。
+        selected_index = machine_combo_box.findData(self.selected_machine_id)
+        machine_combo_box.setCurrentIndex(selected_index)
+        content_layout.addWidget(machine_combo_box)
+
+        # 将重置和确定按钮放在右下方。
+        actions = QHBoxLayout()
+        actions.addStretch()
+        reset_button = TransparentPushButton("重置")
+        apply_button = PrimaryPushButton("确定")
+        actions.addWidget(reset_button)
+        actions.addWidget(apply_button)
+        content_layout.addLayout(actions)
+        view.addWidget(content)
+
+        # 根据机器列的实际位置展开弹层。
+        header = self.table.horizontalHeader()
+        column_position = header.sectionViewportPosition(MACHINE_COLUMN)
+        target_position = header.viewport().mapToGlobal(
+            QPoint(column_position, header.height())
+        )
+        flyout = Flyout.make(
+            view,
+            target=target_position,
+            parent=self.window(),
+            aniType=FlyoutAnimationType.DROP_DOWN,
+        )
+
+        # 点击确定或重置后应用机器条件并关闭弹层。
+        apply_button.clicked.connect(
+            lambda: self.apply_machine_filter(machine_combo_box.currentData())
+        )
+        reset_button.clicked.connect(lambda: self.apply_machine_filter(None))
+        apply_button.clicked.connect(flyout.close)
+        reset_button.clicked.connect(flyout.close)
 
     def update_time_filter_header(self) -> None:
         """刷新时间表头的日期范围提示和文字颜色。
@@ -710,7 +802,7 @@ class HistoryPage(QWidget):
         # 按当前筛选条件读取测量结果。
         result = self.controller.list_measurement_records(
             self.selected_review_status,
-            self.machine_filter.currentData(),
+            self.selected_machine_id,
             self.current_page,
             self.page_size,
             start_date=start_date,
