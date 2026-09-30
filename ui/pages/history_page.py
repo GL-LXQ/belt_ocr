@@ -1,9 +1,9 @@
 """展示已保存的测量历史并处理人工复核。"""
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QSize, Qt, QTimer
+from PySide6.QtCore import QDate, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -24,6 +24,9 @@ from qfluentwidgets import (
     CaptionLabel,
     CheckBox,
     ComboBox,
+    Flyout,
+    FlyoutAnimationType,
+    FlyoutView,
     InfoBar,
     MaskDialogBase,
     PlainTextEdit,
@@ -41,6 +44,9 @@ from qfluentwidgets import (
 
 from src.controller.controller import AppController
 from ui.theme import COLORS
+
+
+TIME_COLUMN = 1
 
 
 def format_history_time(timestamp: str) -> str:
@@ -90,6 +96,8 @@ class HistoryPage(QWidget):
         self.setObjectName("history")
         self.controller = controller
         self.selected_review_status: str | None = None
+        self.selected_start_date: date | None = None
+        self.selected_end_date: date | None = None
         self.current_page = 1
         self.page_size = 20
 
@@ -150,46 +158,6 @@ class HistoryPage(QWidget):
         filters.addWidget(self.machine_filter)
         filter_layout.addLayout(filters)
 
-        # 建立不限时间开关。
-        time_filters = QHBoxLayout()
-        time_filters.setSpacing(12)
-        self.unlimited_time_checkbox = CheckBox("不限时间")
-        self.unlimited_time_checkbox.setChecked(True)
-        self.unlimited_time_checkbox.toggled.connect(self.select_time_filter)
-        time_filters.addWidget(self.unlimited_time_checkbox)
-
-        # 将开始和结束日期放入日期范围容器。
-        self.date_range_container = QWidget()
-        self.date_range_container.setObjectName("historyDateRange")
-        date_range_layout = QHBoxLayout(self.date_range_container)
-        date_range_layout.setContentsMargins(0, 0, 0, 0)
-        date_range_layout.setSpacing(8)
-
-        # 建立开始日期控件。
-        current_date = QDate.currentDate()
-        self.start_date_edit = CalendarPicker(self)
-        self.start_date_edit.setDate(current_date)
-        self.start_date_edit.setDateFormat("yyyy-MM-dd")
-        self.start_date_edit.setResetEnabled(False)
-        self.start_date_edit.setEnabled(False)
-        self.start_date_edit.dateChanged.connect(self.select_start_date)
-        date_range_layout.addWidget(self.start_date_edit)
-
-        # 建立结束日期控件。
-        date_range_layout.addWidget(CaptionLabel("—"))
-        self.end_date_edit = CalendarPicker(self)
-        self.end_date_edit.setDate(current_date)
-        self.end_date_edit.setDateFormat("yyyy-MM-dd")
-        self.end_date_edit.setResetEnabled(False)
-        self.end_date_edit.setEnabled(False)
-        self.end_date_edit.dateChanged.connect(self.select_end_date)
-        date_range_layout.addWidget(self.end_date_edit)
-        self.date_range_container.hide()
-
-        # 将日期筛选栏放在状态和机器筛选栏下方。
-        time_filters.addWidget(self.date_range_container)
-        time_filters.addStretch()
-        filter_layout.addLayout(time_filters)
         layout.addWidget(filter_card)
 
         # 建立六列只读历史记录表格。
@@ -201,7 +169,7 @@ class HistoryPage(QWidget):
         self.table.setColumnCount(6)
         self.table.setObjectName("historyTable")
         self.table.setHorizontalHeaderLabels((
-            "机器", "时间", "OCR 结果摘要", "最终频率", "状态", "操作"
+            "机器", "时间 ▾", "OCR 结果摘要", "最终频率", "状态", "操作"
         ))
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(52)
@@ -212,6 +180,9 @@ class HistoryPage(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSortingEnabled(False)
         table_header = self.table.horizontalHeader()
+        table_header.setSectionsClickable(True)
+        table_header.sectionClicked.connect(self.handle_header_clicked)
+        self.update_time_filter_header()
         table_header.setFixedHeight(40)
         table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for column, width in ((0, 140), (1, 170), (3, 110), (4, 100), (5, 80)):
@@ -462,12 +433,9 @@ class HistoryPage(QWidget):
                 None  # 机器选项与历史列表已刷新，读取失败时显示提示
         """
         # 恢复不限时间的筛选状态。
-        self.unlimited_time_checkbox.blockSignals(True)
-        self.unlimited_time_checkbox.setChecked(True)
-        self.unlimited_time_checkbox.blockSignals(False)
-        self.start_date_edit.setEnabled(False)
-        self.end_date_edit.setEnabled(False)
-        self.date_range_container.hide()
+        self.selected_start_date = None
+        self.selected_end_date = None
+        self.update_time_filter_header()
 
         # 读取有历史记录的机器。
         result = self.controller.list_record_machines()
@@ -533,56 +501,169 @@ class HistoryPage(QWidget):
         self.current_page = 1
         self.reload_records()
 
-    def select_time_filter(self) -> None:
-        """切换不限时间选项并读取第一页记录。
+    def handle_header_clicked(self, column: int) -> None:
+        """点击时间表头时打开日期筛选弹层。
+
+        Args:
+            column: 点击的表格列索引。
+
+        Returns:
+            返回示例：
+                None  # 时间列打开弹层，其他列保持不变
+        """
+        if column == TIME_COLUMN:
+            self.show_time_filter_flyout()
+
+    def update_time_filter_header(self) -> None:
+        """刷新时间表头的日期范围提示和文字颜色。
 
         Args:
             无外部参数。
 
         Returns:
             返回示例：
-                None  # 日期控件和历史列表已按时间筛选状态更新
+                None  # 时间表头已显示当前应用条件
         """
-        dates_enabled = not self.unlimited_time_checkbox.isChecked()
-        self.start_date_edit.setEnabled(dates_enabled)
-        self.end_date_edit.setEnabled(dates_enabled)
-        self.date_range_container.setVisible(dates_enabled)
+        header_item = self.table.horizontalHeaderItem(TIME_COLUMN)
+        if self.selected_start_date is None:
+            header_item.setToolTip("点击筛选时间范围")
+            header_item.setData(Qt.ItemDataRole.ForegroundRole, None)
+        else:
+            header_item.setToolTip(
+                f"{self.selected_start_date:%Y-%m-%d} ～ "
+                f"{self.selected_end_date:%Y-%m-%d}"
+            )
+            header_item.setForeground(QColor(COLORS["blue"]))
+
+    def apply_time_filter(self, start_date: date | None, end_date: date | None) -> None:
+        """应用日期范围或清除时间条件并读取第一页。
+
+        Args:
+            start_date: 本地开始日期，None 表示不限时间。
+            end_date: 本地结束日期，与开始日期同时设置或清除。
+
+        Returns:
+            返回示例：
+                None  # 已应用日期条件，表头和第一页记录已刷新
+        """
+        # 保存已应用的日期条件。
+        self.selected_start_date = start_date
+        self.selected_end_date = end_date
         self.current_page = 1
+
+        # 刷新筛选提示并读取记录。
+        self.update_time_filter_header()
         self.reload_records()
 
-    def select_start_date(self) -> None:
-        """更新开始日期并读取新范围的第一页记录。
+    def show_time_filter_flyout(self) -> None:
+        """建立临时日期输入并在时间表头下方显示筛选弹层。
 
         Args:
             无外部参数。
 
         Returns:
             返回示例：
-                None  # 结束日期和历史列表已同步更新
+                None  # 弹层已打开，确定或重置后应用条件并关闭
         """
-        if self.start_date_edit.getDate() > self.end_date_edit.getDate():
-            self.end_date_edit.blockSignals(True)
-            self.end_date_edit.setDate(self.start_date_edit.getDate())
-            self.end_date_edit.blockSignals(False)
-        self.current_page = 1
-        self.reload_records()
+        # 创建弹层正文和不限时间选项。
+        view = FlyoutView(title="时间筛选", content="", isClosable=False)
+        content = QWidget()
+        content.setObjectName("historyTimeFilterFlyout")
+        content.setFixedWidth(320)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(16, 10, 16, 12)
+        content_layout.setSpacing(12)
+        unlimited_checkbox = CheckBox("不限时间")
+        unlimited_checkbox.setChecked(self.selected_start_date is None)
+        content_layout.addWidget(unlimited_checkbox)
 
-    def select_end_date(self) -> None:
-        """更新结束日期并读取新范围的第一页记录。
+        # 恢复已应用的日期或显示今天。
+        current_date = QDate.currentDate()
+        start_date_edit = CalendarPicker(content)
+        end_date_edit = CalendarPicker(content)
+        for date_edit, selected_date in (
+            (start_date_edit, self.selected_start_date),
+            (end_date_edit, self.selected_end_date),
+        ):
+            date_edit.setDate(QDate(selected_date) if selected_date else current_date)
+            date_edit.setDateFormat("yyyy-MM-dd")
+            date_edit.setResetEnabled(False)
+            date_edit.setEnabled(not unlimited_checkbox.isChecked())
 
-        Args:
-            无外部参数。
+        # 横向排列两个日期输入框。
+        date_layout = QHBoxLayout()
+        date_layout.setSpacing(8)
+        date_layout.addWidget(start_date_edit)
+        date_layout.addWidget(CaptionLabel("—"))
+        date_layout.addWidget(end_date_edit)
+        content_layout.addLayout(date_layout)
 
-        Returns:
-            返回示例：
-                None  # 开始日期和历史列表已同步更新
-        """
-        if self.end_date_edit.getDate() < self.start_date_edit.getDate():
-            self.start_date_edit.blockSignals(True)
-            self.start_date_edit.setDate(self.end_date_edit.getDate())
-            self.start_date_edit.blockSignals(False)
-        self.current_page = 1
-        self.reload_records()
+        # 将重置和确定按钮放在右下方。
+        actions = QHBoxLayout()
+        actions.addStretch()
+        reset_button = TransparentPushButton("重置")
+        apply_button = PrimaryPushButton("确定")
+        actions.addWidget(reset_button)
+        actions.addWidget(apply_button)
+        content_layout.addLayout(actions)
+        view.addWidget(content)
+
+        def synchronize_date_range(changed_date: QDate, changed_start: bool) -> None:
+            """在临时输入框中同步交叉的日期范围。
+
+            Args:
+                changed_date: 本次选择的日期。
+                changed_start: 是否修改了开始日期。
+
+            Returns:
+                返回示例：
+                    None  # 交叉时另一日期已同步，已应用条件保持不变
+            """
+            if start_date_edit.getDate() > end_date_edit.getDate():
+                target_edit = end_date_edit if changed_start else start_date_edit
+                target_edit.setDate(changed_date)
+
+        # 仅更新弹层内的可用状态和日期顺序。
+        unlimited_checkbox.toggled.connect(
+            lambda checked: start_date_edit.setEnabled(not checked)
+        )
+        unlimited_checkbox.toggled.connect(
+            lambda checked: end_date_edit.setEnabled(not checked)
+        )
+        start_date_edit.dateChanged.connect(
+            lambda selected_date: synchronize_date_range(selected_date, True)
+        )
+        end_date_edit.dateChanged.connect(
+            lambda selected_date: synchronize_date_range(selected_date, False)
+        )
+
+        # 根据时间列的实际位置展开弹层。
+        header = self.table.horizontalHeader()
+        column_position = header.sectionViewportPosition(TIME_COLUMN)
+        target_position = header.viewport().mapToGlobal(
+            QPoint(column_position, header.height())
+        )
+        flyout = Flyout.make(
+            view,
+            target=target_position,
+            parent=self.window(),
+            aniType=FlyoutAnimationType.DROP_DOWN,
+        )
+
+        # 点击确定或重置后应用条件并关闭弹层。
+        apply_button.clicked.connect(
+            lambda: self.apply_time_filter(
+                None
+                if unlimited_checkbox.isChecked()
+                else start_date_edit.getDate().toPython(),
+                None
+                if unlimited_checkbox.isChecked()
+                else end_date_edit.getDate().toPython(),
+            )
+        )
+        reset_button.clicked.connect(lambda: self.apply_time_filter(None, None))
+        apply_button.clicked.connect(flyout.close)
+        reset_button.clicked.connect(flyout.close)
 
     def show_previous_page(self) -> None:
         """在上一页可用时读取上一页记录。
@@ -623,11 +704,8 @@ class HistoryPage(QWidget):
                 None  # 表格显示符合筛选条件的测量记录
         """
         # 整理当前选择的本地日期范围。
-        start_date = None
-        end_date = None
-        if not self.unlimited_time_checkbox.isChecked():
-            start_date = self.start_date_edit.getDate().toPython()
-            end_date = self.end_date_edit.getDate().toPython()
+        start_date = self.selected_start_date
+        end_date = self.selected_end_date
 
         # 按当前筛选条件读取测量结果。
         result = self.controller.list_measurement_records(

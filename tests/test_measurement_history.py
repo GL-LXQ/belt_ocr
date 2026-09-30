@@ -11,10 +11,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QDate, QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
-from qfluentwidgets import InfoBar, MaskDialogBase
+from qfluentwidgets import Flyout, InfoBar, MaskDialogBase, SimpleCardWidget
 
 from config_util import AppConfig
 from database import Database, MeasurementRecord
@@ -30,7 +30,8 @@ from src.service.measurement_record_service import (
 )
 from src.service.machine_service import MachineService
 from ui.main_window import MainWindow
-from ui.pages.history_page import HistoryPage, format_history_time
+from ui.pages.history_page import TIME_COLUMN, HistoryPage, format_history_time
+from ui.theme import COLORS
 
 
 @pytest.fixture
@@ -589,15 +590,13 @@ def test_history_page_shows_filters_and_read_only_details(
     try:
         # 页面进入时读取全部历史记录。
         page.refresh_history()
-        assert page.unlimited_time_checkbox.isChecked()
-        assert not page.start_date_edit.isEnabled()
-        assert not page.end_date_edit.isEnabled()
-        assert page.date_range_container.isHidden()
+        assert page.selected_start_date is None
+        assert page.selected_end_date is None
         assert page.table.rowCount() == 4
         assert [
             page.table.horizontalHeaderItem(column).text()
             for column in range(6)
-        ] == ["机器", "时间", "OCR 结果摘要", "最终频率", "状态", "操作"]
+        ] == ["机器", "时间 ▾", "OCR 结果摘要", "最终频率", "状态", "操作"]
         assert page.table.columnWidth(0) == 140
         assert page.table.columnWidth(1) == 170
         assert page.table.item(0, 0).text() == "99"
@@ -753,7 +752,7 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
     paged_measurement_record_service: MeasurementRecordService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证日期筛选交互、日期顺序同步和重新进入时重置。
+    """验证日期条件应用、清除和重新进入时重置。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
@@ -762,70 +761,74 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
 
     Returns:
         返回示例：
-            None  # 日期变化只查询一次第一页，重新进入恢复不限时间
+            None  # 应用条件只查询一次第一页，重新进入恢复不限时间
     """
     controller = AppController(
         Mock(), paged_measurement_record_service, Mock(), Path("config")
     )
     page = HistoryPage(controller)
     try:
-        # 设置无记录的日期并确认默认不限时间仍显示全部记录。
+        # 默认不限时间并显示分页记录。
         page.refresh_history()
-        assert page.date_range_container.isHidden()
+        assert page.selected_start_date is None
+        assert page.selected_end_date is None
+        assert page.record_count_label.text() == "25 条"
         selected_date = datetime.fromisoformat(
             "2026-09-27T08:00:00+00:00"
         ).astimezone().date()
-        selected_qdate = QDate(
-            selected_date.year, selected_date.month, selected_date.day
-        )
-        previous_qdate = selected_qdate.addDays(-1)
-        page.start_date_edit.setDate(previous_qdate)
-        page.end_date_edit.setDate(previous_qdate)
-        assert page.record_count_label.text() == "25 条"
+        previous_date = selected_date - timedelta(days=1)
         page.next_page_button.click()
         assert page.current_page == 2
 
-        # 启用日期筛选后读取新范围的第一页。
-        page.unlimited_time_checkbox.click()
-        assert not page.unlimited_time_checkbox.isChecked()
-        assert page.start_date_edit.isEnabled()
-        assert page.end_date_edit.isEnabled()
-        assert not page.date_range_container.isHidden()
-        assert page.current_page == 1
-        assert page.record_count_label.text() == "0 条"
-
-        # 开始日期超过结束日期时同步结束日期并只查询一次。
+        # 应用日期后只查询一次第一页并更新表头提示。
         list_measurement_records = Mock(wraps=controller.list_measurement_records)
         monkeypatch.setattr(
             controller, "list_measurement_records", list_measurement_records
         )
-        page.start_date_edit.setDate(selected_qdate)
-        assert page.end_date_edit.getDate() == selected_qdate
-        assert list_measurement_records.call_count == 1
-        assert page.record_count_label.text() == "25 条"
-        assert page.page_label.text() == "1 / 2"
-
-        # 结束日期提前时同步开始日期并回到第一页。
-        page.next_page_button.click()
-        assert page.current_page == 2
-        list_measurement_records.reset_mock()
-        page.end_date_edit.setDate(previous_qdate)
-        assert page.start_date_edit.getDate() == previous_qdate
-        assert list_measurement_records.call_count == 1
+        page.apply_time_filter(selected_date, selected_date)
+        assert page.selected_start_date == selected_date
+        assert page.selected_end_date == selected_date
         assert page.current_page == 1
-        assert page.record_count_label.text() == "0 条"
+        list_measurement_records.assert_called_once_with(
+            None, None, 1, 20, start_date=selected_date, end_date=selected_date
+        )
+        assert page.record_count_label.text() == "25 条"
+        assert page.table.rowCount() == 20
+        header_item = page.table.horizontalHeaderItem(TIME_COLUMN)
+        assert header_item.toolTip() == f"{selected_date} ～ {selected_date}"
+        assert header_item.foreground().color() == QColor(COLORS["blue"])
+        displayed_times = [page.table.item(row, 1).text() for row in range(20)]
+        assert displayed_times == sorted(displayed_times, reverse=True)
 
-        # 重新进入历史页恢复不限时间并只读取一次记录。
+        # 无记录的日期范围显示空列表。
+        page.apply_time_filter(previous_date, previous_date)
+        assert page.record_count_label.text() == "0 条"
+        assert page.table.rowCount() == 0
+
+        # 使用弹层共用入口清除日期并恢复全部记录。
+        list_measurement_records.reset_mock()
+        page.apply_time_filter(None, None)
+        assert page.selected_start_date is None
+        assert page.selected_end_date is None
+        assert page.current_page == 1
+        assert page.record_count_label.text() == "25 条"
+        assert header_item.toolTip() == "点击筛选时间范围"
+        assert header_item.data(Qt.ItemDataRole.ForegroundRole) is None
+        list_measurement_records.assert_called_once_with(
+            None, None, 1, 20, start_date=None, end_date=None
+        )
+
+        # 重新进入页面清除日期并保留机器条件。
+        page.machine_filter.setCurrentIndex(page.machine_filter.findData("1"))
+        page.apply_time_filter(selected_date, selected_date)
+        page.next_page_button.click()
         list_measurement_records.reset_mock()
         page.refresh_history()
         assert list_measurement_records.call_count == 1
-        assert page.unlimited_time_checkbox.isChecked()
-        assert not page.start_date_edit.isEnabled()
-        assert not page.end_date_edit.isEnabled()
-        assert page.date_range_container.isHidden()
-        assert page.start_date_edit.getDate() == previous_qdate
-        assert page.end_date_edit.getDate() == previous_qdate
-        assert page.record_count_label.text() == "25 条"
+        assert page.selected_start_date is None
+        assert page.selected_end_date is None
+        assert page.machine_filter.currentData() == "1"
+        assert page.record_count_label.text() == "21 条"
         assert page.current_page == 1
     finally:
         page.detail_dialog.close()
@@ -1316,3 +1319,96 @@ def test_main_window_refreshes_only_when_entering_history(
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_history_header_opens_filter_without_querying_or_sorting(
+    qt_application: QApplication,
+    measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证只有时间表头打开弹层，打开和关闭均不查询或排序。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_record_service: 已保存测试记录的测量记录服务。
+        monkeypatch: pytest 提供的对象替换工具。
+
+    Returns:
+        返回示例：
+            None  # 弹层不改变已应用条件和记录顺序
+    """
+    controller = AppController(Mock(), measurement_record_service, Mock(), Path("config"))
+    page = HistoryPage(controller)
+    make_flyout = Mock()
+    monkeypatch.setattr(Flyout, "make", make_flyout)
+    try:
+        # 检查筛选卡仅保留一行且表格没有启用排序。
+        page.refresh_history()
+        filter_card = page.findChild(SimpleCardWidget, "historyFilterCard")
+        assert filter_card.layout().count() == 1
+        assert TIME_COLUMN == 1
+        assert page.table.isSortingEnabled() is False
+        header = page.table.horizontalHeader()
+        assert not header.isSortIndicatorShown()
+        query_records = Mock(wraps=controller.list_measurement_records)
+        monkeypatch.setattr(controller, "list_measurement_records", query_records)
+
+        # 其他列没有动作，时间列只建立弹层。
+        for column in (0, 2, 3, 4, 5):
+            header.sectionClicked.emit(column)
+        make_flyout.assert_not_called()
+        header.sectionClicked.emit(TIME_COLUMN)
+        make_flyout.assert_called_once()
+        query_records.assert_not_called()
+        assert page.selected_start_date is None
+        assert page.selected_end_date is None
+        make_flyout.return_value.close()
+        make_flyout.call_args.args[0].deleteLater()
+
+        # 已应用条件在再次打开和关闭时保持不变。
+        selected_date = date(2026, 9, 27)
+        page.apply_time_filter(selected_date, selected_date)
+        query_records.reset_mock()
+        header.sectionClicked.emit(TIME_COLUMN)
+        assert make_flyout.call_count == 2
+        make_flyout.return_value.close()
+        query_records.assert_not_called()
+        assert page.selected_start_date == selected_date
+        assert page.selected_end_date == selected_date
+        assert page.table.isSortingEnabled() is False
+
+        # 确定按钮应用当前范围并关闭弹层。
+        view = make_flyout.call_args.args[0]
+        apply_button = next(
+            button for button in view.findChildren(QPushButton)
+            if button.text() == "确定"
+        )
+        make_flyout.return_value.close.reset_mock()
+        apply_button.click()
+        query_records.assert_called_once_with(
+            None, None, 1, 20, start_date=selected_date, end_date=selected_date
+        )
+        make_flyout.return_value.close.assert_called_once()
+        view.deleteLater()
+
+        # 重置按钮直接清除已应用范围并关闭弹层。
+        header.sectionClicked.emit(TIME_COLUMN)
+        view = make_flyout.call_args.args[0]
+        reset_button = next(
+            button for button in view.findChildren(QPushButton)
+            if button.text() == "重置"
+        )
+        query_records.reset_mock()
+        make_flyout.return_value.close.reset_mock()
+        reset_button.click()
+        assert page.selected_start_date is None
+        assert page.selected_end_date is None
+        query_records.assert_called_once_with(
+            None, None, 1, 20, start_date=None, end_date=None
+        )
+        make_flyout.return_value.close.assert_called_once()
+        view.deleteLater()
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
