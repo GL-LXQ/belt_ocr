@@ -4,7 +4,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QPoint, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontInfo, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -23,6 +23,7 @@ from qfluentwidgets import (
     CaptionLabel,
     CheckBox,
     ComboBox,
+    FluentIcon,
     Flyout,
     FlyoutAnimationType,
     FlyoutView,
@@ -37,6 +38,7 @@ from qfluentwidgets import (
     SubtitleLabel,
     TableWidget,
     TitleLabel,
+    ToolButton,
     TransparentPushButton,
 )
 
@@ -413,26 +415,36 @@ class HistoryPage(QWidget):
         self.evidence_grid.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
-        body_layout.addWidget(self.evidence_content)
 
-        # 在证据图片下方创建操作行。
-        self.evidence_actions = QWidget()
-        evidence_actions_layout = QHBoxLayout(self.evidence_actions)
-        evidence_actions_layout.setContentsMargins(0, 0, 0, 0)
-        evidence_actions_layout.setSpacing(12)
-        self.evidence_actions.hide()
+        # 创建纯图标的证据文件夹按钮。
+        self.open_evidence_directory_button = ToolButton(FluentIcon.FOLDER)
+        self.open_evidence_directory_button.setFixedSize(44, 44)
+        self.open_evidence_directory_button.setIconSize(QSize(22, 22))
+        self.open_evidence_directory_button.setToolTip("打开证据文件夹")
+        self.open_evidence_directory_button.hide()
 
-        # 在操作行左侧放置更多图片提示。
-        self.evidence_more_label = CaptionLabel("仅展示前 4 张，更多图片请打开文件夹查看")
-        self.evidence_more_label.hide()
-        evidence_actions_layout.addWidget(self.evidence_more_label)
-        evidence_actions_layout.addStretch()
+        # 将文件夹按钮字体转换为实际点数。
+        directory_button_font = QFont(self.open_evidence_directory_button.font())
+        directory_button_font.setPointSizeF(
+            QFontInfo(directory_button_font).pointSizeF()
+        )
+        self.open_evidence_directory_button.setFont(directory_button_font)
 
-        # 在操作行右侧连接当前证据目录的打开入口。
-        self.open_evidence_directory_button = TransparentPushButton("打开证据文件夹")
+        # 连接当前证据目录的打开入口。
         self.open_evidence_directory_button.clicked.connect(self.open_evidence_directory)
-        evidence_actions_layout.addWidget(self.open_evidence_directory_button)
-        body_layout.addWidget(self.evidence_actions)
+
+        # 创建横向证据区域。
+        self.evidence_row = QWidget()
+        evidence_row_layout = QHBoxLayout(self.evidence_row)
+        evidence_row_layout.setContentsMargins(0, 0, 0, 0)
+        evidence_row_layout.setSpacing(12)
+        evidence_row_layout.addWidget(self.evidence_content, 1)
+
+        # 将文件夹按钮放在图片区右侧并垂直居中。
+        evidence_row_layout.addWidget(
+            self.open_evidence_directory_button, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        body_layout.addWidget(self.evidence_row)
 
         # 在详情底部创建记录信息卡。
         self.record_meta_card = SimpleCardWidget()
@@ -1093,7 +1105,7 @@ class HistoryPage(QWidget):
 
         Returns:
             返回示例：
-                None  # 证据预览、更多图片提示和文件夹入口已更新
+                None  # 证据预览和文件夹入口已更新
         """
         # 清除上一条记录的缩略图和占位文字。
         while self.evidence_grid.count():
@@ -1111,13 +1123,12 @@ class HistoryPage(QWidget):
             self.current_evidence_directory = None
 
         # 根据证据目录更新文件夹入口。
-        self.evidence_actions.setVisible(self.current_evidence_directory is not None)
+        self.open_evidence_directory_button.setVisible(
+            self.current_evidence_directory is not None
+        )
         self.open_evidence_directory_button.setEnabled(
             self.current_evidence_directory is not None
         )
-
-        # 清除上一条记录的更多图片提示。
-        self.evidence_more_label.hide()
 
         # 读取记录目录当前层按文件名排序的 JPG 文件。
         image_paths = (
@@ -1126,18 +1137,16 @@ class HistoryPage(QWidget):
             else []
         )
 
-        # 跳过损坏的 JPG 图片。
+        # 按顺序读取最多四张可读取图片。
         readable_image_count = 0
-        has_more_images = False
         for image_path in image_paths:
+            if readable_image_count >= 4:
+                break
+
+            # 跳过损坏的 JPG 图片。
             image = QPixmap(str(image_path))
             if image.isNull():
                 continue
-
-            # 检测到第五张可读取图片后停止读取。
-            if readable_image_count >= 4:
-                has_more_images = True
-                break
 
             # 为可读取的图片创建可点击缩略图。
             thumbnail = PushButton()
@@ -1166,9 +1175,6 @@ class HistoryPage(QWidget):
             self.evidence_grid.addWidget(thumbnail, 0, readable_image_count)
             readable_image_count += 1
 
-        # 在可读取图片超过四张时显示更多图片提示。
-        self.evidence_more_label.setVisible(has_more_images)
-
         # 在没有可显示图片时给出对应提示。
         if readable_image_count == 0:
             message = "证据图片读取失败" if image_paths else "暂无证据图片"
@@ -1182,12 +1188,22 @@ class HistoryPage(QWidget):
 
         Returns:
             返回示例：
-                None  # 已请求打开当前证据目录，无有效目录时不执行操作
+                None  # 已请求打开证据目录，系统拒绝时显示提示
         """
         # 打开当前记录保存的有效证据目录。
         directory = self.current_evidence_directory
         if directory is not None:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+            directory_url = QUrl.fromLocalFile(str(directory))
+            directory_opened = QDesktopServices.openUrl(directory_url)
+
+            # 在系统拒绝打开目录时显示错误提示。
+            if not directory_opened:
+                InfoBar.error(
+                    "证据文件夹打开失败",
+                    "系统未能打开证据目录，请检查系统文件夹打开功能和访问权限。",
+                    duration=-1,
+                    parent=self.detail_dialog.widget,
+                )
 
     def show_evidence_image(self, image_path: Path) -> None:
         """打开一张证据图片的大图查看窗口。

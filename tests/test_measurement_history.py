@@ -1341,7 +1341,7 @@ def test_history_detail_limits_evidence_preview_and_opens_folder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证证据预览最多四张，并连接文件夹和大图查看入口。
+    """验证证据预览上限、目录打开路径和系统拒绝时的错误提示。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
@@ -1351,7 +1351,7 @@ def test_history_detail_limits_evidence_preview_and_opens_folder(
 
     Returns:
         返回示例：
-            None  # 预览数量、更多图片提示和证据查看入口符合预期
+            None  # 预览数量、证据目录路径和打开失败提示符合预期
     """
     # 在两条记录已有的目录中写入测试图片和一张损坏图片。
     normal_directory = tmp_path / "normal-evidence"
@@ -1385,8 +1385,8 @@ def test_history_detail_limits_evidence_preview_and_opens_folder(
         normal_thumbnail = page.evidence_grid.itemAt(0).widget()
         assert isinstance(normal_thumbnail, QPushButton)
         assert normal_thumbnail.toolTip() == "normal-frame.jpg"
-        assert page.evidence_more_label.isHidden()
-        assert not page.evidence_actions.isHidden()
+        assert not page.open_evidence_directory_button.isHidden()
+        assert page.open_evidence_directory_button.isEnabled()
         page.detail_dialog.close()
 
         # 待复核记录只预览按文件名排序的前四张可读取图片。
@@ -1402,7 +1402,6 @@ def test_history_detail_limits_evidence_preview_and_opens_folder(
             "review-frame-3.jpg",
             "review-frame-4.jpg",
         ]
-        assert not page.evidence_more_label.isHidden()
 
         # 点击文件夹按钮并核对当前记录的证据目录。
         page.open_evidence_directory_button.click()
@@ -1410,12 +1409,21 @@ def test_history_detail_limits_evidence_preview_and_opens_folder(
         directory_url = directory_opener.call_args.args[0]
         assert Path(directory_url.toLocalFile()) == review_directory
 
-        # 点击缩略图并核对现有大图查看入口收到的图片路径。
-        page.show_evidence_image = Mock()
-        review_thumbnails[0].click()
-        page.show_evidence_image.assert_called_once_with(
-            review_directory / "review-frame-1.jpg"
+        # 替换系统拒绝打开目录时的提示入口。
+        directory_opener.reset_mock()
+        directory_opener.return_value = False
+        directory_open_error = Mock()
+        monkeypatch.setattr(InfoBar, "error", directory_open_error)
+
+        # 核对目录打开失败时显示的错误提示。
+        page.open_evidence_directory_button.click()
+        directory_open_error.assert_called_once_with(
+            "证据文件夹打开失败",
+            "系统未能打开证据目录，请检查系统文件夹打开功能和访问权限。",
+            duration=-1,
+            parent=page.detail_dialog.widget,
         )
+
     finally:
         page.detail_dialog.close()
         page.close()
@@ -1444,27 +1452,29 @@ def test_history_detail_handles_missing_empty_and_unreadable_evidence(
         # 记录目录不存在时显示无图片提示。
         page.show_record_detail("normal-session")
         assert page.evidence_grid.itemAt(0).widget().text() == "暂无证据图片"
-        assert page.evidence_actions.isHidden()
+        assert page.open_evidence_directory_button.isHidden()
         page.detail_dialog.close()
 
         # 记录的证据目录为空时显示同样的提示。
         page.populate_evidence_images("")
         assert page.evidence_grid.itemAt(0).widget().text() == "暂无证据图片"
-        assert page.evidence_actions.isHidden()
+        assert page.open_evidence_directory_button.isHidden()
 
         # 目录存在但为空时保持相同提示。
         review_directory = tmp_path / "review-evidence"
         review_directory.mkdir()
         page.show_record_detail("review-session")
         assert page.evidence_grid.itemAt(0).widget().text() == "暂无证据图片"
-        assert not page.evidence_actions.isHidden()
+        assert not page.open_evidence_directory_button.isHidden()
+        assert page.open_evidence_directory_button.isEnabled()
         page.detail_dialog.close()
 
         # 只有损坏的 JPG 时显示读取失败，不影响复核原因。
         (review_directory / "broken.jpg").write_bytes(b"not an image")
         page.show_record_detail("review-session")
         assert page.evidence_grid.itemAt(0).widget().text() == "证据图片读取失败"
-        assert not page.evidence_actions.isHidden()
+        assert not page.open_evidence_directory_button.isHidden()
+        assert page.open_evidence_directory_button.isEnabled()
         assert page.review_reason_value.text() == "没有可靠的 20 位文字"
     finally:
         page.detail_dialog.close()

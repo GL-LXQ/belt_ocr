@@ -10,7 +10,7 @@ import pytest
 def test_camera_fault_and_latest_measurement_progress_are_both_visible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """确认相机故障保留在连接状态，当前流程显示最新测量阶段。
+    """确认原始相机故障保留在连接缓存，本轮流程由测量进度更新。
 
     Args:
         monkeypatch: pytest 提供的属性替换工具。
@@ -28,6 +28,7 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
         title=SimpleNamespace(text=Mock(return_value="机器 1")),
         frequency_label=SimpleNamespace(text=Mock(return_value="--")),
         update_data=Mock(),
+        clear_ocr_result=Mock(),
         set_camera_status=Mock(),
         set_machine_status=Mock(),
         setToolTip=Mock(),
@@ -39,7 +40,7 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
         refresh_selected_machine_detail=Mock(),
         connection_states={},
         cards_by_machine_id={"1": card},
-        ocr_results_by_machine_id={"1": ("session-1", (), ())},
+        ocr_results_by_machine_id={"1": ("session-1", ("AB",), ("AB",))},
         measurement_states_by_machine_id={
             "1": {
                 "session_id": "session-1",
@@ -51,17 +52,12 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
 
     # 显示相机设备故障和原始原因。
     RealtimePage.update_connection_state(page, "1", "相机故障", "GetImageBuffer 失败")
-    card_data = card.update_data.call_args.args[0]
-    assert card_data == {
-        "title": "机器 1",
-        "state": "相机故障",
-        "frequency": "--",
-    }
+    card.update_data.assert_not_called()
     card.set_camera_status.assert_called_once_with("相机故障")
     card.setToolTip.assert_called_once_with("GetImageBuffer 失败")
     page.update_dashboard_summary.assert_not_called()
 
-    # 更新测量失败进度并核对当前流程显示最新阶段。
+    # 更新测量失败进度并核对本轮流程显示最新阶段。
     card.update_data.reset_mock()
     RealtimePage.update_measurement_progress(
         page,
@@ -98,12 +94,43 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
         "image_capture": "failed",
     }
 
-    # CLOSE 结束当前周期动画并刷新详情，不刷新设备总览。
+    # CLOSE 结束当前周期动画并恢复流程和频率占位。
     RealtimePage.update_cycle_closed(page, "1", "session-1")
     assert not measurement_state["machine_running"]
     assert page.refresh_selected_machine_detail.call_count == 3
     card.belt_animation.stop_machine.assert_called_once_with()
+    card.update_data.assert_called_once_with({
+        "title": "机器 1",
+        "state": "--",
+        "frequency": "--",
+    })
+
+    # 当前周期关闭后保留已缓存的 OCR。
+    assert page.ocr_results_by_machine_id["1"] == ("session-1", ("AB",), ("AB",))
+    card.clear_ocr_result.assert_not_called()
     page.update_dashboard_summary.assert_not_called()
+
+    # 新周期启动后重置卡片和详情调用记录。
+    RealtimePage.update_measurement_progress(
+        page, "1", "session-2", "session_start", "success"
+    )
+    card.update_data.reset_mock()
+    card.belt_animation.stop_machine.reset_mock()
+    page.refresh_selected_machine_detail.reset_mock()
+
+    # 旧周期的关闭通知不更新新周期的卡片和动画。
+    RealtimePage.update_cycle_closed(page, "1", "session-1")
+    card.update_data.assert_not_called()
+    card.belt_animation.stop_machine.assert_not_called()
+    page.refresh_selected_machine_detail.assert_not_called()
+
+    # 旧周期关闭后新周期继续运行。
+    measurement_state = page.measurement_states_by_machine_id["1"]
+    assert measurement_state["session_id"] == "session-2"
+    assert measurement_state["machine_running"]
+    assert measurement_state["progress_statuses"] == {
+        "session_start": "success",
+    }
 
 
 @pytest.mark.parametrize(

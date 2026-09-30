@@ -673,7 +673,7 @@ def test_machine_detail_keeps_long_ocr_text_selectable(qt_application) -> None:
 
 
 def test_machine_card_shows_distinct_statuses(qt_application) -> None:
-    """验证机器卡片分别展示整体状态、相机状态和当前流程。
+    """验证机器卡片分别展示整体状态、相机状态和本轮流程。
 
     Args:
         qt_application: Qt 应用实例。
@@ -688,26 +688,28 @@ def test_machine_card_shows_distinct_statuses(qt_application) -> None:
         card = page.machine_cards[0]
         card_labels = [label.text() for label in card.findChildren(QLabel)]
         assert "Camera · CAM-1" not in card_labels
-        assert "当前流程" in card_labels
+        assert "本轮流程" in card_labels
         assert "本轮识别" in card_labels
         assert card.badge.text() == "离线"
         assert card.badge.property("tone") == "idle"
         assert page.detail_panel.badge.text() == "离线"
-        assert card.camera_status_label.text() == "未启动"
+        assert card.camera_status_label.text() == "相机已离线"
         assert card.camera_status_dot.property("tone") == "idle"
-        assert card.state_label.text() == "未启动监测"
+        assert card.state_label.text() == "--"
+        assert card.frequency_label.text() == "--"
         assert page.detail_panel.camera_serial_label.text() == "CAM-1"
 
-        # 核对相机连接状态只更新相机色点和当前流程。
+        # 核对相机连接状态不修改本轮流程。
         page.update_connection_state("1", "连接中", "")
         assert card.badge.text() == "离线"
-        assert card.camera_status_dot.property("tone") == "waiting"
-        assert card.state_label.text() == "正在连接相机"
+        assert card.camera_status_label.text() == "相机已离线"
+        assert card.camera_status_dot.property("tone") == "idle"
+        assert card.state_label.text() == "--"
         page.update_connection_state("1", "相机已连接", "")
         assert card.badge.text() == "离线"
         assert card.camera_status_label.text() == "相机已连接"
         assert card.camera_status_dot.property("tone") == "normal"
-        assert card.state_label.text() == "等待启停信号"
+        assert card.state_label.text() == "--"
 
         # 后端发布在线后同步卡片和详情胶囊。
         page.update_machine_status("1", "online")
@@ -720,6 +722,7 @@ def test_machine_card_shows_distinct_statuses(qt_application) -> None:
         # 核对测量阶段和频率更新不会改变相机连接状态。
         card.set_frequency(24.6)
         page.update_measurement_progress("1", "first", "session_start", "success")
+        assert card.state_label.text() == "本轮启动已完成"
         page.update_measurement_progress(
             "1",
             "first",
@@ -731,8 +734,14 @@ def test_machine_card_shows_distinct_statuses(qt_application) -> None:
         assert card.frequency_label.text() == "24.6 Hz"
         assert card.camera_status_label.text() == "相机已连接"
 
-        # 核对相机故障和测量失败分别显示在相机状态与当前流程。
+        # 核对相机故障保留原始原因且不修改本轮流程和频率。
         page.update_connection_state("1", "相机故障", "故障原因")
+        assert card.state_label.text() == "字符识别进行中"
+        assert card.frequency_label.text() == "24.6 Hz"
+        assert card.toolTip() == "故障原因"
+        assert page.connection_states["1"] == ("相机故障", "故障原因")
+
+        # 核对相机离线时测量进度仍正常更新。
         page.update_measurement_progress(
             "1",
             "first",
@@ -748,12 +757,29 @@ def test_machine_card_shows_distinct_statuses(qt_application) -> None:
             "failed",
         )
         assert card.badge.text() == "在线"
-        assert card.camera_status_label.text() == "相机故障"
-        assert card.camera_status_dot.property("tone") == "error"
+        assert card.camera_status_label.text() == "相机已离线"
+        assert card.camera_status_dot.property("tone") == "idle"
         assert card.state_label.text() == "字符识别失败"
         assert page.detail_panel.badge.text() == "在线"
         assert page.detail_panel.state_label.text() == "字符识别失败"
         assert "#138B3F" not in page.detail_panel.state_label.styleSheet()
+
+        # 核对全部未连接状态只显示相机离线。
+        for status in (
+            "未启动", "连接中", "连接失败", "停止中", "已停止", "相机故障", "监测失败"
+        ):
+            page.update_connection_state("1", status, "状态说明")
+            assert card.camera_status_label.text() == "相机已离线"
+            assert card.camera_status_dot.property("tone") == "idle"
+            assert card.state_label.text() == "字符识别失败"
+            assert card.frequency_label.text() == "24.6 Hz"
+            assert card.badge.text() == "在线"
+
+        # 重新连接相机后保留本轮流程和实时频率。
+        page.update_connection_state("1", "相机已连接", "")
+        assert card.camera_status_label.text() == "相机已连接"
+        assert card.state_label.text() == "字符识别失败"
+        assert card.frequency_label.text() == "24.6 Hz"
 
         # 后端登记采集故障后才更新整体状态。
         page.update_machine_status("1", "fault")
@@ -763,6 +789,32 @@ def test_machine_card_shows_distinct_statuses(qt_application) -> None:
         assert page.detail_panel.badge.text() == "故障"
         assert card.state_label.text() == "图像采集失败"
 
+        # 当前周期关闭后恢复流程和频率占位。
+        page.update_ocr_result("1", "first", ("AB",), ("AB",))
+        page.update_cycle_closed("1", "first")
+        assert card.state_label.text() == "--"
+        assert card.frequency_label.text() == "--"
+        assert page.detail_panel.state_label.text() == "--"
+        assert page.detail_panel.frequency_label.text() == "--"
+
+        # 当前周期关闭后保留已显示的 OCR。
+        assert card.ocr_result_label.text() == "AB"
+        assert "2  AB" in page.detail_panel.ocr_text.toPlainText()
+        assert page.ocr_results_by_machine_id["1"] == ("first", ("AB",), ("AB",))
+
+        # 启动新周期并更新实时频率和采集进度。
+        page.update_measurement_progress("1", "second", "session_start", "success")
+        card.set_frequency(33.3)
+        page.update_measurement_progress("1", "second", "image_capture", "running")
+
+        # 新周期运行时忽略旧周期迟到的关闭通知。
+        page.update_cycle_closed("1", "first")
+        assert card.state_label.text() == "图像采集进行中"
+        assert card.frequency_label.text() == "33.3 Hz"
+        assert page.detail_panel.state_label.text() == "图像采集进行中"
+        assert page.detail_panel.frequency_label.text() == "33.3 Hz"
+        assert page.measurement_states_by_machine_id["1"]["machine_running"]
+
         # 后端释放资源后同步卡片和详情的离线状态。
         page.update_machine_status("1", "offline")
         page.finish_monitoring("")
@@ -770,6 +822,11 @@ def test_machine_card_shows_distinct_statuses(qt_application) -> None:
         assert card.property("tone") == "idle"
         assert page.detail_panel.badge.text() == "离线"
         assert page.detail_panel.badge.property("tone") == "idle"
+        assert card.camera_status_label.text() == "相机已离线"
+        assert card.state_label.text() == "--"
+        assert card.frequency_label.text() == "--"
+        assert page.detail_panel.state_label.text() == "--"
+        assert page.detail_panel.frequency_label.text() == "--"
 
         # 新监测启动前清空上一轮整体状态并等待后端通知。
         page.controller.start_monitoring.return_value = Result.ok()
@@ -777,7 +834,8 @@ def test_machine_card_shows_distinct_statuses(qt_application) -> None:
         assert page.machine_statuses_by_machine_id == {}
         assert page.cards_by_machine_id["1"].badge.text() == "离线"
         assert page.detail_panel.badge.text() == "离线"
-        assert page.cards_by_machine_id["1"].camera_status_label.text() == "连接中"
+        assert page.cards_by_machine_id["1"].camera_status_label.text() == "相机已离线"
+        assert page.cards_by_machine_id["1"].state_label.text() == "--"
     finally:
         page.close()
         page.deleteLater()
@@ -806,18 +864,51 @@ def test_machine_detail_sections_follow_selected_machine(qt_application) -> None
             "--", "--", "--"
         ]
         assert panel.frequency_label.text() == "--"
+        assert panel.state_label.text() == "--"
+        assert panel.camera_state_label.text() == "相机已离线"
+        assert (
+            panel.camera_state_label.text()
+            == page.machine_cards[0].camera_status_label.text()
+        )
 
         # 连接和本轮进度继续刷新当前机器的详情。
+        page.update_connection_state("1", "连接中", "正在初始化")
+        assert panel.camera_state_label.text() == "相机已离线"
+        assert panel.state_label.text() == "--"
         page.update_connection_state("1", "相机已连接", "")
         assert panel.camera_state_label.text() == "相机已连接"
         page.update_measurement_progress("1", "first", "session_start", "success")
         assert "#138B3F" not in panel.state_label.styleSheet()
         assert "#2563EB" in panel.steps.dots[0].styleSheet()
+
+        # 相机故障时详情复用卡片状态并保留原因。
+        page.update_connection_state("1", "相机故障", "取帧失败")
+        card = page.cards_by_machine_id["1"]
+        assert panel.camera_state_label.text() == card.camera_status_label.text()
+        assert panel.camera_state_label.text() == "相机已离线"
+        assert panel.toolTip() == "取帧失败"
+        assert panel.state_label.text() == "本轮启动已完成"
+
+        # 切换机器后显示对应卡片的相机状态。
         page.select_machine("2")
         assert panel.camera_serial_label.text() == "CAM-2"
+        assert panel.camera_state_label.text() == "相机已离线"
+        assert panel.state_label.text() == "--"
+        page.update_connection_state("2", "相机已连接", "")
+        assert panel.camera_state_label.text() == "相机已连接"
         assert [label.text() for label in panel.stat_values.values()] == [
             "--", "--", "--"
         ]
+
+        # 重建卡片后详情继续使用对应相机文字。
+        page.reload_machines()
+        assert (
+            panel.camera_state_label.text()
+            == page.cards_by_machine_id["2"].camera_status_label.text()
+        )
+        page.select_machine("1")
+        assert panel.camera_state_label.text() == "相机已离线"
+        assert panel.toolTip() == "取帧失败"
     finally:
         page.close()
         page.deleteLater()
@@ -877,7 +968,7 @@ def test_dashboard_selection_reload_and_summary(qt_application) -> None:
         assert page.device_overview_card.online_value.text() == "1"
         assert page.device_overview_card.fault_value.text() == "1"
         assert page.detail_panel.badge.text() == "故障"
-        assert page.detail_panel.camera_state_label.text() == "相机故障"
+        assert page.detail_panel.camera_state_label.text() == "相机已离线"
 
         # 单独登记的机器级故障也进入总览。
         page.update_machine_status("3", "fault")

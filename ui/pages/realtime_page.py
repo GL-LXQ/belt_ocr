@@ -228,7 +228,7 @@ class MachineCard(SimpleCardWidget):
         """构建机器卡片并填入展示数据。
 
         Args:
-            data: 卡片展示数据，包含机器编号、标题、当前流程和频率。
+            data: 卡片展示数据，包含机器编号、标题、本轮流程和频率。
 
         Returns:
             返回示例：
@@ -272,7 +272,7 @@ class MachineCard(SimpleCardWidget):
         self.camera_status_dot.setFixedSize(7, 7)
 
         # 显示相机连接状态文字。
-        self.camera_status_label = CaptionLabel("未启动")
+        self.camera_status_label = CaptionLabel("相机已离线")
         self.camera_status_label.setObjectName("cameraStatusText")
 
         # 将色点和文字加入状态行。
@@ -290,12 +290,12 @@ class MachineCard(SimpleCardWidget):
         layout.addWidget(self.belt_animation)
 
 
-        # 在同一行显示当前流程与实时频率。
+        # 在同一行显示本轮流程与实时频率。
         metrics = QHBoxLayout()
         metrics.setSpacing(16)
         state_panel = QVBoxLayout()
         state_panel.setSpacing(4)
-        state_panel.addWidget(CaptionLabel("当前流程"))
+        state_panel.addWidget(CaptionLabel("本轮流程"))
         self.state_label = BodyLabel()
         self.state_label.setWordWrap(True)
         state_panel.addWidget(self.state_label)
@@ -339,7 +339,7 @@ class MachineCard(SimpleCardWidget):
         # 初始化机器整体状态为离线。
         self.set_machine_status("offline")
 
-        # 填入机器标题、当前流程和频率。
+        # 填入机器标题、本轮流程和频率。
         self.update_data(data)
 
     def set_selected(self, selected: bool):
@@ -397,7 +397,7 @@ class MachineCard(SimpleCardWidget):
         self.update()
 
     def update_data(self, data: dict):
-        """更新机器标题、当前流程和频率展示。
+        """更新机器标题、本轮流程和频率展示。
 
         Args:
             data: 包含 title、state 和 frequency 的卡片展示数据。
@@ -406,7 +406,7 @@ class MachineCard(SimpleCardWidget):
             返回示例：
                 None  # 更新机器卡片，不创建新控件
         """
-        # 更新机器标题、当前流程和频率。
+        # 更新机器标题、本轮流程和频率。
         self.title.setText(data["title"])
         self.state_label.setText(data["state"])
         self.frequency_label.setText(data["frequency"])
@@ -422,17 +422,16 @@ class MachineCard(SimpleCardWidget):
             返回示例：
                 None  # 相机状态文字和色点已刷新
         """
-        # 更新相机连接状态文字。
-        self.camera_status_label.setText(status)
-
-        # 将连接状态映射到色点样式。
-        tone = "idle"
+        # 将原始相机状态转换为连接或离线文字及色点样式。
         if status == "相机已连接":
+            status_text = "相机已连接"
             tone = "normal"
-        elif status in ("连接中", "停止中"):
-            tone = "waiting"
-        elif status in ("连接失败", "相机故障", "监测失败"):
-            tone = "error"
+        else:
+            status_text = "相机已离线"
+            tone = "idle"
+
+        # 更新相机连接状态文字。
+        self.camera_status_label.setText(status_text)
 
         # 刷新相机状态色点。
         self.camera_status_dot.setProperty("tone", tone)
@@ -1202,7 +1201,7 @@ class RealtimePage(QWidget):
             card = MachineCard({
                 "machine_id": str(machine["id"]),
                 "title": machine["machine_name"],
-                "state": "未启动监测",
+                "state": "--",
                 "frequency": "--",
             })
             card.clicked.connect(self.select_machine)
@@ -1335,10 +1334,9 @@ class RealtimePage(QWidget):
             machine["frequency_meter_serial"] if machine else "--"
         )
         panel.state_label.setText(card.state_label.text() if card else "--")
-        camera_status = self.connection_states.get(
-            self.selected_machine_id, ("未启动", "")
-        )[0]
-        panel.camera_state_label.setText(camera_status if card else "--")
+        panel.camera_state_label.setText(
+            card.camera_status_label.text() if card else "--"
+        )
         panel.frequency_label.setText(card.frequency_label.text() if card else "--")
 
         # 同步主状态徽标和故障说明。
@@ -1490,7 +1488,7 @@ class RealtimePage(QWidget):
             self.refresh_selected_machine_detail()
 
     def update_connection_state(self, machine_id: str, status: str, reason: str):
-        """保存机器连接结果并更新对应卡片。
+        """保存原始相机状态和原因并同步卡片及选中详情。
 
         Args:
             machine_id: 数据库机器编号的字符串形式。
@@ -1498,33 +1496,13 @@ class RealtimePage(QWidget):
             reason: 连接失败原因或状态说明。
 
         Returns:
-            None  # 已保存状态；当前页面存在该机器时更新卡片
+            None  # 原始状态和原因已保存，相机文字和 Tooltip 已同步
         """
         # 保留状态，并跳过运行期间已从列表移除的机器。
         self.connection_states[machine_id] = (status, reason)
         card = self.cards_by_machine_id.get(machine_id)
         if card is None:
             return
-
-        # 将相机连接结果转换为当前流程文字。
-        current_state = status
-        if status == "未启动":
-            current_state = "未启动监测"
-        elif status == "连接中":
-            current_state = "正在连接相机"
-        elif status == "相机已连接":
-            current_state = "等待启停信号"
-        elif status == "停止中":
-            current_state = "正在停止监测"
-        elif status == "已停止":
-            current_state = "监测已停止"
-
-        # 更新卡片的当前流程和频率。
-        card.update_data({
-            "title": card.title.text(),
-            "state": current_state,
-            "frequency": "--",
-        })
 
         # 显示相机连接结果。
         card.set_camera_status(status)
@@ -1617,7 +1595,7 @@ class RealtimePage(QWidget):
             self.refresh_selected_machine_detail()
 
     def update_cycle_closed(self, machine_id: str, session_id: str) -> None:
-        """关闭对应机器当前周期的皮带动画。
+        """关闭对应机器当前周期的皮带动画并恢复空闲显示。
 
         Args:
             machine_id: 机器编号。
@@ -1625,7 +1603,7 @@ class RealtimePage(QWidget):
 
         Returns:
             返回示例：
-                None  # 当前周期动画已停止，文字结果保持不变
+                None  # 动画已停止，流程和频率显示 --，OCR 结果保持不变
         """
         # 旧周期的关闭通知不影响新周期。
         measurement_state = self.measurement_states_by_machine_id.get(machine_id)
@@ -1634,13 +1612,22 @@ class RealtimePage(QWidget):
 
         # 将当前周期标记为停止。
         measurement_state["machine_running"] = False
-        if machine_id == self.selected_machine_id:
-            self.refresh_selected_machine_detail()
 
         # 收起当前卡片的皮带。
         card = self.cards_by_machine_id.get(machine_id)
         if card is not None:
             card.belt_animation.stop_machine()
+
+            # 将本轮流程和实时频率恢复为占位文字。
+            card.update_data({
+                "title": card.title.text(),
+                "state": "--",
+                "frequency": "--",
+            })
+
+        # 同步选中机器的详情。
+        if machine_id == self.selected_machine_id:
+            self.refresh_selected_machine_detail()
 
     def update_ocr_result(
         self,
@@ -1685,16 +1672,16 @@ class RealtimePage(QWidget):
 
         Returns:
             返回示例：
-                None  # 全部卡片动画停止，操作按钮已恢复
+                None  # 动画已停止，相机离线，流程和频率显示 --，按钮已恢复
         """
         # 标记全部周期停止，避免刷新后恢复子动画。
         for measurement_state in self.measurement_states_by_machine_id.values():
             measurement_state["machine_running"] = False
 
         # 更新全部卡片，保留具体机器的连接失败原因。
-        for machine_id in self.cards_by_machine_id:
+        for machine_id, card in self.cards_by_machine_id.items():
             # 停止当前机器的动画。
-            self.cards_by_machine_id[machine_id].belt_animation.stop_machine()
+            card.belt_animation.stop_machine()
 
             # 更新当前机器的连接结果。
             status, reason = self.connection_states.get(machine_id, ("未启动", ""))
@@ -1702,6 +1689,13 @@ class RealtimePage(QWidget):
                 status = "监测失败" if failure_message else "已停止"
                 reason = failure_message or "相机连接已释放"
             self.update_connection_state(machine_id, status, reason)
+
+            # 将本轮流程和实时频率恢复为占位文字。
+            card.update_data({
+                "title": card.title.text(),
+                "state": "--",
+                "frequency": "--",
+            })
 
         self.update_dashboard_summary()
         self.refresh_selected_machine_detail()
