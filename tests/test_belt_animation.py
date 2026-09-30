@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+from xml.etree import ElementTree
 
 import pytest
 
@@ -14,7 +15,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from src.controller.controller import AppController
-from ui.belt_animation import BeltAnimationWidget
+from ui.belt_animation import (
+    SCENE_VIEW_HEIGHT,
+    SCENE_VIEW_WIDTH,
+    SCENE_VIEW_X,
+    SCENE_VIEW_Y,
+    BeltAnimationWidget,
+    BeltVisualState,
+    render_belt_svg,
+)
 from ui.pages.realtime_page import MachineCard
 
 
@@ -59,6 +68,36 @@ def test_animation_control_interfaces(qt_application: QApplication) -> None:
     animation_widget.animation_timer.stop()
     animation_widget.extension_animation.stop()
     animation_widget.close()
+
+
+def test_mechanical_scene_uses_tightened_view_box() -> None:
+    """验证机械场景使用统一的收紧可视范围。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # SVG 的画布尺寸和 viewBox 与可视范围常量一致
+    """
+    source = render_belt_svg(BeltVisualState())
+    assert (
+        f'viewBox="{SCENE_VIEW_X} {SCENE_VIEW_Y} '
+        f'{SCENE_VIEW_WIDTH} {SCENE_VIEW_HEIGHT}"'
+    ) in source
+    assert f'width="{SCENE_VIEW_WIDTH}" height="{SCENE_VIEW_HEIGHT}"' in source
+
+    # 核对底座淡阴影的完整边界位于可视范围内。
+    root = ElementTree.fromstring(source)
+    shadow = root.find("{http://www.w3.org/2000/svg}ellipse[@fill='url(#shadow)']")
+    center_x = float(shadow.attrib["cx"])
+    center_y = float(shadow.attrib["cy"])
+    radius_x = float(shadow.attrib["rx"])
+    radius_y = float(shadow.attrib["ry"])
+    assert SCENE_VIEW_X < center_x - radius_x
+    assert SCENE_VIEW_Y < center_y - radius_y
+    assert SCENE_VIEW_X + SCENE_VIEW_WIDTH > center_x + radius_x
+    assert SCENE_VIEW_Y + SCENE_VIEW_HEIGHT > center_y + radius_y
 
 
 @pytest.mark.parametrize("widget_size", ((248, 125), (280, 125), (480, 175)))

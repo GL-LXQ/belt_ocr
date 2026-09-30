@@ -20,8 +20,11 @@ from PySide6.QtGui import QPainter
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-SCENE_WIDTH = 1000.0
-SCENE_HEIGHT = 480.0
+# 收紧机械场景的可视范围。
+SCENE_VIEW_X = 90.0
+SCENE_VIEW_Y = 46.0
+SCENE_VIEW_WIDTH = 844.0
+SCENE_VIEW_HEIGHT = 402.0
 Point = tuple[float, float]
 TEXT_FONT_FAMILY = (
     "Microsoft YaHei"
@@ -1204,8 +1207,10 @@ def render_belt_svg(state: BeltVisualState, detailed: bool = True) -> str:
     # 建立透明 SVG 画布和机械材质。
     drawing = SvgDrawing()
     drawing.append_markup(
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="480" '
-        f'viewBox="0 0 {SCENE_WIDTH} {SCENE_HEIGHT}">'
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="{SCENE_VIEW_WIDTH}" height="{SCENE_VIEW_HEIGHT}" '
+        f'viewBox="{SCENE_VIEW_X} {SCENE_VIEW_Y} '
+        f'{SCENE_VIEW_WIDTH} {SCENE_VIEW_HEIGHT}">'
     )
     drawing.append_markup(SVG_DEFS)
 
@@ -1269,7 +1274,6 @@ class BeltAnimationWidget(QWidget):
         self.capturing = False
         self.frequency_listening = False
         self.extension = 0.0
-        self.belt_offset = 0.0
         self.belt_travel = 0.0
         self.scan_progress = 0.0
         self.frequency_phase = 0.0
@@ -1428,7 +1432,6 @@ class BeltAnimationWidget(QWidget):
             return
 
         if self._machine_state == _MachineState.RUNNING:
-            self.belt_offset = (self.belt_offset + 2.8) % 80
             self.belt_travel += 2.8
 
         if self.capturing:
@@ -1466,9 +1469,9 @@ class BeltAnimationWidget(QWidget):
             self.rendered_visual_state = visual_state
 
         # 按可用宽高计算居中的等比例绘制区域。
-        scale = min(self.width() / SCENE_WIDTH, self.height() / SCENE_HEIGHT)
-        scene_width = SCENE_WIDTH * scale
-        scene_height = SCENE_HEIGHT * scale
+        scale = min(self.width() / SCENE_VIEW_WIDTH, self.height() / SCENE_VIEW_HEIGHT)
+        scene_width = SCENE_VIEW_WIDTH * scale
+        scene_height = SCENE_VIEW_HEIGHT * scale
         target = QRectF(
             (self.width() - scene_width) / 2,
             (self.height() - scene_height) / 2,
