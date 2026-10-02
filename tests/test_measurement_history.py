@@ -13,9 +13,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, QPoint, Qt
 from PySide6.QtGui import QColor, QDesktopServices, QImage
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel, QListWidget, QPushButton
 from qfluentwidgets import (
-    CalendarPicker,
     CheckBox,
     ComboBox,
     Flyout,
@@ -37,13 +37,11 @@ from src.service.measurement_record_service import (
 )
 from src.service.machine_service import MachineService
 from ui.main_window import MainWindow
+from ui.date_range_picker import DateRangePicker, InlineCalendarView
 from ui.pages.history_page import (
-    MACHINE_COLUMN,
-    TIME_COLUMN,
     HistoryPage,
     format_history_time,
 )
-from ui.theme import COLORS
 
 
 @pytest.fixture
@@ -444,7 +442,7 @@ def test_history_text_search_submits_and_preserves_conditions(
         page.refresh_history()
         page.next_page_button.click()
         assert page.current_page == 2
-        assert page.text_query_edit.placeholderText() == "输入皮带文字或片段"
+        assert page.text_query_edit.placeholderText() == "输入完整皮带文字或片段"
         assert page.text_match_mode_combo_box.currentData() == "contains"
         assert page.text_length_combo_box.currentData() is None
         query_records.reset_mock()
@@ -502,25 +500,51 @@ def test_history_text_search_submits_and_preserves_conditions(
         assert page.selected_start_date == selected_date
         assert page.selected_end_date == selected_date
 
-        # 清除按钮恢复文字控件和提交状态，保留其他筛选。
+        # 重置按钮清除全部筛选并恢复第一页。
         page.next_page_button.click()
-        page.clear_text_search_button.click()
+        query_records.reset_mock()
+        page.reset_filters_button.click()
         assert page.current_page == 1
         assert page.text_query_edit.text() == ""
         assert page.text_match_mode_combo_box.currentData() == "contains"
         assert page.text_length_combo_box.currentData() is None
         assert page.selected_text_query is None
-        query_records.assert_called_with(
-            "pending",
-            "1",
+        assert page.selected_machine_id is None
+        assert page.selected_start_date is None
+        assert page.selected_end_date is None
+        assert page.selected_review_status is None
+        assert page.status_filter.currentRouteKey() == "all"
+        assert page.machine_filter_button.text() == "全部机器  ▾"
+        assert page.time_filter_button.text() == "时间范围  ▾"
+        assert page.record_count_label.text() == "25 条"
+        query_records.assert_called_once_with(
+            None,
+            None,
             1,
             20,
-            start_date=selected_date,
-            end_date=selected_date,
+            start_date=None,
+            end_date=None,
             text_query=None,
             text_match_mode="contains",
             text_length=None,
         )
+
+        # 连续重置仍只查询一次，控件状态保持全部。
+        query_records.reset_mock()
+        page.reset_filters_button.click()
+        query_records.assert_called_once()
+        assert page.current_page == 1
+        assert page.status_filter.currentRouteKey() == "all"
+        assert page.record_count_label.text() == "25 条"
+
+        # 输入框的查询图标沿用相同的提交入口。
+        query_records.reset_mock()
+        page.text_query_edit.setText(" 文 字 ")
+        page.text_query_edit.actions()[0].trigger()
+        assert page.current_page == 1
+        assert page.selected_text_query == " 文 字 "
+        assert page.record_count_label.text() == "25 条"
+        query_records.assert_called_once()
     finally:
         page.detail_dialog.close()
         page.close()
@@ -1258,7 +1282,7 @@ def test_history_page_shows_filters_and_read_only_details(
         assert [
             page.table.horizontalHeaderItem(column).text()
             for column in range(6)
-        ] == ["机器 ▾", "时间 ▾", "OCR 结果摘要", "最终频率", "状态", "操作"]
+        ] == ["机器", "时间", "OCR 结果摘要", "最终频率", "状态", "操作"]
         assert page.table.item(0, 0).text() == "99"
         assert page.table.item(0, 1).text() == format_history_time(
             "2026-09-27T10:01:00+00:00"
@@ -1434,7 +1458,7 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         page.next_page_button.click()
         assert page.current_page == 2
 
-        # 应用日期后只查询一次第一页并更新表头提示。
+        # 应用日期后只查询一次第一页并更新按钮文字。
         list_measurement_records = Mock(wraps=controller.list_measurement_records)
         monkeypatch.setattr(
             controller, "list_measurement_records", list_measurement_records
@@ -1456,8 +1480,8 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         )
         assert page.record_count_label.text() == "25 条"
         assert page.table.rowCount() == 20
-        header_item = page.table.horizontalHeaderItem(TIME_COLUMN)
-        assert header_item.toolTip() == f"{selected_date} ～ {selected_date}"
+        assert page.time_filter_button.text() == f"{selected_date}  ▾"
+        assert page.time_filter_button.toolTip() == str(selected_date)
         displayed_times = [page.table.item(row, 1).text() for row in range(20)]
         assert displayed_times == sorted(displayed_times, reverse=True)
 
@@ -1473,7 +1497,7 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert page.selected_end_date is None
         assert page.current_page == 1
         assert page.record_count_label.text() == "25 条"
-        assert header_item.toolTip() == "点击筛选时间范围"
+        assert page.time_filter_button.text() == "时间范围  ▾"
         list_measurement_records.assert_called_once_with(
             None,
             None,
@@ -1997,12 +2021,12 @@ def test_main_window_refreshes_only_when_entering_history(
         window.deleteLater()
 
 
-def test_history_header_opens_filter_without_querying_or_sorting(
+def test_history_toolbar_opens_filter_without_querying_or_sorting(
     qt_application: QApplication,
     measurement_record_service: MeasurementRecordService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证机器和时间表头打开弹层，打开和关闭均不查询或排序。
+    """验证工具栏筛选打开弹层，打开和关闭均不查询或排序。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
@@ -2021,48 +2045,54 @@ def test_history_header_opens_filter_without_querying_or_sorting(
         # 检查页面筛选控件和表格排序状态。
         page.refresh_history()
         assert page.findChildren(ComboBox) == [
-            page.text_match_mode_combo_box,
             page.text_length_combo_box,
+            page.text_match_mode_combo_box,
         ]
-        assert MACHINE_COLUMN == 0
-        assert TIME_COLUMN == 1
         assert page.table.isSortingEnabled() is False
         header = page.table.horizontalHeader()
         assert not header.isSortIndicatorShown()
         query_records = Mock(wraps=controller.list_measurement_records)
         monkeypatch.setattr(controller, "list_measurement_records", query_records)
 
-        # 其他列没有动作，机器和时间列只建立各自的弹层。
-        for column in (2, 3, 4, 5):
+        # 表头不再打开筛选，工具栏按钮建立各自的弹层。
+        assert not header.sectionsClickable()
+        for column in range(6):
             header.sectionClicked.emit(column)
         make_flyout.assert_not_called()
-        for column, title in (
-            (MACHINE_COLUMN, "机器筛选"),
-            (TIME_COLUMN, "时间筛选"),
+        for button, title in (
+            (page.machine_filter_button, "机器筛选"),
+            (page.time_filter_button, "时间筛选"),
         ):
-            header.sectionClicked.emit(column)
+            button.click()
             view = make_flyout.call_args.args[0]
             assert view.titleLabel.text() == title
+            assert make_flyout.call_args.kwargs["target"] is button
             make_flyout.return_value.close()
             view.deleteLater()
         assert make_flyout.call_count == 2
         make_flyout.reset_mock()
 
         # 关闭未应用的弹层后，机器和时间条件仍保持默认值。
-        header.sectionClicked.emit(TIME_COLUMN)
+        page.time_filter_button.click()
         make_flyout.assert_called_once()
         query_records.assert_not_called()
         assert page.selected_machine_id is None
         assert page.selected_start_date is None
         assert page.selected_end_date is None
         make_flyout.return_value.close()
-        make_flyout.call_args.args[0].deleteLater()
+        view = make_flyout.call_args.args[0]
+        assert view.findChild(CheckBox) is None
+        date_range = view.findChild(DateRangePicker)
+        assert date_range.start_date == QDate.currentDate()
+        assert date_range.end_date == QDate.currentDate()
+        assert len(view.findChildren(InlineCalendarView)) == 1
+        view.deleteLater()
 
         # 已应用条件在再次打开和关闭时保持不变。
         selected_date = date(2026, 9, 27)
         page.apply_time_filter(selected_date, selected_date)
         query_records.reset_mock()
-        header.sectionClicked.emit(TIME_COLUMN)
+        page.time_filter_button.click()
         assert make_flyout.call_count == 2
         make_flyout.return_value.close()
         query_records.assert_not_called()
@@ -2072,16 +2102,15 @@ def test_history_header_opens_filter_without_querying_or_sorting(
 
         # 弹层恢复已应用的日期范围。
         view = make_flyout.call_args.args[0]
-        unlimited_checkbox = view.findChild(CheckBox)
-        date_edits = view.findChildren(CalendarPicker)
-        assert not unlimited_checkbox.isChecked()
-        assert [date_edit.getDate().toPython() for date_edit in date_edits] == [
-            selected_date, selected_date
-        ]
+        assert view.findChild(CheckBox) is None
+        date_range = view.findChild(DateRangePicker)
+        assert date_range.start_date.toPython() == selected_date
+        assert date_range.end_date.toPython() == selected_date
 
         # 修改临时日期不查询，确定后只应用一次当前范围。
         next_date = selected_date + timedelta(days=1)
-        date_edits[1].setDate(QDate(next_date))
+        date_range.select_endpoint("end")
+        date_range.update_selected_date(QDate(next_date))
         query_records.assert_not_called()
         assert page.selected_end_date == selected_date
         apply_button = next(
@@ -2102,22 +2131,24 @@ def test_history_header_opens_filter_without_querying_or_sorting(
             text_length=None,
         )
         make_flyout.return_value.close.assert_called_once()
+        assert page.time_filter_button.text() == f"{selected_date} ～ {next_date}  ▾"
         view.deleteLater()
         assert page.table.isSortingEnabled() is False
         assert not header.isSortIndicatorShown()
 
-        # 重置按钮直接清除已应用范围并关闭弹层。
-        header.sectionClicked.emit(TIME_COLUMN)
+        # 清除时间按钮直接清除已应用范围并关闭弹层。
+        page.time_filter_button.click()
         view = make_flyout.call_args.args[0]
-        reset_button = next(
+        clear_button = next(
             button for button in view.findChildren(QPushButton)
-            if button.text() == "重置"
+            if button.text() == "清除时间"
         )
         query_records.reset_mock()
         make_flyout.return_value.close.reset_mock()
-        reset_button.click()
+        clear_button.click()
         assert page.selected_start_date is None
         assert page.selected_end_date is None
+        assert page.time_filter_button.text() == "时间范围  ▾"
         query_records.assert_called_once_with(
             None,
             None,
@@ -2137,12 +2168,33 @@ def test_history_header_opens_filter_without_querying_or_sorting(
         page.deleteLater()
 
 
-def test_history_machine_flyout_applies_and_resets_filter(
+def click_calendar_item(scroll_view: QListWidget, selected_date: QDate) -> None:
+    """通过真实鼠标事件点击当前日历页中的日期项。
+
+    Args:
+        scroll_view: 年、月或日列表。
+        selected_date: 目标项保存的日期。
+
+    Returns:
+        返回示例：
+            None  # 目标项收到鼠标点击，Qt 已处理对应事件
+    """
+    item = next(
+        scroll_view.item(index) for index in range(scroll_view.count())
+        if scroll_view.item(index).data(Qt.ItemDataRole.UserRole) == selected_date
+    )
+    position = scroll_view.visualItemRect(item).center()
+    assert scroll_view.viewport().rect().contains(position)
+    QTest.mouseClick(scroll_view.viewport(), Qt.MouseButton.LeftButton, pos=position)
+    QApplication.processEvents()
+
+
+def test_history_inline_calendar_mouse_selection_preserves_popup_and_filters(
     qt_application: QApplication,
     measurement_record_service: MeasurementRecordService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证机器弹层的临时选择、确定、重置和表头状态。
+    """验证同层日历的鼠标选择、年月切换、应用和清除。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
@@ -2151,7 +2203,219 @@ def test_history_machine_flyout_applies_and_resets_filter(
 
     Returns:
         返回示例：
-            None  # 仅确定和重置查询一次记录，表头同步显示机器条件
+            None  # 日期选择始终保留单层弹窗，应用和清除各查询一次
+    """
+    controller = AppController(Mock(), measurement_record_service, Mock(), Path("config"))
+    page = HistoryPage(controller)
+    try:
+        # 先应用机器、状态、文字和日期组合条件。
+        page.refresh_history()
+        page.apply_machine_filter("2")
+        page.status_buttons["pending"].click()
+        page.text_query_edit.setText("待确认")
+        page.apply_text_search()
+        selected_date = date(2026, 9, 27)
+        page.apply_time_filter(selected_date, selected_date)
+        page.show()
+        qt_application.processEvents()
+        query_records = Mock(wraps=controller.list_measurement_records)
+        monkeypatch.setattr(controller, "list_measurement_records", query_records)
+
+        # 点击同一天和不同日期时，只有日期草稿发生变化。
+        QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
+        qt_application.processEvents()
+        flyout = qt_application.activePopupWidget()
+        date_range = flyout.view.findChild(DateRangePicker)
+        calendar = date_range.calendar
+        for endpoint_button, changed_date in (
+            (date_range.start_button, QDate(selected_date)),
+            (date_range.start_button, QDate(2026, 9, 28)),
+            (date_range.end_button, QDate(2026, 9, 28)),
+            (date_range.end_button, QDate(2026, 9, 25)),
+        ):
+            QTest.mouseClick(endpoint_button, Qt.MouseButton.LeftButton)
+            qt_application.processEvents()
+            click_calendar_item(calendar.dayView.scrollView, changed_date)
+            assert flyout.isVisible()
+            assert calendar.isVisible()
+            assert qt_application.activePopupWidget() is flyout
+            assert date_range.start_date == changed_date
+            assert date_range.end_date == changed_date
+        query_records.assert_not_called()
+        assert page.selected_start_date == selected_date
+        assert page.selected_end_date == selected_date
+
+        # 年月选择在同一日历内切换，不建立第二层弹窗。
+        for title_button, target_view in (
+            (calendar.dayView.titleButton, calendar.monthView),
+            (calendar.monthView.titleButton, calendar.yearView),
+        ):
+            QTest.mouseClick(title_button, Qt.MouseButton.LeftButton)
+            qt_application.processEvents()
+            assert calendar.stackedWidget.currentWidget() is target_view
+            assert qt_application.activePopupWidget() is flyout
+        click_calendar_item(calendar.yearView.scrollView, QDate(2025, 1, 1))
+        assert calendar.stackedWidget.currentWidget() is calendar.monthView
+        assert qt_application.activePopupWidget() is flyout
+        click_calendar_item(calendar.monthView.scrollView, QDate(2025, 3, 1))
+        assert calendar.stackedWidget.currentWidget() is calendar.dayView
+        assert qt_application.activePopupWidget() is flyout
+        click_calendar_item(calendar.dayView.scrollView, QDate(2025, 3, 18))
+        click_calendar_item(calendar.dayView.scrollView, QDate(2025, 3, 20))
+        assert date_range.start_date == QDate(2025, 3, 18)
+        assert date_range.end_date == QDate(2025, 3, 20)
+        assert flyout.isVisible()
+        assert [
+            widget for widget in qt_application.topLevelWidgets()
+            if widget.isVisible() and widget.windowType() == Qt.WindowType.Popup
+        ] == [flyout]
+        query_records.assert_not_called()
+
+        # 确定后应用草稿日期，保留其它筛选并只查询一次。
+        apply_button = next(
+            button for button in flyout.view.findChildren(QPushButton)
+            if button.text() == "确定"
+        )
+        QTest.mouseClick(apply_button, Qt.MouseButton.LeftButton)
+        qt_application.processEvents()
+        query_records.assert_called_once_with(
+            "pending",
+            "2",
+            1,
+            20,
+            start_date=date(2025, 3, 18),
+            end_date=date(2025, 3, 20),
+            text_query="待确认",
+            text_match_mode="contains",
+            text_length=None,
+        )
+        assert qt_application.activePopupWidget() is None
+
+        # 再打开恢复已应用日期，清除按钮只移除日期条件。
+        QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
+        qt_application.processEvents()
+        flyout = qt_application.activePopupWidget()
+        date_range = flyout.view.findChild(DateRangePicker)
+        assert date_range.start_date == QDate(2025, 3, 18)
+        assert date_range.end_date == QDate(2025, 3, 20)
+        clear_button = next(
+            button for button in flyout.view.findChildren(QPushButton)
+            if button.text() == "清除时间"
+        )
+        query_records.reset_mock()
+        QTest.mouseClick(clear_button, Qt.MouseButton.LeftButton)
+        qt_application.processEvents()
+        query_records.assert_called_once_with(
+            "pending",
+            "2",
+            1,
+            20,
+            start_date=None,
+            end_date=None,
+            text_query="待确认",
+            text_match_mode="contains",
+            text_length=None,
+        )
+        assert qt_application.activePopupWidget() is None
+        assert page.time_filter_button.text() == "时间范围  ▾"
+        assert page.selected_start_date is None
+        assert page.selected_end_date is None
+    finally:
+        popup = qt_application.activePopupWidget()
+        if popup is not None:
+            popup.close()
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+        qt_application.processEvents()
+
+
+@pytest.mark.parametrize("dismiss_action", ["cancel", "escape", "outside"])
+def test_history_inline_calendar_discards_unapplied_mouse_selection(
+    qt_application: QApplication,
+    measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+    dismiss_action: str,
+) -> None:
+    """验证取消、Esc 和点击外部均丢弃日期草稿。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_record_service: 已保存测试记录的测量记录服务。
+        monkeypatch: pytest 提供的对象替换工具。
+        dismiss_action: 关闭弹层的用户操作。
+
+    Returns:
+        返回示例：
+            None  # 未查询数据库，再次打开恢复已应用日期
+    """
+    controller = AppController(Mock(), measurement_record_service, Mock(), Path("config"))
+    page = HistoryPage(controller)
+    try:
+        # 打开已有日期范围并通过鼠标修改草稿。
+        page.apply_time_filter(date(2026, 9, 27), date(2026, 9, 28))
+        page.show()
+        qt_application.processEvents()
+        query_records = Mock(wraps=controller.list_measurement_records)
+        monkeypatch.setattr(controller, "list_measurement_records", query_records)
+        QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
+        qt_application.processEvents()
+        flyout = qt_application.activePopupWidget()
+        date_range = flyout.view.findChild(DateRangePicker)
+        click_calendar_item(date_range.calendar.dayView.scrollView, QDate(2026, 9, 29))
+        assert date_range.start_date == QDate(2026, 9, 29)
+        assert date_range.end_date == QDate(2026, 9, 29)
+
+        # 执行指定关闭操作，不直接调用关闭函数。
+        if dismiss_action == "cancel":
+            cancel_button = next(
+                button for button in flyout.view.findChildren(QPushButton)
+                if button.text() == "取消"
+            )
+            QTest.mouseClick(cancel_button, Qt.MouseButton.LeftButton)
+        elif dismiss_action == "escape":
+            QTest.keyClick(flyout, Qt.Key.Key_Escape)
+        else:
+            QTest.mouseClick(flyout, Qt.MouseButton.LeftButton, pos=QPoint(-10, -10))
+        qt_application.processEvents()
+        assert qt_application.activePopupWidget() is None
+        query_records.assert_not_called()
+        assert page.selected_start_date == date(2026, 9, 27)
+        assert page.selected_end_date == date(2026, 9, 28)
+
+        # 再次打开恢复已应用日期，不沿用被放弃的草稿。
+        QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
+        qt_application.processEvents()
+        flyout = qt_application.activePopupWidget()
+        date_range = flyout.view.findChild(DateRangePicker)
+        assert date_range.start_date == QDate(2026, 9, 27)
+        assert date_range.end_date == QDate(2026, 9, 28)
+        query_records.assert_not_called()
+    finally:
+        popup = qt_application.activePopupWidget()
+        if popup is not None:
+            popup.close()
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+        qt_application.processEvents()
+
+
+def test_history_machine_flyout_applies_and_resets_filter(
+    qt_application: QApplication,
+    measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证机器弹层的临时选择、确定、重置和按钮状态。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_record_service: 已保存测试记录的测量记录服务。
+        monkeypatch: pytest 提供的对象替换工具。
+
+    Returns:
+        返回示例：
+            None  # 仅确定和重置查询一次记录，按钮同步显示机器条件
     """
     controller = AppController(
         Mock(), measurement_record_service, Mock(), Path("config")
@@ -2160,18 +2424,17 @@ def test_history_machine_flyout_applies_and_resets_filter(
     make_flyout = Mock()
     monkeypatch.setattr(Flyout, "make", make_flyout)
     try:
-        # 默认机器表头显示筛选入口提示。
+        # 默认机器按钮显示全部机器。
         page.refresh_history()
-        header_item = page.table.horizontalHeaderItem(MACHINE_COLUMN)
-        assert header_item.text() == "机器 ▾"
-        assert header_item.toolTip() == "点击筛选机器"
+        assert page.machine_filter_button.text() == "全部机器  ▾"
+        assert page.machine_filter_button.toolTip() == "全部机器"
         query_records = Mock(wraps=controller.list_measurement_records)
         query_machines = Mock(wraps=controller.list_record_machines)
         monkeypatch.setattr(controller, "list_measurement_records", query_records)
         monkeypatch.setattr(controller, "list_record_machines", query_machines)
 
         # 打开弹层时复用机器列表并选中全部机器。
-        page.handle_header_clicked(MACHINE_COLUMN)
+        page.machine_filter_button.click()
         view = make_flyout.call_args.args[0]
         machine_combo_box = view.findChild(ComboBox)
         assert machine_combo_box.currentText() == "全部机器"
@@ -2189,12 +2452,12 @@ def test_history_machine_flyout_applies_and_resets_filter(
         query_records.assert_not_called()
         assert page.selected_machine_id is None
         view.deleteLater()
-        page.handle_header_clicked(MACHINE_COLUMN)
+        page.machine_filter_button.click()
         view = make_flyout.call_args.args[0]
         machine_combo_box = view.findChild(ComboBox)
         assert machine_combo_box.currentData() is None
 
-        # 确定机器条件后只查询一次第一页并更新表头提示。
+        # 确定机器条件后只查询一次第一页并更新按钮文字。
         machine_combo_box.setCurrentIndex(machine_combo_box.findData("2"))
         query_records.assert_not_called()
         apply_button = next(
@@ -2217,13 +2480,13 @@ def test_history_machine_flyout_applies_and_resets_filter(
         make_flyout.return_value.close.assert_called_once()
         assert page.selected_machine_id == "2"
         assert page.table.rowCount() == 1
-        assert header_item.text() == "机器 ▾"
-        assert header_item.toolTip() == "二号皮带"
+        assert page.machine_filter_button.text() == "二号皮带  ▾"
+        assert page.machine_filter_button.toolTip() == "二号皮带"
         view.deleteLater()
 
         # 再次打开时定位到已应用机器，临时修改不查询记录。
         query_records.reset_mock()
-        page.handle_header_clicked(MACHINE_COLUMN)
+        page.machine_filter_button.click()
         view = make_flyout.call_args.args[0]
         machine_combo_box = view.findChild(ComboBox)
         assert machine_combo_box.currentData() == "2"
@@ -2253,7 +2516,7 @@ def test_history_machine_flyout_applies_and_resets_filter(
         query_machines.assert_not_called()
         assert page.selected_machine_id is None
         assert page.table.rowCount() == 4
-        assert header_item.toolTip() == "点击筛选机器"
+        assert page.machine_filter_button.toolTip() == "全部机器"
         assert page.table.isSortingEnabled() is False
         assert not page.table.horizontalHeader().isSortIndicatorShown()
         view.deleteLater()
@@ -2304,7 +2567,7 @@ def test_history_page_resets_machine_filter_when_machine_disappears(
         monkeypatch.setattr(controller, "list_measurement_records", query_records)
         page.refresh_history()
 
-        # 清除失效条件后读取全部机器并恢复默认表头。
+        # 清除失效条件后读取全部机器并恢复按钮文字。
         assert page.record_machines == remaining_machines
         assert page.selected_machine_id is None
         assert page.current_page == 1
@@ -2320,9 +2583,8 @@ def test_history_page_resets_machine_filter_when_machine_disappears(
             text_match_mode="contains",
             text_length=None,
         )
-        header_item = page.table.horizontalHeaderItem(MACHINE_COLUMN)
-        assert header_item.text() == "机器 ▾"
-        assert header_item.toolTip() == "点击筛选机器"
+        assert page.machine_filter_button.text() == "全部机器  ▾"
+        assert page.machine_filter_button.toolTip() == "全部机器"
     finally:
         page.detail_dialog.close()
         page.close()
@@ -2360,8 +2622,8 @@ def test_history_page_visual_layout_and_status_tones(
         filter_card = page.findChild(SimpleCardWidget, "historyFilterCard")
         assert filter_card.layout().count() == 2
         assert filter_card.findChildren(ComboBox) == [
-            page.text_match_mode_combo_box,
             page.text_length_combo_box,
+            page.text_match_mode_combo_box,
         ]
 
         # 核对待复核列表和详情的状态样式标识。
@@ -2391,100 +2653,6 @@ def test_history_page_visual_layout_and_status_tones(
             "historyStatusBadge",
         )
         assert normal_badge.property("tone") == "normal"
-    finally:
-        page.detail_dialog.close()
-        page.close()
-        page.deleteLater()
-
-
-def test_history_page_visual_filter_header_colors(
-    qt_application: QApplication,
-    measurement_record_service: MeasurementRecordService,
-) -> None:
-    """单独验证机器和时间筛选表头的颜色。
-
-    Args:
-        qt_application: 测试期间保持存活的 Qt 应用。
-        measurement_record_service: 已保存测试记录的测量记录服务。
-
-    Returns:
-        返回示例：
-            None  # 已应用和已清除筛选条件时的表头颜色已核对
-    """
-    controller = AppController(
-        Mock(),
-        measurement_record_service,
-        Mock(),
-        Path("config"),
-    )
-    page = HistoryPage(controller)
-    try:
-        # 核对机器筛选应用和清除时的表头颜色。
-        page.refresh_history()
-        machine_header = page.table.horizontalHeaderItem(MACHINE_COLUMN)
-        assert machine_header.data(Qt.ItemDataRole.ForegroundRole) is None
-        page.apply_machine_filter("2")
-        assert machine_header.foreground().color() == QColor(COLORS["blue"])
-        page.apply_machine_filter(None)
-        assert machine_header.data(Qt.ItemDataRole.ForegroundRole) is None
-
-        # 核对时间筛选应用和清除时的表头颜色。
-        time_header = page.table.horizontalHeaderItem(TIME_COLUMN)
-        selected_date = date(2026, 9, 27)
-        page.apply_time_filter(selected_date, selected_date)
-        assert time_header.foreground().color() == QColor(COLORS["blue"])
-        page.apply_time_filter(None, None)
-        assert time_header.data(Qt.ItemDataRole.ForegroundRole) is None
-    finally:
-        page.detail_dialog.close()
-        page.close()
-        page.deleteLater()
-
-
-def test_history_page_visual_resets_disappeared_machine_header_color(
-    qt_application: QApplication,
-    measurement_record_service: MeasurementRecordService,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """单独验证机器消失后恢复默认表头颜色。
-
-    Args:
-        qt_application: 测试期间保持存活的 Qt 应用。
-        measurement_record_service: 已保存测试记录的测量记录服务。
-        monkeypatch: pytest 提供的对象替换工具。
-
-    Returns:
-        返回示例：
-            None  # 失效机器筛选清除后的表头颜色已核对
-    """
-    controller = AppController(
-        Mock(),
-        measurement_record_service,
-        Mock(),
-        Path("config"),
-    )
-    page = HistoryPage(controller)
-    try:
-        # 应用当前存在的机器筛选。
-        page.refresh_history()
-        page.apply_machine_filter("2")
-
-        # 从下一次机器列表读取结果中移除所选机器。
-        remaining_machines = [
-            machine
-            for machine in page.record_machines
-            if machine["machine_id"] != "2"
-        ]
-        monkeypatch.setattr(
-            controller,
-            "list_record_machines",
-            Mock(return_value=Result.ok({"machines": remaining_machines})),
-        )
-
-        # 核对刷新后的默认表头颜色。
-        page.refresh_history()
-        header_item = page.table.horizontalHeaderItem(MACHINE_COLUMN)
-        assert header_item.data(Qt.ItemDataRole.ForegroundRole) is None
     finally:
         page.detail_dialog.close()
         page.close()
@@ -2538,50 +2706,3 @@ def test_main_window_visual_history_cell_positions(
     finally:
         window.close()
         window.deleteLater()
-
-
-def test_history_header_visual_flyout_positions(
-    qt_application: QApplication,
-    measurement_record_service: MeasurementRecordService,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """单独验证机器和时间筛选弹层的表头定位。
-
-    Args:
-        qt_application: 测试期间保持存活的 Qt 应用。
-        measurement_record_service: 已保存测试记录的测量记录服务。
-        monkeypatch: pytest 提供的对象替换工具。
-
-    Returns:
-        返回示例：
-            None  # 表头移动后的筛选弹层定位已核对
-    """
-    controller = AppController(
-        Mock(),
-        measurement_record_service,
-        Mock(),
-        Path("config"),
-    )
-    page = HistoryPage(controller)
-    make_flyout = Mock()
-    monkeypatch.setattr(Flyout, "make", make_flyout)
-    try:
-        # 移动机器表头并逐一打开筛选弹层。
-        page.refresh_history()
-        header = page.table.horizontalHeader()
-        header.moveSection(MACHINE_COLUMN, 2)
-        for column in (MACHINE_COLUMN, TIME_COLUMN):
-            header.sectionClicked.emit(column)
-            view = make_flyout.call_args.args[0]
-
-            # 核对弹层目标点位于对应表头下方。
-            target_position = header.viewport().mapToGlobal(
-                QPoint(header.sectionViewportPosition(column), header.height())
-            )
-            assert make_flyout.call_args.kwargs["target"] == target_position
-            make_flyout.return_value.close()
-            view.deleteLater()
-    finally:
-        page.detail_dialog.close()
-        page.close()
-        page.deleteLater()
