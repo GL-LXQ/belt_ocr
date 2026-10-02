@@ -137,13 +137,14 @@ GUI 启动时先在运行库确保 `abnormal_events` 表存在。异常事件页
 
 开发联调可从仓库根目录运行 `python scripts/simulate_measurement.py normal` 或 `python scripts/simulate_measurement.py review`。正常场景读取 `statistics/imgs` 的 JPG，待复核场景取 `statistics/test_images_without_results` 中按文件名排序的首张 BMP，统一解码为 Mono8 相机帧。脚本通过现有 Camera、TextRecognizer、MachineRuntime 的事件队列完成真实 OCR、50.0 Hz 频率结算和 CLOSE，再由 MachineRuntime 将证据 JPG 与测量结果写入正式配置的业务库；历史记录页按原有查询和图片展示流程查看新记录。模拟只替代相机取流、图片编码和现场输入，不启动真实 MVS 或 Modbus。
 
-### 手动备份业务记录与证据
+### 手动备份与恢复业务记录和证据
 
 从仓库根目录执行 `python scripts/backup_measurements.py --destination D:\BeltBackups\20261002-01`，脚本沿用 `config/config.yaml` 的路径规则，以只读连接生成业务库一致快照（包含机器、测量与人工复核信息），再复制快照引用目录中的全部 JPG/JPEG；不是只复制界面预览的四张图片。快照通过 `integrity_check`，文件大小、SHA-256、记录数量和图片映射写入 `manifest.json`，全部校验成功后才将 `.partial` 暂存目录发布为正式备份。源库和源图片不修改、不清空，已有目标不覆盖；失败时保留暂存目录供检查，重试请使用新的目标名称。SQLite 快照默认最多等待 10 秒，可用 `--timeout-seconds` 调整；备份不依赖相机连接，也不会启动监测。
 
 - 独立检查：`python scripts/backup_measurements.py --verify D:\BeltBackups\20261002-01`。
 - 指定来源：使用 `--config-dir` 指定包含 `config.yaml` 的目录，或同时用 `--database` 和 `--evidence-root` 覆盖源路径；命令行相对路径相对当前工作目录，配置内相对路径仍相对配置目录。
-- 恢复演练：先复制备份到新位置并运行 `--verify`；快照中的图片路径仍是原绝对路径，需按清单 `records` 中的 `session_id`、`backup_directory`，仅更新恢复副本的 `measurement_records.evidence_directory` 为新备份根目录下的对应路径，再让独立测试配置指向恢复副本。不要覆盖在用库；当前没有自动恢复命令。
+- 独立恢复：`python scripts/backup_measurements.py --restore D:\BeltBackups\20261002-01 D:\BeltRestore\20261002-01`。目标必须尚不存在，不能位于备份或原证据目录内部；已有目录（即使为空）、文件和链接均不覆盖。恢复无需原数据库、原图片路径或生产配置，也不会启动监测。
+- 恢复数据流：先校验备份，再排他创建新目录并复制清单内的业务库和全部图片；副本通过校验后，仅按 Session 更新副本的 `measurement_records.evidence_directory` 为新目标中的绝对路径，机器配置、文字、频率明细、时间和复核字段原样保留。重新核对数据库、图片和路径映射后才写入新的 `manifest.json`，该目录可继续用 `--verify` 检查；原库和原备份不变，生产配置不自动切换。失败时保留已产生的不完整目标并报告路径，请检查后换新目标重试；不要把失败目录用于查询。恢复成功后再由操作者让独立测试配置指向该目录的 `measurements.sqlite3`，如需再次迁移，请重新恢复到另一个新目录。
 - 范围限制：当前表只保存证据目录，无法判断备份前是否已缺少其中某张图片；目录缺失、没有 JPG、复制中内容变化或备份后文件损坏都会失败。本工具不备份独立异常运行库、模型和程序配置，不执行月度切换、分表、定时任务或历史清理。
 
 ## 三、项目结构

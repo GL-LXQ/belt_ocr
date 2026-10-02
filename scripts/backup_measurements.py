@@ -1,4 +1,4 @@
-"""显式备份业务库与全部关联证据，不修改或清理源数据。"""
+"""显式备份、校验或恢复业务库与关联证据，不修改或清理源数据。"""
 
 import argparse
 import hashlib
@@ -11,7 +11,7 @@ import sys
 import time
 from contextlib import closing
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 PROJECT_DIRECTORY = Path(__file__).resolve().parents[1]
@@ -58,7 +58,7 @@ def read_snapshot_records(database_path: Path) -> tuple[list[tuple[str, str]], i
             )
     """
     # 校验整个 SQLite 文件，再读取备份需要的关联信息。
-    with closing(sqlite3.connect(database_path.as_uri() + "?mode=ro", uri=True)) as connection:
+    with closing(sqlite3.connect(database_path.as_uri() + "?mode=ro&immutable=1", uri=True)) as connection:
         if connection.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             raise ValueError("业务库完整性检查失败。")
         records = connection.execute(
@@ -80,21 +80,81 @@ def resolve_backup_path(backup_directory: Path, relative_path: str) -> Path:
             Path("/backup/evidence/20261002/1/session")  # 已验证存在的备份内部路径
     """
     # 拒绝绝对路径、上级跳转和非跨平台路径。
+    if not isinstance(relative_path, str) or not relative_path:
+        raise ValueError("备份清单路径必须是非空字符串。")
     portable_path = PurePosixPath(relative_path)
-    if portable_path.is_absolute() or ".." in portable_path.parts or "\\" in relative_path or ":" in relative_path:
+    if (
+        portable_path.is_absolute() or ".." in portable_path.parts or "\\" in relative_path or ":" in relative_path
+        or relative_path != portable_path.as_posix() or relative_path == "."
+    ):
         raise ValueError(f"备份清单路径不合法：{relative_path}")
-    candidate = backup_directory / relative_path
+
+    # 逐级拒绝符号链接，再检查实际路径归属。
+    candidate = backup_directory
+    for component in portable_path.parts:
+        candidate = candidate / component
+        if candidate.is_symlink():
+            raise ValueError(f"备份清单路径使用符号链接：{relative_path}")
     resolved = candidate.resolve(strict=True)
-    if resolved == backup_directory or not resolved.is_relative_to(backup_directory) or candidate.is_symlink():
+    if resolved == backup_directory or not resolved.is_relative_to(backup_directory):
         raise ValueError(f"备份清单路径超出目录或使用符号链接：{relative_path}")
     return resolved
 
 
-def verify_backup(backup_directory: Path) -> dict:
+def validate_backup_manifest(manifest: dict) -> None:
+    """检查外部备份清单的字段类型与基础格式。
+
+    Args:
+        manifest: 从 JSON 读取或恢复流程更新的清单。
+
+    Returns:
+        返回示例：
+            None  # 字段类型有效，内容与实际文件由后续校验核对
+    """
+    # 检查版本、来源和汇总字段。
+    if not isinstance(manifest, dict) or type(manifest.get("format_version")) is not int:
+        raise ValueError("备份清单格式不合法。")
+    if manifest["format_version"] != 1:
+        raise ValueError("不支持的备份清单版本。")
+    for name in ("created_at_utc", "source_database", "source_evidence_root"):
+        if not isinstance(manifest.get(name), str) or not manifest[name]:
+            raise ValueError(f"备份清单字段不合法：{name}")
+    for name in ("source_database", "source_evidence_root"):
+        if not Path(manifest[name]).is_absolute() and not PureWindowsPath(manifest[name]).is_absolute():
+            raise ValueError(f"备份清单来源必须是绝对路径：{name}")
+    for name in ("measurement_count", "machine_count", "image_count"):
+        if type(manifest.get(name)) is not int or manifest[name] < 0:
+            raise ValueError(f"备份清单数量不合法：{name}")
+
+    # 检查每个文件的路径、大小和 SHA-256 字段。
+    if not isinstance(manifest.get("files"), list) or not isinstance(manifest.get("records"), list):
+        raise ValueError("备份清单的文件与记录必须是列表。")
+    for item in manifest["files"]:
+        if not isinstance(item, dict) or set(item) != {"path", "size", "sha256"}:
+            raise ValueError("备份文件字段不合法。")
+        if not isinstance(item["path"], str) or type(item["size"]) is not int or item["size"] < 0:
+            raise ValueError("备份文件路径或大小不合法。")
+        digest = item["sha256"]
+        if not isinstance(digest, str) or len(digest) != 64 or any(value not in "0123456789abcdef" for value in digest):
+            raise ValueError("备份文件 SHA-256 不合法。")
+
+    # 检查每条记录的标识和跨平台原路径。
+    for item in manifest["records"]:
+        if not isinstance(item, dict) or set(item) != {"session_id", "source_directory", "backup_directory"}:
+            raise ValueError("备份记录字段不合法。")
+        if any(not isinstance(value, str) or not value for value in item.values()):
+            raise ValueError("备份记录字段必须是非空字符串。")
+        source_directory = item["source_directory"]
+        if not Path(source_directory).is_absolute() and not PureWindowsPath(source_directory).is_absolute():
+            raise ValueError("备份记录的原证据目录必须是绝对路径。")
+
+
+def verify_backup(backup_directory: Path, *, manifest: dict | None = None) -> dict:
     """核对备份清单、文件摘要、数据库完整性和证据路径映射。
 
     Args:
         backup_directory: 已发布备份或本次暂存目录。
+        manifest: 恢复期间尚未写入的清单；None 表示读取正式清单。
 
     Returns:
         返回示例：
@@ -106,10 +166,14 @@ def verify_backup(backup_directory: Path) -> dict:
     """
     # 读取清单格式与文件列表，不修改备份文件。
     backup_directory = backup_directory.resolve(strict=True)
-    manifest_path = resolve_backup_path(backup_directory, "manifest.json")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest["format_version"] != 1:
-        raise ValueError("不支持的备份清单版本。")
+    manifest_files = set()
+    if manifest is None:
+        manifest_path = resolve_backup_path(backup_directory, "manifest.json")
+        if not manifest_path.is_file():
+            raise ValueError("备份清单不是普通文件。")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_files.add("manifest.json")
+    validate_backup_manifest(manifest)
     files = manifest["files"]
     expected_paths = {item["path"] for item in files}
     if len(expected_paths) != len(files) or "measurements.sqlite3" not in expected_paths:
@@ -118,6 +182,8 @@ def verify_backup(backup_directory: Path) -> dict:
     # 逐文件核对大小与摘要，并拒绝未登记的文件或符号链接。
     for item in files:
         file_path = resolve_backup_path(backup_directory, item["path"])
+        if not file_path.is_file():
+            raise ValueError(f"备份内容不是普通文件：{item['path']}")
         if describe_file(file_path, backup_directory) != item:
             raise ValueError(f"备份文件校验失败：{item['path']}")
     actual_paths = set()
@@ -126,7 +192,9 @@ def verify_backup(backup_directory: Path) -> dict:
             raise ValueError(f"备份中不允许符号链接：{file_path}")
         if file_path.is_file():
             actual_paths.add(file_path.relative_to(backup_directory).as_posix())
-    if actual_paths != expected_paths | {"manifest.json"}:
+        elif not file_path.is_dir():
+            raise ValueError(f"备份中存在非普通文件：{file_path}")
+    if actual_paths != expected_paths | manifest_files:
         raise ValueError("备份文件数量与清单不一致。")
 
     # 核对数据库记录和路径映射，确保每条记录都有完整证据目录。
@@ -137,6 +205,12 @@ def verify_backup(backup_directory: Path) -> dict:
     image_paths = set()
     for item in mappings:
         evidence_directory = resolve_backup_path(backup_directory, item["backup_directory"])
+        relative_directory = PurePosixPath(item["backup_directory"])
+        if (
+            len(relative_directory.parts) < 2 or relative_directory.parts[0] != "evidence"
+            or not evidence_directory.is_dir()
+        ):
+            raise ValueError(f"备份证据目录不合法：{item['session_id']}")
         images = [
             path for path in evidence_directory.iterdir()
             if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg"}
@@ -156,6 +230,103 @@ def verify_backup(backup_directory: Path) -> dict:
     if any(manifest[name] != value for name, value in counts.items()):
         raise ValueError("备份数量与清单不一致。")
     return counts
+
+
+def restore_backup(backup_directory: Path, destination: Path) -> Path:
+    """在全新目录恢复独立业务库和证据，失败时保留未完成内容。
+
+    Args:
+        backup_directory: 已有且可通过校验的备份目录。
+        destination: 操作者指定的全新目录，不允许已存在或位于备份及原证据目录内部。
+
+    Returns:
+        返回示例：
+            Path("/recovered/20261002")  # 记录路径已重映射且完整校验通过的恢复目录
+    """
+    # 完整校验备份，再读取恢复所需的文件和记录映射。
+    backup_directory = backup_directory.resolve(strict=True)
+    verify_backup(backup_directory)
+    manifest = json.loads((backup_directory / "manifest.json").read_text(encoding="utf-8"))
+    validate_backup_manifest(manifest)
+
+    # 拒绝已有目标以及会写入备份或原证据树的目标。
+    destination = destination.absolute()
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"恢复目标已存在：{destination}")
+    destination = destination.resolve()
+    source_evidence_root = Path(manifest["source_evidence_root"])
+    if destination.is_relative_to(backup_directory):
+        raise ValueError("恢复目标不能位于备份目录内部。")
+    if source_evidence_root.is_absolute() and destination.is_relative_to(source_evidence_root.resolve()):
+        raise ValueError("恢复目标不能位于原证据目录内部。")
+    destination.mkdir(parents=True, exist_ok=False)
+
+    # 仅复制清单登记的文件，使用排他创建并同步写盘。
+    for item in manifest["files"]:
+        source_path = resolve_backup_path(backup_directory, item["path"])
+        if not source_path.is_file():
+            raise ValueError(f"备份内容不是普通文件：{item['path']}")
+        target_path = destination / item["path"]
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if target_path.parent != destination:
+            resolve_backup_path(destination, target_path.parent.relative_to(destination).as_posix())
+        with source_path.open("rb") as source_file, target_path.open("xb") as target_file:
+            shutil.copyfileobj(source_file, target_file)
+            target_file.flush()
+            os.fsync(target_file.fileno())
+    verify_backup(destination, manifest=manifest)
+
+    # 限制恢复事务只能更新证据路径，拒绝触发器修改其他字段。
+    def authorize_path_update(action: int, table: str, column: str, database: str, trigger: str) -> int:
+        """限制恢复连接中的数据库写入字段。
+
+        Args:
+            action: SQLite 授权操作编号。
+            table: 本次操作涉及的表名。
+            column: 本次操作涉及的列名。
+            database: 本次操作涉及的数据库名。
+            trigger: 触发本次操作的触发器或视图名称。
+
+        Returns:
+            返回示例：
+                sqlite3.SQLITE_OK  # 允许读取、事务控制或证据路径更新
+                sqlite3.SQLITE_DENY  # 拒绝其他字段写入或记录增删
+        """
+        if action in {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_DELETE}:
+            return sqlite3.SQLITE_DENY
+        if action == sqlite3.SQLITE_UPDATE and (table != "measurement_records" or column != "evidence_directory"):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    # 仅在复制库内按 Session 重映射路径，其他业务字段保持原值。
+    database_path = destination / "measurements.sqlite3"
+    with closing(sqlite3.connect(database_path.as_uri() + "?mode=rw", uri=True)) as connection:
+        connection.execute("PRAGMA journal_mode=DELETE")
+        connection.set_authorizer(authorize_path_update)
+        with connection:
+            for item in manifest["records"]:
+                evidence_directory = str(destination / item["backup_directory"])
+                connection.execute(
+                    "UPDATE measurement_records SET evidence_directory=? WHERE session_id=?",
+                    (evidence_directory, item["session_id"]),
+                )
+                item["source_directory"] = evidence_directory
+
+    # 更新恢复副本的清单并再次核对全部内容。
+    manifest["created_at_utc"] = datetime.now(timezone.utc).isoformat()
+    manifest["source_database"] = str(database_path)
+    manifest["source_evidence_root"] = str(destination / "evidence")
+    for item in manifest["files"]:
+        if item["path"] == "measurements.sqlite3":
+            item.update(describe_file(database_path, destination))
+    verify_backup(destination, manifest=manifest)
+
+    # 所有内容通过校验后才排他写入正式清单，不覆盖已有文件。
+    with (destination / "manifest.json").open("x", encoding="utf-8") as manifest_file:
+        json.dump(manifest, manifest_file, ensure_ascii=False, indent=2)
+        manifest_file.flush()
+        os.fsync(manifest_file.fileno())
+    return destination
 
 
 def create_backup(
@@ -290,31 +461,36 @@ def create_backup(
 
 
 def main(arguments: list[str] | None = None) -> int:
-    """解析显式备份或校验命令并输出结果。
+    """解析显式备份、校验或恢复命令并输出结果。
 
     Args:
         arguments: 命令参数，None 表示使用进程命令行。
 
     Returns:
         返回示例：
-            0  # 备份或校验成功
+            0  # 备份、校验或恢复成功
             1  # 操作失败，未修改源数据
     """
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--destination", type=Path, help="新备份目录，不允许覆盖")
     actions.add_argument("--verify", type=Path, help="仅检查一个已有备份")
+    actions.add_argument("--restore", type=Path, nargs=2, metavar=("BACKUP", "NEW_DIRECTORY"), help="恢复到全新目录")
     parser.add_argument("--config-dir", type=Path, default=PROJECT_DIRECTORY / "config", help="现有配置目录")
     parser.add_argument("--database", type=Path, help="显式覆盖业务库路径，相对当前工作目录")
     parser.add_argument("--evidence-root", type=Path, help="显式覆盖证据根目录，相对当前工作目录")
     parser.add_argument("--timeout-seconds", type=float, default=10.0, help="SQLite 快照最大等待秒数")
     options = parser.parse_args(arguments)
 
-    # 校验操作只读取备份；创建操作沿用现有配置目录的路径解析规则。
+    # 校验和恢复不读取生产配置；创建备份沿用现有配置路径规则。
     try:
         if options.verify:
             counts = verify_backup(options.verify)
             print(f"备份校验通过：{counts}")
+            return 0
+        if options.restore:
+            destination = restore_backup(*options.restore)
+            print(f"恢复完成：{destination}；生产配置未切换。")
             return 0
         settings = {}
         if options.database is None or options.evidence_root is None:
@@ -330,7 +506,14 @@ def main(arguments: list[str] | None = None) -> int:
         print(f"备份完成：{destination}")
         return 0
     except (OSError, ValueError, sqlite3.Error, KeyError, TypeError) as error:
-        print(f"备份失败：{error}；已产生的 .partial 目录保留，请检查后使用新目标重试。", file=sys.stderr)
+        if options.restore:
+            print(
+                f"恢复失败：{error}；本次恢复未完成。目标：{options.restore[1].absolute()}；"
+                "不会自动删除任何内容，请检查后使用新目标重试。",
+                file=sys.stderr,
+            )
+        else:
+            print(f"备份失败：{error}；已产生的 .partial 目录保留，请检查后使用新目标重试。", file=sys.stderr)
         return 1
 
 
