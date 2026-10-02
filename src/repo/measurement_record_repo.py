@@ -115,19 +115,127 @@ class MeasurementRecordRepo:
         # 读取测量结果和对应机器名称。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
             connection.row_factory = sqlite3.Row
-            rows = connection.execute(
-                "SELECT record.session_id, record.machine_id, "
-                "COALESCE(machine.machine_name, record.machine_id) AS machine_name, "
-                "record.finish_time, record.recognized_lines, "
-                "record.final_frequency_hz, record.needs_review, "
-                "record.reviewed_at, record.reviewed_lines "
-                "FROM measurement_records AS record "
-                "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id"
-                + where_clause
-                + " ORDER BY record.finish_time DESC, record.session_id DESC"
-                + " LIMIT ? OFFSET ?",
-                (*parameters, limit, offset),
-            ).fetchall()
+            return self._read_record_rows(connection, where_clause, parameters, limit, offset)
+
+    def get_record_page(
+        self,
+        review_status: str | None = None,
+        machine_id: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        start_finish_time: str | None = None,
+        end_finish_time: str | None = None,
+        *,
+        text_query: str | None = None,
+        text_match_mode: str = "contains",
+        text_length: int | None = None,
+    ) -> dict:
+        """在同一只读快照中统计并读取当前页测量记录。
+
+        Args:
+            review_status: None 表示全部，normal、pending、reviewed 表示查询状态。
+            machine_id: None 表示全部机器，否则筛选指定机器。
+            limit: 本页最多读取的记录数。
+            offset: 跳过的记录数。
+            start_finish_time: 可选的 UTC 结束时间下界。
+            end_finish_time: 可选的 UTC 结束时间排他上界。
+            text_query: 已标准化的查询文字，None 表示不筛选文字。
+            text_match_mode: contains 表示字面包含，exact 表示整行相等。
+            text_length: 被查询行的完整长度，None 表示全部长度。
+
+        Returns:
+            返回示例：
+                {
+                    "records": [  # 当前页测量记录
+                        {
+                            "session_id": "session-1",  # 测量周期编号
+                            "machine_id": "1",  # 机器编号
+                            "machine_name": "皮带机 1",  # 机器名称或编号
+                            "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
+                            "recognized_lines": '["ABC"]',  # 正式识别文字 JSON
+                            "final_frequency_hz": 50.0,  # 最终频率
+                            "needs_review": 0,  # 是否需要人工复核
+                            "reviewed_at": None,  # 人工复核时间
+                            "reviewed_lines": None,  # 人工修改文字 JSON
+                        },
+                    ],
+                    "total": 1,  # 同一快照中符合筛选条件的记录总数
+                }
+        """
+        # 为统计和当前页生成同一组筛选条件。
+        where_clause, parameters = self._build_record_filters(
+            review_status,
+            machine_id,
+            start_finish_time,
+            end_finish_time,
+            text_query,
+            text_match_mode,
+            text_length,
+        )
+
+        # 显式开启读事务，保持两次查询使用同一快照。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection, connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("BEGIN")
+            total = connection.execute(
+                "SELECT COUNT(*) FROM measurement_records AS record" + where_clause,
+                parameters,
+            ).fetchone()[0]
+
+            # 读取同一快照下的本页记录后释放事务和连接。
+            records = self._read_record_rows(connection, where_clause, parameters, limit, offset)
+        return {
+            "records": records,
+            "total": total,
+        }
+
+    def _read_record_rows(
+        self,
+        connection: sqlite3.Connection,
+        where_clause: str,
+        parameters: list[str | int],
+        limit: int,
+        offset: int,
+    ) -> list[dict]:
+        """使用现有行字典连接读取测量记录及机器名称。
+
+        Args:
+            connection: 已设置 sqlite3.Row 的数据库连接。
+            where_clause: 列表和统计共用的 WHERE 条件。
+            parameters: 筛选条件对应的绑定参数。
+            limit: 本页最多读取的记录数。
+            offset: 跳过的记录数。
+
+        Returns:
+            返回示例：
+                [{
+                    "session_id": "session-1",  # 测量周期编号
+                    "machine_id": "1",  # 机器编号
+                    "machine_name": "皮带机 1",  # 机器名称或编号
+                    "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
+                    "recognized_lines": '["ABC"]',  # 正式识别文字 JSON
+                    "final_frequency_hz": 50.0,  # 最终频率
+                    "needs_review": 0,  # 是否需要人工复核
+                    "reviewed_at": None,  # 人工复核时间
+                    "reviewed_lines": None,  # 人工修改文字 JSON
+                }]
+        """
+        # 读取当前筛选条件下按时间与周期编号倒序排列的记录。
+        rows = connection.execute(
+            "SELECT record.session_id, record.machine_id, "
+            "COALESCE(machine.machine_name, record.machine_id) AS machine_name, "
+            "record.finish_time, record.recognized_lines, "
+            "record.final_frequency_hz, record.needs_review, "
+            "record.reviewed_at, record.reviewed_lines "
+            "FROM measurement_records AS record "
+            "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id"
+            + where_clause
+            + " ORDER BY record.finish_time DESC, record.session_id DESC"
+            + " LIMIT ? OFFSET ?",
+            (*parameters, limit, offset),
+        ).fetchall()
+
+        # 将查询结果整理为业务字段字典。
         return [dict(row) for row in rows]
 
     def count_records(

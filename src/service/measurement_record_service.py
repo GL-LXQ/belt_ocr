@@ -129,20 +129,9 @@ class MeasurementRecordService:
                     end_date + timedelta(days=1), time.min
                 ).astimezone(timezone.utc).isoformat()
 
-            # 统计当前筛选条件下的记录。
-            total = self.measurement_record_repo.count_records(
-                review_status,
-                machine_id,
-                start_finish_time,
-                end_finish_time,
-                text_query=text_query,
-                text_match_mode=text_match_mode,
-                text_length=text_length,
-            )
-
-            # 计算当前位置并读取当前页记录。
+            # 计算当前位置并从同一快照读取当前页和总数。
             offset = (page - 1) * page_size
-            records = self.measurement_record_repo.list_records(
+            record_page = self.measurement_record_repo.get_record_page(
                 review_status,
                 machine_id,
                 limit=page_size,
@@ -153,6 +142,8 @@ class MeasurementRecordService:
                 text_match_mode=text_match_mode,
                 text_length=text_length,
             )
+            records = record_page["records"]
+            total = record_page["total"]
 
             # 转换当前页的存储字段。
             for record in records:
