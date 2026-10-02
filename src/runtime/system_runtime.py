@@ -50,6 +50,9 @@ class SystemRuntime:
         self.machines: dict[str, MachineRuntime] = {}
         self.worker_tasks: list[asyncio.Task[None]] = []
 
+        # 按机器保存事件入队锁。
+        self.event_enqueue_locks: dict[str, asyncio.Lock] = {}
+
         # 登记启动、停止与资源释放标志。
         self.accepting_signals = False
         self.has_started = False
@@ -583,7 +586,7 @@ class SystemRuntime:
         await acknowledgement
 
     async def publish_event(self, event: RuntimeEvent) -> None:
-        """更新事件接收时间，并将事件送入对应机器的有界队列。
+        """记录事件接收时间，并按接收顺序送入对应机器的有界队列。
 
         Args:
             event: 待分发的测量事件，包含事件类型、机器编号及相关业务数据。
@@ -617,12 +620,21 @@ class SystemRuntime:
             received_monotonic=time.monotonic(),
         )
 
-        # 将事件放入对应机器队列，队列满时等待空位。
-        await machine.queue.put(event)
+        # 同一机器按接收顺序入队，不同机器独立等待。
+        enqueue_lock = self.event_enqueue_locks.setdefault(event.machine_id, asyncio.Lock())
+        async with enqueue_lock:
+            # 等待入队锁期间已开始释放资源时，取消回执并结束分发。
+            if self.releasing_resources:
+                if event.acknowledgement is not None:
+                    event.acknowledgement.cancel()
+                return
 
-        # 退出期间释放此前阻塞入队的事件和回执。
-        if self.releasing_resources:
-            machine.discard_pending_events()
+            # 将事件放入对应机器队列，队列满时等待空位。
+            await machine.queue.put(event)
+
+            # 退出期间释放此前阻塞入队的事件和回执。
+            if self.releasing_resources:
+                machine.discard_pending_events()
 
     def handle_system_failure(self, error: Exception) -> None:
         """保存故障、关闭信号入口并安排整个应用退出。
