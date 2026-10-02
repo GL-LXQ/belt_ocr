@@ -15,9 +15,9 @@ from PySide6.QtCore import QDate
 from PySide6.QtGui import QColor, QDesktopServices, QImage
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 from qfluentwidgets import (
-    CalendarPicker,
     CheckBox,
     ComboBox,
+    FastCalendarPicker,
     Flyout,
     InfoBar,
     SimpleCardWidget,
@@ -514,7 +514,7 @@ def test_history_text_search_submits_and_preserves_conditions(
         assert page.selected_review_status is None
         assert page.status_filter.currentRouteKey() == "all"
         assert page.machine_filter_button.text() == "全部机器  ▾"
-        assert page.time_filter_button.text() == "不限时间  ▾"
+        assert page.time_filter_button.text() == "时间范围  ▾"
         assert page.record_count_label.text() == "25 条"
         query_records.assert_called_once_with(
             None,
@@ -1496,7 +1496,7 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert page.selected_end_date is None
         assert page.current_page == 1
         assert page.record_count_label.text() == "25 条"
-        assert page.time_filter_button.text() == "不限时间  ▾"
+        assert page.time_filter_button.text() == "时间范围  ▾"
         list_measurement_records.assert_called_once_with(
             None,
             None,
@@ -2079,7 +2079,13 @@ def test_history_toolbar_opens_filter_without_querying_or_sorting(
         assert page.selected_start_date is None
         assert page.selected_end_date is None
         make_flyout.return_value.close()
-        make_flyout.call_args.args[0].deleteLater()
+        view = make_flyout.call_args.args[0]
+        assert view.findChild(CheckBox) is None
+        date_edits = view.findChildren(FastCalendarPicker)
+        assert len(date_edits) == 2
+        assert all(date_edit.isEnabled() for date_edit in date_edits)
+        assert all(date_edit.getDate() == QDate.currentDate() for date_edit in date_edits)
+        view.deleteLater()
 
         # 已应用条件在再次打开和关闭时保持不变。
         selected_date = date(2026, 9, 27)
@@ -2095,9 +2101,8 @@ def test_history_toolbar_opens_filter_without_querying_or_sorting(
 
         # 弹层恢复已应用的日期范围。
         view = make_flyout.call_args.args[0]
-        unlimited_checkbox = view.findChild(CheckBox)
-        date_edits = view.findChildren(CalendarPicker)
-        assert not unlimited_checkbox.isChecked()
+        assert view.findChild(CheckBox) is None
+        date_edits = view.findChildren(FastCalendarPicker)
         assert [date_edit.getDate().toPython() for date_edit in date_edits] == [
             selected_date, selected_date
         ]
@@ -2130,18 +2135,19 @@ def test_history_toolbar_opens_filter_without_querying_or_sorting(
         assert page.table.isSortingEnabled() is False
         assert not header.isSortIndicatorShown()
 
-        # 重置按钮直接清除已应用范围并关闭弹层。
+        # 清除时间按钮直接清除已应用范围并关闭弹层。
         page.time_filter_button.click()
         view = make_flyout.call_args.args[0]
-        reset_button = next(
+        clear_button = next(
             button for button in view.findChildren(QPushButton)
-            if button.text() == "重置"
+            if button.text() == "清除时间"
         )
         query_records.reset_mock()
         make_flyout.return_value.close.reset_mock()
-        reset_button.click()
+        clear_button.click()
         assert page.selected_start_date is None
         assert page.selected_end_date is None
+        assert page.time_filter_button.text() == "时间范围  ▾"
         query_records.assert_called_once_with(
             None,
             None,
@@ -2155,6 +2161,98 @@ def test_history_toolbar_opens_filter_without_querying_or_sorting(
         )
         make_flyout.return_value.close.assert_called_once()
         view.deleteLater()
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_history_fast_calendar_preserves_draft_and_other_filters(
+    qt_application: QApplication,
+    measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证快速日历选择、关闭草稿和清除日期时的条件隔离。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_record_service: 已保存测试记录的测量记录服务。
+        monkeypatch: pytest 提供的对象替换工具。
+
+    Returns:
+        返回示例：
+            None  # 日期草稿不查询，清除日期保留其它已提交条件
+    """
+    controller = AppController(Mock(), measurement_record_service, Mock(), Path("config"))
+    page = HistoryPage(controller)
+    try:
+        # 先应用机器、状态、文字和日期组合条件。
+        page.refresh_history()
+        page.apply_machine_filter("2")
+        page.status_buttons["pending"].click()
+        page.text_query_edit.setText("待确认")
+        page.apply_text_search()
+        selected_date = date(2026, 9, 27)
+        page.apply_time_filter(selected_date, selected_date)
+        page.show()
+        qt_application.processEvents()
+        query_records = Mock(wraps=controller.list_measurement_records)
+        monkeypatch.setattr(controller, "list_measurement_records", query_records)
+
+        # 打开真实日历弹层，交叉日期只同步临时输入。
+        page.time_filter_button.click()
+        qt_application.processEvents()
+        flyout = qt_application.activePopupWidget()
+        date_edits = flyout.view.findChildren(FastCalendarPicker)
+        for date_edit, changed_date in (
+            (date_edits[0], selected_date + timedelta(days=1)),
+            (date_edits[1], selected_date - timedelta(days=1)),
+        ):
+            date_edit.click()
+            qt_application.processEvents()
+            calendar_flyout = qt_application.activePopupWidget()
+            assert calendar_flyout is not flyout
+            calendar_flyout.view.dateChanged.emit(QDate(changed_date))
+            qt_application.processEvents()
+            assert flyout.isVisible()
+            assert [date_edit.getDate().toPython() for date_edit in date_edits] == [
+                changed_date, changed_date
+            ]
+        query_records.assert_not_called()
+        assert page.selected_start_date == selected_date
+        assert page.selected_end_date == selected_date
+
+        # 关闭未确定草稿，再打开仍恢复已应用的日期。
+        flyout.close()
+        qt_application.processEvents()
+        page.time_filter_button.click()
+        qt_application.processEvents()
+        flyout = qt_application.activePopupWidget()
+        assert [date_edit.getDate().toPython() for date_edit in flyout.view.findChildren(FastCalendarPicker)] == [
+            selected_date, selected_date
+        ]
+        query_records.assert_not_called()
+
+        # 清除时间只移除日期条件，其它条件仍沿用已提交值。
+        clear_button = next(
+            button for button in flyout.view.findChildren(QPushButton)
+            if button.text() == "清除时间"
+        )
+        clear_button.click()
+        query_records.assert_called_once_with(
+            "pending",
+            "2",
+            1,
+            20,
+            start_date=None,
+            end_date=None,
+            text_query="待确认",
+            text_match_mode="contains",
+            text_length=None,
+        )
+        assert page.time_filter_button.text() == "时间范围  ▾"
+        assert page.selected_start_date is None
+        assert page.selected_end_date is None
     finally:
         page.detail_dialog.close()
         page.close()

@@ -20,10 +20,9 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
-    CalendarPicker,
     CaptionLabel,
-    CheckBox,
     ComboBox,
+    FastCalendarPicker,
     FluentIcon,
     Flyout,
     FlyoutAnimationType,
@@ -171,7 +170,7 @@ class HistoryPage(QWidget):
         self.machine_filter_button.setAccessibleName("机器筛选")
         self.machine_filter_button.setFixedSize(176, 36)
         self.machine_filter_button.clicked.connect(self.show_machine_filter_flyout)
-        self.time_filter_button = PushButton("不限时间  ▾")
+        self.time_filter_button = PushButton("时间范围  ▾")
         self.time_filter_button.setObjectName("historyTimeFilter")
         self.time_filter_button.setAccessibleName("时间筛选")
         self.time_filter_button.setFixedSize(250, 36)
@@ -832,11 +831,11 @@ class HistoryPage(QWidget):
 
         Returns:
             返回示例：
-                None  # 按钮显示不限时间、单日或完整日期范围
+                None  # 按钮显示时间范围入口、单日或完整日期范围
         """
         # 将已应用日期转换为按钮文字。
         if self.selected_start_date is None:
-            caption = "不限时间"
+            caption = "时间范围"
         elif self.selected_start_date == self.selected_end_date:
             caption = f"{self.selected_start_date:%Y-%m-%d}"
         else:
@@ -878,9 +877,9 @@ class HistoryPage(QWidget):
 
         Returns:
             返回示例：
-                None  # 弹层已打开，确定或重置后应用条件并关闭
+                None  # 弹层已打开，确定或清除时间后应用条件并关闭
         """
-        # 创建弹层正文和不限时间选项。
+        # 创建临时日期筛选弹层。
         view = FlyoutView(title="时间筛选", content="", isClosable=False)
         content = QWidget()
         content.setObjectName("historyTimeFilterFlyout")
@@ -888,14 +887,13 @@ class HistoryPage(QWidget):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(16, 10, 16, 12)
         content_layout.setSpacing(12)
-        unlimited_checkbox = CheckBox("不限时间")
-        unlimited_checkbox.setChecked(self.selected_start_date is None)
-        content_layout.addWidget(unlimited_checkbox)
 
         # 恢复已应用的日期或显示今天。
         current_date = QDate.currentDate()
-        start_date_edit = CalendarPicker(content)
-        end_date_edit = CalendarPicker(content)
+        start_date_edit = FastCalendarPicker(content)
+        end_date_edit = FastCalendarPicker(content)
+        start_date_edit.setAccessibleName("开始日期")
+        end_date_edit.setAccessibleName("结束日期")
         for date_edit, selected_date in (
             (start_date_edit, self.selected_start_date),
             (end_date_edit, self.selected_end_date),
@@ -903,7 +901,6 @@ class HistoryPage(QWidget):
             date_edit.setDate(QDate(selected_date) if selected_date else current_date)
             date_edit.setDateFormat("yyyy-MM-dd")
             date_edit.setResetEnabled(False)
-            date_edit.setEnabled(not unlimited_checkbox.isChecked())
 
         # 横向排列两个日期输入框。
         date_layout = QHBoxLayout()
@@ -913,12 +910,12 @@ class HistoryPage(QWidget):
         date_layout.addWidget(end_date_edit)
         content_layout.addLayout(date_layout)
 
-        # 将重置和确定按钮放在右下方。
+        # 将清除时间和确定按钮分别放在两侧。
         actions = QHBoxLayout()
-        actions.addStretch()
-        reset_button = TransparentPushButton("重置")
+        clear_button = TransparentPushButton("清除时间")
         apply_button = PrimaryPushButton("确定")
-        actions.addWidget(reset_button)
+        actions.addWidget(clear_button)
+        actions.addStretch()
         actions.addWidget(apply_button)
         content_layout.addLayout(actions)
         view.addWidget(content)
@@ -938,13 +935,7 @@ class HistoryPage(QWidget):
                 target_edit = end_date_edit if changed_start else start_date_edit
                 target_edit.setDate(changed_date)
 
-        # 仅更新弹层内的可用状态和日期顺序。
-        unlimited_checkbox.toggled.connect(
-            lambda checked: start_date_edit.setEnabled(not checked)
-        )
-        unlimited_checkbox.toggled.connect(
-            lambda checked: end_date_edit.setEnabled(not checked)
-        )
+        # 仅同步弹层内的日期顺序。
         start_date_edit.dateChanged.connect(
             lambda selected_date: synchronize_date_range(selected_date, True)
         )
@@ -960,20 +951,16 @@ class HistoryPage(QWidget):
             aniType=FlyoutAnimationType.DROP_DOWN,
         )
 
-        # 点击确定或重置后应用条件并关闭弹层。
+        # 点击确定或清除时间后应用条件并关闭弹层。
         apply_button.clicked.connect(
             lambda: self.apply_time_filter(
-                None
-                if unlimited_checkbox.isChecked()
-                else start_date_edit.getDate().toPython(),
-                None
-                if unlimited_checkbox.isChecked()
-                else end_date_edit.getDate().toPython(),
+                start_date_edit.getDate().toPython(),
+                end_date_edit.getDate().toPython(),
             )
         )
-        reset_button.clicked.connect(lambda: self.apply_time_filter(None, None))
+        clear_button.clicked.connect(lambda: self.apply_time_filter(None, None))
         apply_button.clicked.connect(flyout.close)
-        reset_button.clicked.connect(flyout.close)
+        clear_button.clicked.connect(flyout.close)
 
     def show_previous_page(self) -> None:
         """在上一页可用时读取上一页记录。
