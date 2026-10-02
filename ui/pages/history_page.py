@@ -22,7 +22,6 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     ComboBox,
-    FastCalendarPicker,
     FluentIcon,
     Flyout,
     FlyoutAnimationType,
@@ -45,6 +44,7 @@ from qfluentwidgets import (
 )
 
 from src.controller.controller import AppController
+from ui.date_range_picker import DateRangePicker
 from ui.theme import COLORS
 
 
@@ -883,65 +883,31 @@ class HistoryPage(QWidget):
         view = FlyoutView(title="时间筛选", content="", isClosable=False)
         content = QWidget()
         content.setObjectName("historyTimeFilterFlyout")
-        content.setFixedWidth(320)
+        content.setFixedWidth(346)
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(16, 10, 16, 12)
         content_layout.setSpacing(12)
 
         # 恢复已应用的日期或显示今天。
         current_date = QDate.currentDate()
-        start_date_edit = FastCalendarPicker(content)
-        end_date_edit = FastCalendarPicker(content)
-        start_date_edit.setAccessibleName("开始日期")
-        end_date_edit.setAccessibleName("结束日期")
-        for date_edit, selected_date in (
-            (start_date_edit, self.selected_start_date),
-            (end_date_edit, self.selected_end_date),
-        ):
-            date_edit.setDate(QDate(selected_date) if selected_date else current_date)
-            date_edit.setDateFormat("yyyy-MM-dd")
-            date_edit.setResetEnabled(False)
-
-        # 横向排列两个日期输入框。
-        date_layout = QHBoxLayout()
-        date_layout.setSpacing(8)
-        date_layout.addWidget(start_date_edit)
-        date_layout.addWidget(CaptionLabel("—"))
-        date_layout.addWidget(end_date_edit)
-        content_layout.addLayout(date_layout)
+        date_range = DateRangePicker(
+            QDate(self.selected_start_date) if self.selected_start_date else current_date,
+            QDate(self.selected_end_date) if self.selected_end_date else current_date,
+            content,
+        )
+        content_layout.addWidget(date_range)
 
         # 将清除时间和确定按钮分别放在两侧。
         actions = QHBoxLayout()
         clear_button = TransparentPushButton("清除时间")
+        cancel_button = TransparentPushButton("取消")
         apply_button = PrimaryPushButton("确定")
         actions.addWidget(clear_button)
         actions.addStretch()
+        actions.addWidget(cancel_button)
         actions.addWidget(apply_button)
         content_layout.addLayout(actions)
         view.addWidget(content)
-
-        def synchronize_date_range(changed_date: QDate, changed_start: bool) -> None:
-            """在临时输入框中同步交叉的日期范围。
-
-            Args:
-                changed_date: 本次选择的日期。
-                changed_start: 是否修改了开始日期。
-
-            Returns:
-                返回示例：
-                    None  # 交叉时另一日期已同步，已应用条件保持不变
-            """
-            if start_date_edit.getDate() > end_date_edit.getDate():
-                target_edit = end_date_edit if changed_start else start_date_edit
-                target_edit.setDate(changed_date)
-
-        # 仅同步弹层内的日期顺序。
-        start_date_edit.dateChanged.connect(
-            lambda selected_date: synchronize_date_range(selected_date, True)
-        )
-        end_date_edit.dateChanged.connect(
-            lambda selected_date: synchronize_date_range(selected_date, False)
-        )
 
         # 在时间筛选按钮下方展开弹层。
         flyout = Flyout.make(
@@ -954,11 +920,12 @@ class HistoryPage(QWidget):
         # 点击确定或清除时间后应用条件并关闭弹层。
         apply_button.clicked.connect(
             lambda: self.apply_time_filter(
-                start_date_edit.getDate().toPython(),
-                end_date_edit.getDate().toPython(),
+                date_range.start_date.toPython(),
+                date_range.end_date.toPython(),
             )
         )
         clear_button.clicked.connect(lambda: self.apply_time_filter(None, None))
+        cancel_button.clicked.connect(flyout.close)
         apply_button.clicked.connect(flyout.close)
         clear_button.clicked.connect(flyout.close)
 
