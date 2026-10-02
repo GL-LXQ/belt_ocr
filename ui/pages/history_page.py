@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QPoint, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QDate, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontInfo, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -47,10 +47,6 @@ from qfluentwidgets import (
 
 from src.controller.controller import AppController
 from ui.theme import COLORS
-
-
-MACHINE_COLUMN = 0
-TIME_COLUMN = 1
 
 
 def format_history_time(timestamp: str) -> str:
@@ -130,13 +126,13 @@ class HistoryPage(QWidget):
         heading.addWidget(subtitle)
         layout.addLayout(heading)
 
-        # 在查询卡片中建立状态筛选。
+        # 在查询卡片中建立两行工具栏。
         filter_card = SimpleCardWidget()
         filter_card.setObjectName("historyFilterCard")
         filter_card.setBorderRadius(16)
         filter_layout = QVBoxLayout(filter_card)
-        filter_layout.setContentsMargins(20, 18, 20, 16)
-        filter_layout.setSpacing(16)
+        filter_layout.setContentsMargins(20, 16, 20, 16)
+        filter_layout.setSpacing(12)
         filters = QHBoxLayout()
         filters.setSpacing(12)
         self.status_filter = SegmentedWidget(self)
@@ -168,11 +164,31 @@ class HistoryPage(QWidget):
             self.status_buttons[route_key] = segment
             segment.setMinimumWidth(78)
         self.status_filter.setCurrentItem("all")
+
+        # 在第二行集中显示机器、日期和复核状态。
+        self.machine_filter_button = PushButton("全部机器  ▾")
+        self.machine_filter_button.setObjectName("historyMachineFilter")
+        self.machine_filter_button.setAccessibleName("机器筛选")
+        self.machine_filter_button.setFixedSize(176, 36)
+        self.machine_filter_button.clicked.connect(self.show_machine_filter_flyout)
+        self.time_filter_button = PushButton("不限时间  ▾")
+        self.time_filter_button.setObjectName("historyTimeFilter")
+        self.time_filter_button.setAccessibleName("时间筛选")
+        self.time_filter_button.setFixedSize(250, 36)
+        self.time_filter_button.clicked.connect(self.show_time_filter_flyout)
+
+        # 用独立入口一次重置全部筛选条件。
+        self.reset_filters_button = TransparentPushButton("重置筛选")
+        self.reset_filters_button.setObjectName("historyResetFiltersButton")
+        self.reset_filters_button.setFixedSize(88, 36)
+        self.reset_filters_button.setToolTip("清除文字、机器、日期和状态筛选")
+        self.reset_filters_button.clicked.connect(self.reset_filters)
+        filters.addWidget(self.machine_filter_button)
+        filters.addWidget(self.time_filter_button)
+        filters.addSpacing(4)
         filters.addWidget(self.status_filter)
         filters.addStretch()
-        filter_hint = CaptionLabel("点击表头可筛选机器与时间")
-        filter_hint.setObjectName("historyFilterHint")
-        filters.addWidget(filter_hint)
+        filters.addWidget(self.reset_filters_button)
 
         # 建立文字查询输入框。
         text_search_layout = QHBoxLayout()
@@ -181,7 +197,9 @@ class HistoryPage(QWidget):
         self.text_query_edit.setObjectName("historyTextQuery")
         self.text_query_edit.setPlaceholderText("输入完整皮带文字或片段")
         self.text_query_edit.setAccessibleName("皮带文字")
-        self.text_query_edit.setFixedHeight(42)
+        self.text_query_edit.setFixedHeight(38)
+        self.text_query_edit.setMinimumWidth(400)
+        self.text_query_edit.setMaximumWidth(438)
 
         # 在输入框左侧显示查询图标。
         search_action = QAction(FluentIcon.SEARCH.icon(), "查询皮带文字", self.text_query_edit)
@@ -194,7 +212,7 @@ class HistoryPage(QWidget):
         self.text_match_mode_combo_box.setAccessibleName("文字匹配方式")
         self.text_match_mode_combo_box.addItem("包含", userData="contains")
         self.text_match_mode_combo_box.addItem("精确", userData="exact")
-        self.text_match_mode_combo_box.setFixedSize(104, 42)
+        self.text_match_mode_combo_box.setFixedSize(104, 38)
 
         # 建立被查询行的完整位数选项。
         self.text_length_combo_box = ComboBox()
@@ -203,25 +221,22 @@ class HistoryPage(QWidget):
         for text_length in (None, 20, 8, 3, 2):
             caption = "全部位数" if text_length is None else f"{text_length} 位"
             self.text_length_combo_box.addItem(caption, userData=text_length)
-        self.text_length_combo_box.setFixedSize(124, 42)
+        self.text_length_combo_box.setFixedSize(124, 38)
 
         # 将查询按钮和回车连接到同一提交入口。
         self.text_search_button = PrimaryPushButton("查询")
         self.text_search_button.setObjectName("historySearchButton")
-        self.text_search_button.setFixedSize(88, 42)
-        self.clear_text_search_button = TransparentPushButton("清除查询")
-        self.clear_text_search_button.setObjectName("historyClearSearchButton")
-        self.clear_text_search_button.setFixedSize(88, 42)
+        self.text_search_button.setFixedSize(88, 38)
         self.text_search_button.clicked.connect(self.apply_text_search)
         self.text_query_edit.returnPressed.connect(self.apply_text_search)
-        self.clear_text_search_button.clicked.connect(self.clear_text_search)
 
         # 将基础查询控件加入现有筛选区域。
         text_search_layout.addWidget(self.text_query_edit, 1)
-        text_search_layout.addWidget(self.text_match_mode_combo_box)
+        text_search_layout.addSpacing(6)
         text_search_layout.addWidget(self.text_length_combo_box)
+        text_search_layout.addWidget(self.text_match_mode_combo_box)
         text_search_layout.addWidget(self.text_search_button)
-        text_search_layout.addWidget(self.clear_text_search_button)
+        text_search_layout.addStretch()
         filter_layout.addLayout(text_search_layout)
         filter_layout.addLayout(filters)
         layout.addWidget(filter_card)
@@ -237,7 +252,7 @@ class HistoryPage(QWidget):
         self.table.setColumnCount(6)
         self.table.setObjectName("historyTable")
         self.table.setHorizontalHeaderLabels((
-            "机器 ▾", "时间 ▾", "OCR 结果摘要", "最终频率", "状态", "操作"
+            "机器", "时间", "OCR 结果摘要", "最终频率", "状态", "操作"
         ))
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(58)
@@ -248,10 +263,9 @@ class HistoryPage(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSortingEnabled(False)
         table_header = self.table.horizontalHeader()
-        table_header.setSectionsClickable(True)
-        table_header.sectionClicked.connect(self.handle_header_clicked)
-        self.update_machine_filter_header()
-        self.update_time_filter_header()
+        table_header.setSectionsClickable(False)
+        self.update_machine_filter_button()
+        self.update_time_filter_button()
         table_header.setFixedHeight(44)
         table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for column, width in ((0, 140), (1, 170), (3, 110), (4, 100), (5, 80)):
@@ -294,9 +308,10 @@ class HistoryPage(QWidget):
 
         # 将页面样式追加到 Fluent 控件的基础样式。
         for widget in (
-            title, subtitle, filter_card, content, self.status_filter, filter_hint,
+            title, subtitle, filter_card, content, self.status_filter,
             *self.status_filter.items.values(), self.text_query_edit, self.text_match_mode_combo_box,
-            self.text_length_combo_box, self.text_search_button, self.clear_text_search_button, self.table,
+            self.text_length_combo_box, self.text_search_button, self.table,
+            self.machine_filter_button, self.time_filter_button, self.reset_filters_button,
             self.record_count_label, self.page_label, self.previous_page_button, self.next_page_button,
         ):
             setCustomStyleSheet(widget, self.history_stylesheet, self.history_stylesheet)
@@ -607,7 +622,7 @@ class HistoryPage(QWidget):
         # 恢复不限时间的筛选状态。
         self.selected_start_date = None
         self.selected_end_date = None
-        self.update_time_filter_header()
+        self.update_time_filter_button()
 
         # 读取有历史记录的机器。
         result = self.controller.list_record_machines()
@@ -629,7 +644,7 @@ class HistoryPage(QWidget):
         machine_ids = {machine["machine_id"] for machine in self.record_machines}
         if self.selected_machine_id not in machine_ids:
             self.selected_machine_id = None
-        self.update_machine_filter_header()
+        self.update_machine_filter_button()
 
         # 读取当前状态和机器条件下的记录。
         self.current_page = 1
@@ -654,15 +669,15 @@ class HistoryPage(QWidget):
         self.current_page = 1
         self.reload_records()
 
-    def clear_text_search(self) -> None:
-        """清空文字查询并保留机器、日期和复核状态条件。
+    def reset_filters(self) -> None:
+        """恢复全部查询控件和筛选条件并读取第一页。
 
         Args:
             无外部参数。
 
         Returns:
             返回示例：
-                None  # 文字控件恢复默认值并重新读取第一页
+                None  # 全部筛选恢复默认值并重新读取第一页
         """
         # 恢复文字查询控件的默认值。
         self.text_query_edit.clear()
@@ -674,7 +689,16 @@ class HistoryPage(QWidget):
         self.selected_text_match_mode = "contains"
         self.selected_text_length = None
 
-        # 按保留的其他筛选条件重新读取第一页。
+        # 清除机器、日期和复核状态条件。
+        self.selected_machine_id = None
+        self.selected_start_date = None
+        self.selected_end_date = None
+        self.selected_review_status = None
+        self.status_filter.setCurrentItem("all")
+
+        # 刷新筛选按钮并重新读取第一页。
+        self.update_machine_filter_button()
+        self.update_time_filter_button()
         self.current_page = 1
         self.reload_records()
 
@@ -700,60 +724,46 @@ class HistoryPage(QWidget):
 
         Returns:
             返回示例：
-                None  # 机器表头和第一页记录已按所选机器刷新
+                None  # 机器按钮和第一页记录已按所选机器刷新
         """
         # 保存已应用的机器条件并回到第一页。
         self.selected_machine_id = machine_id
         self.current_page = 1
 
-        # 刷新机器表头并读取记录。
-        self.update_machine_filter_header()
+        # 刷新机器按钮并读取记录。
+        self.update_machine_filter_button()
         self.reload_records()
 
-    def handle_header_clicked(self, column: int) -> None:
-        """点击机器或时间表头时打开对应筛选弹层。
-
-        Args:
-            column: 点击的表格列索引。
-
-        Returns:
-            返回示例：
-                None  # 机器或时间列打开弹层，其他列保持不变
-        """
-        if column == MACHINE_COLUMN:
-            self.show_machine_filter_flyout()
-        elif column == TIME_COLUMN:
-            self.show_time_filter_flyout()
-
-    def update_machine_filter_header(self) -> None:
-        """刷新机器表头的所选机器提示和文字颜色。
+    def update_machine_filter_button(self) -> None:
+        """在工具栏按钮中显示已应用的机器条件。
 
         Args:
             无外部参数。
 
         Returns:
             返回示例：
-                None  # 机器表头已显示当前应用条件，表头文字保持不变
+                None  # 按钮显示机器名称，完整名称保留在提示中
         """
-        # 全部机器使用默认提示和文字颜色。
-        header_item = self.table.horizontalHeaderItem(MACHINE_COLUMN)
-        if self.selected_machine_id is None:
-            header_item.setToolTip("点击筛选机器")
-            header_item.setData(Qt.ItemDataRole.ForegroundRole, None)
-        else:
-            # 读取所选机器名称。
+        # 读取已选择的机器名称。
+        machine_name = "全部机器"
+        if self.selected_machine_id is not None:
             machine_name = next(
                 machine["machine_name"]
                 for machine in self.record_machines
                 if machine["machine_id"] == self.selected_machine_id
             )
 
-            # 更新已应用机器条件的表头提示。
-            header_item.setToolTip(machine_name)
-            header_item.setForeground(QColor(COLORS["blue"]))
+        # 缩略过长名称并保留完整提示。
+        button = self.machine_filter_button
+        caption = button.fontMetrics().elidedText(machine_name, Qt.TextElideMode.ElideRight, 130)
+        button.setText(f"{caption}  ▾")
+        button.setToolTip(machine_name)
+        button.setProperty("active", self.selected_machine_id is not None)
+        button.style().unpolish(button)
+        button.style().polish(button)
 
     def show_machine_filter_flyout(self) -> None:
-        """建立临时机器选项并在机器表头下方显示筛选弹层。
+        """建立临时机器选项并在工具栏按钮下方显示筛选弹层。
 
         Args:
             无外部参数。
@@ -798,15 +808,10 @@ class HistoryPage(QWidget):
         content_layout.addLayout(actions)
         view.addWidget(content)
 
-        # 根据机器列的实际位置展开弹层。
-        header = self.table.horizontalHeader()
-        column_position = header.sectionViewportPosition(MACHINE_COLUMN)
-        target_position = header.viewport().mapToGlobal(
-            QPoint(column_position, header.height())
-        )
+        # 在机器筛选按钮下方展开弹层。
         flyout = Flyout.make(
             view,
-            target=target_position,
+            target=self.machine_filter_button,
             parent=self.window(),
             aniType=FlyoutAnimationType.DROP_DOWN,
         )
@@ -819,26 +824,31 @@ class HistoryPage(QWidget):
         apply_button.clicked.connect(flyout.close)
         reset_button.clicked.connect(flyout.close)
 
-    def update_time_filter_header(self) -> None:
-        """刷新时间表头的日期范围提示和文字颜色。
+    def update_time_filter_button(self) -> None:
+        """在工具栏按钮中显示已应用的日期范围。
 
         Args:
             无外部参数。
 
         Returns:
             返回示例：
-                None  # 时间表头已显示当前应用条件
+                None  # 按钮显示不限时间、单日或完整日期范围
         """
-        header_item = self.table.horizontalHeaderItem(TIME_COLUMN)
+        # 将已应用日期转换为按钮文字。
         if self.selected_start_date is None:
-            header_item.setToolTip("点击筛选时间范围")
-            header_item.setData(Qt.ItemDataRole.ForegroundRole, None)
+            caption = "不限时间"
+        elif self.selected_start_date == self.selected_end_date:
+            caption = f"{self.selected_start_date:%Y-%m-%d}"
         else:
-            header_item.setToolTip(
-                f"{self.selected_start_date:%Y-%m-%d} ～ "
-                f"{self.selected_end_date:%Y-%m-%d}"
-            )
-            header_item.setForeground(QColor(COLORS["blue"]))
+            caption = f"{self.selected_start_date:%Y-%m-%d} ～ {self.selected_end_date:%Y-%m-%d}"
+
+        # 同步按钮文字、提示和筛选状态。
+        button = self.time_filter_button
+        button.setText(f"{caption}  ▾")
+        button.setToolTip(caption)
+        button.setProperty("active", self.selected_start_date is not None)
+        button.style().unpolish(button)
+        button.style().polish(button)
 
     def apply_time_filter(self, start_date: date | None, end_date: date | None) -> None:
         """应用日期范围或清除时间条件并读取第一页。
@@ -849,7 +859,7 @@ class HistoryPage(QWidget):
 
         Returns:
             返回示例：
-                None  # 已应用日期条件，表头和第一页记录已刷新
+                None  # 已应用日期条件，按钮和第一页记录已刷新
         """
         # 保存已应用的日期条件。
         self.selected_start_date = start_date
@@ -857,11 +867,11 @@ class HistoryPage(QWidget):
         self.current_page = 1
 
         # 刷新筛选提示并读取记录。
-        self.update_time_filter_header()
+        self.update_time_filter_button()
         self.reload_records()
 
     def show_time_filter_flyout(self) -> None:
-        """建立临时日期输入并在时间表头下方显示筛选弹层。
+        """建立临时日期输入并在工具栏按钮下方显示筛选弹层。
 
         Args:
             无外部参数。
@@ -942,15 +952,10 @@ class HistoryPage(QWidget):
             lambda selected_date: synchronize_date_range(selected_date, False)
         )
 
-        # 根据时间列的实际位置展开弹层。
-        header = self.table.horizontalHeader()
-        column_position = header.sectionViewportPosition(TIME_COLUMN)
-        target_position = header.viewport().mapToGlobal(
-            QPoint(column_position, header.height())
-        )
+        # 在时间筛选按钮下方展开弹层。
         flyout = Flyout.make(
             view,
-            target=target_position,
+            target=self.time_filter_button,
             parent=self.window(),
             aniType=FlyoutAnimationType.DROP_DOWN,
         )

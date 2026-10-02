@@ -29,7 +29,7 @@ QWidget#historyStatusFilter QPushButton[isSelected=true] {
     color: #222733;
     font-weight: 500;
 }
-QLabel#historyFilterHint, QLabel#historyRecordCount {
+QLabel#historyRecordCount {
     color: #8B909A;
     font-size: 12px;
 }
@@ -77,16 +77,33 @@ QPushButton#historySearchButton:hover {
 QPushButton#historySearchButton:pressed {
     background: #205BCC;
 }
-QPushButton#historyClearSearchButton {
+QPushButton#historyResetFiltersButton {
     background: transparent;
     border: none;
     border-radius: 10px;
     color: #818795;
     font-size: 13px;
 }
-QPushButton#historyClearSearchButton:hover {
+QPushButton#historyResetFiltersButton:hover {
     background: #F3F5F8;
     color: #424A59;
+}
+/* 在第二行显示轻量筛选入口和已应用条件。 */
+QPushButton#historyMachineFilter, QPushButton#historyTimeFilter {
+    background: #F7F8FA;
+    border: 1px solid #EAECF0;
+    border-radius: 9px;
+    color: #667080;
+    font-size: 12px;
+    padding: 0 10px;
+}
+QPushButton#historyMachineFilter:hover, QPushButton#historyTimeFilter:hover {
+    background: #EFF2F7;
+}
+QPushButton#historyMachineFilter[active=true], QPushButton#historyTimeFilter[active=true] {
+    background: #F0F5FF;
+    border-color: #DAE7FF;
+    color: #3478F6;
 }
 QWidget#historyDateRange, QWidget#historyStatusWrapper {
     background: transparent;
