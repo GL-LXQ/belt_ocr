@@ -78,7 +78,7 @@ class MachineRuntime:
             database: 数据库访问对象。
             publish_event: 业务事件发送入口。
             notify_measurement_progress: 可选进度通知函数，接收机器编号、Session ID、处理阶段和阶段状态。
-            on_system_failure: 系统故障回调，把识别任务异常交给运行时处理。
+            on_system_failure: 系统故障回调，把后台任务异常交给运行时处理。
             state_changed: 测量状态变化通知。
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、正式识别文字。
@@ -131,6 +131,9 @@ class MachineRuntime:
         # 保存当前 OCR 任务，并跟踪所有尚未结束的 OCR 任务。
         self.current_recognition_task: asyncio.Task | None = None
         self.unfinished_recognition_tasks: set[asyncio.Task[None]] = set()
+
+        # 跟踪当前测量的结果保存任务。
+        self.result_storage_task: asyncio.Task[None] | None = None
 
     @property
     def overall_status(self) -> MachineOverallStatus:
@@ -906,7 +909,7 @@ class MachineRuntime:
             self.on_system_failure(escalated_error)
 
     def release_finished_session(self) -> None:
-        """在测量已关闭、当前 Session 不再关联 OCR 任务且相机结果处理结束后释放当前测量。
+        """在测量已关闭、OCR 和保存任务结束且相机结果处理结束后释放当前测量。
 
         Args:
             无外部参数。
@@ -922,6 +925,10 @@ class MachineRuntime:
 
         # 只有已经保存成功或已经失败的测量才能释放。
         if session.state not in {SessionState.COMMITTED, SessionState.FAILED}:
+            return
+
+        # 结果保存任务结束前继续保留当前测量。
+        if self.result_storage_task is not None:
             return
 
         # 当前 Session 仍绑定 OCR 任务时继续等待。
@@ -1014,6 +1021,10 @@ class MachineRuntime:
 
         # 等待这些后台任务全部结束。
         await asyncio.gather(*machine_tasks, return_exceptions=True)
+
+        # 等待已开始的结果保存完成，再结算退出时的当前测量。
+        if self.result_storage_task is not None:
+            await asyncio.gather(self.result_storage_task, return_exceptions=True)
 
         # 系统退出时，如果当前测量还没有结束，就按退出原因处理为失败。
         session = self.current_session
@@ -1224,14 +1235,14 @@ class MachineRuntime:
         session.measurement_frequencies.append(event.payload)
 
     async def try_finalize(self, session: MeasurementSession) -> None:
-        """检查本轮测量是否完成，条件满足后保存正常记录或待复核记录。
+        """检查本轮测量是否完成，条件满足后启动结果保存任务。
 
         Args:
             session: 待检查完成条件的本轮测量档案。
 
         Returns:
             返回示例：
-                None  # 条件不足时继续等待，否则保存本轮记录
+                None  # 条件不足时继续等待，否则已启动本轮结果保存
         """
         # 当前测量已经不在运行时，不再继续保存结果。
         if session.state != SessionState.RUNNING:
@@ -1325,6 +1336,53 @@ class MachineRuntime:
             record.final_frequency_hz,
         )
 
+        # 启动本轮保存任务，不阻塞机器事件和 DI 轮询。
+        self.result_storage_task = asyncio.create_task(self.store_measurement_result(session, record, evidence_frames))
+        self.result_storage_task.add_done_callback(self.handle_result_storage_finished)
+
+    def handle_result_storage_finished(self, task: asyncio.Task[None]) -> None:
+        """回收结果保存任务，上报未处理异常并检查测量释放条件。
+
+        Args:
+            task: 已结束的结果保存任务。
+
+        Returns:
+            返回示例：
+                None  # 保存任务已回收，异常已上报且当前测量已检查释放条件
+        """
+        # 清空已结束的保存任务引用。
+        if self.result_storage_task is task:
+            self.result_storage_task = None
+
+        # 保存任务意外取消或失败时通知系统故障入口。
+        if task.cancelled():
+            self.on_system_failure(RuntimeError("测量结果保存任务意外取消"))
+        else:
+            error = task.exception()
+            if error is not None:
+                self.on_system_failure(error)
+
+        # 释放已完成的测量，并通知状态等待方。
+        self.release_finished_session()
+        self.state_changed.set()
+
+    async def store_measurement_result(
+        self,
+        session: MeasurementSession,
+        record: MeasurementRecord,
+        evidence_frames: tuple[MeasurementFrame, ...],
+    ) -> None:
+        """保存证据和测量记录，并更新所属测量的最终状态。
+
+        Args:
+            session: 当前正在保存结果的测量周期。
+            record: 本轮正式测量记录。
+            evidence_frames: 本轮需要保存的证据帧。
+
+        Returns:
+            返回示例：
+                None  # 本轮结果已保存，或已按现有失败流程处理
+        """
         # 在线程中保存证据图片，然后写入测量记录。
         try:
             await run_blocking_operation(

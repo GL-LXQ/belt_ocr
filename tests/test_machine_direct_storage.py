@@ -28,6 +28,7 @@ from enums import (
     SessionState,
 )
 from runtime.machine_runtime import EvidenceWriteError, ImageEncodingError, MachineRuntime
+from runtime.system_runtime import SystemRuntime
 from models import (
     MeasurementSession,
     CaptureResult,
@@ -503,6 +504,7 @@ async def test_finalize_saves_images_before_record(
 
     database.write_measurement_record = write_record_after_image
     await machine.try_finalize(session)
+    await machine.result_storage_task
 
     # 核对保存状态、后台线程和数据库内容。
     assert session.state == SessionState.COMMITTED
@@ -558,6 +560,7 @@ async def test_finalize_saves_all_review_frames(tmp_path: Path) -> None:
         tmp_path, (), (first_frame, second_frame), "没有最终文字"
     )
     await machine.try_finalize(session)
+    await machine.result_storage_task
 
     # 核对两张图片和合并后的复核原因。
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
@@ -602,6 +605,7 @@ async def test_finalize_preserves_reliable_text_for_review(tmp_path: Path) -> No
 
     # 结算后读取测量记录。
     await machine.try_finalize(session)
+    await machine.result_storage_task
     with sqlite3.connect(database.config.database_path) as connection:
         record = connection.execute(
             "SELECT recognized_lines, needs_review, review_reason "
@@ -638,6 +642,7 @@ async def test_shutdown_preserves_committed_session(tmp_path: Path) -> None:
 
     # 保存测量记录并确认周期仍由机器持有。
     await machine.try_finalize(session)
+    await machine.result_storage_task
     assert session.state == SessionState.COMMITTED
     assert machine.current_session is session
 
@@ -726,6 +731,7 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
 
     # 执行本轮保存并核对失败审计和证据清理。
     await machine.try_finalize(session)
+    await machine.result_storage_task
     assert session.state == SessionState.FAILED
     assert session.errors == ["SaveImageEx3 编码失败", "证据图片编码失败"]
     assert machine.current_session is None
@@ -783,6 +789,7 @@ async def test_unknown_encoding_failure_removes_new_images(tmp_path: Path) -> No
     machine.camera.sdk_camera.encode_image = encode_first_image
     with pytest.raises(ImageEncodingError):
         await machine.try_finalize(session)
+        await machine.result_storage_task
 
     # 核对新图片与数据库均未留下结果。
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
@@ -820,6 +827,7 @@ async def test_image_write_failure_skips_database(
         Mock(side_effect=write_error),
     )
     await machine.try_finalize(session)
+    await machine.result_storage_task
 
     # 核对失败状态和数据库内容。
     assert session.state == SessionState.FAILED
@@ -867,12 +875,13 @@ async def test_unknown_image_write_error_is_not_database_failure(
     # 执行图片保存并核对未知异常保持原样上抛。
     with pytest.raises(error_type, match="未知图片保存错误") as captured_error:
         await machine.try_finalize(session)
+        await machine.result_storage_task
     assert captured_error.value is unknown_error
     assert "测量结果入库失败" not in session.errors
     assert "证据图片保存失败" not in session.errors
     assert "测量记录提交冲突" not in session.errors
     assert read_abnormal_events(database) == []
-    machine.on_system_failure.assert_not_called()
+    machine.on_system_failure.assert_called_once_with(unknown_error)
 
 
 @pytest.mark.asyncio
@@ -891,6 +900,7 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
     write_error = sqlite3.OperationalError("database is locked")
     database.write_measurement_record = Mock(side_effect=write_error)
     await machine.try_finalize(session)
+    await machine.result_storage_task
 
     # 核对本轮失败状态与已保存的图片。
     assert session.state == SessionState.FAILED
@@ -936,6 +946,7 @@ async def test_database_conflict_keeps_conflict_reason(tmp_path: Path) -> None:
 
     # 执行数据库提交并核对冲突分类。
     await machine.try_finalize(session)
+    await machine.result_storage_task
     assert session.state == SessionState.FAILED
     assert "测量记录提交冲突" in session.errors
     assert "测量结果入库失败" not in session.errors
@@ -978,11 +989,12 @@ async def test_unknown_database_value_error_is_not_commit_conflict(
     # 执行数据库提交并核对未知异常保持原样上抛。
     with pytest.raises(ValueError, match="未知数据库错误") as captured_error:
         await machine.try_finalize(session)
+        await machine.result_storage_task
     assert captured_error.value is unknown_error
     assert "测量记录提交冲突" not in session.errors
     assert "DATABASE_WRITE_FAILED" not in session.errors
     assert read_abnormal_events(database) == []
-    machine.on_system_failure.assert_not_called()
+    machine.on_system_failure.assert_called_once_with(unknown_error)
 
 
 def test_database_compares_evidence_directory(
@@ -2527,6 +2539,7 @@ async def test_storage_failure_keeps_root_cause_when_audit_also_fails(
 
     # 执行本轮结算。
     await machine.try_finalize(session)
+    await machine.result_storage_task
 
     # 核对本轮已完整失败收尾并释放周期。
     assert session.state == SessionState.FAILED
@@ -2758,6 +2771,7 @@ async def test_ocr_notification_precedes_close_and_survives_release(tmp_path: Pa
     # 重复结果被忽略，CLOSE 后正常提交并释放周期。
     await machine.handle_event(RuntimeEvent(EventType.OCR_COMPLETED, "1", session.session_id, result))
     await machine.handle_machine_close()
+    await machine.result_storage_task
     assert session.state == SessionState.COMMITTED
     assert session.ocr_result is None
     assert machine.current_session is None
@@ -2771,3 +2785,268 @@ async def test_ocr_notification_precedes_close_and_survives_release(tmp_path: Pa
         ).fetchone()
     assert json.loads(record[0]) == list(result.recognized_lines)
     database.close()
+
+
+def create_storage_runtime(temporary_directory: Path, shutdown_timeout_ms: int = 1000):
+    """建立使用临时数据库和模拟相机的结果保存运行时。
+
+    Args:
+        temporary_directory: 数据库和证据图片的测试目录。
+        shutdown_timeout_ms: 退出时等待活动测量完成的毫秒数。
+
+    Returns:
+        返回示例：
+            (
+                SystemRuntime(...),  # 已启动机器事件监听的测试系统
+                MachineRuntime(...),  # 当前待关闭的机器
+                MeasurementSession(...),  # OCR 已完成且尚未关闭的测量
+            )
+    """
+    # 建立已完成识别、尚未收到关闭信号的测量。
+    frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, session, _, _ = create_machine(temporary_directory, (frame,))
+    session.capture_stop_time = None
+    session.measurement_frequencies = [FrequencyMeasurement(session.session_id, "meter-1", 50.0)]
+    machine.camera.stop = AsyncMock()
+
+    # 将测试机器接入真实系统事件入口和故障处理。
+    config = replace(machine.config, io_machine_channels={"1": 0}, shutdown_timeout_ms=shutdown_timeout_ms)
+    runtime = SystemRuntime(config)
+    runtime.database = database
+    runtime.machines = {"1": machine}
+    runtime.accepting_signals = True
+    runtime.camera_sdk = SimpleNamespace(close=Mock())
+    machine.publish_event = runtime.publish_event
+    machine.on_system_failure = runtime.handle_system_failure
+    machine.state_changed = runtime.state_changed
+
+    # 启动本机事件监听，保持现场信号的回执和处理顺序。
+    runtime.worker_tasks.append(asyncio.create_task(runtime.run_worker("1号皮带机", machine.listen_events)))
+    return runtime, machine, session
+
+
+@pytest.mark.asyncio
+async def test_slow_storage_does_not_block_other_machine_io(tmp_path: Path) -> None:
+    """确认一台机器保存变慢时仍读取并处理另一台机器的启停脉冲。
+
+    Args:
+        tmp_path: 测试数据库和图片目录。
+
+    Returns:
+        返回示例：
+            None  # 保存阻塞期间另一台机器完成启停，本机没有提前开始下一轮
+    """
+    # 让首台机器在保存证据前等待测试放行。
+    runtime, machine, session = create_storage_runtime(tmp_path, shutdown_timeout_ms=20)
+    runtime.config = replace(runtime.config, io_machine_channels={"1": 0, "2": 1}, modbus_poll_interval_ms=1)
+    storage_started = asyncio.Event()
+    release_storage = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_save = machine.save_evidence_images_and_measurement_record
+
+    def save_after_release(record: MeasurementRecord, frames: tuple[MeasurementFrame, ...]) -> None:
+        """等待放行后执行真实的测试文件和数据库保存。
+
+        Args:
+            record: 本轮测量记录。
+            frames: 本轮证据帧。
+
+        Returns:
+            返回示例：
+                None  # 测试结果已完整写入临时目录
+        """
+        loop.call_soon_threadsafe(storage_started.set)
+        if not release_storage.wait(timeout=5):
+            raise TimeoutError("测试未放行结果保存")
+        original_save(record, frames)
+
+    machine.save_evidence_images_and_measurement_record = Mock(side_effect=save_after_release)
+    other_closed = asyncio.Event()
+    other_camera = SimpleNamespace(
+        available=True,
+        is_capturing=False,
+        delivery_task=loop.create_future(),
+        start_capture=Mock(),
+        inform_capture_workflow_stop=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    other_camera.delivery_task.set_result(None)
+
+    # 建立另一台独立处理事件的机器。
+    other_machine = MachineRuntime(
+        replace(machine.machine_config, machine_id="2", machine_name="2号皮带机"),
+        runtime.config,
+        other_camera,
+        SimpleNamespace(active_session_id=None),
+        machine.text_recognizer,
+        runtime.database,
+        runtime.publish_event,
+        None,
+        runtime.handle_system_failure,
+        runtime.state_changed,
+        notify_cycle_closed=lambda machine_id, session_id: other_closed.set(),
+    )
+    runtime.machines["2"] = other_machine
+    runtime.worker_tasks.append(asyncio.create_task(runtime.run_worker("2号皮带机", other_machine.listen_events)))
+    runtime.io_previous_states = {0: True, 1: False}
+    readings = iter(([False, False], [False, True], [False, False]))
+    finish_polling = asyncio.Event()
+
+    async def read_discrete_inputs(address: int, count: int) -> list[bool] | None:
+        """先关闭首台机器，再交付另一台机器的启动和关闭脉冲。
+
+        Args:
+            address: DI 起始地址。
+            count: 读取的 DI 通道数。
+
+        Returns:
+            返回示例：
+                [False, True]  # 首台机器已关闭，另一台机器已启动
+                None  # 测试结束，不再交付状态
+        """
+        assert count == 2
+        reading = next(readings, None)
+        if reading is None:
+            await finish_polling.wait()
+        elif reading[1]:
+            await storage_started.wait()
+        return reading
+
+    runtime.modbus_client = SimpleNamespace(read_discrete_inputs=read_discrete_inputs, disconnect=AsyncMock())
+    runtime.worker_tasks.append(asyncio.create_task(runtime.run_worker("Modbus IO", runtime.listen_io)))
+    try:
+        # 保存尚未放行时，另一台机器已经收到完整启停脉冲。
+        await asyncio.wait_for(other_closed.wait(), timeout=1)
+        assert storage_started.is_set()
+        assert not release_storage.is_set()
+        other_camera.start_capture.assert_called_once()
+        assert other_machine.current_session.capture_stop_time is not None
+        assert session.state == SessionState.SAVING_RESULT
+        assert machine.current_session is session
+        assert session.final_frequency.value_hz == 50.0
+
+        # 本机保存期间的新启动不会创建另一周期或重复保存。
+        await asyncio.wait_for(runtime.handle_start("1"), timeout=1)
+        await runtime.handle_close("1")
+        await machine.try_finalize(session)
+        assert machine.current_session is session
+        machine.save_evidence_images_and_measurement_record.assert_called_once()
+
+        # 放行保存后，首台机器完成入库并释放原周期。
+        storage_task = machine.result_storage_task
+        release_storage.set()
+        await asyncio.wait_for(storage_task, timeout=1)
+        assert session.state == SessionState.COMMITTED
+        assert machine.current_session is None
+        assert runtime.failure is None
+        with sqlite3.connect(runtime.config.database_path) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM measurement_records").fetchone()[0] == 1
+    finally:
+        # 放行所有模拟等待，按系统退出流程回收测试任务。
+        release_storage.set()
+        finish_polling.set()
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown_timeout_ms", [1, 1000])
+async def test_shutdown_waits_for_result_storage(tmp_path: Path, shutdown_timeout_ms: int) -> None:
+    """确认正常退出和退出超时都等待已经开始的结果保存完成。
+
+    Args:
+        tmp_path: 测试数据库和图片目录。
+        shutdown_timeout_ms: 活动测量的退出等待期限。
+
+    Returns:
+        返回示例：
+            None  # 结果完整入库后才关闭驱动和数据库，成功周期未改为失败
+    """
+    runtime, machine, session = create_storage_runtime(tmp_path, shutdown_timeout_ms)
+    storage_started = asyncio.Event()
+    release_storage = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_save = machine.save_evidence_images_and_measurement_record
+
+    def save_after_release(record: MeasurementRecord, frames: tuple[MeasurementFrame, ...]) -> None:
+        """等待测试放行，然后写入本轮证据和结果。
+
+        Args:
+            record: 本轮测量记录。
+            frames: 本轮证据帧。
+
+        Returns:
+            返回示例：
+                None  # 本轮测试记录已保存
+        """
+        loop.call_soon_threadsafe(storage_started.set)
+        if not release_storage.wait(timeout=5):
+            raise TimeoutError("测试未放行结果保存")
+        original_save(record, frames)
+
+    machine.save_evidence_images_and_measurement_record = save_after_release
+    shutdown_task = None
+    try:
+        # CLOSE 回执返回后，保存线程仍等待放行。
+        await asyncio.wait_for(runtime.handle_close("1"), timeout=1)
+        await asyncio.wait_for(storage_started.wait(), timeout=1)
+        shutdown_task = asyncio.create_task(runtime.stop())
+        await asyncio.sleep(0.03)
+        assert not shutdown_task.done()
+        assert session.state == SessionState.SAVING_RESULT
+        runtime.camera_sdk.close.assert_not_called()
+
+        # 放行后核对退出完成、成功状态和真实入库记录。
+        release_storage.set()
+        await asyncio.wait_for(shutdown_task, timeout=1)
+        assert session.state == SessionState.COMMITTED
+        assert session.errors == []
+        assert machine.result_storage_task is None
+        assert machine.current_session is None
+        assert runtime.failure is None
+        runtime.camera_sdk.close.assert_called_once()
+        with sqlite3.connect(runtime.config.database_path) as connection:
+            assert connection.execute("SELECT session_id FROM measurement_records").fetchone() == (session.session_id,)
+        assert read_abnormal_events(runtime.database) == []
+    finally:
+        # 防止断言失败留下等待中的线程和系统任务。
+        release_storage.set()
+        await runtime.stop()
+        if shutdown_task is not None:
+            await asyncio.gather(shutdown_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [sqlite3.OperationalError, ValueError])
+async def test_background_storage_error_reaches_system_shutdown(tmp_path: Path, error_type: type[Exception]) -> None:
+    """确认后台保存的数据库异常和未知异常都触发系统退出。
+
+    Args:
+        tmp_path: 测试数据库和图片目录。
+        error_type: 注入保存线程的异常类型。
+
+    Returns:
+        返回示例：
+            None  # 原始故障已上报，当前测量和系统资源已清理
+    """
+    runtime, machine, session = create_storage_runtime(tmp_path)
+    storage_error = error_type("测试结果保存失败")
+    runtime.database.write_measurement_record = Mock(side_effect=storage_error)
+    try:
+        # CLOSE 回执只确认现场关闭处理，故障通过后台任务交给系统。
+        await runtime.handle_close("1")
+        with pytest.raises(error_type, match="测试结果保存失败") as captured_error:
+            await asyncio.wait_for(runtime.wait_for_failure(), timeout=1)
+        await runtime.stop()
+
+        # 核对根因和退出结果，没有未处理的保存任务。
+        assert captured_error.value is storage_error
+        assert runtime.failure is storage_error
+        assert runtime.failure_event.is_set()
+        assert not runtime.accepting_signals
+        assert session.state == SessionState.FAILED
+        assert machine.current_session is None
+        assert machine.result_storage_task is None
+        assert not runtime.worker_tasks
+        runtime.camera_sdk.close.assert_called_once()
+    finally:
+        await runtime.stop()

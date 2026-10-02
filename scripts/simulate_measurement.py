@@ -378,6 +378,12 @@ async def run_measurement_simulation(scenario: str) -> dict:
             EventType.MACHINE_CLOSED, machine_config.machine_id, session_id
         ))
 
+        # 等待本轮后台保存完成后再读取正式记录。
+        if machine.result_storage_task is not None:
+            await machine.result_storage_task
+        if fatal_errors:
+            raise fatal_errors[0]
+
         # 用现有测量记录服务核对正式记录和本轮 JPG 证据。
         measurement_record_service = MeasurementRecordService(
             MeasurementRecordRepo(config.database_path)
