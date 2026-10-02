@@ -4,7 +4,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QPoint, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontInfo, QIcon, QPixmap
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontInfo, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QSizePolicy,
     QTableWidgetItem,
     QVBoxLayout,
@@ -41,6 +42,7 @@ from qfluentwidgets import (
     TitleLabel,
     ToolButton,
     TransparentPushButton,
+    setCustomStyleSheet,
 )
 
 from src.controller.controller import AppController
@@ -117,26 +119,30 @@ class HistoryPage(QWidget):
         # 创建页面标题和说明。
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 4, 24, 20)
-        layout.setSpacing(20)
+        layout.setSpacing(18)
         title = TitleLabel("历史记录")
         title.setObjectName("pageTitle")
-        subtitle = BodyLabel("查看已保存的测量结果并处理待复核记录")
+        subtitle = BodyLabel("从皮带文字，找到每一次测量")
         subtitle.setObjectName("pageSubtitle")
         heading = QVBoxLayout()
-        heading.setSpacing(4)
+        heading.setSpacing(6)
         heading.addWidget(title)
         heading.addWidget(subtitle)
         layout.addLayout(heading)
 
-        # 在筛选卡片中建立状态筛选。
+        # 在查询卡片中建立状态筛选。
         filter_card = SimpleCardWidget()
         filter_card.setObjectName("historyFilterCard")
+        filter_card.setBorderRadius(16)
         filter_layout = QVBoxLayout(filter_card)
-        filter_layout.setContentsMargins(20, 16, 20, 16)
-        filter_layout.setSpacing(12)
+        filter_layout.setContentsMargins(20, 18, 20, 16)
+        filter_layout.setSpacing(16)
         filters = QHBoxLayout()
         filters.setSpacing(12)
         self.status_filter = SegmentedWidget(self)
+        self.status_filter.setObjectName("historyStatusFilter")
+        self.status_filter.setFixedSize(336, 36)
+        self.status_filter.setIndicatorColor(Qt.GlobalColor.transparent, Qt.GlobalColor.transparent)
         status_values = {
             "all": None,
             "normal": "normal",
@@ -160,30 +166,52 @@ class HistoryPage(QWidget):
             )
             self.status_buttons[review_status] = segment
             self.status_buttons[route_key] = segment
+            segment.setMinimumWidth(78)
         self.status_filter.setCurrentItem("all")
         filters.addWidget(self.status_filter)
         filters.addStretch()
-        filter_layout.addLayout(filters)
+        filter_hint = CaptionLabel("点击表头可筛选机器与时间")
+        filter_hint.setObjectName("historyFilterHint")
+        filters.addWidget(filter_hint)
 
         # 建立文字查询输入框。
         text_search_layout = QHBoxLayout()
+        text_search_layout.setSpacing(10)
         self.text_query_edit = LineEdit()
-        self.text_query_edit.setPlaceholderText("输入皮带文字或片段")
+        self.text_query_edit.setObjectName("historyTextQuery")
+        self.text_query_edit.setPlaceholderText("输入完整皮带文字或片段")
+        self.text_query_edit.setAccessibleName("皮带文字")
+        self.text_query_edit.setFixedHeight(42)
+
+        # 在输入框左侧显示查询图标。
+        search_action = QAction(FluentIcon.SEARCH.icon(), "查询皮带文字", self.text_query_edit)
+        search_action.triggered.connect(self.apply_text_search)
+        self.text_query_edit.addAction(search_action, QLineEdit.ActionPosition.LeadingPosition)
 
         # 建立包含和精确匹配选项。
         self.text_match_mode_combo_box = ComboBox()
+        self.text_match_mode_combo_box.setObjectName("historyMatchMode")
+        self.text_match_mode_combo_box.setAccessibleName("文字匹配方式")
         self.text_match_mode_combo_box.addItem("包含", userData="contains")
         self.text_match_mode_combo_box.addItem("精确", userData="exact")
+        self.text_match_mode_combo_box.setFixedSize(104, 42)
 
         # 建立被查询行的完整位数选项。
         self.text_length_combo_box = ComboBox()
+        self.text_length_combo_box.setObjectName("historyTextLength")
+        self.text_length_combo_box.setAccessibleName("皮带文字位数")
         for text_length in (None, 20, 8, 3, 2):
             caption = "全部位数" if text_length is None else f"{text_length} 位"
             self.text_length_combo_box.addItem(caption, userData=text_length)
+        self.text_length_combo_box.setFixedSize(124, 42)
 
         # 将查询按钮和回车连接到同一提交入口。
-        self.text_search_button = PushButton("查询")
-        self.clear_text_search_button = PushButton("清除查询")
+        self.text_search_button = PrimaryPushButton("查询")
+        self.text_search_button.setObjectName("historySearchButton")
+        self.text_search_button.setFixedSize(88, 42)
+        self.clear_text_search_button = TransparentPushButton("清除查询")
+        self.clear_text_search_button.setObjectName("historyClearSearchButton")
+        self.clear_text_search_button.setFixedSize(88, 42)
         self.text_search_button.clicked.connect(self.apply_text_search)
         self.text_query_edit.returnPressed.connect(self.apply_text_search)
         self.clear_text_search_button.clicked.connect(self.clear_text_search)
@@ -195,13 +223,16 @@ class HistoryPage(QWidget):
         text_search_layout.addWidget(self.text_search_button)
         text_search_layout.addWidget(self.clear_text_search_button)
         filter_layout.addLayout(text_search_layout)
+        filter_layout.addLayout(filters)
         layout.addWidget(filter_card)
 
         # 建立六列只读历史记录表格。
         content = SimpleCardWidget()
         content.setObjectName("historyRecordsCard")
+        content.setBorderRadius(16)
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(16, 16, 16, 16)
+        content_layout.setContentsMargins(16, 12, 16, 12)
+        content_layout.setSpacing(12)
         self.table = TableWidget()
         self.table.setColumnCount(6)
         self.table.setObjectName("historyTable")
@@ -209,7 +240,7 @@ class HistoryPage(QWidget):
             "机器 ▾", "时间 ▾", "OCR 结果摘要", "最终频率", "状态", "操作"
         ))
         self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(52)
+        self.table.verticalHeader().setDefaultSectionSize(58)
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -221,7 +252,7 @@ class HistoryPage(QWidget):
         table_header.sectionClicked.connect(self.handle_header_clicked)
         self.update_machine_filter_header()
         self.update_time_filter_header()
-        table_header.setFixedHeight(40)
+        table_header.setFixedHeight(44)
         table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for column, width in ((0, 140), (1, 170), (3, 110), (4, 100), (5, 80)):
             self.table.setColumnWidth(column, width)
@@ -229,18 +260,24 @@ class HistoryPage(QWidget):
 
         # 在表格下方显示筛选后的总数和翻页入口。
         pagination_layout = QHBoxLayout()
+        pagination_layout.setContentsMargins(8, 0, 4, 0)
+        pagination_layout.setSpacing(12)
         self.record_count_label = CaptionLabel("0 条")
+        self.record_count_label.setObjectName("historyRecordCount")
         pagination_layout.addWidget(self.record_count_label)
         pagination_layout.addStretch()
         self.previous_page_button = TransparentPushButton("‹")
+        self.previous_page_button.setObjectName("historyPreviousPage")
         self.previous_page_button.setFixedWidth(34)
         self.previous_page_button.setAccessibleName("上一页")
         self.previous_page_button.setEnabled(False)
         self.previous_page_button.clicked.connect(self.show_previous_page)
         pagination_layout.addWidget(self.previous_page_button)
         self.page_label = CaptionLabel("1 / 1")
+        self.page_label.setObjectName("historyPageNumber")
         pagination_layout.addWidget(self.page_label)
         self.next_page_button = TransparentPushButton("›")
+        self.next_page_button.setObjectName("historyNextPage")
         self.next_page_button.setFixedWidth(34)
         self.next_page_button.setAccessibleName("下一页")
         self.next_page_button.setEnabled(False)
@@ -248,6 +285,21 @@ class HistoryPage(QWidget):
         pagination_layout.addWidget(self.next_page_button)
         content_layout.addLayout(pagination_layout)
         layout.addWidget(content, 1)
+
+        # 读取历史列表样式并替换项目颜色。
+        stylesheet_path = Path(__file__).parents[1] / "styles" / "history_page.qss"
+        self.history_stylesheet = stylesheet_path.read_text(encoding="utf-8")
+        for name, color in COLORS.items():
+            self.history_stylesheet = self.history_stylesheet.replace(f"@{name}", color)
+
+        # 将页面样式追加到 Fluent 控件的基础样式。
+        for widget in (
+            title, subtitle, filter_card, content, self.status_filter, filter_hint,
+            *self.status_filter.items.values(), self.text_query_edit, self.text_match_mode_combo_box,
+            self.text_length_combo_box, self.text_search_button, self.clear_text_search_button, self.table,
+            self.record_count_label, self.page_label, self.previous_page_button, self.next_page_button,
+        ):
+            setCustomStyleSheet(widget, self.history_stylesheet, self.history_stylesheet)
 
         # 保存当前详情记录的有效证据目录。
         self.current_evidence_directory: Path | None = None
@@ -1049,6 +1101,7 @@ class HistoryPage(QWidget):
             # 为当前记录建立详情入口。
             button = TransparentPushButton("查看  ›")
             button.setObjectName("historyViewButton")
+            setCustomStyleSheet(button, self.history_stylesheet, self.history_stylesheet)
             session_id = record["session_id"]
             button.clicked.connect(
                 lambda checked=False, cycle=session_id: self.show_record_detail(cycle)

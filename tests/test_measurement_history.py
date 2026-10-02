@@ -444,7 +444,7 @@ def test_history_text_search_submits_and_preserves_conditions(
         page.refresh_history()
         page.next_page_button.click()
         assert page.current_page == 2
-        assert page.text_query_edit.placeholderText() == "输入皮带文字或片段"
+        assert page.text_query_edit.placeholderText() == "输入完整皮带文字或片段"
         assert page.text_match_mode_combo_box.currentData() == "contains"
         assert page.text_length_combo_box.currentData() is None
         query_records.reset_mock()
@@ -521,6 +521,15 @@ def test_history_text_search_submits_and_preserves_conditions(
             text_match_mode="contains",
             text_length=None,
         )
+
+        # 输入框的查询图标沿用相同的提交入口。
+        query_records.reset_mock()
+        page.text_query_edit.setText(" 文 字 ")
+        page.text_query_edit.actions()[0].trigger()
+        assert page.current_page == 1
+        assert page.selected_text_query == " 文 字 "
+        assert page.record_count_label.text() == "21 条"
+        query_records.assert_called_once()
     finally:
         page.detail_dialog.close()
         page.close()
