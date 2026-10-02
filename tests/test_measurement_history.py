@@ -2026,7 +2026,7 @@ def test_history_toolbar_opens_filter_without_querying_or_sorting(
     measurement_record_service: MeasurementRecordService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证工具栏筛选打开弹层，打开和关闭均不查询或排序。
+    """验证机器仍使用 Flyout，时间面板独立开关且不查询。
 
     Args:
         qt_application: 测试期间保持存活的 Qt 应用。
@@ -2035,137 +2035,50 @@ def test_history_toolbar_opens_filter_without_querying_or_sorting(
 
     Returns:
         返回示例：
-            None  # 弹层不改变已应用条件和记录顺序
+            None  # 两种筛选使用各自弹层，打开和关闭不查询
     """
     controller = AppController(Mock(), measurement_record_service, Mock(), Path("config"))
     page = HistoryPage(controller)
     make_flyout = Mock()
     monkeypatch.setattr(Flyout, "make", make_flyout)
     try:
-        # 检查页面筛选控件和表格排序状态。
+        # 打开机器筛选仍调用原有 Flyout 入口。
         page.refresh_history()
-        assert page.findChildren(ComboBox) == [
-            page.text_length_combo_box,
-            page.text_match_mode_combo_box,
-        ]
-        assert page.table.isSortingEnabled() is False
-        header = page.table.horizontalHeader()
-        assert not header.isSortIndicatorShown()
+        page.show()
+        qt_application.processEvents()
         query_records = Mock(wraps=controller.list_measurement_records)
         monkeypatch.setattr(controller, "list_measurement_records", query_records)
-
-        # 表头不再打开筛选，工具栏按钮建立各自的弹层。
-        assert not header.sectionsClickable()
-        for column in range(6):
-            header.sectionClicked.emit(column)
-        make_flyout.assert_not_called()
-        for button, title in (
-            (page.machine_filter_button, "机器筛选"),
-            (page.time_filter_button, "时间筛选"),
-        ):
-            button.click()
-            view = make_flyout.call_args.args[0]
-            assert view.titleLabel.text() == title
-            assert make_flyout.call_args.kwargs["target"] is button
-            make_flyout.return_value.close()
-            view.deleteLater()
-        assert make_flyout.call_count == 2
-        make_flyout.reset_mock()
-
-        # 关闭未应用的弹层后，机器和时间条件仍保持默认值。
-        page.time_filter_button.click()
+        page.machine_filter_button.click()
         make_flyout.assert_called_once()
-        query_records.assert_not_called()
-        assert page.selected_machine_id is None
-        assert page.selected_start_date is None
-        assert page.selected_end_date is None
-        make_flyout.return_value.close()
-        view = make_flyout.call_args.args[0]
-        assert view.findChild(CheckBox) is None
-        date_range = view.findChild(DateRangePicker)
-        assert date_range.start_date == QDate.currentDate()
-        assert date_range.end_date == QDate.currentDate()
-        assert len(view.findChildren(InlineCalendarView)) == 1
-        view.deleteLater()
+        assert make_flyout.call_args.kwargs["target"] is page.machine_filter_button
+        make_flyout.call_args.args[0].deleteLater()
 
-        # 已应用条件在再次打开和关闭时保持不变。
-        selected_date = date(2026, 9, 27)
-        page.apply_time_filter(selected_date, selected_date)
-        query_records.reset_mock()
+        # 时间筛选使用 Tool 浮层，第二次点击只关闭。
+        QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
+        panel = page.time_filter_panel
+        assert panel.isVisible()
+        assert panel.windowType() == Qt.WindowType.Tool
+        assert panel.view.findChild(DateRangePicker).start_date == QDate.currentDate()
+        QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
+        assert not panel.isVisible()
+        assert page.time_filter_panel is None
+        make_flyout.assert_called_once()
+
+        # 旧面板的迟到通知不会清理新面板。
         page.time_filter_button.click()
-        assert make_flyout.call_count == 2
-        make_flyout.return_value.close()
+        current_panel = page.time_filter_panel
+        panel.closed.emit()
+        assert page.time_filter_panel is current_panel
+        assert current_panel.isVisible()
+        assert not page.table.isSortingEnabled()
         query_records.assert_not_called()
-        assert page.selected_start_date == selected_date
-        assert page.selected_end_date == selected_date
-        assert page.table.isSortingEnabled() is False
-
-        # 弹层恢复已应用的日期范围。
-        view = make_flyout.call_args.args[0]
-        assert view.findChild(CheckBox) is None
-        date_range = view.findChild(DateRangePicker)
-        assert date_range.start_date.toPython() == selected_date
-        assert date_range.end_date.toPython() == selected_date
-
-        # 修改临时日期不查询，确定后只应用一次当前范围。
-        next_date = selected_date + timedelta(days=1)
-        date_range.select_endpoint("end")
-        date_range.update_selected_date(QDate(next_date))
-        query_records.assert_not_called()
-        assert page.selected_end_date == selected_date
-        apply_button = next(
-            button for button in view.findChildren(QPushButton)
-            if button.text() == "确定"
-        )
-        make_flyout.return_value.close.reset_mock()
-        apply_button.click()
-        query_records.assert_called_once_with(
-            None,
-            None,
-            1,
-            20,
-            start_date=selected_date,
-            end_date=next_date,
-            text_query=None,
-            text_match_mode="contains",
-            text_length=None,
-        )
-        make_flyout.return_value.close.assert_called_once()
-        assert page.time_filter_button.text() == f"{selected_date} ～ {next_date}  ▾"
-        view.deleteLater()
-        assert page.table.isSortingEnabled() is False
-        assert not header.isSortIndicatorShown()
-
-        # 清除时间按钮直接清除已应用范围并关闭弹层。
-        page.time_filter_button.click()
-        view = make_flyout.call_args.args[0]
-        clear_button = next(
-            button for button in view.findChildren(QPushButton)
-            if button.text() == "清除时间"
-        )
-        query_records.reset_mock()
-        make_flyout.return_value.close.reset_mock()
-        clear_button.click()
-        assert page.selected_start_date is None
-        assert page.selected_end_date is None
-        assert page.time_filter_button.text() == "时间范围  ▾"
-        query_records.assert_called_once_with(
-            None,
-            None,
-            1,
-            20,
-            start_date=None,
-            end_date=None,
-            text_query=None,
-            text_match_mode="contains",
-            text_length=None,
-        )
-        make_flyout.return_value.close.assert_called_once()
-        view.deleteLater()
     finally:
+        if page.time_filter_panel is not None:
+            page.time_filter_panel.close()
         page.detail_dialog.close()
         page.close()
         page.deleteLater()
+        qt_application.processEvents()
 
 
 def click_calendar_item(scroll_view: QListWidget, selected_date: QDate) -> None:
@@ -2189,7 +2102,7 @@ def click_calendar_item(scroll_view: QListWidget, selected_date: QDate) -> None:
     QApplication.processEvents()
 
 
-def test_history_inline_calendar_mouse_selection_preserves_popup_and_filters(
+def test_history_inline_calendar_mouse_selection_preserves_panel_and_filters(
     qt_application: QApplication,
     measurement_record_service: MeasurementRecordService,
     monkeypatch: pytest.MonkeyPatch,
@@ -2224,7 +2137,7 @@ def test_history_inline_calendar_mouse_selection_preserves_popup_and_filters(
         # 点击同一天和不同日期时，只有日期草稿发生变化。
         QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
         qt_application.processEvents()
-        flyout = qt_application.activePopupWidget()
+        flyout = page.time_filter_panel
         date_range = flyout.view.findChild(DateRangePicker)
         calendar = date_range.calendar
         for endpoint_button, changed_date in (
@@ -2238,7 +2151,7 @@ def test_history_inline_calendar_mouse_selection_preserves_popup_and_filters(
             click_calendar_item(calendar.dayView.scrollView, changed_date)
             assert flyout.isVisible()
             assert calendar.isVisible()
-            assert qt_application.activePopupWidget() is flyout
+            assert page.time_filter_panel is flyout
             assert date_range.start_date == changed_date
             assert date_range.end_date == changed_date
         query_records.assert_not_called()
@@ -2253,22 +2166,22 @@ def test_history_inline_calendar_mouse_selection_preserves_popup_and_filters(
             QTest.mouseClick(title_button, Qt.MouseButton.LeftButton)
             qt_application.processEvents()
             assert calendar.stackedWidget.currentWidget() is target_view
-            assert qt_application.activePopupWidget() is flyout
+            assert page.time_filter_panel is flyout
+            assert flyout.isVisible()
         click_calendar_item(calendar.yearView.scrollView, QDate(2025, 1, 1))
         assert calendar.stackedWidget.currentWidget() is calendar.monthView
-        assert qt_application.activePopupWidget() is flyout
+        assert page.time_filter_panel is flyout
+        assert flyout.isVisible()
         click_calendar_item(calendar.monthView.scrollView, QDate(2025, 3, 1))
         assert calendar.stackedWidget.currentWidget() is calendar.dayView
-        assert qt_application.activePopupWidget() is flyout
+        assert page.time_filter_panel is flyout
+        assert flyout.isVisible()
         click_calendar_item(calendar.dayView.scrollView, QDate(2025, 3, 18))
         click_calendar_item(calendar.dayView.scrollView, QDate(2025, 3, 20))
         assert date_range.start_date == QDate(2025, 3, 18)
         assert date_range.end_date == QDate(2025, 3, 20)
         assert flyout.isVisible()
-        assert [
-            widget for widget in qt_application.topLevelWidgets()
-            if widget.isVisible() and widget.windowType() == Qt.WindowType.Popup
-        ] == [flyout]
+        assert flyout.windowType() == Qt.WindowType.Tool
         query_records.assert_not_called()
 
         # 确定后应用草稿日期，保留其它筛选并只查询一次。
@@ -2289,12 +2202,12 @@ def test_history_inline_calendar_mouse_selection_preserves_popup_and_filters(
             text_match_mode="contains",
             text_length=None,
         )
-        assert qt_application.activePopupWidget() is None
+        assert page.time_filter_panel is None
 
         # 再打开恢复已应用日期，清除按钮只移除日期条件。
         QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
         qt_application.processEvents()
-        flyout = qt_application.activePopupWidget()
+        flyout = page.time_filter_panel
         date_range = flyout.view.findChild(DateRangePicker)
         assert date_range.start_date == QDate(2025, 3, 18)
         assert date_range.end_date == QDate(2025, 3, 20)
@@ -2316,12 +2229,12 @@ def test_history_inline_calendar_mouse_selection_preserves_popup_and_filters(
             text_match_mode="contains",
             text_length=None,
         )
-        assert qt_application.activePopupWidget() is None
+        assert page.time_filter_panel is None
         assert page.time_filter_button.text() == "时间范围  ▾"
         assert page.selected_start_date is None
         assert page.selected_end_date is None
     finally:
-        popup = qt_application.activePopupWidget()
+        popup = page.time_filter_panel
         if popup is not None:
             popup.close()
         page.detail_dialog.close()
@@ -2360,7 +2273,7 @@ def test_history_inline_calendar_discards_unapplied_mouse_selection(
         monkeypatch.setattr(controller, "list_measurement_records", query_records)
         QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
         qt_application.processEvents()
-        flyout = qt_application.activePopupWidget()
+        flyout = page.time_filter_panel
         date_range = flyout.view.findChild(DateRangePicker)
         click_calendar_item(date_range.calendar.dayView.scrollView, QDate(2026, 9, 29))
         assert date_range.start_date == QDate(2026, 9, 29)
@@ -2378,7 +2291,7 @@ def test_history_inline_calendar_discards_unapplied_mouse_selection(
         else:
             QTest.mouseClick(flyout, Qt.MouseButton.LeftButton, pos=QPoint(-10, -10))
         qt_application.processEvents()
-        assert qt_application.activePopupWidget() is None
+        assert page.time_filter_panel is None
         query_records.assert_not_called()
         assert page.selected_start_date == date(2026, 9, 27)
         assert page.selected_end_date == date(2026, 9, 28)
@@ -2386,13 +2299,13 @@ def test_history_inline_calendar_discards_unapplied_mouse_selection(
         # 再次打开恢复已应用日期，不沿用被放弃的草稿。
         QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
         qt_application.processEvents()
-        flyout = qt_application.activePopupWidget()
+        flyout = page.time_filter_panel
         date_range = flyout.view.findChild(DateRangePicker)
         assert date_range.start_date == QDate(2026, 9, 27)
         assert date_range.end_date == QDate(2026, 9, 28)
         query_records.assert_not_called()
     finally:
-        popup = qt_application.activePopupWidget()
+        popup = page.time_filter_panel
         if popup is not None:
             popup.close()
         page.detail_dialog.close()

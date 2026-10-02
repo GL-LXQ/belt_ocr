@@ -3,10 +3,11 @@
 from datetime import date, datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontInfo, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -43,6 +44,8 @@ from qfluentwidgets import (
     setCustomStyleSheet,
 )
 
+from qfluentwidgets.components.widgets.flyout import FlyoutAnimationManager
+
 from src.controller.controller import AppController
 from ui.date_range_picker import DateRangePicker
 from ui.theme import COLORS
@@ -75,6 +78,81 @@ def format_history_frequency(frequency: float | None) -> str:
     return "--" if frequency is None else f"{frequency:.1f} Hz"
 
 
+class HistoryTimeFilterPanel(Flyout):
+    """仅供历史时间筛选使用的非 Popup 浮层。"""
+
+    def __init__(self, view: FlyoutView, trigger_button: QWidget, parent: QWidget) -> None:
+        """建立浮层并保存用于开关切换的按钮。
+
+        Args:
+            view: 日期草稿和操作按钮所在的内容视图。
+            trigger_button: 打开时间筛选的按钮。
+            parent: 所属主窗口。
+
+        Returns:
+            返回示例：
+                None  # 浮层使用 Tool 窗口类型
+        """
+        super().__init__(view, parent)
+        self.trigger_button = trigger_button
+        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+
+    def showEvent(self, event) -> None:
+        """显示期间安装点击和按键过滤器。
+
+        Args:
+            event: Qt 显示事件。
+
+        Returns:
+            返回示例：
+                None  # 应用事件过滤器已安装
+        """
+        super().showEvent(event)
+        QApplication.instance().installEventFilter(self)
+
+    def hideEvent(self, event) -> None:
+        """隐藏时移除应用事件过滤器。
+
+        Args:
+            event: Qt 隐藏事件。
+
+        Returns:
+            返回示例：
+                None  # 应用事件过滤器已移除
+        """
+        QApplication.instance().removeEventFilter(self)
+        super().hideEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:
+        """处理 Esc 和面板及触发按钮之外的点击。
+
+        Args:
+            watched: 接收事件的对象。
+            event: Qt 输入事件。
+
+        Returns:
+            返回示例：
+                True  # Esc 已关闭面板并消费事件
+                False  # 其它事件继续交给目标控件
+        """
+        if self.isVisible():
+            # Esc 关闭草稿面板并停止传递该按键。
+            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                self.close()
+                return True
+
+            # 外部点击关闭面板，触发按钮交给页面执行开关切换。
+            if event.type() == QEvent.MouseButtonPress:
+                global_position = event.globalPosition().toPoint()
+                inside_panel = self.rect().contains(self.mapFromGlobal(global_position))
+                inside_button = self.trigger_button.rect().contains(
+                    self.trigger_button.mapFromGlobal(global_position)
+                )
+                if not inside_panel and not inside_button:
+                    self.close()
+        return super().eventFilter(watched, event)
+
+
 class HistoryPage(QWidget):
     """组织测量历史筛选、表格、详情和人工复核。"""
 
@@ -101,6 +179,7 @@ class HistoryPage(QWidget):
         self.record_machines = []
         self.selected_start_date: date | None = None
         self.selected_end_date: date | None = None
+        self.time_filter_panel: HistoryTimeFilterPanel | None = None
 
         # 保存已提交的文字查询条件。
         self.selected_text_query: str | None = None
@@ -879,6 +958,11 @@ class HistoryPage(QWidget):
             返回示例：
                 None  # 弹层已打开，确定或清除时间后应用条件并关闭
         """
+        # 再次点击按钮时关闭当前面板。
+        if self.time_filter_panel is not None and self.time_filter_panel.isVisible():
+            self.time_filter_panel.close()
+            return
+
         # 创建临时日期筛选弹层。
         view = FlyoutView(title="时间筛选", content="", isClosable=False)
         content = QWidget()
@@ -909,12 +993,30 @@ class HistoryPage(QWidget):
         content_layout.addLayout(actions)
         view.addWidget(content)
 
-        # 在时间筛选按钮下方展开弹层。
-        flyout = Flyout.make(
-            view,
-            target=self.time_filter_button,
-            parent=self.window(),
-            aniType=FlyoutAnimationType.DROP_DOWN,
+        # 保存当前面板，并仅清理对应实例的引用。
+        panel = HistoryTimeFilterPanel(view, self.time_filter_button, self.window())
+        self.time_filter_panel = panel
+
+        def clear_panel_reference() -> None:
+            """清理当前已关闭的时间面板引用。
+
+            Args:
+                无外部参数。
+
+            Returns:
+                返回示例：
+                    None  # 对应引用已清理，新面板引用保持不变
+            """
+            if self.time_filter_panel is panel:
+                self.time_filter_panel = None
+
+        panel.closed.connect(clear_panel_reference)
+
+        # 沿用原有定位和下拉动画显示时间面板。
+        panel.show()
+        animation = FlyoutAnimationManager.make(FlyoutAnimationType.DROP_DOWN, panel)
+        panel.exec(
+            animation.position(self.time_filter_button), FlyoutAnimationType.DROP_DOWN
         )
 
         # 点击确定或清除时间后应用条件并关闭弹层。
@@ -925,9 +1027,9 @@ class HistoryPage(QWidget):
             )
         )
         clear_button.clicked.connect(lambda: self.apply_time_filter(None, None))
-        cancel_button.clicked.connect(flyout.close)
-        apply_button.clicked.connect(flyout.close)
-        clear_button.clicked.connect(flyout.close)
+        cancel_button.clicked.connect(panel.close)
+        apply_button.clicked.connect(panel.close)
+        clear_button.clicked.connect(panel.close)
 
     def show_previous_page(self) -> None:
         """在上一页可用时读取上一页记录。
