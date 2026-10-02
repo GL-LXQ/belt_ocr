@@ -1,6 +1,7 @@
 """读取 MVS 相机和测量业务配置。"""
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 
 import yaml
@@ -97,6 +98,29 @@ class AppConfig:
             "max_cycle_open_ms", "event_queue_capacity",
             "shutdown_timeout_ms",
         )
+
+        # 数值配置只接受整数或有限小数，可选相机参数允许留空。
+        numeric_parameters = positive_parameters + (
+            "minimum_frequency_hz", "maximum_frequency_hz",
+            "camera_exposure_time_us", "camera_gain",
+            "modbus_poll_interval_ms", "modbus_reconnect_interval_ms",
+            "modbus_timeout_seconds", "modbus_baudrate", "modbus_input_address",
+            "modbus_stopbits", "modbus_bytesize", "modbus_unit_id",
+        )
+        for parameter in numeric_parameters:
+            value = getattr(self, parameter)
+            if parameter in ("camera_exposure_time_us", "camera_gain") and value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or (isinstance(value, float) and not math.isfinite(value))
+            ):
+                raise ValueError(f"{parameter} 必须是有限数值。")
+
+        # 队列容量必须使用整数，不能由小数隐式决定容量。
+        if not isinstance(self.event_queue_capacity, int):
+            raise ValueError("event_queue_capacity 必须是正整数。")
 
         # 逐项检查上述参数大于零。
         for parameter in positive_parameters:
