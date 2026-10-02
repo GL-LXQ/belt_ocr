@@ -3,7 +3,7 @@
 
 # 数据库与图片路径、退出期限。
 application:
-  database_path: ../runtime/measurements.sqlite3  # 业务库路径，含机器表与测量结果表
+  database_path: ../runtime/measurements.recognized.20261002.sqlite3  # 业务库路径，含机器表与测量结果表
   recovery_database_path: ../runtime/measurements.recovery.sqlite3  # 运行库路径，保存异常事件审计
   evidence_directory: ../runtime/evidence  # 证据图片根目录
 

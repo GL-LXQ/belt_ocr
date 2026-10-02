@@ -62,6 +62,8 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 
 ## 二、数据流向
 
+当前本地业务库由 `config/config.yaml` 指向 `runtime/measurements.recognized.20261002.sqlite3`，新库使用程序现有初始化入口建表，原机器和测量记录已转存；正式识别文字及非空人工复核文字逐行去除空白并转大写，未编辑确认仍保留 `reviewed_lines=NULL`。历史查询和后续测量写入使用新库，证据目录及运行恢复库沿用原路径；原业务库和 `runtime/database_backups/` 中的切换前快照保留。
+
 现场 DI 基线和后续启停边沿进入 `SystemRuntime`，`MachineRuntime.handle_machine_start()` 直接检查当前 Session、机器故障、等待复位和相机状态后受理测量；频率读数仅在 `FrequencyState.RUNNING` 时加入本轮明细，结束后由 `SUCCESS / FAILED` 保存最终结果，迟到的同轮读数写入异常事件。测量通知进入 `RealtimePage.measurement_states_by_machine_id`，页面统一缓存当前 Session、步骤进度和动画运行状态，卡片更新与重建直接读取页面缓存。
 
 实时监测页从现有机器记录读取名称，并从机器整体状态、相机连接状态、测量进度、频率和 OCR 结果刷新机器卡片；卡片分别展示整体状态徽标、相机连接状态、本轮流程、实时频率和本轮第一条识别摘要。选中机器后，右侧详情同步整体状态胶囊，继续读取机器记录中的相机序列号并展示完整 OCR 结果。
