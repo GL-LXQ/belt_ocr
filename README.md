@@ -8,6 +8,8 @@ BeltVision 是运行在工控机上的多皮带机视觉监测系统。一台工
 
 相机运行参数由 `config/config.yaml` 的 `camera` 段读入 `AppConfig`，Runtime 为每台机器写入 `MachineConfig`，打开相机时由 MVS SDK 依次设置 Mono8、关闭自动曝光与自动增益、写入曝光 80 微秒和增益 0，再选择输出线路、设置频闪模式与信号源并使能频闪；参数写入失败时释放相机句柄并按单台连接失败处理。`camera_line_selector` 和 `camera_line_source` 仍需按现场 MVS 实际值填入，启用频闪时缺失任一值会使配置校验失败。
 
+相机打开或参数写入失败时，SDK 仍依次尝试关闭设备和销毁句柄；后续清理故障单独记入日志，不覆盖最先发生的异常。明确的 MVS 错误继续按单台连接失败处理，未知程序异常保留原类型并进入 Runtime 启动失败与整体资源释放流程。
+
 IO 模块通过 Modbus RTU 持续读取 DI 状态。Runtime 完成相机和 OCR 初始化后，在开放现场信号入口前将各机器设为 `waiting_cycle_reset=True`，等待首份有效 DI。首读只建立现场基线，不产生 START 或 CLOSE，也不创建半轮测量：`False / CLOSED` 解除等待复位，`True / OPEN` 继续等待真实 CLOSE；之后的 `False → True` 视为 START，`True → False` 视为 CLOSE。断线恢复后的首读同样只重新建立基线。
 
 IO 读取失败时，系统记录日志并清空旧 DI 状态，以 `IO_INTERRUPTED` 结束仍未收到 CLOSE 的采集周期；已经关闭、正在等待识别或入库的周期继续处理。轮询保持运行，通信恢复后的首份有效读数按上述基线规则处理，断线期间发生的电平变化不再与旧状态比较，也不补发 START 或 CLOSE。

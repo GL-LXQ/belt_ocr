@@ -2,6 +2,7 @@
 
 import ctypes
 import importlib
+import logging
 import os
 import sys
 import threading
@@ -15,6 +16,7 @@ from numpy.typing import NDArray
 
 
 PIXEL_TYPE_MONO8 = 0x01080001
+logger = logging.getLogger(__name__)
 
 
 class MvsError(RuntimeError):
@@ -511,11 +513,13 @@ class MvsSdk:
                     if return_code != self.binding.errors.MV_OK:
                         raise MvsError(f"设置相机网络包大小失败（GevSCPSPacketSize），错误码：0x{return_code:08X}")
         except Exception:
-            # 任一步失败时关闭已创建的资源，清理也失败则合并报告。
+            # 打开失败时关闭已创建的资源，清理故障独立记录。
             try:
                 camera.close()
-            except Exception as cleanup_error:
-                raise MvsError(f"相机打开失败，资源清理也失败：{cleanup_error}")
+            except Exception:
+                logger.exception("相机打开失败后的资源清理失败 camera_serial=%s", serial)
+
+            # 保留最先发生的异常及其故障分类。
             raise
 
         # 登记已打开的相机并返回资源对象。

@@ -35,7 +35,9 @@ def create_camera_sdk() -> tuple[MvsSdk, Mock]:
         "MV_CC_DestroyHandle", "MV_CC_SetEnumValueByString",
         "MV_CC_SetFloatValue", "MV_CC_SetBoolValue", "MV_CC_SetIntValue",
     ):
-        getattr(handle, method_name).return_value = 0
+        method = getattr(handle, method_name)
+        method.return_value = 0
+        method.__name__ = method_name
     handle.MV_CC_GetOptimalPacketSize.return_value = 1500
 
     # 建立包含一台 GigE 相机的 SDK 绑定和枚举结果。
@@ -101,6 +103,91 @@ def test_open_camera_writes_parameters_in_order() -> None:
     ]
     assert sdk.cameras["camera-1"] is camera
     handle.MV_CC_StartGrabbing.assert_not_called()
+
+
+@pytest.mark.parametrize("opening_method", ["MV_CC_OpenDevice", "MV_CC_SetEnumValueByString"])
+@pytest.mark.parametrize("cleanup_method", ["MV_CC_CloseDevice", "MV_CC_DestroyHandle"])
+@pytest.mark.parametrize("cleanup_raises", [False, True])
+def test_open_camera_preserves_unknown_error_after_cleanup_failure(
+    opening_method: str,
+    cleanup_method: str,
+    cleanup_raises: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """确认打开相机的未知异常不会被清理故障转换为设备异常。
+
+    Args:
+        opening_method: 抛出未知异常的 SDK 打开或配置方法。
+        cleanup_method: 清理过程中失败的 SDK 方法。
+        cleanup_raises: 为 True 时清理抛错，否则返回失败码。
+        caplog: pytest 提供的日志收集工具。
+
+    Returns:
+        返回示例：
+            None  # 原始异常保持不变，清理故障已记录且句柄销毁已尝试
+    """
+    # 同时注入打开异常和资源清理故障。
+    sdk, handle = create_camera_sdk()
+    opening_error = RuntimeError("SDK 绑定发生未知异常")
+    getattr(handle, opening_method).side_effect = opening_error
+    cleanup_operation = getattr(handle, cleanup_method)
+    if cleanup_raises:
+        cleanup_operation.side_effect = RuntimeError("清理连接失败")
+    else:
+        cleanup_operation.return_value = 1
+
+    # 清理故障不能覆盖最先发生的异常或改变故障分类。
+    with pytest.raises(RuntimeError) as raised:
+        sdk.open_camera("camera-1")
+    assert raised.value is opening_error
+    assert "相机打开失败后的资源清理失败" in caplog.text
+    assert "camera_serial=camera-1" in caplog.text
+
+    # 打开失败时仍依次尝试关闭设备和销毁句柄。
+    handle.MV_CC_CloseDevice.assert_called_once_with()
+    handle.MV_CC_DestroyHandle.assert_called_once_with()
+    assert "camera-1" not in sdk.cameras
+
+
+@pytest.mark.parametrize(
+    ("opening_method", "expected_message"),
+    [
+        ("MV_CC_OpenDevice", "OpenDevice(camera-1)"),
+        ("MV_CC_SetEnumValueByString", "AcquisitionMode"),
+    ],
+)
+def test_open_camera_preserves_sdk_error_after_cleanup_failure(
+    opening_method: str,
+    expected_message: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """确认相机清理失败后仍报告最先发生的 SDK 错误码和操作。
+
+    Args:
+        opening_method: 返回失败码的相机打开或配置方法。
+        expected_message: 原始错误应包含的 SDK 操作或参数名称。
+        caplog: pytest 提供的日志收集工具。
+
+    Returns:
+        返回示例：
+            None  # 原始设备故障可见，清理故障独立记录
+    """
+    # 使用不同错误码区分最初故障和后续清理故障。
+    sdk, handle = create_camera_sdk()
+    getattr(handle, opening_method).return_value = 2
+    handle.MV_CC_CloseDevice.return_value = 3
+
+    # 原始设备故障保持原有分类和诊断信息。
+    with pytest.raises(MvsError) as raised:
+        sdk.open_camera("camera-1")
+    assert expected_message in str(raised.value)
+    assert "0x00000002" in str(raised.value)
+    assert "0x00000003" in caplog.text
+
+    # 关闭失败不阻止继续销毁句柄。
+    handle.MV_CC_CloseDevice.assert_called_once_with()
+    handle.MV_CC_DestroyHandle.assert_called_once_with()
+    assert "camera-1" not in sdk.cameras
 
 
 @pytest.mark.parametrize(

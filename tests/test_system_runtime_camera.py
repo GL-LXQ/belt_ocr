@@ -408,3 +408,93 @@ async def test_ocr_initialization_failure_stops_startup(
     camera_sdk.close.assert_called_once()
     modbus_client.disconnect.assert_awaited_once()
     assert runtime.database.anchor_connection is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_startup_waits_for_ocr_before_releasing_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """确认反复取消启动仍等待 OCR 初始化结束，再且仅一次释放资源。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+        monkeypatch: pytest 提供的属性替换工具。
+
+    Returns:
+        返回示例：
+            None  # 启动已取消，现场入口未开放，相机、串口和数据库已关闭
+    """
+    # 建立已连接相机但尚未完成 OCR 初始化的运行时。
+    config = AppConfig(
+        database_path=tmp_path / "measurements.sqlite3",
+        evidence_directory=tmp_path / "evidence",
+        mvs_development_directory=tmp_path,
+        modbus_serial_port="COM1",
+        io_machine_channels={"1": 0},
+    )
+    runtime = SystemRuntime(config)
+    machine = SimpleNamespace(
+        machine_config=MachineConfig("1", "1号皮带机", "camera-1", "meter-1"),
+        camera=SimpleNamespace(sdk_camera=None),
+        discard_pending_events=Mock(),
+        release_resources=AsyncMock(),
+    )
+    runtime.machines = {"1": machine}
+    runtime.initialize_machines = Mock()
+    camera_sdk = SimpleNamespace(open_camera=Mock(return_value=Mock()), close=Mock())
+    modbus_client = SimpleNamespace(disconnect=AsyncMock())
+    monkeypatch.setattr("runtime.system_runtime.load_mvs_sdk", Mock(return_value=camera_sdk))
+    monkeypatch.setattr("runtime.system_runtime.ModbusClient", Mock(return_value=modbus_client))
+
+    # 让 OCR 初始化在线程内等待测试放行。
+    initialization_started = threading.Event()
+    initialization_finished = threading.Event()
+
+    def initialize_ocr() -> None:
+        """等待测试放行后完成 OCR 初始化。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 初始化线程已经结束
+        """
+        initialization_started.set()
+        if not initialization_finished.wait(timeout=5):
+            raise TimeoutError("测试未放行 OCR 初始化")
+
+    runtime.text_recognizer.initialize = Mock(side_effect=initialize_ocr)
+    startup_task = asyncio.create_task(runtime.start())
+    try:
+        # 反复取消启动不能提前结束底层初始化或关闭资源。
+        assert await asyncio.to_thread(initialization_started.wait, 5)
+        for _ in range(2):
+            startup_task.cancel()
+            await asyncio.sleep(0)
+        assert not startup_task.done()
+        assert not runtime.accepting_signals
+        assert not runtime.worker_tasks
+        camera_sdk.close.assert_not_called()
+        modbus_client.disconnect.assert_not_awaited()
+        assert runtime.database.anchor_connection is not None
+
+        # 线程结束后传播取消，并核对全部资源已经释放。
+        initialization_finished.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(startup_task, 5)
+        machine.release_resources.assert_awaited_once()
+        assert not runtime.accepting_signals
+        assert not runtime.worker_tasks
+        assert runtime.failure is None
+        assert runtime.database.anchor_connection is None
+
+        # 后续停止调用复用已经完成的清理，不重复关闭设备。
+        await runtime.stop()
+        camera_sdk.close.assert_called_once_with()
+        modbus_client.disconnect.assert_awaited_once_with()
+    finally:
+        initialization_finished.set()
+        await asyncio.gather(startup_task, return_exceptions=True)
+        await runtime.stop()
