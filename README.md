@@ -48,7 +48,7 @@ CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率�
 
 证据图片文件操作出现 `OSError` 时清理本轮新建图片，将它包装为 `EvidenceWriteError`，并以 `EVIDENCE_WRITE_FAILED` 结束当前 Session；图片全部保存后，测量记录提交遇到 SQLite `SQLITE_BUSY` 时最多尝试两次，两次间隔 100 毫秒。写锁重试耗尽或发生其他 SQLite 提交错误时，以 `DATABASE_WRITE_FAILED` 结束本轮，已保存的图片保留。数据库发现同一 Session 内容冲突时抛出 `CommitIntegrityConflictError`，以 `COMMIT_INTEGRITY_CONFLICT` 结束本轮，原记录不被覆盖。这三类存储故障在 Session 失败记录完成后进入 Runtime 全局故障流程并停止接收新测量；已知 MVS 图片编码失败只结束当前 Session，未知保存异常继续沿现有全局故障路径上报。
 
-采集完成却没有帧时，图像采集阶段上报失败，OCR 不启动；已知的 OCR 处理错误或周期超时也进入 Session 失败收尾。`MachineRuntime` 将失败原因写入 Session、标记失败并把机器编号、周期编号和错误明细写入现有 `abnormal_events` 表；随后取消并解绑本轮 OCR 任务，待现场关闭后释放 Session，旧任务独立收尾。人工复核结果仍按正常测量流程保存。异常事件写入失败只记录日志，不影响本轮收尾；收尾全部完成后，审计异常经 `on_system_failure()` 升级为系统级故障并安排 Runtime 退出。调用方已有原始系统级根因（证据图片写入失败、测量结果入库失败或提交冲突）时，`handle_session_failure()` 通过 `system_error` 参数优先上报该根因，审计异常只留在日志，不覆盖首次故障。
+采集无帧、已知 OCR 错误和周期超时先将 Session 标记失败，停止本轮采集并解绑 OCR 任务；机器编号、周期编号和错误明细由本机单个 `failure_audit_task` 写入 `abnormal_events`，等待数据库写锁不再占住机器事件回执或其他机器的 DI 启停。失败 Session 保留到现场关闭且审计保存结束，同机此时不受理新 START；任务结束才确认写入结果，退出也等待该任务后再关闭数据库。审计写入失败或意外取消经 `on_system_failure()` 进入系统退出；已有证据写入、测量入库或提交冲突根因时优先上报原始 `system_error`，审计异常只保留日志。人工复核和旧 OCR 任务独立收尾的流程保持不变。
 
 异常按影响范围进入现有三个入口：`handle_session_failure()` 只结算当前 Session，并在收尾完成后把调用方根因或异常事件存储故障交给系统级入口，`handle_machine_failure()` 记录本机故障并复用 Session 失败收尾，`handle_system_failure()` 关闭 Runtime 信号入口并安排整体退出。正常或迟到的同轮相机 `CAPTURE_FAILED` 都进入机器级入口；若当前 Session 已因 OCR 超时失败，只登记本机故障，不重复结算 Session 或写入异常事件。现场 CLOSE 后释放失败 Session，本机后续不再受理 START，其他机器继续运行。
 

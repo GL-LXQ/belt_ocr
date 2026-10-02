@@ -135,6 +135,9 @@ class MachineRuntime:
         # 跟踪当前测量的结果保存任务。
         self.result_storage_task: asyncio.Task[None] | None = None
 
+        # 跟踪当前测量的失败记录保存任务。
+        self.failure_audit_task: asyncio.Task[None] | None = None
+
     @property
     def overall_status(self) -> MachineOverallStatus:
         """返回当前机器用于实时监测展示的整体状态。
@@ -830,16 +833,16 @@ class MachineRuntime:
         *,
         system_error: Exception | None = None,
     ) -> None:
-        """将本轮测量标记为失败并清理相关资源，现场尚未关闭时继续保留当前 Session。
+        """清理失败测量并启动失败记录保存，现场关闭且保存结束后释放当前 Session。
 
         Args:
             session: 处理失败、中断或保存失败的当前测量。
             failure_reason: 本轮失败的原因描述。
-            system_error: 已发生的系统级异常，本轮清理完成后优先上报。
+            system_error: 已发生的系统级异常，失败记录保存结束后优先上报。
 
         Returns:
             返回示例：
-                None  # 当前测量已标记失败并完成清理；如有系统级异常，会在清理后上报
+                None  # 当前测量已清理，失败记录由本机后台任务继续保存
         """
         # 保存本轮失败原因。
         session.errors.append(failure_reason)
@@ -856,26 +859,6 @@ class MachineRuntime:
             session.session_id,
             session.errors,
         )
-
-        # 保存本轮失败记录；如果保存失败，先完成当前测量清理，再上报系统故障。
-        audit_error: Exception | None = None
-        try:
-            await run_blocking_operation(
-                self.database.save_abnormal_event,
-                failure_reason,
-                machine_id=session.machine_id,
-                session_id=session.session_id,
-                payload={"session_errors": list(session.errors)},
-            )
-        except Exception as error:
-            # 失败记录保存异常时，先记下这个异常。
-            audit_error = error
-            logger.exception(
-                "%s 保存测量失败记录时发生异常 machine_id=%s session_id=%s",
-                self.machine_config.machine_name,
-                session.machine_id,
-                session.session_id,
-            )
 
         # 取消当前 OCR 任务并解除当前 Session 的任务引用；尚未结束的任务仍由后台任务集合继续跟踪。
         current_recognition_task = self.current_recognition_task
@@ -899,14 +882,64 @@ class MachineRuntime:
         if session.frequency_state == FrequencyState.RUNNING:
             session.frequency_state = FrequencyState.FAILED
 
-        # 停止本轮相机采集和结果发送，然后检查当前测量能否释放。
-        await self.camera.inform_capture_workflow_stop()
-        self.release_finished_session()
+        # 在后台保存失败记录，保存结束前保留当前测量。
+        self.failure_audit_task = asyncio.create_task(run_blocking_operation(
+            self.database.save_abnormal_event,
+            failure_reason,
+            machine_id=session.machine_id,
+            session_id=session.session_id,
+            payload={"session_errors": list(session.errors)},
+        ))
 
-        # 如果已经有系统级异常就上报它，否则上报失败记录的保存异常。
+        # 停止本轮相机采集；停止异常或取消时仍回收失败记录任务。
+        try:
+            await self.camera.inform_capture_workflow_stop()
+        finally:
+            # 相机停止流程返回后，再允许保存回调释放当前测量或上报故障。
+            self.failure_audit_task.add_done_callback(
+                lambda task: self.handle_failure_audit_finished(task, session, system_error)
+            )
+
+    def handle_failure_audit_finished(
+        self,
+        task: asyncio.Task[None],
+        session: MeasurementSession,
+        system_error: Exception | None,
+    ) -> None:
+        """回收失败记录保存任务，优先上报原始故障并检查测量释放条件。
+
+        Args:
+            task: 已结束的失败记录保存任务。
+            session: 失败记录所属的测量周期。
+            system_error: 调用方已有的系统级故障，未发生时为 None。
+
+        Returns:
+            返回示例：
+                None  # 保存任务已回收，故障已上报且当前测量已检查释放条件
+        """
+        # 清空已结束的失败记录保存任务引用。
+        if self.failure_audit_task is task:
+            self.failure_audit_task = None
+
+        # 读取保存异常，意外取消也按系统故障处理。
+        audit_error = RuntimeError("测量失败记录保存任务意外取消") if task.cancelled() else task.exception()
+        if audit_error is not None:
+            logger.error(
+                "%s 保存测量失败记录时发生异常 machine_id=%s session_id=%s",
+                self.machine_config.machine_name,
+                session.machine_id,
+                session.session_id,
+                exc_info=(type(audit_error), audit_error, audit_error.__traceback__),
+            )
+
+        # 保留调用方的原始系统级故障，审计异常不覆盖它。
         escalated_error = system_error if system_error is not None else audit_error
         if escalated_error is not None:
             self.on_system_failure(escalated_error)
+
+        # 保存结束后检查测量释放条件，并通知状态等待方。
+        self.release_finished_session()
+        self.state_changed.set()
 
     def release_finished_session(self) -> None:
         """在测量已关闭、OCR 和保存任务结束且相机结果处理结束后释放当前测量。
@@ -927,8 +960,8 @@ class MachineRuntime:
         if session.state not in {SessionState.COMMITTED, SessionState.FAILED}:
             return
 
-        # 结果保存任务结束前继续保留当前测量。
-        if self.result_storage_task is not None:
+        # 结果或失败记录保存结束前继续保留当前测量。
+        if self.result_storage_task is not None or self.failure_audit_task is not None:
             return
 
         # 当前 Session 仍绑定 OCR 任务时继续等待。
@@ -1036,6 +1069,10 @@ class MachineRuntime:
                 await self.handle_session_failure(session, shutdown_reason)
             except Exception as error:
                 self.on_system_failure(error)
+
+        # 等待已有和退出时新建的失败记录保存，再释放当前测量。
+        if self.failure_audit_task is not None:
+            await asyncio.gather(self.failure_audit_task, return_exceptions=True)
 
         # 最后清空当前测量和频率归属。
         self.current_session = None
