@@ -61,8 +61,7 @@ class FrequencyMeasurement:
 class OCRResult:
     """保存本轮最终文字、证据图片或待复核原始帧。"""
 
-    ordered_lines: tuple[str, ...]  # 最终文字的顺序列表
-    normalized_lines: tuple[str, ...]  # 最终文字的去空格列表
+    recognized_lines: tuple[str, ...]  # 按终选顺序排列的大写、无空白正式识别文字
     selected_frames: tuple[MeasurementFrame, ...]  # 最终选中的内存图片
     line_frame_ids: tuple[tuple[str, ...], ...]  # 每条文字对应的证据图片编号
     review_frames: tuple[MeasurementFrame, ...] = ()  # 待复核时保留的全部原始帧

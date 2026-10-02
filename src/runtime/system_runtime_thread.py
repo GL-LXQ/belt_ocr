@@ -25,8 +25,8 @@ class SystemRuntimeThread(QThread):
     # 本轮关闭信号，参数依次为机器编号和周期编号。
     cycle_closed_signal = Signal(str, str)
 
-    # 最终文字信号，参数依次为机器编号、周期编号、原文字和去空格文字。
-    ocr_result_changed_signal = Signal(str, str, tuple, tuple)
+    # 最终文字信号，参数依次为机器编号、周期编号、正式识别文字。
+    ocr_result_changed_signal = Signal(str, str, tuple)
 
     # 机器整体状态信号，参数依次为机器编号和整体状态标识。
     machine_status_changed_signal = Signal(str, str)

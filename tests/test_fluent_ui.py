@@ -511,6 +511,7 @@ def test_summary_cards_use_light_shadows_and_metric_colors(qt_application) -> No
         assert pending_value.palette().color(QPalette.ColorRole.WindowText) == (
             QColor("#182230")
         )
+        assert pending_value.property("tone") == "normal"
 
         # 机器卡片和详情继续使用原有表面。
         assert all(card.graphicsEffect() is None for card in page.machine_cards)
@@ -542,7 +543,7 @@ def test_today_detection_refreshes_after_storage_and_page_show(qt_application) -
 
         # OCR 结果和正在执行的入库阶段不触发统计查询。
         page.update_measurement_progress("1", "session", "session_start", "success")
-        page.update_ocr_result("1", "session", ("003",), ("003",))
+        page.update_ocr_result("1", "session", ("003",))
         page.update_measurement_progress("1", "session", "evidence_storage", "running")
         assert controller.get_today_measurement_summary.call_count == query_count
 
@@ -574,8 +575,6 @@ def test_today_detection_refreshes_after_storage_and_page_show(qt_application) -
         qt_application.processEvents()
         assert controller.get_today_measurement_summary.call_count == query_count + 3
         assert page.today_detection_card.pending_review_value.text() == "0"
-        pending_value = page.today_detection_card.pending_review_value
-        assert pending_value.property("tone") == "normal"
     finally:
         window.close()
         window.deleteLater()
@@ -634,38 +633,68 @@ def test_today_detection_failure_keeps_monitoring_updates(
 
 
 def test_machine_detail_keeps_long_ocr_text_selectable(qt_application) -> None:
-    """验证详情保留全文且大量 OCR 不撑高摘要卡。
+    """验证详情保留正式识别全文且支持复制。
 
     Args:
         qt_application: Qt 应用实例。
 
     Returns:
-        None  # 全文可复制，摘要高度固定
+        None  # 全文可复制，摘要显示第一条正式识别文字
     """
     page = RealtimePage(make_ui_controller())
     try:
         page.show()
         qt_application.processEvents()
         card = page.machine_cards[0]
-        ordered_lines = tuple(f"{number:020d}" for number in range(40))
+        recognized_lines = tuple(f"{number:020d}" for number in range(40))
         page.update_measurement_progress("1", "first", "session_start", "success")
         qt_application.processEvents()
-        initial_height = card.sizeHint().height()
-        page.update_ocr_result("1", "first", ordered_lines, ordered_lines)
+        page.update_ocr_result("1", "first", recognized_lines)
         qt_application.processEvents()
 
         # 核对全文、只读属性和剪贴板复制。
         editor = page.detail_panel.ocr_text
-        assert editor.parentWidget().objectName() == "detailOcrPanel"
-        assert editor.frameShape() == QFrame.Shape.NoFrame
-        assert editor.height() == 110
-        assert all(line in editor.toPlainText() for line in ordered_lines)
-        assert ordered_lines[-1] in editor.toPlainText()
+        assert all(line in editor.toPlainText() for line in recognized_lines)
+        assert recognized_lines[-1] in editor.toPlainText()
         assert editor.isReadOnly()
         editor.selectAll()
         editor.copy()
         assert QApplication.clipboard().text() == editor.toPlainText()
-        assert card.ocr_result_label.text() == ordered_lines[0]
+        assert card.ocr_result_label.text() == recognized_lines[0]
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+def test_machine_detail_keeps_long_ocr_text_visual_layout(qt_application) -> None:
+    """验证大量正式识别文字保留详情样式且不撑高摘要卡。
+
+    Args:
+        qt_application: Qt 应用实例。
+
+    Returns:
+        None  # 详情样式保持固定，摘要卡高度不随 OCR 文字数量变化
+    """
+    # 创建页面并记录接收文字前的摘要卡高度。
+    page = RealtimePage(make_ui_controller())
+    try:
+        page.show()
+        qt_application.processEvents()
+        card = page.machine_cards[0]
+        recognized_lines = tuple(f"{number:020d}" for number in range(40))
+        page.update_measurement_progress("1", "first", "session_start", "success")
+        qt_application.processEvents()
+        initial_height = card.sizeHint().height()
+
+        # 更新大量文字后检查详情的固定样式。
+        page.update_ocr_result("1", "first", recognized_lines)
+        qt_application.processEvents()
+        editor = page.detail_panel.ocr_text
+        assert editor.parentWidget().objectName() == "detailOcrPanel"
+        assert editor.frameShape() == QFrame.Shape.NoFrame
+        assert editor.height() == 110
+
+        # 检查摘要卡高度保持不变。
         assert card.sizeHint().height() == initial_height
     finally:
         page.close()
@@ -790,17 +819,11 @@ def test_machine_card_shows_distinct_statuses(qt_application) -> None:
         assert card.state_label.text() == "图像采集失败"
 
         # 当前周期关闭后恢复流程和频率占位。
-        page.update_ocr_result("1", "first", ("AB",), ("AB",))
         page.update_cycle_closed("1", "first")
         assert card.state_label.text() == "--"
         assert card.frequency_label.text() == "--"
         assert page.detail_panel.state_label.text() == "--"
         assert page.detail_panel.frequency_label.text() == "--"
-
-        # 当前周期关闭后保留已显示的 OCR。
-        assert card.ocr_result_label.text() == "AB"
-        assert "2  AB" in page.detail_panel.ocr_text.toPlainText()
-        assert page.ocr_results_by_machine_id["1"] == ("first", ("AB",), ("AB",))
 
         # 启动新周期并更新实时频率和采集进度。
         page.update_measurement_progress("1", "second", "session_start", "success")
@@ -836,6 +859,50 @@ def test_machine_card_shows_distinct_statuses(qt_application) -> None:
         assert page.detail_panel.badge.text() == "离线"
         assert page.cards_by_machine_id["1"].camera_status_label.text() == "相机已离线"
         assert page.cards_by_machine_id["1"].state_label.text() == "--"
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+def test_machine_card_preserves_ocr_text_after_cycle_close_and_stop(
+    qt_application,
+) -> None:
+    """验证周期关闭和监测停止刷新后仍保留正式识别文字。
+
+    Args:
+        qt_application: Qt 应用实例。
+
+    Returns:
+        None  # 当前文字在关闭和停止刷新后保留，新周期清空旧文字
+    """
+    # 创建页面并接收当前周期的正式识别文字。
+    page = RealtimePage(make_ui_controller())
+    recognized_lines = ("2926215C", "003", "AB")
+    try:
+        page.update_measurement_progress("1", "first", "session_start", "success")
+        page.update_ocr_result("1", "first", recognized_lines)
+
+        # 周期关闭后保留缓存、摘要和详情文字。
+        page.update_cycle_closed("1", "first")
+        assert page.ocr_results_by_machine_id["1"] == ("first", recognized_lines)
+        assert page.cards_by_machine_id["1"].ocr_result_label.text() == "2926215C"
+        assert page.detail_panel.ocr_text.toPlainText() == (
+            "20  --\n8  2926215C\n3  003\n2  AB"
+        )
+
+        # 监测停止并刷新机器卡片后保留文字。
+        page.finish_monitoring("")
+        page.reload_machines()
+        assert page.ocr_results_by_machine_id["1"] == ("first", recognized_lines)
+        assert page.cards_by_machine_id["1"].ocr_result_label.text() == "2926215C"
+        assert "8  2926215C" in page.detail_panel.ocr_text.toPlainText()
+
+        # 新周期清空旧文字并隔离上一周期的迟到结果。
+        page.update_measurement_progress("1", "second", "session_start", "success")
+        page.update_ocr_result("1", "first", recognized_lines)
+        assert page.ocr_results_by_machine_id["1"] == ("second", ())
+        assert page.cards_by_machine_id["1"].ocr_result_label.text() == "--"
+        assert page.detail_panel.ocr_text.toPlainText() == "20  --\n8  --\n3  --\n2  --"
     finally:
         page.close()
         page.deleteLater()

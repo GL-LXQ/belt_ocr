@@ -178,27 +178,26 @@ class StepProgress(QFrame):
             connector.setGeometry(left, left_dot.center().y(), right - left, 1)
 
 
-def format_ocr_result_text(ordered_lines, normalized_lines) -> str:
+def format_ocr_result_text(recognized_lines: tuple[str, ...]) -> str:
     """按字符长度分类生成完整 OCR 展示文字。
 
     Args:
-        ordered_lines: 保留原始格式的文字。
-        normalized_lines: 逐条对应的去空格文字。
+        recognized_lines: 已转大写并去除所有空白的正式识别文字。
 
     Returns:
         "20  --\n8  --\n3  --\n2  --"  # 各类别的完整文字
     """
-    # 按固定类别收集对应的原始文字。
+    # 按固定类别收集正式识别文字。
     grouped_lines = {
         20: [],
         8: [],
         3: [],
         2: [],
     }
-    for ordered_line, normalized_line in zip(ordered_lines, normalized_lines):
-        character_count = len(normalized_line)
+    for recognized_line in recognized_lines:
+        character_count = len(recognized_line)
         if character_count in grouped_lines:
-            grouped_lines[character_count].append(ordered_line)
+            grouped_lines[character_count].append(recognized_line)
 
     # 为每类首行添加类别标识，后续结果单独换行。
     result_lines = []
@@ -451,20 +450,17 @@ class MachineCard(SimpleCardWidget):
         frequency_text = "--" if frequency is None else f"{frequency:.1f} Hz"
         self.frequency_label.setText(frequency_text)
 
-    def set_ocr_result(
-        self, ordered_lines: tuple[str, ...], normalized_lines: tuple[str, ...]
-    ) -> None:
+    def set_ocr_result(self, recognized_lines: tuple[str, ...]) -> None:
         """显示第一条 OCR 文字摘要。
 
         Args:
-            ordered_lines: 保留原始格式的最终文字。
-            normalized_lines: 与原始文字逐条对应的去空格文字。
+            recognized_lines: 已转大写并去除所有空白的正式识别文字。
 
         Returns:
             返回示例：
                 None  # 仅显示第一条结果或占位文字
         """
-        self.ocr_result_label.setText(ordered_lines[0] if ordered_lines else "--")
+        self.ocr_result_label.setText(recognized_lines[0] if recognized_lines else "--")
 
     def clear_ocr_result(self) -> None:
         """将 OCR 摘要恢复为占位文字。
@@ -970,7 +966,7 @@ class RealtimePage(QWidget):
         self.closing_requested = False
         self.connection_states = {}
         self.machine_statuses_by_machine_id = {}
-        self.ocr_results_by_machine_id = {}
+        self.ocr_results_by_machine_id: dict[str, tuple[str, tuple[str, ...]]] = {}
         self.measurement_states_by_machine_id = {}
         self.selected_machine_id: str | None = None
         self.cards_by_machine_id = {}
@@ -1234,9 +1230,8 @@ class RealtimePage(QWidget):
             # 恢复已缓存的文字。
             cached_result = self.ocr_results_by_machine_id.get(machine_id)
             if cached_result is not None:
-                ordered_lines = cached_result[1]
-                normalized_lines = cached_result[2]
-                card.set_ocr_result(ordered_lines, normalized_lines)
+                recognized_lines = cached_result[1]
+                card.set_ocr_result(recognized_lines)
 
             # 恢复当前周期的进度节点。
             measurement_state = self.measurement_states_by_machine_id.get(machine_id)
@@ -1378,10 +1373,7 @@ class RealtimePage(QWidget):
 
         # 从已有缓存恢复全文和步骤。
         cached_result = self.ocr_results_by_machine_id.get(self.selected_machine_id)
-        result_text = format_ocr_result_text(
-            cached_result[1] if cached_result else (),
-            cached_result[2] if cached_result else (),
-        )
+        result_text = format_ocr_result_text(cached_result[1] if cached_result else ())
         if panel.ocr_text.toPlainText() != result_text:
             panel.ocr_text.setPlainText(result_text)
         measurement_state = self.measurement_states_by_machine_id.get(
@@ -1570,7 +1562,7 @@ class RealtimePage(QWidget):
                 "machine_running": True,
             }
             self.measurement_states_by_machine_id[machine_id] = measurement_state
-            self.ocr_results_by_machine_id[machine_id] = (session_id, (), ())
+            self.ocr_results_by_machine_id[machine_id] = (session_id, ())
         elif measurement_state is None or measurement_state["session_id"] != session_id:
             return
 
@@ -1663,16 +1655,14 @@ class RealtimePage(QWidget):
         self,
         machine_id: str,
         session_id: str,
-        ordered_lines: tuple[str, ...],
-        normalized_lines: tuple[str, ...],
+        recognized_lines: tuple[str, ...],
     ) -> None:
         """保存当前周期的最终文字并更新对应卡片。
 
         Args:
             machine_id: 机器编号。
             session_id: 文字所属周期编号。
-            ordered_lines: 保留原始格式的最终文字。
-            normalized_lines: 与原始文字对应的去空格文字。
+            recognized_lines: 已转大写并去除所有空白的正式识别文字。
 
         Returns:
             返回示例：
@@ -1683,14 +1673,15 @@ class RealtimePage(QWidget):
         if cached_result is None or cached_result[0] != session_id:
             return
 
-        # 保留轻量文字缓存并更新仍在页面中的卡片。
-        self.ocr_results_by_machine_id[machine_id] = (
-            session_id, ordered_lines, normalized_lines
-        )
+        # 保存当前周期的正式识别文字缓存。
+        self.ocr_results_by_machine_id[machine_id] = (session_id, recognized_lines)
+
+        # 更新仍在页面中的机器卡片。
         card = self.cards_by_machine_id.get(machine_id)
         if card is not None:
-            card.set_ocr_result(ordered_lines, normalized_lines)
+            card.set_ocr_result(recognized_lines)
 
+        # 同步选中机器的详情文字。
         if machine_id == self.selected_machine_id:
             self.refresh_selected_machine_detail()
 

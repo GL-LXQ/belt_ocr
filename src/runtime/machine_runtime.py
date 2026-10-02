@@ -63,7 +63,7 @@ class MachineRuntime:
         on_system_failure: Callable[[Exception], None],
         state_changed: asyncio.Event,
         notify_camera_state: Callable[[str, str, str], None] | None = None,
-        notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
+        notify_ocr_result: Callable[[str, str, tuple[str, ...]], None] | None = None,
         notify_cycle_closed: Callable[[str, str], None] | None = None,
         notify_machine_status: Callable[[str, str], None] | None = None,
     ) -> None:
@@ -81,7 +81,7 @@ class MachineRuntime:
             on_system_failure: 系统故障回调，把识别任务异常交给运行时处理。
             state_changed: 测量状态变化通知。
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
-            notify_ocr_result: 可选文字通知函数，接收机器编号、Session ID、原文字和去空格文字。
+            notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、正式识别文字。
             notify_cycle_closed: 可选测量关闭通知函数，接收机器编号和 Session ID。
             notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
                 online、offline 或 fault。
@@ -699,8 +699,7 @@ class MachineRuntime:
                     self.notify_ocr_result(
                         session.machine_id,
                         session.session_id,
-                        session.ocr_result.ordered_lines,
-                        session.ocr_result.normalized_lines,
+                        session.ocr_result.recognized_lines,
                     )
 
                 # 通知界面 OCR 已完成。
@@ -1289,7 +1288,7 @@ class MachineRuntime:
             session_id=session.session_id,
             start_time=session.start_time,
             finish_time=session.finish_time,
-            ordered_lines=tuple(ocr_result.ordered_lines),
+            recognized_lines=tuple(ocr_result.recognized_lines),
             final_frequency_hz=final_frequency.value_hz if final_frequency else None,
             measurement_frequencies=tuple(
                 asdict(measurement) for measurement in session.measurement_frequencies

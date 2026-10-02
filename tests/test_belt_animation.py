@@ -264,14 +264,12 @@ def test_machine_card_sets_and_clears_ocr_result() -> None:
     """
     ocr_result_label = Mock()
     card = SimpleNamespace(ocr_result_label=ocr_result_label)
-    result_lines = ("2378244 VEGA × 5EPJ1152", "2926 215C", "003")
+    recognized_lines = ("2378244VEGA×5EPJ1152", "2926215C", "003")
 
-    MachineCard.set_ocr_result(card, result_lines, ("A" * 20, "2926215C", "003"))
-    ocr_result_label.setText.assert_called_once_with(
-        "2378244 VEGA × 5EPJ1152"
-    )
+    MachineCard.set_ocr_result(card, recognized_lines)
+    ocr_result_label.setText.assert_called_once_with("2378244VEGA×5EPJ1152")
 
-    MachineCard.set_ocr_result(card, (), ())
+    MachineCard.set_ocr_result(card, ())
     ocr_result_label.setText.assert_called_with("--")
     MachineCard.clear_ocr_result(card)
     assert ocr_result_label.setText.call_args_list[-1].args == ("--",)
@@ -315,15 +313,13 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
         "pending_review_count": 0,
     }
     page = RealtimePage(controller)
-    ordered_lines = ("14", "2926 215C", "<b>003</b>", "2926 216C", "2926 217C", "长文字")
-    normalized_lines = ("14", "2926215C", "003", "2926216C", "2926217C", "A" * 20)
+    recognized_lines = ("14", "2926215C", "003", "2926216C", "2926217C", "A" * 20)
     try:
         # 正式启动后交付乱序文字，核对分类和纯文本设置。
         page.update_measurement_progress("1", "first", "session_start", "success")
-        page.update_ocr_result("1", "first", ordered_lines, normalized_lines)
+        page.update_ocr_result("1", "first", recognized_lines)
         expected_text = (
-            "20  长文字\n8  2926 215C\n    2926 216C\n    2926 217C"
-            "\n3  <b>003</b>\n2  14"
+            f"20  {'A' * 20}\n8  2926215C\n    2926216C\n    2926217C\n3  003\n2  14"
         )
         assert page.detail_panel.ocr_text.toPlainText() == expected_text
         result_label = page.cards_by_machine_id["1"].ocr_result_label
@@ -339,19 +335,19 @@ def test_ocr_page_preserves_session_and_text_on_refresh(qt_application) -> None:
 
         # 新周期同时清空缓存和控件，刷新不恢复上一轮文字。
         page.update_measurement_progress("1", "second", "session_start", "success")
-        assert page.ocr_results_by_machine_id["1"] == ("second", (), ())
+        assert page.ocr_results_by_machine_id["1"] == ("second", ())
         page.reload_machines()
         assert page.measurement_states_by_machine_id["1"]["session_id"] == "second"
-        page.update_ocr_result("1", "first", ordered_lines, normalized_lines)
+        page.update_ocr_result("1", "first", recognized_lines)
         page.update_measurement_progress("1", "first", "evidence_storage", "success")
-        assert page.ocr_results_by_machine_id["1"] == ("second", (), ())
+        assert page.ocr_results_by_machine_id["1"] == ("second", ())
         assert page.cards_by_machine_id["1"].ocr_result_label.text() == "--"
 
         # 第二台机器独立接收本轮结果。
         page.update_measurement_progress("2", "other", "session_start", "success")
-        page.update_ocr_result("2", "other", ("12",), ("12",))
+        page.update_ocr_result("2", "other", ("12",))
         assert page.cards_by_machine_id["2"].ocr_result_label.text() == "12"
-        assert page.ocr_results_by_machine_id["1"] == ("second", (), ())
+        assert page.ocr_results_by_machine_id["1"] == ("second", ())
     finally:
         page.close()
         page.deleteLater()
@@ -423,7 +419,7 @@ def test_page_animates_only_current_machine_and_session(
         assert first_animation._machine_state.name == "STARTING"
 
         # 当前周期关闭后保留文字，旧周期消息不影响下一轮。
-        page.update_ocr_result("1", "first", ("003",), ("003",))
+        page.update_ocr_result("1", "first", ("003",))
         page.update_cycle_closed("1", "first")
         assert first_animation._machine_state.name == "STOPPING"
         first_card = page.cards_by_machine_id["1"]
@@ -665,7 +661,7 @@ def test_runtime_thread_delivers_text_from_background_thread(
         """
         machine_status_notification("1", "online")
         progress_notification("1", "session", "session_start", "success")
-        ocr_notification("1", "session", ("003",), ("003",))
+        ocr_notification("1", "session", ("003",))
         cycle_closed_notification("1", "session")
 
     # 替换设备启动入口并绑定真实 Qt 信号。
@@ -695,7 +691,7 @@ def test_runtime_thread_delivers_text_from_background_thread(
         qt_application.processEvents()
         assert runtime_thread.failure_message == ""
         assert controller.runtime_thread is None
-        assert page.ocr_results_by_machine_id["1"] == ("session", ("003",), ("003",))
+        assert page.ocr_results_by_machine_id["1"] == ("session", ("003",))
         assert page.cards_by_machine_id["1"].ocr_result_label.text() == "003"
         assert machine_status_notification.call_args_list == [
             call("1", "online"),

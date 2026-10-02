@@ -32,7 +32,7 @@ START 时只启动 `CYCLE_TIMEOUT`；相机采集完成后 OCR 任务在 `ocr_lo
 
 模型返回后，OCR 先检查结果数量及业务筛选必需的 `blocks`、`lines`、`text` 结构；仅对通过现有格式过滤、实际参与比较的候选检查 `confidence`。接口结果异常抛出 `OCRProcessingError`，按 `OCR_FAILED` 结束当前 Session；未知识别异常由任务完成回调交给 Runtime 的全局故障流程，不生成 `OCR_FAILED`。正常返回但没有可靠业务文字时继续生成待人工复核的结果。
 
-文字按去空白后的 20、8、3、2 位分类处理，最终生成文字、来源图片以及是否需要人工复核的信息。
+OCR 引擎保留原始 `line["text"]` 协议，候选入口将文字转为大写并删除所有空白，以 `recognized_text` 按现有 20、8、3、2 位规则筛选、去重、选择和排序，再从同一份已排序候选生成 `recognized_lines: tuple[str, ...]` 及对应证据帧。Runtime 通过机器编号、周期编号、正式识别文字三参数信号更新页面，并将同一份 `recognized_lines` 写入数据库；没有最终文字时保存空元组，人工复核判定和原因沿用现有逻辑。
 
 CLOSE 后停止本轮采集，封闭频率列表并取最后一个有效频率。待 OCR 完成后，`MachineRuntime` 汇总文字、频率和复核状态，将证据帧编码为 JPG，保存到：
 
@@ -109,7 +109,7 @@ GUI 启动入口创建 Repo、Service 和唯一的 `AppController`，四个正�
 
 `SystemRuntime.start()` 只在启动时读取一次启用机器并据此创建 `MachineRuntime`、`Camera`、`FrequencyAdapter`，运行期间不刷新机器配置。因此 `AppController` 以 `runtime_thread` 是否存在作为拦截条件：只要线程尚未清空（启动中、运行中、停止清理中），`create_machine()`、`update_machine()`、`delete_machine()` 在调用 `MachineService` 之前直接返回 `Result.error("监测运行中，请先停止监测后再修改机器配置。")`；`SystemRuntimeThread` 发出 `finished`、`finish_monitoring()` 将 `runtime_thread` 置为 `None` 后，机器写操作自动恢复。机器查询接口不受影响。
 
-历史记录页进入时通过 `AppController` 调用 `MeasurementRecordService`，再经 `MeasurementRecordRepo` 从业务库 `measurement_records` 按当前状态、机器和可选日期范围统计总数，并以 SQLite `LIMIT / OFFSET` 每页读取 20 条测量结果；日期范围按运行电脑的本地自然日解释，Service 将开始日零点和结束日次日零点转换为 UTC，Repo 以包含下界、排除上界的条件筛选 `finish_time`。结果按结束时间倒序，同时间按 `session_id` 倒序，切换筛选或重新进入页面从第一页读取，重新进入时恢复不限时间；复核后刷新当前页，末页消失时回退到最后有效页。机器选项或记录读取失败时，历史页清空表格和分页显示并禁用翻页按钮。详情保留原始 OCR、频率、复核原因和本轮 JPG 证据图片。待复核记录可确认原文字或按行保存人工修正文字，Repo 只对尚未复核的记录写入 UTC 复核时间和可选的 `reviewed_lines` JSON，原 `ordered_lines`、`needs_review` 与 `review_reason` 保留；已复核详情同时显示原始与最终文字，列表摘要优先显示人工结果。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
+历史记录页进入时通过 `AppController` 调用 `MeasurementRecordService`，再经 `MeasurementRecordRepo` 从业务库 `measurement_records` 按当前状态、机器和可选日期范围统计总数，并以 SQLite `LIMIT / OFFSET` 每页读取 20 条测量结果；日期范围按运行电脑的本地自然日解释，Service 将开始日零点和结束日次日零点转换为 UTC，Repo 以包含下界、排除上界的条件筛选 `finish_time`。结果按结束时间倒序，同时间按 `session_id` 倒序，切换筛选或重新进入页面从第一页读取，重新进入时恢复不限时间；复核后刷新当前页，末页消失时回退到最后有效页。机器选项或记录读取失败时，历史页清空表格和分页显示并禁用翻页按钮。详情保留正式识别文字、频率、复核原因和本轮 JPG 证据图片。待复核记录可确认识别结果，或将人工输入先分行、逐行删除所有空白并转大写、过滤空行后保存；Repo 只对尚未复核的记录写入 UTC 复核时间和可选的 `reviewed_lines` JSON，原 `recognized_lines`、`needs_review` 与 `review_reason` 保留，未编辑确认仍保存 `reviewed_lines=NULL`。已复核详情同时显示识别与最终文字，列表摘要存在人工结果时显示 `reviewed_lines`，否则显示 `recognized_lines`。机器名称从机器表关联取得，历史中停用或软删除的机器仍可查询；`abnormal_events` 保留在独立运行库，不进入历史记录页。
 
 历史记录查询结果进入列表后，页面将关联取得的机器名称写入第一列，将格式化后的 `finish_time` 写入第二列；OCR 摘要、最终频率、状态和操作继续写入原有列，查询与筛选流程不变。
 

@@ -306,7 +306,7 @@ class HistoryPage(QWidget):
         result_layout = QHBoxLayout()
         result_layout.setSpacing(12)
 
-        # 在左侧卡片展示原始 OCR 文字。
+        # 在左侧卡片展示正式识别文字。
         self.original_result_card = SimpleCardWidget()
         self.original_result_card.setObjectName("historyOriginalResultCard")
         self.original_result_card.setBorderRadius(12)
@@ -925,7 +925,7 @@ class HistoryPage(QWidget):
         for row_index, record in enumerate(records):
             final_lines = record["reviewed_lines"]
             if final_lines is None:
-                final_lines = record["ordered_lines"]
+                final_lines = record["recognized_lines"]
             summary_lines = (line.replace("\n", " ") for line in final_lines[:2])
             summary = "；".join(summary_lines) or "--"
             if len(final_lines) > 2 or len(summary) > 60:
@@ -1024,8 +1024,10 @@ class HistoryPage(QWidget):
         )
         self.detail_values["evidence_directory"].setText(record["evidence_directory"])
 
-        # 显示原始 OCR 文字和需要复核的原因。
-        self.detail_ocr_text.setText("\n".join(record["ordered_lines"]) or "--")
+        # 显示正式识别文字。
+        self.detail_ocr_text.setText("\n".join(record["recognized_lines"]) or "--")
+
+        # 显示需要复核的原因。
         self.review_reason_card.setVisible(needs_review)
         reason_text = (record["review_reason"] or "--") if needs_review else ""
         self.review_reason_value.setText(reason_text)
@@ -1033,7 +1035,7 @@ class HistoryPage(QWidget):
         # 为已复核记录显示复核时间和人工最终结果。
         final_lines = record["reviewed_lines"]
         if final_lines is None:
-            final_lines = record["ordered_lines"]
+            final_lines = record["recognized_lines"]
         self.reviewed_at_title.setVisible(completed_review)
         self.reviewed_at_value.setVisible(completed_review)
         self.reviewed_at_value.setText(
@@ -1042,9 +1044,11 @@ class HistoryPage(QWidget):
         self.final_result_card.setVisible(completed_review)
         self.final_result_text.setText("\n".join(final_lines) or "--")
 
-        # 为待复核记录预填原始文字并显示操作入口。
+        # 显示待复核记录的操作入口。
         self.review_editor_section.setVisible(pending_review)
-        self.review_editor.setPlainText("\n".join(record["ordered_lines"]))
+
+        # 为待复核记录预填正式识别文字。
+        self.review_editor.setPlainText("\n".join(record["recognized_lines"]))
 
         # 读取本轮证据目录并显示可用图片。
         self.populate_evidence_images(record["evidence_directory"])
@@ -1070,7 +1074,7 @@ class HistoryPage(QWidget):
         """提交当前详情中的人工复核并刷新历史列表。
 
         Args:
-            use_edited_text: True 保存编辑文字，False 确认原始文字。
+            use_edited_text: True 保存编辑文字，False 确认正式识别文字。
 
         Returns:
             返回示例：

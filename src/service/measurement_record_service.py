@@ -91,7 +91,7 @@ class MeasurementRecordService:
                             "machine_id": "1",  # 机器编号
                             "machine_name": "皮带机 1",  # 机器名称或编号
                             "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
-                            "ordered_lines": ("ABC",),  # 完整 OCR 文字
+                            "recognized_lines": ("ABC",),  # 正式识别文字
                             "final_frequency_hz": 50.0,  # 最终频率
                             "needs_review": False,  # 是否需要人工复核
                             "reviewed_at": None,  # 人工复核时间
@@ -208,7 +208,7 @@ class MeasurementRecordService:
                         "machine_name": "皮带机 1",  # 机器名称或编号
                         "start_time": "2026-09-27T07:59:00+00:00",  # 开始时间
                         "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
-                        "ordered_lines": ("ABC",),  # 完整 OCR 文字
+                        "recognized_lines": ("ABC",),  # 正式识别文字
                         "final_frequency_hz": 50.0,  # 最终频率
                         "evidence_directory": "runtime/evidence/1",  # 证据目录
                         "needs_review": False,  # 是否待复核
@@ -237,25 +237,32 @@ class MeasurementRecordService:
             raise MeasurementRecordServiceError("历史详情读取失败。") from error
 
     def complete_review(self, session_id: str, edited_text: str | None = None) -> None:
-        """确认原始文字或保存人工文字并完成一条记录的复核。
+        """确认正式识别文字或保存人工文字并完成一条记录的复核。
 
         Args:
             session_id: 待复核的测量周期编号。
-            edited_text: 人工编辑的多行文字；None 表示确认原始文字。
+            edited_text: 人工编辑的多行文字；None 表示确认正式识别文字。
 
         Returns:
             返回示例：
                 None  # 已写入复核时间和可选人工结果
         """
-        # 整理人工编辑内容，确认原结果时保持人工文字为空。
+        # 确认原结果时保持人工文字为空。
         reviewed_lines = None
         if edited_text is not None:
-            lines = tuple(
-                line.strip() for line in edited_text.splitlines() if line.strip()
-            )
-            if not lines:
+            # 按行去除所有空白并转为大写。
+            recognized_lines = []
+            for edited_line in edited_text.splitlines():
+                recognized_line = "".join(edited_line.split()).upper()
+                if recognized_line:
+                    recognized_lines.append(recognized_line)
+
+            # 拒绝没有有效文字的人工结果。
+            if not recognized_lines:
                 raise MeasurementRecordServiceError("人工复核结果至少需要一条有效文字。")
-            reviewed_lines = json.dumps(lines, ensure_ascii=False)
+
+            # 将人工文字整理为 JSON。
+            reviewed_lines = json.dumps(tuple(recognized_lines), ensure_ascii=False)
 
         # 使用统一 UTC 时间提交复核并报告重复操作。
         reviewed_at = datetime.now(timezone.utc).isoformat()
@@ -282,7 +289,12 @@ class MeasurementRecordService:
             返回示例：
                 None  # 记录中的文字列表和 needs_review 已原地转换
         """
-        record["ordered_lines"] = tuple(json.loads(record["ordered_lines"]))
+        # 解析正式识别文字 JSON。
+        record["recognized_lines"] = tuple(json.loads(record["recognized_lines"]))
+
+        # 解析已保存的人工复核文字 JSON。
         if record["reviewed_lines"] is not None:
             record["reviewed_lines"] = tuple(json.loads(record["reviewed_lines"]))
+
+        # 将复核标志转换为布尔值。
         record["needs_review"] = bool(record["needs_review"])

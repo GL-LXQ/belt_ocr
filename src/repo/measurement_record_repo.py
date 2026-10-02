@@ -38,7 +38,7 @@ class MeasurementRecordRepo:
                 machine_id TEXT NOT NULL,
                 start_time TEXT NOT NULL,
                 finish_time TEXT NOT NULL,
-                ordered_lines TEXT NOT NULL,
+                recognized_lines TEXT NOT NULL,
                 final_frequency_hz REAL,
                 measurement_frequencies TEXT NOT NULL DEFAULT '[]',
                 evidence_directory TEXT NOT NULL,
@@ -87,7 +87,7 @@ class MeasurementRecordRepo:
                     "machine_id": "1",  # 机器编号
                     "machine_name": "皮带机 1",  # 机器名称或编号
                     "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
-                    "ordered_lines": '["ABC"]',  # OCR 文字 JSON
+                    "recognized_lines": '["ABC"]',  # 正式识别文字 JSON
                     "final_frequency_hz": 50.0,  # 最终频率
                     "needs_review": 0,  # 是否需要人工复核
                     "reviewed_at": None,  # 人工复核时间
@@ -122,7 +122,7 @@ class MeasurementRecordRepo:
             rows = connection.execute(
                 "SELECT record.session_id, record.machine_id, "
                 "COALESCE(machine.machine_name, record.machine_id) AS machine_name, "
-                "record.finish_time, record.ordered_lines, "
+                "record.finish_time, record.recognized_lines, "
                 "record.final_frequency_hz, record.needs_review, "
                 "record.reviewed_at, record.reviewed_lines "
                 "FROM measurement_records AS record "
@@ -268,7 +268,7 @@ class MeasurementRecordRepo:
                     "machine_name": "皮带机 1",  # 机器名称或编号
                     "start_time": "2026-09-27T07:59:00+00:00",  # 开始时间
                     "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
-                    "ordered_lines": '["ABC"]',  # OCR 文字 JSON
+                    "recognized_lines": '["ABC"]',  # 正式识别文字 JSON
                     "final_frequency_hz": 50.0,  # 最终频率
                     "evidence_directory": "runtime/evidence/1",  # 证据目录
                     "needs_review": 0,  # 是否需要人工复核
@@ -284,7 +284,7 @@ class MeasurementRecordRepo:
             row = connection.execute(
                 "SELECT record.session_id, record.machine_id, "
                 "COALESCE(machine.machine_name, record.machine_id) AS machine_name, "
-                "record.start_time, record.finish_time, record.ordered_lines, "
+                "record.start_time, record.finish_time, record.recognized_lines, "
                 "record.final_frequency_hz, record.evidence_directory, "
                 "record.needs_review, record.review_reason, "
                 "record.reviewed_at, record.reviewed_lines "

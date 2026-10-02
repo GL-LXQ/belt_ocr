@@ -85,8 +85,7 @@ def recognize_model_lines(model_lines: list[dict]) -> OCRResult:
     Returns:
         返回示例：
             OCRResult(
-                ordered_lines=("123",),  # 最终文字
-                normalized_lines=("123",),  # 去空白后的文字
+                recognized_lines=("123",),  # 正式识别文字
                 selected_frames=(),  # 选中的证据图片
                 line_frame_ids=(),  # 文字对应的图片编号
                 review_frames=(),  # 待复核的原始图片
@@ -107,8 +106,7 @@ def recognize_model_results(model_results: object) -> OCRResult:
     Returns:
         返回示例：
             OCRResult(
-                ordered_lines=("123",),  # 最终文字
-                normalized_lines=("123",),  # 去空白后的文字
+                recognized_lines=("123",),  # 正式识别文字
                 selected_frames=(),  # 选中的证据图片
                 line_frame_ids=(),  # 文字对应的图片编号
                 review_frames=(),  # 待复核的原始图片
@@ -332,7 +330,9 @@ def test_recognize_qualified_frames_consumes_engine_result() -> None:
     result = recognizer.recognize_qualified_frames(
         "session-1", measurement_frames, qualified_frames
     )
-    assert result.ordered_lines == tuple(line["text"] for line in RELIABLE_MODEL_LINES)
+    assert result.recognized_lines == tuple(
+        line["text"] for line in RELIABLE_MODEL_LINES
+    )
     assert result.review_reason is None
     assert result.line_frame_ids == (("capture-1-1",),) * 4
     assert len(result.selected_frames) == 1
@@ -394,8 +394,9 @@ def test_all_reliable_categories_need_no_review() -> None:
     result = recognize_model_lines(list(RELIABLE_MODEL_LINES))
 
     # 核对最终文字和证据图片。
-    assert result.ordered_lines == tuple(line["text"] for line in RELIABLE_MODEL_LINES)
-    assert result.normalized_lines == result.ordered_lines
+    assert result.recognized_lines == tuple(
+        line["text"] for line in RELIABLE_MODEL_LINES
+    )
     assert result.line_frame_ids == (("capture-1-1",),) * 4
     assert len(result.selected_frames) == 1
 
@@ -404,28 +405,201 @@ def test_all_reliable_categories_need_no_review() -> None:
     assert result.review_reason is None
 
 
-def test_reliable_text_preserves_original_spacing() -> None:
-    """确认可靠文字保留原始空白并标记缺失类别。
+@pytest.mark.parametrize("model_text,recognized_text", [
+    (" 123 ", "123"),
+    ("2926 215c", "2926215C"),
+    ("29\t26\u3000215c\n", "2926215C"),
+])
+def test_reliable_text_removes_whitespace_and_uppercases(
+    model_text: str, recognized_text: str
+) -> None:
+    """确认正式识别文字删除所有空白并转为大写。
+
+    Args:
+        model_text: OCR 引擎返回的原始文字。
+        recognized_text: 标准化后预期的正式识别文字。
+
+    Returns:
+        返回示例：
+            None  # 正式识别文字、证据和复核原因已核对
+    """
+    # 将含有空白和小写字母的原始文字送入候选入口。
+    model_line = {
+        "text": model_text,
+        "confidence": 0.95,
+    }
+    result = recognize_model_lines([model_line])
+
+    # 核对文字和对应证据图片。
+    assert result.recognized_lines == (recognized_text,)
+    assert result.line_frame_ids == (("capture-1-1",),)
+    selected_frame = result.selected_frames[0]
+    review_frame = result.review_frames[0]
+    assert selected_frame.camera_frame is review_frame.camera_frame
+
+    # 核对引擎返回的原始文字未被修改。
+    assert model_line["text"] == model_text
+
+    # 核对缺失类别的复核原因。
+    assert "没有可靠的 20 位文字" in result.review_reason
+
+
+def test_final_text_keeps_category_order_after_normalization() -> None:
+    """确认乱序输入标准化后仍按 20、8、3、2 位顺序输出。
 
     Args:
         无外部参数。
 
     Returns:
         返回示例：
-            None  # 原始文字、去空白文字和复核原因已核对
+            None  # 正式识别文字的类别顺序及证据顺序已核对
     """
-    result = recognize_model_lines([{"text": " 123 ", "confidence": 0.95}])
+    # 按不同于最终顺序的顺序提供四类原始文字。
+    model_texts = ("1\u30002", "2\t15", "2926 215c", "abcd 1234567890123456")
+    model_lines = [
+        {
+            "text": model_text,
+            "confidence": 0.95,
+        }
+        for model_text in model_texts
+    ]
+    result = recognize_model_lines(model_lines)
 
-    # 核对文字和对应证据图片。
-    assert result.ordered_lines == (" 123 ",)
-    assert result.normalized_lines == ("123",)
-    assert result.line_frame_ids == (("capture-1-1",),)
-    selected_frame = result.selected_frames[0]
-    review_frame = result.review_frames[0]
-    assert selected_frame.camera_frame is review_frame.camera_frame
+    # 核对标准化文字按现有类别顺序排列。
+    assert result.recognized_lines == (
+        "ABCD1234567890123456",
+        "2926215C",
+        "215",
+        "12",
+    )
+    assert tuple(map(len, result.recognized_lines)) == (20, 8, 3, 2)
 
-    # 核对缺失类别已进入复核原因。
-    assert "没有可靠的 20 位文字" in result.review_reason
+    # 核对每条文字的证据和正常复核状态。
+    assert result.line_frame_ids == (("capture-1-1",),) * 4
+    assert result.review_frames == ()
+    assert result.review_reason is None
+
+
+@pytest.mark.parametrize("include_two_character_text", [True, False])
+def test_consecutive_candidates_keep_text_evidence_and_review_order(
+    include_two_character_text: bool,
+) -> None:
+    """确认标准化重复候选按连续编号终选并保留文字证据对应关系。
+
+    Args:
+        include_two_character_text: 是否提供可靠的 2 位文字。
+
+    Returns:
+        返回示例：
+            None  # 连续编号、共同证据和复核原因已核对
+    """
+    # 准备三张带不同编号的原始帧。
+    first_frame = CameraFrame(
+        camera_serial="camera-1",
+        frame_number=1,
+        device_timestamp=1,
+        host_timestamp=1,
+        received_monotonic=time.monotonic(),
+        width=2,
+        height=1,
+        pixel_type=PIXEL_TYPE_MONO8,
+        lost_packet_count=0,
+        image_bytes=b"\x01\x02",
+    )
+    camera_frames = tuple(
+        replace(first_frame, frame_number=frame_number)
+        for frame_number in (1, 2, 3)
+    )
+
+    # 提供大小写和空白不同的重复编号以及更高置信度的非连续编号。
+    candidate_values_by_frame = [
+        [
+            ("1234 5678901234567890", 0.95),
+            ("2\t15", 0.95),
+            ("2926 215c", 0.88),
+            ("2926217c", 0.89),
+            ("7777777d", 0.99),
+        ],
+        [("2926\t215C", 0.96), ("2926216c", 0.92)],
+        [("2926218d", 0.95), ("2926\u3000217C", 0.90)],
+    ]
+    if include_two_character_text:
+        candidate_values_by_frame[2].append(("1 2", 0.95))
+
+    # 按帧顺序生成引擎原始返回结构。
+    model_results = [
+        {
+            "blocks": [
+                {
+                    "lines": [
+                        {
+                            "text": model_text,
+                            "confidence": confidence,
+                        }
+                        for model_text, confidence in candidate_values
+                    ],
+                },
+            ],
+        }
+        for candidate_values in candidate_values_by_frame
+    ]
+    recognizer = TextRecognizer()
+    recognizer.recognize_images = Mock(return_value=model_results)
+
+    # 将三帧送入完整识别流程。
+    measurement_frames, qualified_frames = recognizer.prepare_frames_for_ocr(
+        "session-1", "capture-1", "camera-1", camera_frames
+    )
+    result = recognizer.recognize_qualified_frames(
+        "session-1", measurement_frames, qualified_frames
+    )
+
+    # 核对引擎原始文字保留大小写和空白。
+    assert tuple(
+        line["text"]
+        for model_result in model_results
+        for line in model_result["blocks"][0]["lines"]
+    ) == tuple(
+        model_text
+        for candidate_values in candidate_values_by_frame
+        for model_text, confidence in candidate_values
+    )
+
+    # 核对连续编号组替代更高置信度的非连续编号并按数字顺序输出。
+    expected_lines = (
+        "12345678901234567890",
+        "2926215C",
+        "2926216C",
+        "2926217C",
+        "215",
+    )
+    if include_two_character_text:
+        expected_lines += ("12",)
+    assert result.recognized_lines == expected_lines
+
+    # 核对连续编号共用去重后最高置信度候选所在的证据帧。
+    expected_frame_ids = (
+        ("capture-1-1",),
+        ("capture-1-2",),
+        ("capture-1-2",),
+        ("capture-1-2",),
+        ("capture-1-1",),
+    )
+    if include_two_character_text:
+        expected_frame_ids += (("capture-1-3",),)
+    assert result.line_frame_ids == expected_frame_ids
+    expected_frames = measurement_frames if include_two_character_text else (
+        measurement_frames[:2]
+    )
+    assert result.selected_frames == expected_frames
+
+    # 核对缺失类别只影响原有复核原因和待复核帧。
+    if include_two_character_text:
+        assert result.review_reason is None
+        assert result.review_frames == ()
+    else:
+        assert result.review_reason == "没有可靠的 2 位文字"
+        assert result.review_frames == measurement_frames
 
 
 @pytest.mark.parametrize("missing_text,character_length", [
@@ -453,7 +627,7 @@ def test_missing_category_preserves_reliable_text(
     result = recognize_model_lines(model_lines)
 
     # 核对其余可靠文字仍进入最终结果。
-    assert result.ordered_lines == tuple(line["text"] for line in model_lines)
+    assert result.recognized_lines == tuple(line["text"] for line in model_lines)
     assert result.selected_frames
 
     # 核对缺少类别的原因和待复核图片。
@@ -487,8 +661,8 @@ def test_invalid_numeric_format_requires_review(
     result = recognize_model_lines(model_lines)
 
     # 核对格式不符的文字没有进入最终结果。
-    assert invalid_text not in result.ordered_lines
-    assert len(result.ordered_lines) == 3
+    assert invalid_text not in result.recognized_lines
+    assert len(result.recognized_lines) == 3
 
     # 核对该类别的格式复核原因。
     assert f"没有格式正确的 {character_length} 位文字" in result.review_reason
@@ -512,7 +686,7 @@ def test_low_confidence_requires_review() -> None:
     result = recognize_model_lines(model_lines)
 
     # 核对不可靠文字被排除，其余文字保留。
-    assert result.ordered_lines == ("1234567A", "123", "12")
+    assert result.recognized_lines == ("1234567A", "123", "12")
 
     # 核对最高置信度不足的原因。
     assert "20 位文字最高置信度不足" in result.review_reason
@@ -531,7 +705,7 @@ def test_multiple_missing_categories_keep_all_review_reasons() -> None:
     result = recognize_model_lines(list(RELIABLE_MODEL_LINES[2:]))
 
     # 核对剩余可靠文字。
-    assert result.ordered_lines == ("123", "12")
+    assert result.recognized_lines == ("123", "12")
 
     # 核对两个类别的复核原因。
     assert "没有可靠的 20 位文字" in result.review_reason
@@ -551,7 +725,7 @@ def test_no_final_text_combines_review_reasons() -> None:
     result = recognize_model_lines([])
 
     # 核对无文字时的证据图片和复核原因。
-    assert result.ordered_lines == ()
+    assert result.recognized_lines == ()
     assert len(result.review_frames) == 1
     assert "没有可靠的 20 位文字" in result.review_reason
     assert "没有可靠的 8 位文字" in result.review_reason

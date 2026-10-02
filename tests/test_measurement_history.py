@@ -80,7 +80,7 @@ def measurement_record_service(tmp_path: Path) -> MeasurementRecordService:
             session_id="normal-session",
             start_time="2026-09-27T08:00:00+00:00",
             finish_time="2026-09-27T08:01:00+00:00",
-            ordered_lines=("12345678", "003"),
+            recognized_lines=("12345678", "003"),
             final_frequency_hz=50.0,
             measurement_frequencies=(),
             evidence_directory=tmp_path / "normal-evidence",
@@ -92,7 +92,7 @@ def measurement_record_service(tmp_path: Path) -> MeasurementRecordService:
             session_id="review-session",
             start_time="2026-09-27T09:00:00+00:00",
             finish_time="2026-09-27T09:01:00+00:00",
-            ordered_lines=("待确认文字",),
+            recognized_lines=("待确认文字",),
             final_frequency_hz=None,
             measurement_frequencies=(),
             evidence_directory=tmp_path / "review-evidence",
@@ -104,7 +104,7 @@ def measurement_record_service(tmp_path: Path) -> MeasurementRecordService:
             session_id="disabled-machine-session",
             start_time="2026-09-27T09:30:00+00:00",
             finish_time="2026-09-27T09:31:00+00:00",
-            ordered_lines=("停用机器记录",),
+            recognized_lines=("停用机器记录",),
             final_frequency_hz=25.0,
             measurement_frequencies=(),
             evidence_directory=tmp_path / "disabled-machine-evidence",
@@ -116,7 +116,7 @@ def measurement_record_service(tmp_path: Path) -> MeasurementRecordService:
             session_id="missing-machine-session",
             start_time="2026-09-27T10:00:00+00:00",
             finish_time="2026-09-27T10:01:00+00:00",
-            ordered_lines=(),
+            recognized_lines=(),
             final_frequency_hz=0.0,
             measurement_frequencies=(),
             evidence_directory=tmp_path / "missing-machine-evidence",
@@ -152,7 +152,7 @@ def paged_measurement_record_service(
             "1" if record_number < 21 else "2",
             "2026-09-27T08:00:00+00:00",
             f"2026-09-27T08:00:{finish_second:02}+00:00",
-            json.dumps([f"文字 {record_number:02}"], ensure_ascii=False),
+            json.dumps([f"文字{record_number:02}"], ensure_ascii=False),
             str(database_path.parent / f"page-{record_number:02}"),
             int(record_number < 21),
         ))
@@ -163,7 +163,7 @@ def paged_measurement_record_service(
         connection.executemany(
             "INSERT INTO measurement_records "
             "(session_id, machine_id, start_time, finish_time, "
-            "ordered_lines, evidence_directory, needs_review) "
+            "recognized_lines, evidence_directory, needs_review) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             records_to_insert,
         )
@@ -234,10 +234,10 @@ def test_measurement_record_service_filters_and_reads_details(
     # 读取详情并确认文字、空频率和复核原因。
     review_record = measurement_record_service.get_record("review-session")["record"]
     normal_record = measurement_record_service.get_record("normal-session")["record"]
-    assert review_record["ordered_lines"] == ("待确认文字",)
+    assert review_record["recognized_lines"] == ("待确认文字",)
     assert review_record["final_frequency_hz"] is None
     assert review_record["review_reason"] == "没有可靠的 20 位文字"
-    assert normal_record["ordered_lines"] == ("12345678", "003")
+    assert normal_record["recognized_lines"] == ("12345678", "003")
     assert normal_record["review_reason"] is None
     assert measurement_record_service.get_record("unknown-session")["record"] is None
 
@@ -345,7 +345,7 @@ def test_measurement_records_filter_by_local_day_boundaries(
         connection.executemany(
             "INSERT INTO measurement_records "
             "(session_id, machine_id, start_time, finish_time, "
-            "ordered_lines, evidence_directory) "
+            "recognized_lines, evidence_directory) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             [
                 (
@@ -414,7 +414,7 @@ def test_daily_summary_counts_local_day_records_and_pending_reviews(
         connection.execute("DELETE FROM measurement_records")
         connection.executemany(
             "INSERT INTO measurement_records "
-            "(session_id, machine_id, start_time, finish_time, ordered_lines, "
+            "(session_id, machine_id, start_time, finish_time, recognized_lines, "
             "evidence_directory, needs_review, reviewed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -591,7 +591,7 @@ def test_measurement_records_combine_date_status_machine_and_pagination(
         connection.execute(
             "INSERT INTO measurement_records "
             "(session_id, machine_id, start_time, finish_time, "
-            "ordered_lines, evidence_directory, needs_review) "
+            "recognized_lines, evidence_directory, needs_review) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 "outside-date",
@@ -625,20 +625,20 @@ def test_measurement_records_combine_date_status_machine_and_pagination(
 def test_existing_measurement_table_adds_review_columns_without_losing_records(
     tmp_path: Path,
 ) -> None:
-    """验证旧开发库补列后保留已有测量记录。
+    """验证已有测量表补齐复核字段后保留测量记录。
 
     Args:
         tmp_path: pytest 提供的临时目录。
 
     Returns:
         返回示例：
-            None  # 旧记录仍在且两个复核字段可重复初始化
+            None  # 已有记录仍在且两个复核字段可重复初始化
     """
     database_path = tmp_path / "existing.sqlite3"
     with sqlite3.connect(database_path) as connection:
         connection.execute(
             "CREATE TABLE measurement_records (session_id TEXT PRIMARY KEY, "
-            "ordered_lines TEXT NOT NULL, needs_review INTEGER NOT NULL)"
+            "recognized_lines TEXT NOT NULL, needs_review INTEGER NOT NULL)"
         )
         connection.execute(
             "INSERT INTO measurement_records VALUES (?, ?, ?)",
@@ -651,7 +651,7 @@ def test_existing_measurement_table_adds_review_columns_without_losing_records(
         table_columns = connection.execute("PRAGMA table_info(measurement_records)")
         columns = {column[1] for column in table_columns}
         saved_record = connection.execute(
-            "SELECT session_id, ordered_lines, needs_review, "
+            "SELECT session_id, recognized_lines, needs_review, "
             "reviewed_at, reviewed_lines "
             "FROM measurement_records"
         ).fetchone()
@@ -676,7 +676,7 @@ def test_confirm_original_ocr_preserves_original_record_and_prevents_repeat(
     record = measurement_record_service.get_record("review-session")["record"]
     reviewed_time = datetime.fromisoformat(record["reviewed_at"])
     assert reviewed_time.tzinfo == timezone.utc
-    assert record["ordered_lines"] == ("待确认文字",)
+    assert record["recognized_lines"] == ("待确认文字",)
     assert record["reviewed_lines"] is None
     assert record["needs_review"] is True
     assert record["review_reason"] == "没有可靠的 20 位文字"
@@ -691,7 +691,7 @@ def test_confirm_original_ocr_preserves_original_record_and_prevents_repeat(
     database_path = measurement_record_service.measurement_record_repo.database_path
     with sqlite3.connect(database_path) as connection:
         saved_record = connection.execute(
-            "SELECT ordered_lines, needs_review, review_reason, reviewed_lines "
+            "SELECT recognized_lines, needs_review, review_reason, reviewed_lines "
             "FROM measurement_records WHERE session_id = ?",
             ("review-session",),
         ).fetchone()
@@ -707,7 +707,7 @@ def test_confirm_original_ocr_preserves_original_record_and_prevents_repeat(
 def test_edited_review_saves_lines_and_rejects_empty_input(
     measurement_record_service: MeasurementRecordService,
 ) -> None:
-    """验证人工文字按行保存且空输入不完成复核。
+    """验证人工文字先分行再标准化且空输入不完成复核。
 
     Args:
         measurement_record_service: 已保存测试记录的测量记录服务。
@@ -716,33 +716,38 @@ def test_edited_review_saves_lines_and_rejects_empty_input(
         返回示例：
             None  # 有效文字保存为 JSON，原始 OCR 保留
     """
-    with pytest.raises(MeasurementRecordServiceError, match="至少需要一条有效文字"):
-        measurement_record_service.complete_review("review-session", " \n\t ")
+    # 拒绝没有有效文字的空输入和各种空白字符。
+    for edited_text in ("", " \n\t \u3000", "\u2002\u00a0\n\u3000"):
+        with pytest.raises(MeasurementRecordServiceError, match="至少需要一条有效文字"):
+            measurement_record_service.complete_review("review-session", edited_text)
     pending_record = measurement_record_service.get_record("review-session")["record"]
     assert pending_record["reviewed_at"] is None
 
-    # 保存去空白后的两条人工文字。
-    measurement_record_service.complete_review("review-session", " 修正一 \n\n 修正二  ")
+    # 分行保存大小写、制表符和全角空格混合的人工文字。
+    measurement_record_service.complete_review(
+        "review-session",
+        " 2926\t215c \n\t\u3000\n ab\u3000 c \n 修 正二  ",
+    )
     record = measurement_record_service.get_record("review-session")["record"]
-    assert record["ordered_lines"] == ("待确认文字",)
-    assert record["reviewed_lines"] == ("修正一", "修正二")
+    assert record["recognized_lines"] == ("待确认文字",)
+    assert record["reviewed_lines"] == ("2926215C", "ABC", "修正二")
     assert record["needs_review"] is True
     assert record["review_reason"] == "没有可靠的 20 位文字"
     assert datetime.fromisoformat(record["reviewed_at"]).tzinfo == timezone.utc
     reviewed_records = measurement_record_service.list_records("reviewed")["records"]
     assert reviewed_records[0]["reviewed_lines"] == (
-        "修正一", "修正二"
+        "2926215C", "ABC", "修正二"
     )
 
     database_path = measurement_record_service.measurement_record_repo.database_path
     with sqlite3.connect(database_path) as connection:
         saved_record = connection.execute(
-            "SELECT ordered_lines, reviewed_lines FROM measurement_records "
+            "SELECT recognized_lines, reviewed_lines FROM measurement_records "
             "WHERE session_id = ?",
             ("review-session",),
         ).fetchone()
     assert saved_record[0] == '["待确认文字"]'
-    assert json.loads(saved_record[1]) == ["修正一", "修正二"]
+    assert json.loads(saved_record[1]) == ["2926215C", "ABC", "修正二"]
 
 
 def test_invalid_ocr_json_is_a_history_read_error(
@@ -760,7 +765,7 @@ def test_invalid_ocr_json_is_a_history_read_error(
     database_path = measurement_record_service.measurement_record_repo.database_path
     with sqlite3.connect(database_path) as connection:
         connection.execute(
-            "UPDATE measurement_records SET ordered_lines = ? WHERE session_id = ?",
+            "UPDATE measurement_records SET recognized_lines = ? WHERE session_id = ?",
             ("{broken", "normal-session"),
         )
 
@@ -804,8 +809,6 @@ def test_history_page_shows_filters_and_read_only_details(
             page.table.horizontalHeaderItem(column).text()
             for column in range(6)
         ] == ["机器 ▾", "时间 ▾", "OCR 结果摘要", "最终频率", "状态", "操作"]
-        assert page.table.columnWidth(0) == 140
-        assert page.table.columnWidth(1) == 170
         assert page.table.item(0, 0).text() == "99"
         assert page.table.item(0, 1).text() == format_history_time(
             "2026-09-27T10:01:00+00:00"
@@ -815,7 +818,6 @@ def test_history_page_shows_filters_and_read_only_details(
             QLabel, "historyStatusBadge"
         )
         assert pending_badge.text() == "待复核"
-        assert pending_badge.property("tone") == "pending"
         assert page.table.cellWidget(0, 5).text() == "查看  ›"
 
         # 组合状态和机器筛选，仅保留软删除机器的待复核记录。
@@ -839,7 +841,6 @@ def test_history_page_shows_filters_and_read_only_details(
         page.table.cellWidget(0, 5).click()
         assert page.detail_values["machine"].text() == "二号皮带"
         assert page.detail_values["status"].text() == "待复核"
-        assert page.detail_values["status"].property("tone") == "pending"
         assert page.detail_completed_at_label.text() == (
             page.detail_values["finish_time"].text()
         )
@@ -855,7 +856,7 @@ def test_history_page_shows_filters_and_read_only_details(
         assert page.review_editor.toPlainText() == "待确认文字"
         page.detail_dialog.close()
 
-        # 正常记录使用绿色状态且不显示复核原因。
+        # 正常记录显示正常状态且不显示复核原因。
         page.apply_machine_filter(None)
         page.status_buttons["normal"].click()
         assert page.table.rowCount() == 3
@@ -863,7 +864,6 @@ def test_history_page_shows_filters_and_read_only_details(
             QLabel, "historyStatusBadge"
         )
         assert normal_badge.text() == "正常"
-        assert normal_badge.property("tone") == "normal"
         page.table.cellWidget(2, 5).click()
         assert page.detail_values["status"].text() == "正常"
         assert page.detail_ocr_text.text() == "12345678\n003"
@@ -900,13 +900,11 @@ def test_history_page_turns_pages_and_resets_on_filter_changes(
         page.refresh_history()
         assert page.current_page == 1
         assert page.table.rowCount() == 20
-        assert page.table.item(0, 2).text() == "文字 24"
+        assert page.table.item(0, 2).text() == "文字24"
         assert page.record_count_label.text() == "25 条"
         assert page.page_label.text() == "1 / 2"
         assert page.previous_page_button.text() == "‹"
         assert page.next_page_button.text() == "›"
-        assert page.previous_page_button.width() == 34
-        assert page.next_page_button.width() == 34
         assert not page.previous_page_button.isEnabled()
         assert page.next_page_button.isEnabled()
 
@@ -914,19 +912,19 @@ def test_history_page_turns_pages_and_resets_on_filter_changes(
         page.next_page_button.click()
         assert page.current_page == 2
         assert page.table.rowCount() == 5
-        assert page.table.item(0, 2).text() == "文字 04"
-        assert page.table.item(4, 2).text() == "文字 00"
+        assert page.table.item(0, 2).text() == "文字04"
+        assert page.table.item(4, 2).text() == "文字00"
         assert page.previous_page_button.isEnabled()
         assert not page.next_page_button.isEnabled()
         page.previous_page_button.click()
         assert page.current_page == 1
-        assert page.table.item(0, 2).text() == "文字 24"
+        assert page.table.item(0, 2).text() == "文字24"
 
         # 状态筛选回第一页并更新筛选后的总数。
         page.next_page_button.click()
         page.status_buttons["pending"].click()
         assert page.current_page == 1
-        assert page.table.item(0, 2).text() == "文字 20"
+        assert page.table.item(0, 2).text() == "文字20"
         assert page.record_count_label.text() == "21 条"
         assert page.page_label.text() == "1 / 2"
 
@@ -936,7 +934,7 @@ def test_history_page_turns_pages_and_resets_on_filter_changes(
         page.apply_machine_filter("2")
         assert page.current_page == 1
         assert page.table.rowCount() == 4
-        assert page.table.item(0, 2).text() == "文字 24"
+        assert page.table.item(0, 2).text() == "文字24"
         assert page.record_count_label.text() == "4 条"
         assert page.page_label.text() == "1 / 1"
         assert [page.table.item(row, 0).text() for row in range(4)] == [
@@ -946,7 +944,7 @@ def test_history_page_turns_pages_and_resets_on_filter_changes(
         page.next_page_button.click()
         page.refresh_history()
         assert page.current_page == 1
-        assert page.table.item(0, 2).text() == "文字 24"
+        assert page.table.item(0, 2).text() == "文字24"
     finally:
         page.detail_dialog.close()
         page.close()
@@ -1002,7 +1000,6 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert page.table.rowCount() == 20
         header_item = page.table.horizontalHeaderItem(TIME_COLUMN)
         assert header_item.toolTip() == f"{selected_date} ～ {selected_date}"
-        assert header_item.foreground().color() == QColor(COLORS["blue"])
         displayed_times = [page.table.item(row, 1).text() for row in range(20)]
         assert displayed_times == sorted(displayed_times, reverse=True)
 
@@ -1019,7 +1016,6 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert page.current_page == 1
         assert page.record_count_label.text() == "25 条"
         assert header_item.toolTip() == "点击筛选时间范围"
-        assert header_item.data(Qt.ItemDataRole.ForegroundRole) is None
         list_measurement_records.assert_called_once_with(
             None, None, 1, 20, start_date=None, end_date=None
         )
@@ -1146,7 +1142,7 @@ def test_history_page_returns_to_last_page_after_review_reduces_results(
         # 筛选结果缩为一页后显示新的最后一页。
         assert page.current_page == 1
         assert page.table.rowCount() == 20
-        assert page.table.item(0, 2).text() == "文字 20"
+        assert page.table.item(0, 2).text() == "文字20"
         assert page.record_count_label.text() == "20 条"
         assert page.page_label.text() == "1 / 1"
         assert not page.previous_page_button.isEnabled()
@@ -1159,7 +1155,10 @@ def test_history_page_returns_to_last_page_after_review_reduces_results(
 
 @pytest.mark.parametrize(
     ("edited_text", "expected_result"),
-    ((None, "待确认文字"), (" 人工修正一 \n\n 人工修正二 ", "人工修正一\n人工修正二")),
+    (
+        (None, "待确认文字"),
+        (" 2926\t215c \n\n ab\u3000 c \n\t\u3000", "2926215C\nABC"),
+    ),
 )
 def test_history_page_completes_review_and_shows_original_and_final_results(
     qt_application: QApplication,
@@ -1204,10 +1203,8 @@ def test_history_page_completes_review_and_shows_original_and_final_results(
             QLabel, "historyStatusBadge"
         )
         assert reviewed_badge.text() == "已复核"
-        assert reviewed_badge.property("tone") == "reviewed"
         page.table.cellWidget(0, 5).click()
         assert page.detail_values["status"].text() == "已复核"
-        assert page.detail_values["status"].property("tone") == "reviewed"
         assert page.detail_ocr_text.text() == "待确认文字"
         assert page.final_result_text.text() == expected_result
         assert not page.final_result_card.isHidden()
@@ -1509,7 +1506,6 @@ def test_main_window_refreshes_only_when_entering_history(
     )
     window = MainWindow(controller)
     try:
-        window.resize(1600, 900)
         window.show()
         qt_application.processEvents()
         window.history_page.refresh_history = Mock(
@@ -1519,16 +1515,8 @@ def test_main_window_refreshes_only_when_entering_history(
         assert window.history_page.refresh_history.call_count == 1
         qt_application.processEvents()
 
-        # 首次显示完成后核对状态徽标和查看按钮的单元格位置。
-        table = window.history_page.table
-        assert table.rowCount() == 4
-        for row_index in range(table.rowCount()):
-            for column_index in (4, 5):
-                widget = table.cellWidget(row_index, column_index)
-                cell_rectangle = table.visualRect(
-                    table.model().index(row_index, column_index)
-                )
-                assert widget.geometry() == cell_rectangle
+        # 首次进入后显示全部历史记录。
+        assert window.history_page.table.rowCount() == 4
 
         window.switch_page("history")
         assert window.history_page.refresh_history.call_count == 1
@@ -1561,11 +1549,8 @@ def test_history_header_opens_filter_without_querying_or_sorting(
     make_flyout = Mock()
     monkeypatch.setattr(Flyout, "make", make_flyout)
     try:
-        # 检查筛选卡仅保留一行且表格没有启用排序。
+        # 检查页面筛选控件和表格排序状态。
         page.refresh_history()
-        filter_card = page.findChild(SimpleCardWidget, "historyFilterCard")
-        assert filter_card.layout().count() == 1
-        assert filter_card.findChildren(ComboBox) == []
         assert page.findChildren(ComboBox) == []
         assert MACHINE_COLUMN == 0
         assert TIME_COLUMN == 1
@@ -1579,7 +1564,6 @@ def test_history_header_opens_filter_without_querying_or_sorting(
         for column in (2, 3, 4, 5):
             header.sectionClicked.emit(column)
         make_flyout.assert_not_called()
-        header.moveSection(MACHINE_COLUMN, 2)
         for column, title in (
             (MACHINE_COLUMN, "机器筛选"),
             (TIME_COLUMN, "时间筛选"),
@@ -1587,10 +1571,6 @@ def test_history_header_opens_filter_without_querying_or_sorting(
             header.sectionClicked.emit(column)
             view = make_flyout.call_args.args[0]
             assert view.titleLabel.text() == title
-            target_position = header.viewport().mapToGlobal(
-                QPoint(header.sectionViewportPosition(column), header.height())
-            )
-            assert make_flyout.call_args.kwargs["target"] == target_position
             make_flyout.return_value.close()
             view.deleteLater()
         assert make_flyout.call_count == 2
@@ -1692,12 +1672,11 @@ def test_history_machine_flyout_applies_and_resets_filter(
     make_flyout = Mock()
     monkeypatch.setattr(Flyout, "make", make_flyout)
     try:
-        # 默认机器表头保持普通颜色并提示筛选入口。
+        # 默认机器表头显示筛选入口提示。
         page.refresh_history()
         header_item = page.table.horizontalHeaderItem(MACHINE_COLUMN)
         assert header_item.text() == "机器 ▾"
         assert header_item.toolTip() == "点击筛选机器"
-        assert header_item.data(Qt.ItemDataRole.ForegroundRole) is None
         query_records = Mock(wraps=controller.list_measurement_records)
         query_machines = Mock(wraps=controller.list_record_machines)
         monkeypatch.setattr(controller, "list_measurement_records", query_records)
@@ -1727,7 +1706,7 @@ def test_history_machine_flyout_applies_and_resets_filter(
         machine_combo_box = view.findChild(ComboBox)
         assert machine_combo_box.currentData() is None
 
-        # 确定机器条件后只查询一次第一页并显示蓝色表头。
+        # 确定机器条件后只查询一次第一页并更新表头提示。
         machine_combo_box.setCurrentIndex(machine_combo_box.findData("2"))
         query_records.assert_not_called()
         apply_button = next(
@@ -1744,7 +1723,6 @@ def test_history_machine_flyout_applies_and_resets_filter(
         assert page.table.rowCount() == 1
         assert header_item.text() == "机器 ▾"
         assert header_item.toolTip() == "二号皮带"
-        assert header_item.foreground().color() == QColor(COLORS["blue"])
         view.deleteLater()
 
         # 再次打开时定位到已应用机器，临时修改不查询记录。
@@ -1772,7 +1750,6 @@ def test_history_machine_flyout_applies_and_resets_filter(
         assert page.selected_machine_id is None
         assert page.table.rowCount() == 4
         assert header_item.toolTip() == "点击筛选机器"
-        assert header_item.data(Qt.ItemDataRole.ForegroundRole) is None
         assert page.table.isSortingEnabled() is False
         assert not page.table.horizontalHeader().isSortIndicatorShown()
         view.deleteLater()
@@ -1834,7 +1811,261 @@ def test_history_page_resets_machine_filter_when_machine_disappears(
         header_item = page.table.horizontalHeaderItem(MACHINE_COLUMN)
         assert header_item.text() == "机器 ▾"
         assert header_item.toolTip() == "点击筛选机器"
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_history_page_visual_layout_and_status_tones(
+    qt_application: QApplication,
+    measurement_record_service: MeasurementRecordService,
+) -> None:
+    """单独验证历史页尺寸、筛选卡布局和状态样式标识。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_record_service: 已保存测试记录的测量记录服务。
+
+    Returns:
+        返回示例：
+            None  # 历史页尺寸、布局和状态样式标识已核对
+    """
+    controller = AppController(
+        Mock(),
+        measurement_record_service,
+        Mock(),
+        Path("config"),
+    )
+    page = HistoryPage(controller)
+    try:
+        # 核对列宽、翻页按钮尺寸和筛选卡布局。
+        page.refresh_history()
+        assert page.table.columnWidth(0) == 140
+        assert page.table.columnWidth(1) == 170
+        assert page.previous_page_button.width() == 34
+        assert page.next_page_button.width() == 34
+        filter_card = page.findChild(SimpleCardWidget, "historyFilterCard")
+        assert filter_card.layout().count() == 1
+        assert filter_card.findChildren(ComboBox) == []
+
+        # 核对待复核列表和详情的状态样式标识。
+        pending_badge = page.table.cellWidget(2, 4).findChild(
+            QLabel,
+            "historyStatusBadge",
+        )
+        assert pending_badge.property("tone") == "pending"
+        page.show_record_detail("review-session")
+        assert page.detail_values["status"].property("tone") == "pending"
+
+        # 核对已复核列表和详情的状态样式标识。
+        measurement_record_service.complete_review("review-session")
+        page.status_buttons["reviewed"].click()
+        reviewed_badge = page.table.cellWidget(0, 4).findChild(
+            QLabel,
+            "historyStatusBadge",
+        )
+        assert reviewed_badge.property("tone") == "reviewed"
+        page.show_record_detail("review-session")
+        assert page.detail_values["status"].property("tone") == "reviewed"
+
+        # 核对正常记录的状态样式标识。
+        page.status_buttons["normal"].click()
+        normal_badge = page.table.cellWidget(2, 4).findChild(
+            QLabel,
+            "historyStatusBadge",
+        )
+        assert normal_badge.property("tone") == "normal"
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_history_page_visual_filter_header_colors(
+    qt_application: QApplication,
+    measurement_record_service: MeasurementRecordService,
+) -> None:
+    """单独验证机器和时间筛选表头的颜色。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_record_service: 已保存测试记录的测量记录服务。
+
+    Returns:
+        返回示例：
+            None  # 已应用和已清除筛选条件时的表头颜色已核对
+    """
+    controller = AppController(
+        Mock(),
+        measurement_record_service,
+        Mock(),
+        Path("config"),
+    )
+    page = HistoryPage(controller)
+    try:
+        # 核对机器筛选应用和清除时的表头颜色。
+        page.refresh_history()
+        machine_header = page.table.horizontalHeaderItem(MACHINE_COLUMN)
+        assert machine_header.data(Qt.ItemDataRole.ForegroundRole) is None
+        page.apply_machine_filter("2")
+        assert machine_header.foreground().color() == QColor(COLORS["blue"])
+        page.apply_machine_filter(None)
+        assert machine_header.data(Qt.ItemDataRole.ForegroundRole) is None
+
+        # 核对时间筛选应用和清除时的表头颜色。
+        time_header = page.table.horizontalHeaderItem(TIME_COLUMN)
+        selected_date = date(2026, 9, 27)
+        page.apply_time_filter(selected_date, selected_date)
+        assert time_header.foreground().color() == QColor(COLORS["blue"])
+        page.apply_time_filter(None, None)
+        assert time_header.data(Qt.ItemDataRole.ForegroundRole) is None
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_history_page_visual_resets_disappeared_machine_header_color(
+    qt_application: QApplication,
+    measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """单独验证机器消失后恢复默认表头颜色。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_record_service: 已保存测试记录的测量记录服务。
+        monkeypatch: pytest 提供的对象替换工具。
+
+    Returns:
+        返回示例：
+            None  # 失效机器筛选清除后的表头颜色已核对
+    """
+    controller = AppController(
+        Mock(),
+        measurement_record_service,
+        Mock(),
+        Path("config"),
+    )
+    page = HistoryPage(controller)
+    try:
+        # 应用当前存在的机器筛选。
+        page.refresh_history()
+        page.apply_machine_filter("2")
+
+        # 从下一次机器列表读取结果中移除所选机器。
+        remaining_machines = [
+            machine
+            for machine in page.record_machines
+            if machine["machine_id"] != "2"
+        ]
+        monkeypatch.setattr(
+            controller,
+            "list_record_machines",
+            Mock(return_value=Result.ok({"machines": remaining_machines})),
+        )
+
+        # 核对刷新后的默认表头颜色。
+        page.refresh_history()
+        header_item = page.table.horizontalHeaderItem(MACHINE_COLUMN)
         assert header_item.data(Qt.ItemDataRole.ForegroundRole) is None
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_main_window_visual_history_cell_positions(
+    qt_application: QApplication,
+    measurement_record_service: MeasurementRecordService,
+) -> None:
+    """单独验证历史页状态徽标和查看按钮的单元格位置。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_record_service: 已保存测试记录的测量记录服务。
+
+    Returns:
+        返回示例：
+            None  # 状态徽标和查看按钮的单元格位置已核对
+    """
+    # 创建含历史记录服务的主窗口。
+    database_path = measurement_record_service.measurement_record_repo.database_path
+    machine_repo = MachineRepo(database_path)
+    abnormal_event_service = AbnormalEventService(
+        AbnormalEventRepo(database_path.with_suffix(".recovery.sqlite3"))
+    )
+    controller = AppController(
+        MachineService(machine_repo),
+        measurement_record_service,
+        abnormal_event_service,
+        Path("config"),
+    )
+    window = MainWindow(controller)
+    try:
+        # 显示指定尺寸的主窗口并进入历史页。
+        window.resize(1600, 900)
+        window.show()
+        qt_application.processEvents()
+        window.switch_page("history")
+        qt_application.processEvents()
+
+        # 核对状态徽标和查看按钮的单元格位置。
+        table = window.history_page.table
+        for row_index in range(table.rowCount()):
+            for column_index in (4, 5):
+                widget = table.cellWidget(row_index, column_index)
+                cell_rectangle = table.visualRect(
+                    table.model().index(row_index, column_index)
+                )
+                assert widget.geometry() == cell_rectangle
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_history_header_visual_flyout_positions(
+    qt_application: QApplication,
+    measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """单独验证机器和时间筛选弹层的表头定位。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        measurement_record_service: 已保存测试记录的测量记录服务。
+        monkeypatch: pytest 提供的对象替换工具。
+
+    Returns:
+        返回示例：
+            None  # 表头移动后的筛选弹层定位已核对
+    """
+    controller = AppController(
+        Mock(),
+        measurement_record_service,
+        Mock(),
+        Path("config"),
+    )
+    page = HistoryPage(controller)
+    make_flyout = Mock()
+    monkeypatch.setattr(Flyout, "make", make_flyout)
+    try:
+        # 移动机器表头并逐一打开筛选弹层。
+        page.refresh_history()
+        header = page.table.horizontalHeader()
+        header.moveSection(MACHINE_COLUMN, 2)
+        for column in (MACHINE_COLUMN, TIME_COLUMN):
+            header.sectionClicked.emit(column)
+            view = make_flyout.call_args.args[0]
+
+            # 核对弹层目标点位于对应表头下方。
+            target_position = header.viewport().mapToGlobal(
+                QPoint(header.sectionViewportPosition(column), header.height())
+            )
+            assert make_flyout.call_args.kwargs["target"] == target_position
+            make_flyout.return_value.close()
+            view.deleteLater()
     finally:
         page.detail_dialog.close()
         page.close()

@@ -1,6 +1,7 @@
 """验证测量记录写入时的 SQLite 写锁重试边界。"""
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -8,7 +9,7 @@ import pytest
 
 import database as database_module
 from config_util import AppConfig
-from database import Database, MeasurementRecord
+from database import CommitIntegrityConflictError, Database, MeasurementRecord
 
 
 def create_database_and_record(
@@ -28,7 +29,7 @@ def create_database_and_record(
                     session_id="session-1",  # 周期编号
                     start_time="2026-09-24T00:00:00+00:00",  # 开始时间
                     finish_time="2026-09-24T00:00:01+00:00",  # 结束时间
-                    ordered_lines=("ABC",),  # 最终文字
+                    recognized_lines=("2926215C", "003"),  # 正式识别文字
                     final_frequency_hz=50.0,  # 最终频率
                     measurement_frequencies=(),  # 频率明细
                     evidence_directory=Path("evidence"),  # 证据目录
@@ -52,7 +53,7 @@ def create_database_and_record(
         session_id="session-1",
         start_time="2026-09-24T00:00:00+00:00",
         finish_time="2026-09-24T00:00:01+00:00",
-        ordered_lines=("ABC",),
+        recognized_lines=("2926215C", "003"),
         final_frequency_hz=50.0,
         measurement_frequencies=(),
         evidence_directory=config.evidence_directory,
@@ -95,7 +96,7 @@ def test_busy_write_succeeds_on_second_attempt(
     finally:
         successful_connection.close()
 
-    # 核对重试次数和最终写入内容。
+    # 核对重试次数。
     assert connect_mock.call_count == 2
     sleep_mock.assert_called_once_with(0.1)
 
@@ -108,12 +109,69 @@ def test_busy_write_succeeds_on_second_attempt(
     assert len(retry_warnings) == 1
     assert retry_warnings[0].levelname == "WARNING"
     assert retry_warnings[0].getMessage() == "测量记录写锁竞争，准备重试 session_id=session-1"
+
+    # 核对最终写入内容。
     with sqlite3.connect(database.config.database_path) as connection:
         record_count = connection.execute(
             "SELECT COUNT(*) FROM measurement_records WHERE session_id = ?",
             (record.session_id,),
         ).fetchone()[0]
+        recognized_lines = connection.execute(
+            "SELECT recognized_lines FROM measurement_records WHERE session_id = ?",
+            (record.session_id,),
+        ).fetchone()[0]
     assert record_count == 1
+    assert recognized_lines == '["2926215C", "003"]'
+
+
+def test_recognized_lines_participate_in_idempotent_write(tmp_path: Path) -> None:
+    """验证新库正式文字字段参与重复写入和内容冲突比较。
+
+    Args:
+        tmp_path: pytest 提供的临时目录。
+
+    Returns:
+        返回示例：
+            None  # 正式文字已保存，相同内容只写一次，不同文字产生冲突
+    """
+    # 重复写入同一周期的相同正式文字。
+    database, record = create_database_and_record(tmp_path)
+    database.write_measurement_record(record)
+    database.write_measurement_record(record)
+
+    # 读取新库的字段。
+    with sqlite3.connect(database.config.database_path) as connection:
+        columns = {
+            column[1]
+            for column in connection.execute("PRAGMA table_info(measurement_records)")
+        }
+
+        # 读取已保存的正式文字 JSON。
+        saved_records = connection.execute(
+            "SELECT recognized_lines FROM measurement_records"
+        ).fetchall()
+    # 核对新库的完整字段。
+    assert columns == {
+        "session_id",
+        "machine_id",
+        "start_time",
+        "finish_time",
+        "recognized_lines",
+        "final_frequency_hz",
+        "evidence_directory",
+        "measurement_frequencies",
+        "needs_review",
+        "review_reason",
+        "reviewed_at",
+        "reviewed_lines",
+    }
+    # 核对同一周期只保留一条标准化文字。
+    assert saved_records == [('["2926215C", "003"]',)]
+
+    # 同一周期改用不同正式文字时报告提交冲突。
+    conflicting_record = replace(record, recognized_lines=("2926215D", "003"))
+    with pytest.raises(CommitIntegrityConflictError, match="提交内容不一致"):
+        database.write_measurement_record(conflicting_record)
 
 
 def test_persistent_busy_stops_after_second_attempt(

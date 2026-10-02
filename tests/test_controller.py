@@ -30,7 +30,7 @@ class FakeSystemRuntimeThread(QObject):
     camera_state_changed_signal = Signal(str, str, str)
     measurement_progress_changed_signal = Signal(str, str, str, str)
     cycle_closed_signal = Signal(str, str)
-    ocr_result_changed_signal = Signal(str, str, tuple, tuple)
+    ocr_result_changed_signal = Signal(str, str, tuple)
     machine_status_changed_signal = Signal(str, str)
     finished = Signal()
 
@@ -574,16 +574,14 @@ def test_monitoring_signals_are_forwarded(
         "1", "session-1", "image_capture", "running"
     )
     runtime_thread.cycle_closed_signal.emit("1", "session-1")
-    runtime_thread.ocr_result_changed_signal.emit(
-        "1", "session-1", ("003",), ("003",)
-    )
+    runtime_thread.ocr_result_changed_signal.emit("1", "session-1", ("003",))
     runtime_thread.machine_status_changed_signal.emit("1", "online")
     camera_notification.assert_called_once_with("1", "已连接", "")
     progress_notification.assert_called_once_with(
         "1", "session-1", "image_capture", "running"
     )
     cycle_notification.assert_called_once_with("1", "session-1")
-    ocr_notification.assert_called_once_with("1", "session-1", ("003",), ("003",))
+    ocr_notification.assert_called_once_with("1", "session-1", ("003",))
     machine_status_notification.assert_called_once_with("1", "online")
 
 

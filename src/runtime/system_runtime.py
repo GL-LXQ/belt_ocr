@@ -72,7 +72,7 @@ class SystemRuntime:
         self,
         notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None = None,
         notify_camera_state: Callable[[str, str, str], None] | None = None,
-        notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
+        notify_ocr_result: Callable[[str, str, tuple[str, ...]], None] | None = None,
         notify_cycle_closed: Callable[[str, str], None] | None = None,
         notify_machine_status: Callable[[str, str], None] | None = None,
     ) -> None:
@@ -80,7 +80,7 @@ class SystemRuntime:
 
         Args:
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
-            notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、原文字和去空格文字。
+            notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、正式识别文字。
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
             notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
             notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
@@ -149,7 +149,7 @@ class SystemRuntime:
         self,
         notify_camera_state: Callable[[str, str, str], None] | None = None,
         notify_measurement_progress: Callable[[str, str, ProgressStage, ProgressStatus], None] | None = None,
-        notify_ocr_result: Callable[[str, str, tuple[str, ...], tuple[str, ...]], None] | None = None,
+        notify_ocr_result: Callable[[str, str, tuple[str, ...]], None] | None = None,
         notify_cycle_closed: Callable[[str, str], None] | None = None,
         notify_machine_status: Callable[[str, str], None] | None = None,
     ) -> None:
@@ -159,7 +159,7 @@ class SystemRuntime:
             notify_camera_state: 可选连接通知函数，接收机器编号、连接状态和失败原因；
                 GUI 由 Controller 管理的后台 Runtime 线程提供 Qt 信号，无界面时传 None。
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
-            notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、原文字和去空格文字。
+            notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、正式识别文字。
             notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
             notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
                 online、offline 或 fault。

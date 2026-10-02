@@ -94,7 +94,7 @@ class MeasurementRecord:
     session_id: str  # 测量周期编号
     start_time: str  # 本轮开始时间
     finish_time: str  # 本轮结算时间
-    ordered_lines: tuple[str, ...]  # 最终文字
+    recognized_lines: tuple[str, ...]  # 大写且去除所有空白的正式识别文字
     final_frequency_hz: float | None  # 最终频率
     measurement_frequencies: tuple[dict, ...]  # 频率明细
     evidence_directory: Path  # 本轮证据图片目录
@@ -244,7 +244,7 @@ class Database:
             record.machine_id,
             record.start_time,
             record.finish_time,
-            json.dumps(record.ordered_lines, ensure_ascii=False),
+            json.dumps(record.recognized_lines, ensure_ascii=False),
             record.final_frequency_hz,
             str(record.evidence_directory),
             json.dumps(record.measurement_frequencies, ensure_ascii=False, sort_keys=True),
@@ -266,7 +266,7 @@ class Database:
                             # 查询同一周期已保存的业务字段。
                             existing_record = connection.execute(
                                 "SELECT machine_id, start_time, finish_time, "
-                                "ordered_lines, final_frequency_hz, "
+                                "recognized_lines, final_frequency_hz, "
                                 "evidence_directory, measurement_frequencies, "
                                 "needs_review, review_reason "
                                 "FROM measurement_records WHERE session_id = ?",
@@ -290,7 +290,7 @@ class Database:
                             # 写入本轮测量记录。
                             connection.execute(
                                 "INSERT INTO measurement_records (session_id, machine_id, "
-                                "start_time, finish_time, ordered_lines, "
+                                "start_time, finish_time, recognized_lines, "
                                 "final_frequency_hz, evidence_directory, "
                                 "measurement_frequencies, needs_review, "
                                 "review_reason) "

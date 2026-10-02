@@ -211,8 +211,7 @@ def create_machine(
         capture_stop_time=1.0,
         ocr_state=OCRState.COMPLETED,
         ocr_result=OCRResult(
-            ordered_lines=() if review_reason else ("AB123456",),
-            normalized_lines=() if review_reason else ("AB123456",),
+            recognized_lines=() if review_reason else ("AB123456",),
             selected_frames=selected_frames,
             line_frame_ids=() if review_reason else ((selected_frames[0].frame_id,),),
             review_frames=review_frames,
@@ -516,7 +515,7 @@ async def test_finalize_saves_images_before_record(
     )
     with sqlite3.connect(database.config.database_path) as connection:
         record = connection.execute(
-            "SELECT ordered_lines, final_frequency_hz, "
+            "SELECT recognized_lines, final_frequency_hz, "
             "evidence_directory, needs_review "
             "FROM measurement_records WHERE session_id = ?",
             (session.session_id,),
@@ -566,7 +565,7 @@ async def test_finalize_saves_all_review_frames(tmp_path: Path) -> None:
     assert (expected_directory / "frame-2.jpg").read_bytes() == b"image-two"
     with sqlite3.connect(database.config.database_path) as connection:
         record = connection.execute(
-            "SELECT ordered_lines, final_frequency_hz, evidence_directory, "
+            "SELECT recognized_lines, final_frequency_hz, evidence_directory, "
             "needs_review, review_reason "
             "FROM measurement_records WHERE session_id = ?",
             (session.session_id,),
@@ -594,8 +593,7 @@ async def test_finalize_preserves_reliable_text_for_review(tmp_path: Path) -> No
         tmp_path, (evidence_frame,), (evidence_frame,), "没有可靠的 20 位文字"
     )
     session.ocr_result = OCRResult(
-        ordered_lines=("123",),
-        normalized_lines=("123",),
+        recognized_lines=("123",),
         selected_frames=(evidence_frame,),
         line_frame_ids=((evidence_frame.frame_id,),),
         review_frames=(evidence_frame,),
@@ -606,7 +604,7 @@ async def test_finalize_preserves_reliable_text_for_review(tmp_path: Path) -> No
     await machine.try_finalize(session)
     with sqlite3.connect(database.config.database_path) as connection:
         record = connection.execute(
-            "SELECT ordered_lines, needs_review, review_reason "
+            "SELECT recognized_lines, needs_review, review_reason "
             "FROM measurement_records WHERE session_id = ?",
             (session.session_id,),
         ).fetchone()
@@ -927,7 +925,7 @@ async def test_database_conflict_keeps_conflict_reason(tmp_path: Path) -> None:
         session_id=session.session_id,
         start_time=session.start_time,
         finish_time="2026-09-23T00:00:01+00:00",
-        ordered_lines=("EXISTING",),
+        recognized_lines=("EXISTING",),
         final_frequency_hz=50.0,
         measurement_frequencies=(),
         evidence_directory=tmp_path / "existing",
@@ -949,12 +947,12 @@ async def test_database_conflict_keeps_conflict_reason(tmp_path: Path) -> None:
     # 核对数据库仍保留首次提交的内容。
     with sqlite3.connect(database.config.database_path) as connection:
         saved_record = connection.execute(
-            "SELECT ordered_lines, evidence_directory "
+            "SELECT recognized_lines, evidence_directory "
             "FROM measurement_records WHERE session_id = ?",
             (session.session_id,),
         ).fetchone()
     assert saved_record == (
-        json.dumps(existing_record.ordered_lines),
+        json.dumps(existing_record.recognized_lines),
         str(existing_record.evidence_directory),
     )
 
@@ -1012,7 +1010,7 @@ def test_database_compares_evidence_directory(
         session_id="session-1",
         start_time="2026-09-23T00:00:00+00:00",
         finish_time="2026-09-23T00:00:01+00:00",
-        ordered_lines=("AB123456",),
+        recognized_lines=("AB123456",),
         final_frequency_hz=50.0,
         measurement_frequencies=(),
         evidence_directory=tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1",
@@ -1623,8 +1621,7 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
     processing_started = threading.Event()
     processing_release = threading.Event()
     expected_result = OCRResult(
-        ordered_lines=(),
-        normalized_lines=(),
+        recognized_lines=(),
         selected_frames=(),
         line_frame_ids=(),
         review_frames=(),
@@ -2750,7 +2747,11 @@ async def test_ocr_notification_precedes_close_and_survives_release(tmp_path: Pa
 
     # 当前结果在现场关闭前立即发送，参数仅包含身份和文字。
     await machine.handle_event(RuntimeEvent(EventType.OCR_COMPLETED, "1", session.session_id, result))
-    notification.assert_called_once_with("1", session.session_id, result.ordered_lines, result.normalized_lines)
+    notification.assert_called_once_with(
+        "1",
+        session.session_id,
+        result.recognized_lines,
+    )
     assert session.capture_stop_time is None
     assert session.ocr_state == OCRState.COMPLETED
 
@@ -2761,4 +2762,12 @@ async def test_ocr_notification_precedes_close_and_survives_release(tmp_path: Pa
     assert session.ocr_result is None
     assert machine.current_session is None
     assert notification.call_count == 1
+
+    # 正式入库文字与当前周期通知文字保持一致。
+    with sqlite3.connect(database.config.database_path) as connection:
+        record = connection.execute(
+            "SELECT recognized_lines FROM measurement_records WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+    assert json.loads(record[0]) == list(result.recognized_lines)
     database.close()

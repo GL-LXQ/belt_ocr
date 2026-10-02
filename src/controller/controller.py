@@ -80,7 +80,8 @@ class AppController(QObject):
     camera_state_changed_signal = Signal(str, str, str)
     measurement_progress_changed_signal = Signal(str, str, str, str)
     cycle_closed_signal = Signal(str, str)
-    ocr_result_changed_signal = Signal(str, str, tuple, tuple)
+    # 最终文字信号，参数依次为机器编号、周期编号、正式识别文字。
+    ocr_result_changed_signal = Signal(str, str, tuple)
     machine_status_changed_signal = Signal(str, str)
     monitoring_finished_signal = Signal(str)
 

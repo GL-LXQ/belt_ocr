@@ -32,13 +32,13 @@ def _serial_number_of(candidate: dict) -> int:
     """返回 8 字符候选前 7 位数字对应的整数。
 
     Args:
-        candidate: 包含 normalized_text 的 8 字符候选。
+        candidate: 包含 recognized_text 的 8 字符候选。
 
     Returns:
         返回示例：
             2926215  # 前七位数字组成的整数
     """
-    return int(candidate["normalized_text"][:7])
+    return int(candidate["recognized_text"][:7])
 
 
 class TextRecognizer:
@@ -208,8 +208,7 @@ class TextRecognizer:
                     ),
                 )
                 OCRResult(
-                    ordered_lines=(),  # 最终文字
-                    normalized_lines=(),  # 去空白后的文字
+                    recognized_lines=(),  # 正式识别文字
                     selected_frames=(),  # 选中的证据帧
                     line_frame_ids=(),  # 文字对应的证据帧 ID
                     review_frames=(measurement_frame,),  # 待人工复核的测量帧
@@ -218,8 +217,7 @@ class TextRecognizer:
         """
         # 将本轮全部测量帧留给人工复核。
         return OCRResult(
-            ordered_lines=(),
-            normalized_lines=(),
+            recognized_lines=(),
             selected_frames=(),
             line_frame_ids=(),
             review_frames=measurement_frames,
@@ -262,8 +260,7 @@ class TextRecognizer:
                     ),
                 )
                 OCRResult(
-                    ordered_lines=("ABC",),  # 最终文字
-                    normalized_lines=("ABC",),  # 去空白后的最终文字
+                    recognized_lines=("ABC",),  # 正式识别文字
                     selected_frames=(selected_frame,),  # 选中的证据帧
                     line_frame_ids=(("capture-1",),),  # 文字对应的证据帧 ID
                     review_frames=(),  # 正常结果没有待复核图片
@@ -310,23 +307,21 @@ class TextRecognizer:
 
         # 根据全部 OCR 结果选出最终文字、证据图片和对应的 frame_id。
         (
-            ordered_lines,
-            normalized_lines,
+            recognized_lines,
             selected_frames,
             line_frame_ids,
             review_reason,
         ) = self.generate_final_text_and_images(frame_results, qualified_frames)
 
         # 没有选出最终文字时，将本轮全部测量帧留给人工复核。
-        if not ordered_lines:
+        if not recognized_lines:
             logger.warning("本轮没有最终文字，人工复核 session_id=%s", session_id)
             review_reason = (
                 f"{review_reason}；没有最终文字"
                 if review_reason else "没有最终文字"
             )
             return OCRResult(
-                ordered_lines=(),
-                normalized_lines=(),
+                recognized_lines=(),
                 selected_frames=(),
                 line_frame_ids=(),
                 review_frames=measurement_frames,
@@ -335,8 +330,7 @@ class TextRecognizer:
 
         # 生成并返回本轮 OCRResult。
         return OCRResult(
-            ordered_lines=ordered_lines,
-            normalized_lines=normalized_lines,
+            recognized_lines=recognized_lines,
             selected_frames=selected_frames,
             line_frame_ids=line_frame_ids,
             review_frames=measurement_frames if review_reason else (),
@@ -422,8 +416,16 @@ class TextRecognizer:
         return image_results
 
     def _serial_number_of(candidate: dict) -> int:
-        """返回 8 字符编号前 7 位数字对应的整数。"""
-        return int(candidate["normalized_text"][:7])
+        """返回 8 字符编号前 7 位数字对应的整数。
+
+        Args:
+            candidate: 包含 recognized_text 的 8 字符候选。
+
+        Returns:
+            返回示例：
+                2926215  # 前七位数字组成的整数
+        """
+        return int(candidate["recognized_text"][:7])
 
     def generate_final_text_and_images(
         self,
@@ -431,14 +433,13 @@ class TextRecognizer:
         frames: tuple[MeasurementFrame, ...],
     ) -> tuple[
         tuple[str, ...],
-        tuple[str, ...],
         tuple[MeasurementFrame, ...],
         tuple[tuple[str, ...], ...],
         str | None,
     ]:
         """按 20、8、3、2 字符类别选出最终文字，并确定对应的证据图片。
 
-        处理规则：先将文字统一转成大写，并去掉空白计算字符数。
+        处理规则：先将文字统一转成大写，并去掉所有空白。
         20 字符不限制格式；3、2 字符必须全部是数字；8 字符必须是前 7 位数字加 1 位字母。
         20、3、2 字符各选置信度最高的一条；8 字符先去重并过滤低置信度候选，
         再按连续编号规则选择。
@@ -452,8 +453,7 @@ class TextRecognizer:
         Returns:
             返回示例：
                 (
-                    ("0 03",),  # 最终文字，按 20、8、3、2 类别排列
-                    ("003",),  # 与最终文字逐项对应的去空白文字
+                    ("003",),  # 正式识别文字，按 20、8、3、2 类别排列
                     (  # 最终证据帧，同一帧只保留一次
                         MeasurementFrame(
                             session_id="session",  # Session ID
@@ -491,17 +491,15 @@ class TextRecognizer:
         for frame_result in frame_results:
             for block in frame_result["blocks"]:
                 for line in block["lines"]:
-                    # 将 OCR 文字统一转成大写。
-                    text = line["text"].upper()
-                    normalized_text = re.sub(r"\s+", "", text)
-                    character_length = len(normalized_text)
+                    # 将 OCR 文字转为大写并删除所有空白。
+                    recognized_text = re.sub(r"\s+", "", line["text"].upper())
+                    character_length = len(recognized_text)
                     if character_length not in (20, 8, 3, 2):
                         continue
 
-                    # 保存候选文字、去空白结果、置信度和来源 frame_id。
+                    # 保存正式识别候选、置信度和来源 frame_id。
                     candidates_by_length[character_length].append({
-                        "text": text,
-                        "normalized_text": normalized_text,
+                        "recognized_text": recognized_text,
                         "confidence": line.get("confidence"),
                         "frame_id": frame_result["frame_id"],
                     })
@@ -531,7 +529,7 @@ class TextRecognizer:
                 candidates = [
                     candidate
                     for candidate in candidates
-                    if re.fullmatch(pattern, candidate["normalized_text"])
+                    if re.fullmatch(pattern, candidate["recognized_text"])
                 ]
 
                 # 当前类别有候选，但没有一个符合格式要求。
@@ -552,7 +550,10 @@ class TextRecognizer:
                     raise OCRProcessingError(f"{character_length} 位文字置信度不是有限数值")
 
             # 选出当前类别置信度最高的候选。
-            best_candidate = max(candidates, key=lambda candidate: candidate["confidence"])
+            best_candidate = max(
+                candidates,
+                key=lambda candidate: candidate["confidence"],
+            )
 
             # 最高置信度仍低于最低要求。
             if best_candidate["confidence"] < minimum_confidence:
@@ -567,7 +568,7 @@ class TextRecognizer:
         eight_candidates = [
             candidate
             for candidate in candidates_by_length.get(8, [])
-            if re.fullmatch(r"[0-9]{7}[A-Za-z]", candidate["normalized_text"])
+            if re.fullmatch(r"[0-9]{7}[A-Za-z]", candidate["recognized_text"])
         ]
 
         # 检查 8 字符候选的置信度是否有效。
@@ -582,7 +583,10 @@ class TextRecognizer:
                 raise OCRProcessingError("8 位文字置信度不是有限数值")
 
         # 相同 8 字符文字只保留置信度最高的一条，并过滤低置信度候选。
-        reliable_eight_candidates = self._select_reliable_candidates(eight_candidates, minimum_confidence)
+        reliable_eight_candidates = self._select_reliable_candidates(
+            eight_candidates,
+            minimum_confidence,
+        )
 
         # 没有可靠的 8 字符候选时，记录人工复核原因。
         if not reliable_eight_candidates:
@@ -590,7 +594,9 @@ class TextRecognizer:
             review_reasons.append("没有可靠的 8 位文字")
         else:
             # 有可靠候选时，按连续编号规则选出最终 8 字符文字。
-            eight_winners = self._select_eight_character_winners(reliable_eight_candidates)
+            eight_winners = self._select_eight_character_winners(
+                reliable_eight_candidates
+            )
 
             # 从最终 8 字符文字中选出置信度最高的一条，并将它的来源图片作为这一类别的共同证据。
             best_eight_candidate = max(
@@ -608,13 +614,14 @@ class TextRecognizer:
             3: 2,
             2: 3,
         }
-        selected_candidates.sort(key=lambda candidate: category_order[len(candidate["normalized_text"])])
+        selected_candidates.sort(
+            key=lambda candidate: category_order[len(candidate["recognized_text"])]
+        )
 
-        # 最终文字保留 OCR 原有空白，字母统一大写。
-        ordered_lines = tuple(candidate["text"] for candidate in selected_candidates)
-
-        # 同时保存去掉所有空白后的文字。
-        normalized_lines = tuple(candidate["normalized_text"] for candidate in selected_candidates)
+        # 按已排序候选生成正式识别文字。
+        recognized_lines = tuple(
+            candidate["recognized_text"] for candidate in selected_candidates
+        )
 
         # 为每条最终文字记录对应的证据 frame_id。
         line_frame_ids = tuple(
@@ -625,21 +632,26 @@ class TextRecognizer:
         selected_frame_ids = dict.fromkeys(
             candidate["evidence_frame_id"] for candidate in selected_candidates
         )
-        selected_frames = tuple(frames_by_id[frame_id] for frame_id in selected_frame_ids)
+        selected_frames = tuple(
+            frames_by_id[frame_id] for frame_id in selected_frame_ids
+        )
 
         # 合并本轮需要人工复核的原因。
         review_reason = "；".join(review_reasons) or None
 
-        # 返回最终文字、去空白文字、证据图片、文字对应的 frame_id 和复核原因。
+        # 返回正式识别文字、证据图片、文字对应的 frame_id 和复核原因。
         return (
-            ordered_lines,
-            normalized_lines,
+            recognized_lines,
             selected_frames,
             line_frame_ids,
             review_reason,
         )
 
-    def _select_reliable_candidates(self, candidates: list[dict], minimum_confidence: float) -> list[dict]:
+    def _select_reliable_candidates(
+        self,
+        candidates: list[dict],
+        minimum_confidence: float,
+    ) -> list[dict]:
         """相同 8 字符文字只保留置信度最高的一条，并过滤低置信度候选。
 
         Args:
@@ -649,8 +661,7 @@ class TextRecognizer:
         Returns:
             返回示例：
                 [{
-                    "text": "2926215C",  # 保留空白的大写文字
-                    "normalized_text": "2926215C",  # 去掉空白后的文字
+                    "recognized_text": "2926215C",  # 大写且无空白的正式识别文字
                     "confidence": 0.95,  # 该行的识别置信度
                     "frame_id": "capture-1",  # 来源图片编号
                 }]
@@ -658,10 +669,13 @@ class TextRecognizer:
         # 相同文字只保留置信度最高的一条；置信度相同时保留先出现的候选。
         best_candidate_by_text: dict[str, dict] = {}
         for candidate in candidates:
-            normalized_text = candidate["normalized_text"]
-            current_candidate = best_candidate_by_text.get(normalized_text)
-            if current_candidate is None or candidate["confidence"] > current_candidate["confidence"]:
-                best_candidate_by_text[normalized_text] = candidate
+            recognized_text = candidate["recognized_text"]
+            current_candidate = best_candidate_by_text.get(recognized_text)
+            if (
+                current_candidate is None
+                or candidate["confidence"] > current_candidate["confidence"]
+            ):
+                best_candidate_by_text[recognized_text] = candidate
 
         # 过滤低于最低置信度的候选。
         return [
@@ -681,14 +695,17 @@ class TextRecognizer:
         Returns:
             返回示例：
                 [{
-                    "text": "2926215C",  # 保留空白的大写文字
-                    "normalized_text": "2926215C",  # 去掉空白后的文字
+                    "recognized_text": "2926215C",  # 大写且无空白的正式识别文字
                     "confidence": 0.95,  # 该行的识别置信度
                     "frame_id": "capture-1",  # 来源图片编号
                 }]
         """
         # 按置信度从高到低排列，同分保留先出现的候选。
-        ordered_candidates = sorted(candidates, key=lambda candidate: candidate["confidence"], reverse=True)
+        ordered_candidates = sorted(
+            candidates,
+            key=lambda candidate: candidate["confidence"],
+            reverse=True,
+        )
 
         # 只在置信度最高的前 5 条候选中寻找连续编号。
         top_candidates = ordered_candidates[:5]
@@ -696,7 +713,7 @@ class TextRecognizer:
         # 按编号最后一位字母分组。
         candidates_by_suffix: defaultdict[str, list[dict]] = defaultdict(list)
         for candidate in top_candidates:
-            suffix = candidate["normalized_text"][-1]
+            suffix = candidate["recognized_text"][-1]
             candidates_by_suffix[suffix].append(candidate)
 
         # 收集所有长度至少为 2 的连续编号组。
@@ -706,7 +723,11 @@ class TextRecognizer:
             current_group: list[dict] = []
             for candidate in ordered_suffix_candidates:
                 # 当前编号与上一编号相差 1 时并入当前组。
-                if current_group and _serial_number_of(candidate) == _serial_number_of(current_group[-1]) + 1:
+                if (
+                    current_group
+                    and _serial_number_of(candidate)
+                    == _serial_number_of(current_group[-1]) + 1
+                ):
                     current_group.append(candidate)
                     continue
 
@@ -728,7 +749,10 @@ class TextRecognizer:
         # 优先选择包含编号最多的连续组；数量相同时，选择组内最低置信度更高的一组。
         winning_group = max(
             consecutive_groups,
-            key=lambda group: (len(group), min(candidate["confidence"] for candidate in group)),
+            key=lambda group: (
+                len(group),
+                min(candidate["confidence"] for candidate in group),
+            ),
         )
 
         # 最终连续编号按前 7 位数字从小到大排列。

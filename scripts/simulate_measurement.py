@@ -179,7 +179,7 @@ async def run_measurement_simulation(scenario: str) -> dict:
             {
                 "session_id": "abc123",  # 本轮唯一周期编号
                 "machine_id": "1",  # 所选机器编号
-                "ordered_lines": ("ABC",),  # 实际 OCR 终选文字
+                "recognized_lines": ("ABC",),  # 标准化后的正式识别文字
                 "needs_review": False,  # 历史记录复核状态
                 "final_frequency_hz": 50.0,  # 最终模拟频率
                 "review_reason": None,  # 实际 OCR 复核原因
@@ -399,14 +399,14 @@ async def run_measurement_simulation(scenario: str) -> dict:
                 raise RuntimeError("历史复核原因与真实 OCR 结果不一致")
             if "没有找到最终频率" in record["review_reason"]:
                 raise RuntimeError("历史复核原因错误地包含缺少频率")
-        elif not record["ordered_lines"]:
+        elif not record["recognized_lines"]:
             raise RuntimeError("正常记录缺少最终 OCR 文字")
 
         # 输出刚完成的周期结果供历史页面核对。
         return {
             "session_id": session_id,
             "machine_id": record["machine_id"],
-            "ordered_lines": record["ordered_lines"],
+            "recognized_lines": record["recognized_lines"],
             "needs_review": record["needs_review"],
             "final_frequency_hz": record["final_frequency_hz"],
             "review_reason": record["review_reason"],
@@ -443,7 +443,7 @@ def run_simulation_cli() -> None:
     result = asyncio.run(run_measurement_simulation(arguments.scenario))
     print(f"Session ID：{result['session_id']}")
     print(f"机器编号：{result['machine_id']}")
-    print(f"OCR 结果：{result['ordered_lines']}")
+    print(f"OCR 结果：{result['recognized_lines']}")
     print(f"状态：{'待复核' if result['needs_review'] else '正常'}")
     print(f"最终频率：{result['final_frequency_hz']:.1f} Hz")
     print(f"复核原因：{result['review_reason'] or '--'}")
