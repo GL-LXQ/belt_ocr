@@ -342,6 +342,10 @@ class AppController(QObject):
         page_size: int = 20,
         start_date: date | None = None,
         end_date: date | None = None,
+        *,
+        text_query: str | None = None,
+        text_match_mode: str = "contains",
+        text_length: int | None = None,
     ) -> Result:
         """检查筛选参数并读取测量记录。
 
@@ -352,6 +356,9 @@ class AppController(QObject):
             page_size: 每页最多显示的记录数。
             start_date: 可选的本地开始日期。
             end_date: 可选的本地结束日期。
+            text_query: 待转交 Service 标准化的查询文字。
+            text_match_mode: contains 表示包含，exact 表示整行相等。
+            text_length: None 或 20、8、3、2，限制被查询行的完整长度。
 
         Returns:
             Result(
@@ -373,10 +380,26 @@ class AppController(QObject):
         if start_date is not None and end_date is not None and start_date > end_date:
             return Result.error("开始日期不能晚于结束日期。")
 
+        # 检查文字匹配方式。
+        if text_match_mode not in ("contains", "exact"):
+            return Result.error("文字匹配方式无效，请选择包含或精确。")
+
+        # 检查被查询行的完整长度选项。
+        if text_length not in (None, 20, 8, 3, 2):
+            return Result.error("文字位数无效，请选择全部、20 位、8 位、3 位或 2 位。")
+
         # 读取筛选记录并转换预期服务故障。
         try:
             record_data = self.measurement_record_service.list_records(
-                review_status, machine_id, page, page_size, start_date, end_date
+                review_status,
+                machine_id,
+                page,
+                page_size,
+                start_date,
+                end_date,
+                text_query=text_query,
+                text_match_mode=text_match_mode,
+                text_length=text_length,
             )
             return Result.ok(record_data)
         except MeasurementRecordServiceError as error:

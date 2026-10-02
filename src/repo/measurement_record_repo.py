@@ -69,8 +69,12 @@ class MeasurementRecordRepo:
         offset: int = 0,
         start_finish_time: str | None = None,
         end_finish_time: str | None = None,
+        *,
+        text_query: str | None = None,
+        text_match_mode: str = "contains",
+        text_length: int | None = None,
     ) -> list[dict]:
-        """按复核状态、机器和结束时间分页读取测量历史。
+        """按复核状态、机器、结束时间和有效文字分页读取测量历史。
 
         Args:
             review_status: None 表示全部，normal、pending、reviewed 表示查询状态。
@@ -79,6 +83,9 @@ class MeasurementRecordRepo:
             offset: 跳过的记录数。
             start_finish_time: 可选的 UTC 结束时间下界。
             end_finish_time: 可选的 UTC 结束时间排他上界。
+            text_query: 已标准化的查询文字，None 表示不筛选文字。
+            text_match_mode: contains 表示字面包含，exact 表示整行相等。
+            text_length: 被查询行的完整长度，None 表示全部长度。
 
         Returns:
             返回示例：
@@ -94,27 +101,16 @@ class MeasurementRecordRepo:
                     "reviewed_lines": None,  # 人工修改文字 JSON
                 }]
         """
-        # 按已选择的筛选条件生成参数化查询。
-        conditions = []
-        parameters = []
-        if review_status == "normal":
-            conditions.append("record.needs_review = 0")
-        elif review_status == "pending":
-            conditions.append("record.needs_review = 1 AND record.reviewed_at IS NULL")
-        elif review_status == "reviewed":
-            conditions.append(
-                "record.needs_review = 1 AND record.reviewed_at IS NOT NULL"
-            )
-        if machine_id is not None:
-            conditions.append("record.machine_id = ?")
-            parameters.append(machine_id)
-        if start_finish_time is not None:
-            conditions.append("record.finish_time >= ?")
-            parameters.append(start_finish_time)
-        if end_finish_time is not None:
-            conditions.append("record.finish_time < ?")
-            parameters.append(end_finish_time)
-        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+        # 生成列表与总数共用的筛选条件。
+        where_clause, parameters = self._build_record_filters(
+            review_status,
+            machine_id,
+            start_finish_time,
+            end_finish_time,
+            text_query,
+            text_match_mode,
+            text_length,
+        )
 
         # 读取测量结果和对应机器名称。
         with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
@@ -140,20 +136,74 @@ class MeasurementRecordRepo:
         machine_id: str | None = None,
         start_finish_time: str | None = None,
         end_finish_time: str | None = None,
+        *,
+        text_query: str | None = None,
+        text_match_mode: str = "contains",
+        text_length: int | None = None,
     ) -> int:
-        """统计当前复核状态、机器和结束时间条件下的记录。
+        """统计当前复核状态、机器、结束时间和有效文字条件下的记录。
 
         Args:
             review_status: None 表示全部，normal、pending、reviewed 表示查询状态。
             machine_id: None 表示全部机器，否则筛选指定机器。
             start_finish_time: 可选的 UTC 结束时间下界。
             end_finish_time: 可选的 UTC 结束时间排他上界。
+            text_query: 已标准化的查询文字，None 表示不筛选文字。
+            text_match_mode: contains 表示字面包含，exact 表示整行相等。
+            text_length: 被查询行的完整长度，None 表示全部长度。
 
         Returns:
             返回示例：
                 25  # 当前筛选条件下的测量记录数
         """
-        # 按当前复核状态和机器编号整理筛选条件。
+        # 生成列表与总数共用的筛选条件。
+        where_clause, parameters = self._build_record_filters(
+            review_status,
+            machine_id,
+            start_finish_time,
+            end_finish_time,
+            text_query,
+            text_match_mode,
+            text_length,
+        )
+
+        # 查询符合筛选条件的记录总数。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM measurement_records AS record" + where_clause,
+                parameters,
+            ).fetchone()
+        return row[0]
+
+    def _build_record_filters(
+        self,
+        review_status: str | None,
+        machine_id: str | None,
+        start_finish_time: str | None,
+        end_finish_time: str | None,
+        text_query: str | None,
+        text_match_mode: str,
+        text_length: int | None,
+    ) -> tuple[str, list[str | int]]:
+        """整理测量记录列表和总数共用的 SQL 条件与绑定参数。
+
+        Args:
+            review_status: None 或 normal、pending、reviewed。
+            machine_id: 可选机器编号。
+            start_finish_time: 可选的 UTC 结束时间下界。
+            end_finish_time: 可选的 UTC 结束时间排他上界。
+            text_query: 已标准化的查询文字，空值表示不筛选文字。
+            text_match_mode: contains 表示字面包含，exact 表示整行相等。
+            text_length: 被查询行的完整长度，None 表示全部长度。
+
+        Returns:
+            返回示例：
+                (
+                    " WHERE record.machine_id = ?",  # 带 WHERE 的筛选条件
+                    ["1"],  # 与条件占位符依次对应的绑定参数
+                )
+        """
+        # 整理复核状态条件。
         conditions = []
         parameters = []
         if review_status == "normal":
@@ -164,24 +214,46 @@ class MeasurementRecordRepo:
             conditions.append(
                 "record.needs_review = 1 AND record.reviewed_at IS NOT NULL"
             )
+
+        # 绑定机器条件。
         if machine_id is not None:
             conditions.append("record.machine_id = ?")
             parameters.append(machine_id)
+
+        # 绑定结束时间范围。
         if start_finish_time is not None:
             conditions.append("record.finish_time >= ?")
             parameters.append(start_finish_time)
         if end_finish_time is not None:
             conditions.append("record.finish_time < ?")
             parameters.append(end_finish_time)
-        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
 
-        # 查询符合筛选条件的记录总数。
-        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) FROM measurement_records AS record" + where_clause,
-                parameters,
-            ).fetchone()
-        return row[0]
+        # 在当前有效文字的同一行内匹配文字与完整长度。
+        if text_query:
+            line_condition = (
+                "line.value = ?"
+                if text_match_mode == "exact" else "instr(line.value, ?) > 0"
+            )
+            parameters.append(text_query)
+
+            # 将完整行长度限制加入同一文字条件。
+            if text_length is not None:
+                line_condition += " AND length(line.value) = ?"
+                parameters.append(text_length)
+
+            # 检查当前有效文字中是否存在命中的一行。
+            conditions.append(
+                "EXISTS (SELECT 1 FROM "
+                "json_each(COALESCE(record.reviewed_lines, record.recognized_lines)) "
+                "AS line WHERE " + line_condition + ")"
+            )
+
+        # 合并筛选条件并返回对应参数。
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+        return (
+            where_clause,
+            parameters,
+        )
 
     def count_daily_summary(
         self,

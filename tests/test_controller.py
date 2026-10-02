@@ -337,7 +337,18 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
     measurement_record_service.get_record.assert_not_called()
     measurement_record_service.complete_review.assert_not_called()
 
-    # 合法查询转发筛选条件，重复复核转换为普通失败。
+    # 拒绝非法文字选项，保持服务未调用。
+    for text_match_mode in ("like", "EXACT", ""):
+        result = controller.list_measurement_records(text_match_mode=text_match_mode)
+        assert result == Result.error("文字匹配方式无效，请选择包含或精确。")
+    for text_length in (0, 4, 7, "8"):
+        result = controller.list_measurement_records(text_length=text_length)
+        assert result == Result.error(
+            "文字位数无效，请选择全部、20 位、8 位、3 位或 2 位。"
+        )
+    measurement_record_service.list_records.assert_not_called()
+
+    # 合法查询原样转发筛选条件。
     measurement_record_service.list_records.return_value = {
         "records": [{"session_id": "session-1"}],
         "page": 2,
@@ -348,13 +359,45 @@ def test_history_parameters_and_review_failure(controller_services) -> None:
     start_date = date(2026, 9, 27)
     end_date = date(2026, 9, 28)
     result = controller.list_measurement_records(
-        "pending", "1", 2, 20, start_date=start_date, end_date=end_date
+        "pending",
+        "1",
+        2,
+        20,
+        start_date=start_date,
+        end_date=end_date,
+        text_query=" 2926\t215c ",
+        text_match_mode="exact",
+        text_length=8,
     )
     assert result.success
     assert result.data == measurement_record_service.list_records.return_value
     measurement_record_service.list_records.assert_called_once_with(
-        "pending", "1", 2, 20, start_date, end_date
+        "pending",
+        "1",
+        2,
+        20,
+        start_date,
+        end_date,
+        text_query=" 2926\t215c ",
+        text_match_mode="exact",
+        text_length=8,
     )
+
+    # 未传文字参数的旧调用继续使用默认选项。
+    controller.list_measurement_records()
+    measurement_record_service.list_records.assert_called_with(
+        None,
+        None,
+        1,
+        20,
+        None,
+        None,
+        text_query=None,
+        text_match_mode="contains",
+        text_length=None,
+    )
+
+    # 重复复核转换为普通失败。
     review_error = MeasurementReviewAlreadyCompletedError("该记录已完成复核。")
     measurement_record_service.complete_review.side_effect = review_error
     result = controller.complete_measurement_review(" session-1 ", None)

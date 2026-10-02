@@ -185,6 +185,456 @@ def qt_application() -> QApplication:
     return application or QApplication([])
 
 
+@pytest.fixture
+def text_search_record_service(
+    measurement_record_service: MeasurementRecordService,
+) -> MeasurementRecordService:
+    """准备包含多种长度、重复文字和空人工结果的临时测量记录。
+
+    Args:
+        measurement_record_service: 已初始化临时业务库的服务。
+
+    Returns:
+        返回示例：
+            MeasurementRecordService(...)  # 含三条文字查询样本的服务
+    """
+    # 准备不同记录共享文字及同一记录中的多行文字。
+    record_lines = (
+        (
+            "text-primary",
+            "1",
+            (
+                "ABCD1234567890123456", "2926215C", "2926217C", "003", "12",
+                "6215", "A%B", "A_B", "LEFT", "RIGHT",
+            ),
+            1,
+            None,
+            None,
+        ),
+        ("text-copy", "2", ("2926215C", "AAB"), 0, None, None),
+        (
+            "text-empty-review", "1", ("HIDDEN",), 1,
+            "2026-09-27T12:00:00+00:00", "[]",
+        ),
+    )
+
+    # 将样本写入现有临时库，并为每条记录设置独立证据目录。
+    database_path = measurement_record_service.measurement_record_repo.database_path
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            "INSERT INTO measurement_records "
+            "(session_id, machine_id, start_time, finish_time, recognized_lines, "
+            "evidence_directory, needs_review, reviewed_at, reviewed_lines) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    session_id,
+                    machine_id,
+                    "2026-09-27T11:00:00+00:00",
+                    "2026-09-27T11:01:00+00:00",
+                    json.dumps(recognized_lines),
+                    str(database_path.parent / session_id),
+                    needs_review,
+                    reviewed_at,
+                    reviewed_lines,
+                )
+                for (
+                    session_id, machine_id, recognized_lines, needs_review,
+                    reviewed_at, reviewed_lines,
+                ) in record_lines
+            ],
+        )
+    return measurement_record_service
+
+
+@pytest.mark.parametrize(
+    "text_query,text_match_mode,text_length,expected_sessions",
+    [
+        (" abcd 1234567890123456 ", "exact", 20, ("text-primary",)),
+        ("29\t26\u3000215c", "exact", 8, ("text-primary", "text-copy")),
+        ("0\t03", "exact", 3, ("text-primary", "normal-session")),
+        ("1\u30002", "exact", 2, ("text-primary",)),
+        ("6215", "contains", 8, ("text-primary", "text-copy")),
+        ("6215", "exact", 8, ()),
+        ("6215", "exact", None, ("text-primary",)),
+        ("6215", "contains", 3, ()),
+        ("2926", "contains", 8, ("text-primary", "text-copy")),
+        ("2926216C", "exact", 8, ()),
+        ("%", "contains", None, ("text-primary",)),
+        ("_", "contains", None, ("text-primary",)),
+        ("LEFT RIGHT", "contains", None, ()),
+        ('["', "contains", None, ()),
+        ('","', "contains", None, ()),
+        ("HIDDEN", "exact", None, ()),
+    ],
+)
+def test_text_search_matches_effective_json_lines(
+    text_search_record_service: MeasurementRecordService,
+    text_query: str,
+    text_match_mode: str,
+    text_length: int | None,
+    expected_sessions: tuple[str, ...],
+) -> None:
+    """验证标准化、逐行字面匹配、完整行长度和记录去重。
+
+    Args:
+        text_search_record_service: 含文字查询样本的临时服务。
+        text_query: 用户输入的完整文字或片段。
+        text_match_mode: 包含或精确匹配方式。
+        text_length: 被查询行的完整长度。
+        expected_sessions: 按结束时间和周期编号倒序排列的预期记录。
+
+    Returns:
+        返回示例：
+            None  # 查询列表与总数符合逐行匹配结果
+    """
+    result = text_search_record_service.list_records(
+        text_query=text_query,
+        text_match_mode=text_match_mode,
+        text_length=text_length,
+    )
+
+    # 核对记录级返回与总数，保留不同周期中的相同文字。
+    assert tuple(record["session_id"] for record in result["records"]) == (
+        expected_sessions
+    )
+    assert result["total"] == len(expected_sessions)
+    assert result["total_pages"] == 1
+
+
+@pytest.mark.parametrize("text_query", [None, "", " \t\u3000\n"])
+def test_empty_text_search_ignores_length(
+    text_search_record_service: MeasurementRecordService,
+    text_query: str | None,
+) -> None:
+    """验证空查询词不增加文字或行长度筛选。
+
+    Args:
+        text_search_record_service: 含文字查询样本的临时服务。
+        text_query: 未输入或纯空白的查询词。
+
+    Returns:
+        返回示例：
+            None  # 无查询词时保留全部记录
+    """
+    expected = text_search_record_service.list_records()
+    result = text_search_record_service.list_records(
+        text_query=text_query, text_match_mode="exact", text_length=2
+    )
+    assert result == expected
+    assert result["total"] == 7
+
+
+@pytest.mark.parametrize("edited_text", [None, "new belt"])
+def test_text_search_uses_reviewed_result(
+    text_search_record_service: MeasurementRecordService,
+    edited_text: str | None,
+) -> None:
+    """验证人工修改替换查询文字，直接确认仍搜索识别结果。
+
+    Args:
+        text_search_record_service: 含待复核样本的临时服务。
+        edited_text: 人工修改文字或直接确认标记。
+
+    Returns:
+        返回示例：
+            None  # 旧文字与新文字命中当前有效结果
+    """
+    text_search_record_service.complete_review("text-primary", edited_text)
+    original_result = text_search_record_service.list_records(
+        text_query="2926215C", text_match_mode="exact"
+    )
+    new_result = text_search_record_service.list_records(text_query="new belt")
+
+    # 核对人工修改后旧文字退出查询，直接确认保留原文字。
+    expected_original = ["text-copy"] if edited_text else ["text-primary", "text-copy"]
+    assert [record["session_id"] for record in original_result["records"]] == (
+        expected_original
+    )
+    assert original_result["total"] == len(expected_original)
+    assert new_result["total"] == (1 if edited_text else 0)
+    if edited_text:
+        assert new_result["records"][0]["session_id"] == "text-primary"
+
+
+def test_text_search_combines_filters_before_pagination(
+    paged_measurement_record_service: MeasurementRecordService,
+) -> None:
+    """验证文字、机器、日期和状态共同筛选后分页并保持稳定倒序。
+
+    Args:
+        paged_measurement_record_service: 已保存二十五条记录的临时服务。
+
+    Returns:
+        返回示例：
+            None  # 四页记录、总数和组合条件保持一致
+    """
+    selected_date = datetime.fromisoformat(
+        "2026-09-27T08:00:00+00:00"
+    ).astimezone().date()
+
+    # 查询十条文字命中的待复核记录，每页三条。
+    records = []
+    for page_number in range(1, 5):
+        result = paged_measurement_record_service.list_records(
+            "pending",
+            "1",
+            page_number,
+            3,
+            selected_date,
+            selected_date,
+            text_query="文字0",
+        )
+        assert result["total"] == 10
+        assert result["total_pages"] == 4
+        assert len(result["records"]) == (1 if page_number == 4 else 3)
+        records.extend(result["records"])
+
+    # 核对跨页排序与同一结束时间的周期编号倒序。
+    assert [record["session_id"] for record in records] == [
+        f"page-{record_number:02}" for record_number in reversed(range(10))
+    ]
+
+    # 任一其他条件不符时返回空列表和一致的总数。
+    previous_date = selected_date - timedelta(days=1)
+    for review_status, machine_id, query_date in (
+        ("normal", "1", selected_date),
+        ("pending", "2", selected_date),
+        ("pending", "1", previous_date),
+    ):
+        result = paged_measurement_record_service.list_records(
+            review_status,
+            machine_id,
+            start_date=query_date,
+            end_date=query_date,
+            text_query="文字0",
+        )
+        assert result["records"] == []
+        assert result["total"] == 0
+        assert result["total_pages"] == 1
+
+
+def test_history_text_search_submits_and_preserves_conditions(
+    qt_application: QApplication,
+    paged_measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证点击和回车提交文字，翻页及其他筛选只沿用已提交条件。
+
+    Args:
+        qt_application: 当前 Qt 应用。
+        paged_measurement_record_service: 已保存二十五条记录的临时服务。
+        monkeypatch: pytest 属性替换工具。
+
+    Returns:
+        返回示例：
+            None  # 草稿不触发查询，提交、清除和空白查询符合预期
+    """
+    controller = AppController(
+        Mock(), paged_measurement_record_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
+    query_records = Mock(wraps=controller.list_measurement_records)
+    monkeypatch.setattr(controller, "list_measurement_records", query_records)
+    selected_date = datetime.fromisoformat(
+        "2026-09-27T08:00:00+00:00"
+    ).astimezone().date()
+    try:
+        # 核对默认控件值，输入文字后不自动查询。
+        page.refresh_history()
+        page.next_page_button.click()
+        assert page.current_page == 2
+        assert page.text_query_edit.placeholderText() == "输入皮带文字或片段"
+        assert page.text_match_mode_combo_box.currentData() == "contains"
+        assert page.text_length_combo_box.currentData() is None
+        query_records.reset_mock()
+        page.text_query_edit.setText(" 文 字 ")
+        query_records.assert_not_called()
+
+        # 点击查询提交原始输入，并回到第一页。
+        page.text_search_button.click()
+        assert page.current_page == 1
+        assert page.record_count_label.text() == "25 条"
+        assert page.selected_text_query == " 文 字 "
+        assert query_records.call_args.kwargs["text_query"] == " 文 字 "
+
+        # 修改未提交的三个控件值，下一页仍使用上次提交条件。
+        query_records.reset_mock()
+        page.text_query_edit.setText("未提交文字")
+        page.text_match_mode_combo_box.setCurrentIndex(1)
+        page.text_length_combo_box.setCurrentIndex(2)
+        query_records.assert_not_called()
+        page.next_page_button.click()
+        assert page.current_page == 2
+        assert query_records.call_args.kwargs["text_match_mode"] == "contains"
+        assert query_records.call_args.kwargs["text_length"] is None
+        assert query_records.call_args.kwargs["text_query"] == " 文 字 "
+
+        # 机器、日期、状态和刷新均沿用已提交文字。
+        page.apply_machine_filter("1")
+        page.apply_time_filter(selected_date, selected_date)
+        page.status_buttons["pending"].click()
+        assert page.record_count_label.text() == "21 条"
+        page.refresh_history()
+        assert page.selected_start_date is None
+        assert page.text_query_edit.text() == "未提交文字"
+        assert query_records.call_args.kwargs["text_query"] == " 文 字 "
+        assert query_records.call_args.kwargs["text_match_mode"] == "contains"
+        assert query_records.call_args.kwargs["text_length"] is None
+
+        # 回车提交精确查询，未命中时清空列表并禁用翻页。
+        page.apply_time_filter(selected_date, selected_date)
+        page.text_query_edit.returnPressed.emit()
+        assert page.current_page == 1
+        assert page.selected_text_match_mode == "exact"
+        assert page.selected_text_length == 8
+        assert page.table.rowCount() == 0
+        assert page.record_count_label.text() == "0 条"
+        assert not page.previous_page_button.isEnabled()
+        assert not page.next_page_button.isEnabled()
+
+        # 空白提交取消文字查询，但不取消机器、日期或状态条件。
+        page.text_query_edit.setText(" \t\u3000")
+        page.text_query_edit.returnPressed.emit()
+        assert page.record_count_label.text() == "21 条"
+        assert page.selected_machine_id == "1"
+        assert page.selected_review_status == "pending"
+        assert page.selected_start_date == selected_date
+        assert page.selected_end_date == selected_date
+
+        # 清除按钮恢复文字控件和提交状态，保留其他筛选。
+        page.next_page_button.click()
+        page.clear_text_search_button.click()
+        assert page.current_page == 1
+        assert page.text_query_edit.text() == ""
+        assert page.text_match_mode_combo_box.currentData() == "contains"
+        assert page.text_length_combo_box.currentData() is None
+        assert page.selected_text_query is None
+        query_records.assert_called_with(
+            "pending",
+            "1",
+            1,
+            20,
+            start_date=selected_date,
+            end_date=selected_date,
+            text_query=None,
+            text_match_mode="contains",
+            text_length=None,
+        )
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_history_text_search_opens_same_record_details(
+    qt_application: QApplication,
+    text_search_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证命中记录按周期编号打开完整测量详情和对应证据目录。
+
+    Args:
+        qt_application: 当前 Qt 应用。
+        text_search_record_service: 含重复文字记录的临时服务。
+        monkeypatch: pytest 属性替换工具。
+
+    Returns:
+        返回示例：
+            None  # 同文不同周期的详情时间与证据目录各自对应
+    """
+    controller = AppController(
+        Mock(), text_search_record_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
+    get_record = Mock(wraps=controller.get_measurement_record)
+    load_evidence = Mock()
+    monkeypatch.setattr(controller, "get_measurement_record", get_record)
+    monkeypatch.setattr(page, "populate_evidence_images", load_evidence)
+    try:
+        page.refresh_history()
+        page.text_query_edit.setText("2926215c")
+        page.text_search_button.click()
+        assert page.table.rowCount() == 2
+
+        # 分别打开相同文字所属的两个周期并核对完整详情。
+        for row_index, session_id in enumerate(("text-primary", "text-copy")):
+            record = text_search_record_service.get_record(session_id)["record"]
+            page.table.cellWidget(row_index, 5).click()
+            get_record.assert_called_with(session_id)
+            assert page.detail_values["session_id"].text() == session_id
+            for field_name in ("start_time", "finish_time"):
+                assert page.detail_values[field_name].text() == format_history_time(
+                    record[field_name]
+                )
+            assert page.detail_values["evidence_directory"].text() == (
+                record["evidence_directory"]
+            )
+            load_evidence.assert_called_with(record["evidence_directory"])
+            assert page.detail_ocr_text.text() == "\n".join(record["recognized_lines"])
+            page.detail_dialog.close()
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
+def test_history_text_search_review_removes_last_page(
+    qt_application: QApplication,
+    paged_measurement_record_service: MeasurementRecordService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证人工改字后记录退出文字结果，消失的末页回退到有效页。
+
+    Args:
+        qt_application: 当前 Qt 应用。
+        paged_measurement_record_service: 已保存二十五条记录的临时服务。
+        monkeypatch: pytest 属性替换工具。
+
+    Returns:
+        返回示例：
+            None  # 修改后的有效文字影响重新查询和页码回退
+    """
+    controller = AppController(
+        Mock(), paged_measurement_record_service, Mock(), Path("config")
+    )
+    page = HistoryPage(controller)
+    monkeypatch.setattr(page, "populate_evidence_images", Mock())
+    try:
+        # 仅按机器和文字查到二十一条记录并打开第二页。
+        page.refresh_history()
+        page.apply_machine_filter("1")
+        page.text_query_edit.setText("文字")
+        page.text_search_button.click()
+        page.next_page_button.click()
+        assert page.current_page == 2
+        assert page.table.rowCount() == 1
+        page.table.cellWidget(0, 5).click()
+        assert page.detail_values["session_id"].text() == "page-00"
+
+        # 保存不再命中当前查询的人工文字。
+        page.review_editor.setPlainText("new belt")
+        page.complete_record_review(True)
+        assert page.selected_review_status is None
+        assert page.selected_text_query == "文字"
+        assert page.current_page == 1
+        assert page.table.rowCount() == 20
+        assert page.record_count_label.text() == "20 条"
+        assert not page.next_page_button.isEnabled()
+
+        # 新文字查询返回刚修改的原周期。
+        page.text_query_edit.setText("new belt")
+        page.text_search_button.click()
+        assert page.table.rowCount() == 1
+        page.table.cellWidget(0, 5).click()
+        assert page.detail_values["session_id"].text() == "page-00"
+        assert page.final_result_text.text() == "NEWBELT"
+    finally:
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+
+
 def test_measurement_record_service_filters_and_reads_details(
     measurement_record_service: MeasurementRecordService,
 ) -> None:
@@ -994,7 +1444,15 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert page.selected_end_date == selected_date
         assert page.current_page == 1
         list_measurement_records.assert_called_once_with(
-            None, None, 1, 20, start_date=selected_date, end_date=selected_date
+            None,
+            None,
+            1,
+            20,
+            start_date=selected_date,
+            end_date=selected_date,
+            text_query=None,
+            text_match_mode="contains",
+            text_length=None,
         )
         assert page.record_count_label.text() == "25 条"
         assert page.table.rowCount() == 20
@@ -1017,7 +1475,15 @@ def test_history_page_filters_dates_and_restores_unlimited_time(
         assert page.record_count_label.text() == "25 条"
         assert header_item.toolTip() == "点击筛选时间范围"
         list_measurement_records.assert_called_once_with(
-            None, None, 1, 20, start_date=None, end_date=None
+            None,
+            None,
+            1,
+            20,
+            start_date=None,
+            end_date=None,
+            text_query=None,
+            text_match_mode="contains",
+            text_length=None,
         )
 
         # 重新进入页面清除日期并保留机器条件。
@@ -1064,6 +1530,8 @@ def test_history_page_clears_pagination_after_query_failure(
     try:
         # 先保留成功查询后的总数和可用翻页按钮。
         page.refresh_history()
+        page.text_query_edit.setText("文字")
+        page.text_search_button.click()
         if failure_source == "machines":
             page.next_page_button.click()
             assert page.current_page == 2
@@ -1092,6 +1560,7 @@ def test_history_page_clears_pagination_after_query_failure(
             page.reload_records()
 
         # 核对旧记录和分页入口已清空。
+        assert page.selected_text_query == "文字"
         assert page.table.rowCount() == 0
         assert page.current_page == 1
         assert page.record_count_label.text() == "0 条"
@@ -1551,7 +2020,10 @@ def test_history_header_opens_filter_without_querying_or_sorting(
     try:
         # 检查页面筛选控件和表格排序状态。
         page.refresh_history()
-        assert page.findChildren(ComboBox) == []
+        assert page.findChildren(ComboBox) == [
+            page.text_match_mode_combo_box,
+            page.text_length_combo_box,
+        ]
         assert MACHINE_COLUMN == 0
         assert TIME_COLUMN == 1
         assert page.table.isSortingEnabled() is False
@@ -1619,7 +2091,15 @@ def test_history_header_opens_filter_without_querying_or_sorting(
         make_flyout.return_value.close.reset_mock()
         apply_button.click()
         query_records.assert_called_once_with(
-            None, None, 1, 20, start_date=selected_date, end_date=next_date
+            None,
+            None,
+            1,
+            20,
+            start_date=selected_date,
+            end_date=next_date,
+            text_query=None,
+            text_match_mode="contains",
+            text_length=None,
         )
         make_flyout.return_value.close.assert_called_once()
         view.deleteLater()
@@ -1639,7 +2119,15 @@ def test_history_header_opens_filter_without_querying_or_sorting(
         assert page.selected_start_date is None
         assert page.selected_end_date is None
         query_records.assert_called_once_with(
-            None, None, 1, 20, start_date=None, end_date=None
+            None,
+            None,
+            1,
+            20,
+            start_date=None,
+            end_date=None,
+            text_query=None,
+            text_match_mode="contains",
+            text_length=None,
         )
         make_flyout.return_value.close.assert_called_once()
         view.deleteLater()
@@ -1716,7 +2204,15 @@ def test_history_machine_flyout_applies_and_resets_filter(
         make_flyout.return_value.close.reset_mock()
         apply_button.click()
         query_records.assert_called_once_with(
-            None, "2", 1, 20, start_date=None, end_date=None
+            None,
+            "2",
+            1,
+            20,
+            start_date=None,
+            end_date=None,
+            text_query=None,
+            text_match_mode="contains",
+            text_length=None,
         )
         make_flyout.return_value.close.assert_called_once()
         assert page.selected_machine_id == "2"
@@ -1743,7 +2239,15 @@ def test_history_machine_flyout_applies_and_resets_filter(
         make_flyout.return_value.close.reset_mock()
         reset_button.click()
         query_records.assert_called_once_with(
-            None, None, 1, 20, start_date=None, end_date=None
+            None,
+            None,
+            1,
+            20,
+            start_date=None,
+            end_date=None,
+            text_query=None,
+            text_match_mode="contains",
+            text_length=None,
         )
         make_flyout.return_value.close.assert_called_once()
         query_machines.assert_not_called()
@@ -1806,7 +2310,15 @@ def test_history_page_resets_machine_filter_when_machine_disappears(
         assert page.current_page == 1
         assert page.table.rowCount() == 4
         query_records.assert_called_once_with(
-            None, None, 1, 20, start_date=None, end_date=None
+            None,
+            None,
+            1,
+            20,
+            start_date=None,
+            end_date=None,
+            text_query=None,
+            text_match_mode="contains",
+            text_length=None,
         )
         header_item = page.table.horizontalHeaderItem(MACHINE_COLUMN)
         assert header_item.text() == "机器 ▾"
@@ -1846,8 +2358,11 @@ def test_history_page_visual_layout_and_status_tones(
         assert page.previous_page_button.width() == 34
         assert page.next_page_button.width() == 34
         filter_card = page.findChild(SimpleCardWidget, "historyFilterCard")
-        assert filter_card.layout().count() == 1
-        assert filter_card.findChildren(ComboBox) == []
+        assert filter_card.layout().count() == 2
+        assert filter_card.findChildren(ComboBox) == [
+            page.text_match_mode_combo_box,
+            page.text_length_combo_box,
+        ]
 
         # 核对待复核列表和详情的状态样式标识。
         pending_badge = page.table.cellWidget(2, 4).findChild(

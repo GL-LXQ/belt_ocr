@@ -28,6 +28,7 @@ from qfluentwidgets import (
     FlyoutAnimationType,
     FlyoutView,
     InfoBar,
+    LineEdit,
     MaskDialogBase,
     PlainTextEdit,
     PrimaryPushButton,
@@ -104,6 +105,11 @@ class HistoryPage(QWidget):
         self.selected_start_date: date | None = None
         self.selected_end_date: date | None = None
 
+        # 保存已提交的文字查询条件。
+        self.selected_text_query: str | None = None
+        self.selected_text_match_mode = "contains"
+        self.selected_text_length: int | None = None
+
         # 初始化历史记录分页。
         self.current_page = 1
         self.page_size = 20
@@ -159,6 +165,36 @@ class HistoryPage(QWidget):
         filters.addStretch()
         filter_layout.addLayout(filters)
 
+        # 建立文字查询输入框。
+        text_search_layout = QHBoxLayout()
+        self.text_query_edit = LineEdit()
+        self.text_query_edit.setPlaceholderText("输入皮带文字或片段")
+
+        # 建立包含和精确匹配选项。
+        self.text_match_mode_combo_box = ComboBox()
+        self.text_match_mode_combo_box.addItem("包含", userData="contains")
+        self.text_match_mode_combo_box.addItem("精确", userData="exact")
+
+        # 建立被查询行的完整位数选项。
+        self.text_length_combo_box = ComboBox()
+        for text_length in (None, 20, 8, 3, 2):
+            caption = "全部位数" if text_length is None else f"{text_length} 位"
+            self.text_length_combo_box.addItem(caption, userData=text_length)
+
+        # 将查询按钮和回车连接到同一提交入口。
+        self.text_search_button = PushButton("查询")
+        self.clear_text_search_button = PushButton("清除查询")
+        self.text_search_button.clicked.connect(self.apply_text_search)
+        self.text_query_edit.returnPressed.connect(self.apply_text_search)
+        self.clear_text_search_button.clicked.connect(self.clear_text_search)
+
+        # 将基础查询控件加入现有筛选区域。
+        text_search_layout.addWidget(self.text_query_edit, 1)
+        text_search_layout.addWidget(self.text_match_mode_combo_box)
+        text_search_layout.addWidget(self.text_length_combo_box)
+        text_search_layout.addWidget(self.text_search_button)
+        text_search_layout.addWidget(self.clear_text_search_button)
+        filter_layout.addLayout(text_search_layout)
         layout.addWidget(filter_card)
 
         # 建立六列只读历史记录表格。
@@ -313,7 +349,7 @@ class HistoryPage(QWidget):
         original_layout = QVBoxLayout(self.original_result_card)
         original_layout.setContentsMargins(18, 16, 18, 16)
         original_layout.setSpacing(12)
-        original_layout.addWidget(BodyLabel("原始 OCR"))
+        original_layout.addWidget(BodyLabel("OCR 识别结果"))
         self.detail_ocr_text = QLabel("--")
         self.detail_ocr_text.setObjectName("historyDetailOcrText")
         self.detail_ocr_text.setTextFormat(Qt.TextFormat.PlainText)
@@ -544,6 +580,49 @@ class HistoryPage(QWidget):
         self.update_machine_filter_header()
 
         # 读取当前状态和机器条件下的记录。
+        self.current_page = 1
+        self.reload_records()
+
+    def apply_text_search(self) -> None:
+        """提交当前文字查询控件值并读取第一页。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 已提交文字条件并重新读取记录
+        """
+        # 保存本次提交的原始查询词与选项。
+        self.selected_text_query = self.text_query_edit.text()
+        self.selected_text_match_mode = self.text_match_mode_combo_box.currentData()
+        self.selected_text_length = self.text_length_combo_box.currentData()
+
+        # 从第一页读取符合已提交条件的记录。
+        self.current_page = 1
+        self.reload_records()
+
+    def clear_text_search(self) -> None:
+        """清空文字查询并保留机器、日期和复核状态条件。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 文字控件恢复默认值并重新读取第一页
+        """
+        # 恢复文字查询控件的默认值。
+        self.text_query_edit.clear()
+        self.text_match_mode_combo_box.setCurrentIndex(0)
+        self.text_length_combo_box.setCurrentIndex(0)
+
+        # 清除已提交的文字条件。
+        self.selected_text_query = None
+        self.selected_text_match_mode = "contains"
+        self.selected_text_length = None
+
+        # 按保留的其他筛选条件重新读取第一页。
         self.current_page = 1
         self.reload_records()
 
@@ -868,7 +947,7 @@ class HistoryPage(QWidget):
             self.reload_records()
 
     def reload_records(self) -> None:
-        """按状态、机器和日期条件填充历史记录表格。
+        """按状态、机器、日期和已提交文字条件填充历史记录表格。
 
         Args:
             无外部参数。
@@ -889,6 +968,9 @@ class HistoryPage(QWidget):
             self.page_size,
             start_date=start_date,
             end_date=end_date,
+            text_query=self.selected_text_query,
+            text_match_mode=self.selected_text_match_mode,
+            text_length=self.selected_text_length,
         )
         if not result.success:
             # 清空记录和分页显示。
