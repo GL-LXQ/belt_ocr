@@ -1,0 +1,117 @@
+/* 页面延续浅灰背景与白色圆角卡片。 */
+QWidget#settings {
+    background: @background;
+}
+QWidget#settings QLabel#pageTitle {
+    color: #20232B;
+    font-size: 28px;
+    font-weight: 600;
+}
+QScrollArea#settingsScroll, QWidget#settingsScrollBody,
+QWidget#settingsContent, QWidget#settingsForm,
+QWidget#settingsGroup, QWidget#settingsAdvancedBody {
+    background: transparent;
+    border: none;
+}
+QFrame#settingsCard, QFrame#settingsActionBar {
+    background: @white;
+    border: 1px solid #E5E7EB;
+    border-radius: 16px;
+}
+QFrame#settingsDivider {
+    background: #F0F1F3;
+    border: none;
+    margin-left: 20px;
+    margin-right: 20px;
+}
+
+/* 使用紧凑标题和轻量说明，预览提示始终可见。 */
+QLabel#settingsPreviewNotice {
+    background: #EAF1FC;
+    border: 1px solid #DAE6F8;
+    border-radius: 10px;
+    color: #486B9E;
+    font-size: 13px;
+    padding: 10px 14px;
+}
+QLabel#settingsGroupTitle {
+    color: #343B47;
+    font-size: 15px;
+    font-weight: 600;
+    padding-left: 4px;
+}
+QLabel#settingsGroupDescription {
+    color: #818795;
+    font-size: 12px;
+    padding-left: 4px;
+}
+QLabel#settingsFieldTitle {
+    color: #313846;
+    font-size: 14px;
+}
+QLabel#settingsFieldDescription, QLabel#settingsBindingHint,
+QLabel#settingsUnit {
+    color: #818795;
+    font-size: 12px;
+    background: transparent;
+}
+QLabel#settingsDraftStatus {
+    color: #687181;
+    font-size: 13px;
+    font-weight: 500;
+}
+QLabel#settingsDraftStatus[dirty="true"] {
+    color: #B07428;
+}
+
+/* 只读字段与可编辑输入保持清晰区分。 */
+QLineEdit#settingsReadonlyInput {
+    background: #F7F8FA;
+    border: 1px solid #EAECF0;
+    border-radius: 8px;
+    color: #667080;
+    font-size: 12px;
+    padding-left: 10px;
+    min-height: 34px;
+}
+QLineEdit#settingsValueInput {
+    border-radius: 8px;
+    min-height: 34px;
+}
+QPushButton#settingsCopyButton {
+    color: #667080;
+    background: #F7F8FA;
+    border: 1px solid #EAECF0;
+    border-radius: 8px;
+    min-height: 34px;
+}
+QPushButton#settingsCopyButton:hover {
+    background: #EFF2F7;
+    color: @blue;
+}
+QPushButton#settingsCopyButton:disabled {
+    color: #B8BEC7;
+}
+
+/* 高级入口覆盖完整行，错误只显示在当前页面。 */
+QPushButton#settingsAdvancedToggle {
+    text-align: left;
+    background: #ECEEF2;
+    border: 1px solid #E5E7EB;
+    border-radius: 12px;
+    color: #596273;
+    font-size: 13px;
+    padding: 15px 18px;
+}
+QPushButton#settingsAdvancedToggle:hover {
+    background: #E5E9F0;
+}
+QFrame#settingsErrorCard {
+    background: #FFF6EA;
+    border: 1px solid #F0D8B5;
+    border-radius: 12px;
+}
+QLabel#settingsReadError {
+    color: #936124;
+    font-size: 13px;
+}
