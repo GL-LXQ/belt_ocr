@@ -5,6 +5,8 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
+from runtime.hardware_lock import HardwareOwnershipLock
 from datetime import datetime, timezone
 
 from camera.camera import Camera
@@ -14,7 +16,7 @@ from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
 from runtime.machine_runtime import MachineRuntime
 from enums import EventType, ProgressStage, ProgressStatus
-from models import RuntimeEvent
+from models import MeasurementSession, RuntimeEvent
 from async_utils import run_blocking_operation
 from text_recognizer import TextRecognizer
 from database import Database
@@ -25,11 +27,18 @@ logger = logging.getLogger(__name__)
 
 
 class SystemRuntime:
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        hardware_lock: HardwareOwnershipLock | None = None,
+        ocr_config_path: Path | None = None,
+    ) -> None:
         """保存运行配置，创建数据库和运行状态。
 
         Args:
             config: 数据库路径、采集期限和退出参数。
+            hardware_lock: 启动准备阶段已经持有的设备锁。
+            ocr_config_path: 可选的独立 OCR 配置文件路径。
 
         Returns:
             返回示例：
@@ -38,13 +47,14 @@ class SystemRuntime:
         # 校验并保存运行配置。
         config.validate()
         self.config = config
+        self.hardware_lock = hardware_lock or HardwareOwnershipLock()
 
         # 创建周期状态变化通知。
         self.state_changed = asyncio.Event()
 
         # 创建数据库和共享 OCR 处理器。
         self.database = Database(config)
-        self.text_recognizer = TextRecognizer()
+        self.text_recognizer = TextRecognizer(ocr_config_path) if ocr_config_path is not None else TextRecognizer()
 
         # 登记机器运行对象与后台任务列表。
         self.machines: dict[str, MachineRuntime] = {}
@@ -56,8 +66,10 @@ class SystemRuntime:
         # 登记启动、停止与资源释放标志。
         self.accepting_signals = False
         self.has_started = False
+        self.start_requested = False
         self.stopping = False
         self.releasing_resources = False
+        self.cleanup_failed = False
         self.camera_sdk = None
 
         # 登记故障记录、故障通知与退出任务引用。
@@ -79,6 +91,7 @@ class SystemRuntime:
         notify_cycle_closed: Callable[[str, str], None] | None = None,
         notify_machine_status: Callable[[str, str], None] | None = None,
         notify_machine_warning: Callable[[str, str], None] | None = None,
+        notify_session_finished: Callable[[MeasurementSession], None] | None = None,
     ) -> None:
         """在双库初始化之后读取启用机器，并逐台建立相机、频率适配器和机器运行对象。
 
@@ -88,6 +101,7 @@ class SystemRuntime:
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
             notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
             notify_machine_warning: 可选机器积压提示，接收机器编号和说明。
+            notify_session_finished: 可选周期终态通知，接收已经完整回收的业务周期。
             notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
                 online、offline 或 fault。
 
@@ -149,6 +163,7 @@ class SystemRuntime:
                 notify_cycle_closed,
                 notify_machine_status,
                 notify_machine_warning,
+                notify_session_finished,
             )
 
     async def start(
@@ -159,16 +174,18 @@ class SystemRuntime:
         notify_cycle_closed: Callable[[str, str], None] | None = None,
         notify_machine_status: Callable[[str, str], None] | None = None,
         notify_machine_warning: Callable[[str, str], None] | None = None,
+        notify_session_finished: Callable[[MeasurementSession], None] | None = None,
     ) -> None:
         """初始化本次运行的机器状态和存储，启动监听与处理任务。
 
         Args:
             notify_camera_state: 可选连接通知函数，接收机器编号、连接状态和失败原因；
-                GUI 由 Controller 管理的后台 Runtime 线程提供 Qt 信号，无界面时传 None。
+                API 宿主将通知转换为状态快照，无界面时传 None。
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、正式识别文字。
             notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
             notify_machine_warning: 可选机器积压提示，接收机器编号和说明。
+            notify_session_finished: 可选周期终态通知，接收已经完整回收的业务周期。
             notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
                 online、offline 或 fault。
 
@@ -178,8 +195,12 @@ class SystemRuntime:
                 None  # 无返回数据
         """
         # 拒绝重复启动同一个应用实例。
-        if self.has_started:
+        if self.has_started or self.start_requested or self.shutdown_task is not None:
             raise RuntimeError("请为新一次运行创建新的测量应用实例。")
+        self.start_requested = True
+
+        # 在任何数据库或设备初始化前独占现场设备。
+        self.hardware_lock.acquire()
 
         # 记录本次启动使用的存储路径。
         logger.info(
@@ -203,6 +224,7 @@ class SystemRuntime:
                 notify_cycle_closed,
                 notify_machine_status,
                 notify_machine_warning,
+                notify_session_finished,
             )
 
             # 记录本次运行加载的启用机器。
@@ -642,6 +664,10 @@ class SystemRuntime:
             返回示例：
                 None  # 故障已记录，资源清理任务已安排
         """
+        # 资源释放期间发生故障时保留设备所有权。
+        if self.releasing_resources:
+            self.cleanup_failed = True
+
         # 只保存首次故障。
         if self.failure is None:
             self.failure = error
@@ -842,6 +868,7 @@ class SystemRuntime:
         # 逐条登记机器资源释放过程中的异常。
         for result in release_results:
             if isinstance(result, Exception):
+                self.cleanup_failed = True
                 self.handle_system_failure(result)
 
         # 取消全部系统级后台任务。
@@ -858,6 +885,7 @@ class SystemRuntime:
             except Exception as error:
                 # 记录 Modbus 关闭失败并继续释放其他资源。
                 logger.exception("关闭 Modbus 客户端失败")
+                self.cleanup_failed = True
                 self.handle_system_failure(error)
 
         # 清空已登记的后台任务列表。
@@ -874,6 +902,7 @@ class SystemRuntime:
         except Exception as error:
             # 记录关闭相机驱动失败并登记故障。
             logger.exception("关闭相机驱动失败")
+            self.cleanup_failed = True
             self.handle_system_failure(error)
         finally:
             # 关闭本地记录库并释放实例锁。
@@ -883,6 +912,10 @@ class SystemRuntime:
                 # 记录关闭记录库失败并登记故障。
                 logger.exception("关闭本地记录库失败")
                 self.handle_system_failure(error)
+
+            # 全部硬件与存储清理完成后释放跨进程设备锁。
+            if not self.cleanup_failed:
+                self.hardware_lock.release()
 
             # 通知全部状态等待方本次退出已结束。
             self.state_changed.set()

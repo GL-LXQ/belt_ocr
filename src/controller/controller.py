@@ -1,10 +1,14 @@
-"""统一接收界面请求并管理后台监测线程。"""
+"""复用业务服务，为 HTTP 接口提供统一业务结果。"""
 
-from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal, Slot
+from collections.abc import Callable
+from hashlib import sha256
+from functools import wraps
+from threading import RLock
+
+from src.controller.result import Result
 
 from src.service.abnormal_event_service import (
     AbnormalEventService,
@@ -21,73 +25,36 @@ from src.service.measurement_record_service import (
     MeasurementRecordServiceError,
     MeasurementReviewAlreadyCompletedError,
 )
-from src.runtime.system_runtime_thread import SystemRuntimeThread
 
 
-@dataclass
-class Result:
-    """保存界面请求的成功状态、数据和提示。"""
+def serialize_configuration(operation):
+    """串行访问配置服务的读取基线与写入过程。
 
-    success: bool
-    data: object | None = None
-    message: str = ""
+    Args:
+        operation: 配置控制器方法。
 
-    @classmethod
-    def ok(cls, data: object | None = None, message: str = "") -> "Result":
-        """创建成功结果。
-
-        Args:
-            data: 返回给页面的业务数据。
-            message: 返回给页面的提示。
-
-        Returns:
-            Result(
-                success=True,  # 请求成功
-                data="data",  # 页面数据
-                message="",  # 页面提示
-            )
-        """
-        return cls(
-            success=True,
-            data=data,
-            message=message,
-        )
-
-    @classmethod
-    def error(cls, message: str, data: object | None = None) -> "Result":
-        """创建失败结果。
+    Returns:
+        callable  # 在同一配置锁内执行的原方法
+    """
+    @wraps(operation)
+    def locked(self, *arguments, **keywords):
+        """等待其他配置请求完成后调用业务方法。
 
         Args:
-            message: 返回给页面的失败提示。
-            data: 返回给页面的附加数据。
+            self: 当前控制器。
+            arguments: 原方法的位置参数。
+            keywords: 原方法的命名参数。
 
         Returns:
-            Result(
-                success=False,  # 请求失败
-                data=True,  # 页面附加数据
-                message="失败",  # 失败提示
-            )
+            Result(...)  # 原业务方法的结果
         """
-        return cls(
-            success=False,
-            data=data,
-            message=message,
-        )
+        with self.configuration_lock:
+            return operation(self, *arguments, **keywords)
+    return locked
 
 
-class AppController(QObject):
-    """转发界面业务请求并管理唯一的监测线程。"""
-
-    camera_state_changed_signal = Signal(str, str, str)
-    measurement_progress_changed_signal = Signal(str, str, str, str)
-    cycle_closed_signal = Signal(str, str)
-    # 最终文字信号，参数依次为机器编号、周期编号、正式识别文字。
-    ocr_result_changed_signal = Signal(str, str, tuple)
-    machine_status_changed_signal = Signal(str, str)
-    # 机器积压提示，参数依次为机器编号和说明。
-    machine_warning_signal = Signal(str, str)
-    monitoring_finished_signal = Signal(str)
-    monitoring_state_changed_signal = Signal()
+class AppController:
+    """转发 HTTP 业务请求，复用现有服务和统一结果。"""
 
     def __init__(
         self,
@@ -95,6 +62,7 @@ class AppController(QObject):
         measurement_record_service: MeasurementRecordService,
         abnormal_event_service: AbnormalEventService,
         configuration_directory: Path,
+        is_monitoring_active: Callable[[], bool] | None = None,
     ) -> None:
         """保存业务服务和监测配置目录。
 
@@ -103,20 +71,21 @@ class AppController(QObject):
             measurement_record_service: 测量记录业务服务。
             abnormal_event_service: 异常事件业务服务。
             configuration_directory: 公共配置目录。
+            is_monitoring_active: 返回当前是否正在启动、运行或清理。
 
         Returns:
-            None  # Controller 已初始化，尚无监测线程
+            None  # Controller 已初始化，尚无监测任务
         """
-        super().__init__()
-
         # 保存页面请求所需的业务服务和监测配置。
         self.machine_service = machine_service
         self.measurement_record_service = measurement_record_service
         self.abnormal_event_service = abnormal_event_service
         self.configuration_directory = configuration_directory
         self.configuration_service = ConfigurationService(configuration_directory)
-        self.runtime_thread: SystemRuntimeThread | None = None
+        self.configuration_lock = RLock()
+        self.is_monitoring_active = is_monitoring_active or (lambda: False)
 
+    @serialize_configuration
     def read_configuration(self) -> Result:
         """读取系统配置草稿，不启动设备或校验运行条件。
 
@@ -135,10 +104,14 @@ class AppController(QObject):
         """
         try:
             settings = self.configuration_service.read_configuration()
-            return Result.ok({"settings": settings})
+            return Result.ok({
+                "settings": settings,
+                "revision": sha256(self.configuration_service.source_bytes).hexdigest(),
+            })
         except ConfigurationServiceError as error:
             return Result.error(str(error), data={"field": error.field})
 
+    @serialize_configuration
     def validate_configuration(self, draft: dict) -> Result:
         """使用当前机器记录校验系统配置草稿。
 
@@ -165,11 +138,13 @@ class AppController(QObject):
         except MachineServiceError as error:
             return Result.error(f"无法校验机器与 DI 绑定：{error}")
 
-    def save_configuration(self, draft: dict) -> Result:
-        """仅在监测线程完全清理后保存配置，供下次启动读取。
+    @serialize_configuration
+    def save_configuration(self, draft: dict, revision: str | None = None) -> Result:
+        """仅在监测任务完全清理后保存配置，供下次启动读取。
 
         Args:
             draft: 页面提交的配置草稿。
+            revision: 页面读取时的配置内容摘要。
 
         Returns:
             返回示例：
@@ -181,17 +156,29 @@ class AppController(QObject):
                     message="配置已保存，下次开始监测时生效。",  # 生效说明
                 )
         """
-        # 启动中、运行中和停止清理中都持有线程，均禁止写入。
-        if self.runtime_thread is not None:
+        # 启动中、运行中和停止清理中都持有任务，均禁止写入。
+        if self.is_monitoring_active():
             return Result.error("监测启动、运行或停止清理中，请等待完全停止后再保存配置。")
         try:
             machines = self.machine_service.list_machines()["machines"]
+            if revision is not None:
+                current_bytes = self.configuration_service.configuration_path.read_bytes()
+                if sha256(current_bytes).hexdigest() != revision:
+                    return Result.error(
+                        "配置已被其他窗口修改，请重新读取后再保存。",
+                        {"field": "revision"},
+                    )
             settings = self.configuration_service.save_configuration(draft, machines)
-            return Result.ok({"settings": settings}, "配置已保存，下次开始监测时生效。")
+            return Result.ok({
+                "settings": settings,
+                "revision": sha256(self.configuration_service.source_bytes).hexdigest(),
+            }, "配置已保存，下次开始监测时生效。")
         except ConfigurationServiceError as error:
             return Result.error(str(error), data={"field": error.field})
         except MachineServiceError as error:
             return Result.error(f"无法校验机器与 DI 绑定：{error}")
+        except OSError:
+            return Result.error("无法读取配置版本，请重新读取配置。", {"field": "revision"})
 
     def list_machines(self) -> Result:
         """读取全部未删除的机器。
@@ -268,8 +255,8 @@ class AppController(QObject):
                 message="监测运行中，请先停止监测后再修改机器配置。",  # 失败提示
             )
         """
-        # 监测线程尚未结束时禁止修改机器配置。
-        if self.runtime_thread is not None:
+        # 监测任务尚未结束时禁止修改机器配置。
+        if self.is_monitoring_active():
             return Result.error("监测运行中，请先停止监测后再修改机器配置。")
 
         # 清理三个必填字段并返回第一个空字段。
@@ -330,8 +317,8 @@ class AppController(QObject):
                 message="监测运行中，请先停止监测后再修改机器配置。",  # 失败提示
             )
         """
-        # 监测线程尚未结束时禁止修改机器配置。
-        if self.runtime_thread is not None:
+        # 监测任务尚未结束时禁止修改机器配置。
+        if self.is_monitoring_active():
             return Result.error("监测运行中，请先停止监测后再修改机器配置。")
 
         # 清理三个必填字段并返回第一个空字段。
@@ -382,8 +369,8 @@ class AppController(QObject):
                 message="监测运行中，请先停止监测后再修改机器配置。",  # 失败提示
             )
         """
-        # 监测线程尚未结束时禁止修改机器配置。
-        if self.runtime_thread is not None:
+        # 监测任务尚未结束时禁止修改机器配置。
+        if self.is_monitoring_active():
             return Result.error("监测运行中，请先停止监测后再修改机器配置。")
 
         # 删除机器并转换预期服务故障。
@@ -600,6 +587,9 @@ class AppController(QObject):
         session_id: str | None = None,
         start_date: date | None = None,
         end_date: date | None = None,
+        *,
+        page: int | None = None,
+        page_size: int = 20,
     ) -> Result:
         """整理可选筛选值并读取异常事件。
 
@@ -608,6 +598,8 @@ class AppController(QObject):
             session_id: 可选完整周期编号。
             start_date: 可选的本地记录开始日期。
             end_date: 可选的本地记录结束日期，包含整天。
+            page: 可选的分页页码，省略时兼容原有全部查询。
+            page_size: 每页最多显示的事件数量。
 
         Returns:
             Result(
@@ -631,6 +623,8 @@ class AppController(QObject):
                 session_id,
                 start_date=start_date,
                 end_date=end_date,
+                page=page,
+                page_size=page_size,
             )
             return Result.ok(event_data)
         except AbnormalEventServiceError as error:
@@ -657,113 +651,3 @@ class AppController(QObject):
             return Result.ok(event_data)
         except AbnormalEventServiceError as error:
             return Result.error(str(error))
-
-    def start_monitoring(self) -> Result:
-        """创建并启动唯一的监测线程。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            Result(
-                success=True,  # 是否启动监测
-                data=None,  # 启动操作没有返回数据
-                message="",  # 重复启动提示
-            )
-        """
-        if self.runtime_thread is not None:
-            return Result.error("监测正在运行。")
-
-        # 创建当前监测线程。
-        self.runtime_thread = SystemRuntimeThread(self.configuration_directory)
-        self.monitoring_state_changed_signal.emit()
-
-        # 转发相机和测量状态信号。
-        self.runtime_thread.camera_state_changed_signal.connect(
-            self.camera_state_changed_signal.emit
-        )
-        self.runtime_thread.measurement_progress_changed_signal.connect(
-            self.measurement_progress_changed_signal.emit
-        )
-
-        # 转发周期和 OCR 信号。
-        self.runtime_thread.cycle_closed_signal.connect(
-            self.cycle_closed_signal.emit
-        )
-        self.runtime_thread.ocr_result_changed_signal.connect(
-            self.ocr_result_changed_signal.emit
-        )
-
-        # 原样转发机器整体状态信号。
-        self.runtime_thread.machine_status_changed_signal.connect(
-            self.machine_status_changed_signal.emit
-        )
-        self.runtime_thread.machine_warning_signal.connect(
-            self.machine_warning_signal.emit
-        )
-
-        # 连接结束回调。
-        self.runtime_thread.finished.connect(self.finish_monitoring)
-
-        # 启动监测。
-        self.runtime_thread.start()
-        return Result.ok()
-
-    def stop_monitoring(self) -> Result:
-        """通知当前监测线程停止。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            Result(
-                success=True,  # 停止请求已处理
-                data=None,  # 停止操作没有返回数据
-                message="",  # 提示信息
-            )
-        """
-        if self.runtime_thread is not None:
-            self.runtime_thread.stop_requested.set()
-        return Result.ok()
-
-    def is_monitoring_running(self) -> Result:
-        """查询监测线程是否尚未完成清理。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            Result(
-                success=True,  # 状态查询成功
-                data={  # 页面业务数据
-                    "running": True,  # 仍有监测线程等待清理
-                },
-                message="",  # 提示信息
-            )
-        """
-        return Result.ok({"running": self.runtime_thread is not None})
-
-    @Slot()
-    def finish_monitoring(self) -> None:
-        """清理当前结束的线程并转发最终故障信息。
-
-        Args:
-            无外部参数。
-
-        Returns:
-            None  # 当前线程已清理，监测结束信号已发出
-        """
-        runtime_thread = self.sender()
-        if runtime_thread is not self.runtime_thread:
-            return
-
-        # 读取监测结束时的失败信息。
-        failure_message = runtime_thread.failure_message
-
-        # 安排线程对象释放并清空当前引用。
-        runtime_thread.deleteLater()
-        self.runtime_thread = None
-        self.monitoring_state_changed_signal.emit()
-
-        # 在引用清理后通知界面监测已结束。
-        self.monitoring_finished_signal.emit(failure_message)

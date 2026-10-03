@@ -145,7 +145,10 @@ class AbnormalEventService:
         session_id: str | None = None,
         start_date: date | None = None,
         end_date: date | None = None,
-    ) -> dict[str, list[dict]]:
+        *,
+        page: int | None = None,
+        page_size: int = 20,
+    ) -> dict:
         """按机器、周期和本地日期查询异常列表并准备可读摘要。
 
         Args:
@@ -153,6 +156,8 @@ class AbnormalEventService:
             session_id: 完整 Session ID，None 表示全部周期。
             start_date: 可选的本地记录开始日期。
             end_date: 可选的本地记录结束日期，包含整天。
+            page: 可选的一起始页码，None 沿用原始完整查询。
+            page_size: 每页条数。
 
         Returns:
             返回示例：
@@ -182,12 +187,29 @@ class AbnormalEventService:
 
         # 读取符合机器、周期和记录时间条件的异常事件。
         try:
-            events = self.abnormal_event_repo.list_events(
-                machine_id,
-                session_id,
-                start_created_at=start_created_at,
-                end_created_at=end_created_at,
-            )
+            if page is None:
+                events = self.abnormal_event_repo.list_events(
+                    machine_id,
+                    session_id,
+                    start_created_at=start_created_at,
+                    end_created_at=end_created_at,
+                )
+                result = {"events": events}
+            else:
+                result = self.abnormal_event_repo.get_event_page(
+                    machine_id,
+                    session_id,
+                    start_created_at=start_created_at,
+                    end_created_at=end_created_at,
+                    limit=page_size,
+                    offset=(page - 1) * page_size,
+                )
+                events = result["events"]
+                result.update(
+                    page=page,
+                    page_size=page_size,
+                    total_pages=max(1, (result["total"] + page_size - 1) // page_size),
+                )
         except sqlite3.Error as error:
             # 记录数据库读取故障。
             logger.exception("异常事件读取失败")
@@ -198,9 +220,7 @@ class AbnormalEventService:
         # 为列表补充可读摘要，保留原始原因和完整 JSON。
         for event in events:
             event["payload_summary"] = format_event_summary(event["payload_json"])
-        return {
-            "events": events,
-        }
+        return result
 
     def get_event(self, abnormal_event_id: int) -> dict[str, dict | None]:
         """按主键读取一条完整异常事件。

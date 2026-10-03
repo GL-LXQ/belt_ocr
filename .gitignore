@@ -14,3 +14,16 @@ pytest-of-meiwe/
 
 # 模拟运行输出
 /runtime/
+
+# Vue 与 Tauri 构建输出
+node_modules/
+/desktop/src-tauri/target/
+/desktop/src-tauri/binaries/
+.pytest_cache/
+
+# 本地后端打包验证缓存
+/.codex-temp/backend-build/
+/.codex-temp/backend-packaging.log
+
+# TypeScript 增量构建缓存
+*.tsbuildinfo

@@ -4098,6 +4098,10 @@ async def test_shutdown_completes_queued_ocr_during_grace_period(tmp_path: Path)
         await asyncio.wait_for(resource_acquired.wait(), 1)
         await runtime.handle_start("1")
         session = machine.active_session
+
+        # 明确等待模拟帧采集完成，再测试已关闭周期的退出宽限。
+        capture = machine.cycles[session.session_id].capture_task
+        await asyncio.wait_for(capture.capture_finished.wait(), 1)
         session.measurement_frequencies = [FrequencyMeasurement(session.session_id, "meter-1", 50.0)]
         await runtime.handle_close("1")
 

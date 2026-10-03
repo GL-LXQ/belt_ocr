@@ -82,6 +82,7 @@ class MachineRuntime:
         notify_cycle_closed: Callable[[str, str], None] | None = None,
         notify_machine_status: Callable[[str, str], None] | None = None,
         notify_machine_warning: Callable[[str, str], None] | None = None,
+        notify_session_finished: Callable[[MeasurementSession], None] | None = None,
     ) -> None:
         """初始化单台机器运行时及其业务依赖。
 
@@ -100,6 +101,7 @@ class MachineRuntime:
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、正式识别文字。
             notify_cycle_closed: 可选测量关闭通知函数，接收机器编号和 Session ID。
             notify_machine_warning: 可选机器积压提示，接收机器编号和说明。
+            notify_session_finished: 可选周期终态通知，在上下文回收时交付完整业务状态。
             notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
                 online、offline 或 fault。
 
@@ -127,6 +129,7 @@ class MachineRuntime:
         self.notify_cycle_closed = notify_cycle_closed
         self.notify_machine_status = notify_machine_status
         self.notify_machine_warning = notify_machine_warning
+        self.notify_session_finished = notify_session_finished
 
         # 保存系统故障回调和状态变化通知。
         self.on_system_failure = on_system_failure
@@ -1078,6 +1081,10 @@ class MachineRuntime:
         # 清除所属图片引用和运行上下文。
         cycle.session.ocr_result = None
         del self.cycles[session_id]
+
+        # 在上下文回收后交付完整终态，保留错误、结束时间和频率。
+        if self.notify_session_finished is not None:
+            self.notify_session_finished(cycle.session)
 
         # 记录所属周期完整回收并通知状态等待方。
         logger.info(

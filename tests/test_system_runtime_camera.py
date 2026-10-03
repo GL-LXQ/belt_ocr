@@ -170,6 +170,7 @@ async def test_camera_connection_failure_preserves_other_machine(
             None,
             machine_status_notification,
             None,
+            None,
         )
         assert runtime.accepting_signals
         for machine in runtime.machines.values():
@@ -189,6 +190,9 @@ async def test_camera_connection_failure_preserves_other_machine(
             worker_task.cancel()
         await asyncio.gather(*runtime.worker_tasks, return_exceptions=True)
         runtime.database.close()
+
+        # 手动测试清理同时归还新增的设备所有权。
+        runtime.hardware_lock.release()
 
 
 def test_initialize_machines_passes_camera_state_notification(

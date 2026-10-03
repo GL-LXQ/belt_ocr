@@ -121,26 +121,11 @@ class AbnormalEventRepo:
                     "payload_json": "{}",  # 原始事件内容
                 }]
         """
-        # 组合机器和完整周期编号的精确筛选条件。
-        conditions = []
-        parameters = []
-        if machine_id is not None:
-            conditions.append("machine_id = ?")
-            parameters.append(machine_id)
-        if session_id is not None:
-            conditions.append("session_id = ?")
-            parameters.append(session_id)
-
-        # 在排序前筛选包含下界、不包含上界的记录时间范围。
-        if start_created_at is not None:
-            conditions.append("created_at >= ?")
-            parameters.append(start_created_at)
-        if end_created_at is not None:
-            conditions.append("created_at < ?")
-            parameters.append(end_created_at)
+        where_clause, parameters = build_event_filter(
+            machine_id, session_id, start_created_at, end_created_at,
+        )
 
         # 按记录写入时间和主键倒序读取匹配结果。
-        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         query = (
             "SELECT abnormal_event_id, created_at, machine_id, session_id, "
             "reason, payload_json FROM abnormal_events"
@@ -153,6 +138,52 @@ class AbnormalEventRepo:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(query, parameters).fetchall()
             return [dict(row) for row in rows]
+
+    def get_event_page(
+        self,
+        machine_id: str | None = None,
+        session_id: str | None = None,
+        start_created_at: float | None = None,
+        end_created_at: float | None = None,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict:
+        """在同一只读快照中读取异常总数与当前页。
+
+        Args:
+            machine_id: 可选机器编号。
+            session_id: 可选完整周期编号。
+            start_created_at: 包含的时间下界。
+            end_created_at: 不包含的时间上界。
+            limit: 当前页最多读取条数。
+            offset: 跳过的匹配条数。
+
+        Returns:
+            {
+                "events": [],  # 当前页异常事件
+                "total": 0,  # 所有匹配事件的数量
+            }
+        """
+        where_clause, parameters = build_event_filter(
+            machine_id, session_id, start_created_at, end_created_at,
+        )
+        query = (
+            "SELECT abnormal_event_id, created_at, machine_id, session_id, reason, payload_json "
+            "FROM abnormal_events" + where_clause
+            + " ORDER BY created_at DESC, abnormal_event_id DESC LIMIT ? OFFSET ?"
+        )
+
+        # 固定一次查询的数据库视图，避免新异常导致数量与页面不一致。
+        with closing(sqlite3.connect(self.database_path, timeout=1)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("BEGIN")
+            total = connection.execute("SELECT COUNT(*) FROM abnormal_events" + where_clause, parameters).fetchone()[0]
+            events = connection.execute(query, [*parameters, limit, offset]).fetchall()
+            return {
+                "events": [dict(event) for event in events],
+                "total": total,
+            }
 
     def get_event(self, abnormal_event_id: int) -> dict | None:
         """按异常事件主键读取完整记录。
@@ -181,3 +212,47 @@ class AbnormalEventRepo:
                 (abnormal_event_id,),
             ).fetchone()
             return dict(row) if row is not None else None
+
+
+def build_event_filter(
+    machine_id: str | None,
+    session_id: str | None,
+    start_created_at: float | None,
+    end_created_at: float | None,
+) -> tuple[str, list]:
+    """为旧版查询与分页查询建立同一套异常筛选条件。
+
+    Args:
+        machine_id: 可选机器编号。
+        session_id: 可选完整周期编号。
+        start_created_at: 包含的时间下界。
+        end_created_at: 不包含的时间上界。
+
+    Returns:
+        (
+            " WHERE machine_id = ?",  # 参数化筛选语句
+            ["1"],  # 与条件对应的参数
+        )
+    """
+    # 组合机器和完整周期编号的精确筛选条件。
+    conditions = []
+    parameters = []
+    if machine_id is not None:
+        conditions.append("machine_id = ?")
+        parameters.append(machine_id)
+    if session_id is not None:
+        conditions.append("session_id = ?")
+        parameters.append(session_id)
+
+    # 在排序前筛选包含下界、不包含上界的记录时间范围。
+    if start_created_at is not None:
+        conditions.append("created_at >= ?")
+        parameters.append(start_created_at)
+    if end_created_at is not None:
+        conditions.append("created_at < ?")
+        parameters.append(end_created_at)
+
+    return (
+        " WHERE " + " AND ".join(conditions) if conditions else "",  # 仅使用固定列名和占位符
+        parameters,  # 用户输入始终作为绑定参数
+    )

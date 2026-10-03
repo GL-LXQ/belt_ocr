@@ -33,29 +33,43 @@ BeltVision 是运行在工控机上的多皮带机视觉监测系统：识别皮
 
 ## 安装、配置与启动
 
-现场相机链路目前使用 **Windows 海康 MVS SDK**。准备 Python 3.10 和 [uv](https://docs.astral.sh/uv/)，从仓库根目录安装锁定依赖：
+当前入口为 **Tauri 2 + Vue 3 / TypeScript 桌面**，本机单独运行 **Python 3.12 + FastAPI / Uvicorn** 后端，状态通过 SSE 更新。`src/controller/` 保留纯 Python 业务控制器，不再依赖 Qt。根目录 `ui/` 和 `tests/legacy_ui/` 原样保留作旧界面档案；旧 Qt 入口已不受支持，不能再用 `python -m ui` 运行当前业务层。
+
+准备 [Python 3.12 与 uv](https://docs.astral.sh/uv/)、Node.js 22.12+（或受 Vite 支持的更新版本）、[Rust 与 Tauri 2 平台依赖](https://v2.tauri.app/start/prerequisites/)。Windows 构建需要 Visual Studio C++ Build Tools 和 WebView2；Linux 开发需要 GTK 3、WebKitGTK 4.1 等开发库。仓库根目录安装锁定 Python 依赖，再安装前端依赖：
 
 ```powershell
 uv sync --frozen
+cd desktop
+npm ci
+cd ..
 ```
 
-另按 [PaddlePaddle 官方安装说明](https://www.paddlepaddle.org.cn/documentation/docs/zh/install/index_cn.html)，将匹配本机 CPU/GPU 的 PaddlePaddle 运行时安装到项目 `.venv`；它未包含在项目依赖中。`src/ocr/config.yaml` 当前使用 `gpu:0`，需核对设备、模型、ROI 和预处理配置。桌面实际加载的是这份文件。
+现场相机仍使用 **Windows 海康 MVS SDK**。另按 [PaddlePaddle 官方安装说明](https://www.paddlepaddle.org.cn/documentation/docs/zh/install/index_cn.html)，将匹配本机 Python 3.12、CPU/GPU、CUDA/CUDNN 的 PaddlePaddle 运行时安装到项目 `.venv`；它未包含在项目锁文件中。源码默认 OCR 配置是 `src/ocr/config.yaml`，当前设备为 `gpu:0`；使用 CPU 时须同时修改设备并安装匹配的 CPU 运行时。先核对模型路径、ROI、预处理与离线模型可用性；不能把依赖安装成功当作模型或硬件验证成功。
 
 启动前核对 `config/config.yaml`：
 
 - 业务库、运行库、证据目录与 MVS SDK 路径；文件内相对路径以 `config/` 为基准。
 - 相机曝光、增益和频闪线路／信号源；串口、Modbus 参数和机器到 DI 的映射。仓库值不是现场通用值，启用机器须绑定互不重复的非负整数通道。
+- 开发验证使用独立配置与临时数据库，不对现场配置或数据库运行测试。可在启动前用绝对路径环境变量 `BELTVISION_CONFIG_DIR`、`BELTVISION_OCR_CONFIG` 指向操作者选择的独立配置。
+
+从桌面目录启动开发版，Rust 会使用仓库 `.venv` 中的 Python：
 
 ```powershell
-uv run --no-sync python -m ui
+cd desktop
+npm run tauri:dev
 ```
 
-桌面入口会初始化配置指向的数据库表。在“机器管理”添加并启用机器、填写相机和频率仪编号，再到“系统配置”核对 DI 绑定，最后点击“启动监测”。机器与配置修改须等待监测完全停止；配置保存后下次启动监测生效。`--no-sync` 避免启动时重同步环境；重新同步依赖时需留意单独安装的 PaddlePaddle。
+桌面会创建一个后端进程，绑定 `127.0.0.1` 随机端口；临时令牌通过进程管道交给后端，再通过受限 Tauri IPC 交给页面，只保存在内存中。通过握手和鉴权健康检查后才启用业务界面；重复打开应用只聚焦现有窗口。设备锁独立于配置目录，但只约束使用本版本锁机制且共享同一用户临时目录的进程。升级前必须完全退出旧版客户端；未更新的旧程序和其他系统用户会话不受该锁保护，不得同时操作同一现场设备。
+
+后端初始化指定数据库表但不会自动启动监测。在“机器管理”添加并启用机器、填写相机和频率仪编号，再到“系统配置”核对 DI 绑定，最后点击“启动监测”。机器与配置修改须等待监测完全停止；配置保存后下次启动监测生效。关闭窗口会先请求后端停止，等待全部采集、OCR、保存、审计和进程实际退出；不会按几秒倒计时强杀。后端故障或清理未完成时界面显示真实状态，旧进程仍存活时禁止重试创建第二个进程。
+
+浏览器联调、打包、部署路径及验证命令见 [运维与验证](docs/operations.md)。本地令牌不是远程账号系统，本服务不可改成公网或局域网监听。重新同步环境时需留意单独安装的 PaddlePaddle，启动现场程序避免不必要的依赖同步。
 
 ## 当前边界与运维
 
 - OCR 已接入；图像初筛仍原样通过全部帧，尚无有效的质量筛选。共享引擎仍串行使用，当前等锁 10000ms、处理 3000ms；并行接收周期不代表这些期限已适合 CPU 吞吐，需现场测量调整。
 - 默认周期容量 2 是保守起始值，内存和持续换带负荷尚需真机验证，不能承诺无限连续运行不漏采。新轮取流与旧轮 JPG 编码并行的 MVS SDK 兼容性也待真机验证。停止监测等待全部采集、识别线程、保存和审计结束后才关闭 SDK 与数据库，退出期限不能强杀 Python 工作线程。
 - **真实频率仪协议尚未接入**，当前每轮按间隔生成最多 3 条模拟读数，不能作为现场实测频率。
-- 图片数量只反映现存文件，不能证明证据完整；历史详情仅预览前 4 张，完整证据可在图片管理或记录目录查看。
+- 图片数量只反映现存文件，不能证明证据完整；界面通过受鉴权的分页证据接口加载图片。Tauri“打开目录”只接受记录周期编号，由后端按已保存记录验证目录；浏览器不能直接打开本机文件夹。
+- 窗口正常退出和父进程管道断开会请求有序清理；断电、操作系统强制结束、原生 SDK 崩溃或无法返回的原生调用仍不能保证未完成数据落盘。该迁移尚不是经过生产长期负载验证的成熟发布，Windows 安装器、GPU/Paddle、相机与现场 IO 需在目标工控机验收。
 - 备份、校验、独立恢复、测试和模拟步骤见 [运维与验证](docs/operations.md)。模拟脚本使用真实 OCR，并写入配置中的真实业务库和证据目录，运行前必须确认数据去向。

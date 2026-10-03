@@ -44,11 +44,11 @@ def _serial_number_of(candidate: dict) -> int:
 class TextRecognizer:
     """管理共享 OCR Engine 的使用，并提供帧筛选、识别和结果整理流程。"""
 
-    def __init__(self) -> None:
+    def __init__(self, ocr_config_path: Path | None = None) -> None:
         """初始化系统共享的 OCR 访问控制和 OCR Engine。
 
         Args:
-            无外部参数。
+            ocr_config_path: 可选的独立 OCR 配置文件路径。
 
         Returns:
             返回示例：
@@ -56,6 +56,7 @@ class TextRecognizer:
         """
         # 创建共享 OCR 访问锁。
         self._processing_lock = asyncio.Lock()
+        self.ocr_config_path = ocr_config_path or Path(__file__).resolve().parent / "ocr" / "config.yaml"
 
         # 初始化共享 OCR Engine，启动前暂时为空。
         self.ocr_engine: BeltOCREngine | None = None
@@ -104,8 +105,7 @@ class TextRecognizer:
             return
 
         # 加载 OCR 配置并创建共享 OCR Engine。
-        config_path = Path(__file__).resolve().parent / "ocr" / "config.yaml"
-        self.ocr_engine = BeltOCREngine(load_ocr_config(config_path))
+        self.ocr_engine = BeltOCREngine(load_ocr_config(self.ocr_config_path))
 
     def prepare_frames_for_ocr(
         self,

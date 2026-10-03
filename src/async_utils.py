@@ -1,6 +1,8 @@
 """提供异步业务中复用的阻塞操作执行工具。"""
 
 import asyncio
+from contextvars import copy_context
+from functools import partial
 
 
 async def run_blocking_operation(operation, *arguments, **keyword_arguments):
@@ -17,7 +19,9 @@ async def run_blocking_operation(operation, *arguments, **keyword_arguments):
             "runtime/measurements.sqlite3"  # 同步函数返回字符串时透传该结果
     """
     # 在线程中启动阻塞操作。
-    task = asyncio.create_task(asyncio.to_thread(operation, *arguments, **keyword_arguments))
+    context = copy_context()
+    callback = partial(context.run, operation, *arguments, **keyword_arguments)
+    task = asyncio.get_running_loop().run_in_executor(None, callback)
 
     # 登记是否收到过取消请求。
     cancelled = False

@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "主窗口只读取后端连接、监听状态及调用受限生命周期与证据目录命令。",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-get-backend-connection",
+    "allow-get-backend-status",
+    "allow-retry-backend",
+    "allow-request-shutdown",
+    "allow-open-evidence-folder"
+  ]
+}

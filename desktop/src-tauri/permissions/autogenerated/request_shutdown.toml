@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-request-shutdown"
+description = "Enables the request_shutdown command without any pre-configured scope."
+commands.allow = ["request_shutdown"]
+
+[[permission]]
+identifier = "deny-request-shutdown"
+description = "Denies the request_shutdown command without any pre-configured scope."
+commands.deny = ["request_shutdown"]
