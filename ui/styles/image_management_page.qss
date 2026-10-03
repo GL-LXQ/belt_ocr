@@ -1,0 +1,232 @@
+/* 沿用灰色页面、白色卡片和克制的蓝色操作。 */
+QWidget#images {
+    background: @background;
+}
+QWidget#images QLabel#pageTitle {
+    color: #20232B;
+    font-size: 28px;
+    font-weight: 600;
+}
+QWidget#images QLabel#pageSubtitle {
+    color: #81858F;
+    font-size: 13px;
+}
+QFrame#imagePreviewBar {
+    background: #EDF3FC;
+    border: 1px solid #DFE9F8;
+    border-radius: 12px;
+}
+QLabel#imagePreviewNotice {
+    color: #537092;
+    font-size: 12px;
+    line-height: 20px;
+}
+QLabel#imagePreviewBadge {
+    background: #EEF4FF;
+    border-radius: 6px;
+    color: #4775B7;
+    padding: 5px 9px;
+    font-size: 12px;
+}
+QWidget#imageFilterCard, QFrame#imageEmptyState {
+    background: @white;
+    border: 1px solid #E5E7EB;
+    border-radius: 16px;
+}
+
+/* 文字搜索作为第一层，机器和完成日期作为次级筛选。 */
+QLineEdit#imageTextQuery {
+    background: #F5F6F8;
+    border: 1px solid #F0F1F4;
+    border-radius: 10px;
+    color: #252B35;
+    font-size: 14px;
+    padding: 0 12px;
+}
+QLineEdit#imageTextQuery:focus {
+    background: @white;
+    border-color: #8AB5FF;
+}
+QPushButton#imageTextLength, QPushButton#imageMatchMode,
+QPushButton#imageMachineFilter, QPushButton#imageTimeFilter, QPushButton#imagePreviewScenario {
+    background: #F7F8FA;
+    border: 1px solid #EAECF0;
+    border-radius: 9px;
+    color: #667080;
+    font-size: 12px;
+}
+QPushButton#imageTextLength:hover, QPushButton#imageMatchMode:hover,
+QPushButton#imageMachineFilter:hover, QPushButton#imageTimeFilter:hover {
+    background: #EFF2F7;
+}
+QPushButton#imageTimeFilter[active=true] {
+    background: #F0F5FF;
+    border-color: #DAE7FF;
+    color: #3478F6;
+}
+QPushButton#imageSearchButton {
+    background: #3478F6;
+    border: 1px solid #3478F6;
+    border-radius: 10px;
+    color: @white;
+    font-size: 13px;
+}
+QPushButton#imageSearchButton:hover {
+    background: #286BE8;
+}
+QPushButton#imageSearchButton:disabled {
+    background: #DCE2EC;
+    border-color: #DCE2EC;
+    color: #9098A6;
+}
+QWidget#imageStatusFilter {
+    background: #F1F2F5;
+    border: none;
+    border-radius: 9px;
+}
+QWidget#imageStatusFilter QPushButton {
+    color: #747985;
+    font-size: 13px;
+}
+QWidget#imageStatusFilter QPushButton[isSelected=true] {
+    color: #222733;
+    font-weight: 500;
+}
+QPushButton#imageResetFilters {
+    background: transparent;
+    border: none;
+    color: #818795;
+    font-size: 13px;
+}
+QPushButton#imageResetFilters:hover {
+    color: #3478F6;
+}
+QLineEdit#imageTextQuery:disabled, QPushButton#imageTextLength:disabled,
+QPushButton#imageMatchMode:disabled, QPushButton#imageMachineFilter:disabled,
+QPushButton#imageTimeFilter:disabled, QPushButton#imageResetFilters:disabled {
+    color: #A3A9B3;
+}
+
+/* 当前页卡片在透明滚动区域中均分列宽。 */
+QScrollArea#imageResultsScroll, QWidget#imageResultsBody, QWidget#qt_scrollarea_viewport,
+QScrollArea#evidenceThumbnailScroll, QScrollArea#evidenceRecordScroll, QWidget#evidenceRecordBody {
+    background: transparent;
+    border: none;
+}
+QPushButton#imageMeasurementCard {
+    background: @white;
+    border: 1px solid #E4E7EC;
+    border-radius: 16px;
+    text-align: left;
+}
+QPushButton#imageMeasurementCard:hover {
+    border: 1px solid #9EBDF0;
+    background: #FDFEFF;
+}
+QPushButton#imageMeasurementCard:focus {
+    border: 2px solid #3478F6;
+}
+QPushButton#imageMeasurementCard:pressed {
+    background: #F4F8FF;
+}
+QLabel#evidenceCardThumbnail {
+    background: #F0F2F5;
+    border: none;
+    border-radius: 10px;
+    color: #89919E;
+    font-size: 12px;
+    padding: 10px;
+}
+QLabel#imageCountBadge {
+    background: #E9EDF3;
+    color: #68758A;
+    border-radius: 6px;
+    padding: 4px 8px;
+    margin: 0 6px 6px 0;
+    font-size: 11px;
+}
+QLabel#imageMachineName {
+    color: #303846;
+    font-size: 13px;
+    font-weight: 600;
+}
+QLabel#imageReviewBadge {
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 11px;
+}
+QLabel#imageReviewBadge[reviewStatus="normal"] {
+    color: #57816B;
+    background: #EFF7F2;
+}
+QLabel#imageReviewBadge[reviewStatus="pending"] {
+    color: #B18034;
+    background: #FCF4E7;
+}
+QLabel#imageReviewBadge[reviewStatus="reviewed"] {
+    color: #5C7CA8;
+    background: #EEF3FA;
+}
+QLabel#imageTextSummary {
+    color: #485162;
+    font-size: 13px;
+}
+QLabel#imageMutedText, QLabel#imageRecordCount, QLabel#imagePageNumber {
+    color: #8B919D;
+    font-size: 12px;
+}
+QLabel#imageEmptyTitle {
+    color: #566174;
+    font-size: 17px;
+    font-weight: 500;
+}
+
+/* 查看器的图片区与右侧只读信息保持清晰边界。 */
+QFrame#evidenceViewerContent {
+    background: @white;
+    border: 1px solid #E5E7EB;
+    border-radius: 16px;
+}
+QStackedWidget#evidenceImageStage, QGraphicsView#evidenceImageCanvas,
+QWidget#evidenceImagePlaceholder {
+    background: #F0F2F5;
+    border: none;
+    border-radius: 12px;
+}
+QLabel#evidenceFilename {
+    color: #687386;
+    font-size: 12px;
+}
+QToolButton#evidenceThumbnailButton {
+    background: #F3F5F8;
+    border: 1px solid #E4E8EF;
+    border-radius: 8px;
+    color: #7D8697;
+    font-size: 11px;
+}
+QToolButton#evidenceThumbnailButton:hover {
+    border-color: #A1BCEC;
+}
+QToolButton#evidenceThumbnailButton:checked {
+    background: #F1F6FF;
+    border: 2px solid #5588E7;
+    color: #3B70C8;
+}
+QLabel#evidenceMachineName {
+    color: #303846;
+    font-size: 17px;
+    font-weight: 600;
+}
+QLabel#evidenceSectionTitle {
+    color: #566174;
+    font-size: 12px;
+    font-weight: 500;
+}
+QPlainTextEdit#evidenceFullText {
+    background: #F8F9FB;
+    border: 1px solid #E9ECF1;
+    border-radius: 10px;
+    color: #455065;
+    padding: 8px;
+    font-size: 13px;
+}

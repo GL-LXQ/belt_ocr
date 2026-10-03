@@ -17,6 +17,7 @@ from qfluentwidgets import (
 from src.controller.controller import AppController
 from ui.pages.abnormal_events_page import AbnormalEventsPage
 from ui.pages.history_page import HistoryPage
+from ui.pages.image_management_page import ImageManagementPage
 from ui.pages.machines_page import MachinesPage
 from ui.pages.realtime_page import RealtimePage
 from ui.pages.system_configuration_page import SystemConfigurationPage
@@ -29,7 +30,7 @@ PAGES = {
     "history": ("历史记录", "查看已保存的测量结果", FluentIcon.HISTORY),
     "abnormal_events": ("异常事件", "查看测量过程中的异常事件和原始信息", FluentIcon.INFO),
     "machines": ("机器管理", "管理检测机器的基本信息", FluentIcon.ROBOT),
-    "images": ("图片管理", "图片管理功能尚未开放", FluentIcon.PHOTO),
+    "images": ("图片管理", "按测量归组查看证据图片", FluentIcon.PHOTO),
     "settings": ("系统配置", "编辑系统配置，保存后下次监测生效", FluentIcon.SETTING),
     "logs": ("日志查看", "日志查看功能尚未开放", FluentIcon.DOCUMENT),
 }
@@ -38,7 +39,7 @@ NAVIGATION_WIDTH = 176
 
 
 class MainWindow(FluentWindow):
-    """展示监测、历史、异常、机器管理和系统配置页面。"""
+    """展示监测、历史、异常、机器、图片管理和系统配置页面。"""
 
     def __init__(self, controller: AppController):
         """初始化窗口、页面、导航、状态和时钟。
@@ -59,12 +60,14 @@ class MainWindow(FluentWindow):
         self.history_page = HistoryPage(controller, self)
         self.abnormal_events_page = AbnormalEventsPage(controller, self)
         self.machines_page = MachinesPage(controller, self)
+        self.images_page = ImageManagementPage(self)
         self.settings_page = SystemConfigurationPage(controller, self)
         self.pages = {
             "realtime": self.realtime_page,
             "history": self.history_page,
             "abnormal_events": self.abnormal_events_page,
             "machines": self.machines_page,
+            "images": self.images_page,
             "settings": self.settings_page,
         }
 
@@ -106,9 +109,9 @@ class MainWindow(FluentWindow):
                 self.pages[page_key], PAGES[page_key][2], PAGES[page_key][0]
             )
 
-        # 保留底部导航顺序，系统配置使用正式的草稿页面。
+        # 保留底部导航顺序，图片管理使用独立的只读预览页面。
         for page_key in ("images", "settings", "logs"):
-            page = self.settings_page if page_key == "settings" else self.create_placeholder_page(page_key)
+            page = self.create_placeholder_page(page_key) if page_key == "logs" else self.pages[page_key]
             self.pages[page_key] = page
             self.addSubInterface(
                 page,
