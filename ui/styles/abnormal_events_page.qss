@@ -1,0 +1,146 @@
+/* 设置异常页标题和白色内容表面。 */
+QWidget#abnormal_events QLabel#pageTitle {
+    color: #20232B;
+    font-size: 28px;
+    font-weight: 600;
+}
+QWidget#abnormalFilterCard, QWidget#abnormalEventsCard {
+    background: @white;
+    border: 1px solid #E5E7EB;
+    border-radius: 16px;
+}
+
+/* 设置紧凑筛选入口和轻量刷新按钮。 */
+QPushButton#abnormalMachineFilter, QPushButton#abnormalTimeFilter {
+    background: #F7F8FA;
+    border: 1px solid #EAECF0;
+    border-radius: 9px;
+    color: #505765;
+    font-size: 13px;
+    padding-left: 12px;
+}
+QPushButton#abnormalMachineFilter:hover {
+    background: #EFF2F7;
+}
+QPushButton#abnormalTimeFilter:disabled {
+    background: #FAFAFB;
+    border-color: #F0F1F3;
+    color: #A2A8B2;
+}
+QPushButton#abnormalRefreshButton {
+    background: transparent;
+    border: none;
+    border-radius: 9px;
+    color: #667080;
+    font-size: 13px;
+}
+QPushButton#abnormalRefreshButton:hover {
+    background: #F3F5F8;
+    color: #424A59;
+}
+
+/* 设置表头、选中行和详情入口。 */
+QTableWidget#abnormalEventsTable {
+    background: @white;
+    border: none;
+    color: @text;
+    gridline-color: transparent;
+}
+QTableWidget#abnormalEventsTable QHeaderView::section {
+    background: #FAFAFC;
+    color: #8B909A;
+    border: none;
+    border-bottom: 1px solid @border;
+    font-weight: 500;
+    font-size: 12px;
+    padding-left: 8px;
+}
+QTableWidget#abnormalEventsTable::item:selected {
+    background: #F2F6FC;
+    color: @text;
+}
+QPushButton#abnormalViewButton {
+    background: transparent;
+    border: none;
+    color: #4F7FC8;
+    font-size: 13px;
+}
+QPushButton#abnormalViewButton:hover {
+    color: @blue;
+}
+QLabel#abnormalEventCount, QLabel#abnormalEmptyState {
+    color: #8B909A;
+    font-size: 12px;
+    background: transparent;
+}
+
+/* 将异常原因和可读记录信息放在详情前部。 */
+QFrame#abnormalEventDetailContent {
+    background: @white;
+    border: 1px solid @border;
+    border-radius: 16px;
+}
+QWidget#abnormalDetailBody, QScrollArea#abnormalDetailScroll,
+QWidget#abnormalPayloadContainer {
+    background: transparent;
+    border: none;
+}
+QLabel#abnormalDetailReason {
+    color: #252B35;
+    font-size: 19px;
+    font-weight: 600;
+}
+QWidget#abnormalDetailSummaryCard {
+    background: #F7F8FA;
+    border: none;
+    border-radius: 12px;
+}
+QLabel#abnormalDetailKey {
+    color: #818795;
+    font-size: 12px;
+}
+QLabel#abnormalDetailValue {
+    color: #313846;
+    font-size: 14px;
+    font-weight: 500;
+}
+QLabel#abnormalDetailIdentity {
+    color: #687181;
+    font-size: 12px;
+}
+
+/* 设置折叠区、复制入口和只读原始数据。 */
+QPushButton#abnormalPayloadToggle, QPushButton#abnormalCopySession,
+QPushButton#abnormalCopyPayload {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    color: #667080;
+    font-size: 12px;
+}
+QPushButton#abnormalPayloadToggle:hover, QPushButton#abnormalCopySession:hover,
+QPushButton#abnormalCopyPayload:hover {
+    background: #F3F5F8;
+    color: #3478F6;
+}
+QPushButton#abnormalCopySession:disabled {
+    color: #BCC1C9;
+}
+QPlainTextEdit#abnormalEventPayload {
+    background: #F7F8FA;
+    border: 1px solid #EAECF0;
+    border-radius: 10px;
+    color: #505765;
+    font-size: 12px;
+    padding: 10px;
+}
+QPushButton#abnormalDetailClose {
+    background: #F7F8FA;
+    border: 1px solid #EAECF0;
+    border-radius: 9px;
+    color: #505765;
+    font-size: 13px;
+}
+QPushButton#abnormalDetailClose:hover {
+    background: #EFF2F7;
+}
