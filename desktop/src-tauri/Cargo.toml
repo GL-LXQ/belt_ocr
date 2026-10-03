@@ -6,7 +6,7 @@ edition = "2021"
 rust-version = "1.85"
 
 [lib]
-name = "beltvision_desktop"
+name = "beltvision_desktop_library"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [[bin]]

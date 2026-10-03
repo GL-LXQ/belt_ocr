@@ -2,7 +2,7 @@ use rand::RngCore;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -38,10 +38,53 @@ impl Status {
 #[derive(Clone)]
 pub struct LaunchConfig {
     pub executable: PathBuf,
+    pub virtual_environment_executable: Option<PathBuf>,
     pub arguments: Vec<String>,
     pub working_directory: PathBuf,
     pub config_directory: PathBuf,
     pub ocr_config_path: PathBuf,
+}
+
+/// 解析项目虚拟环境使用的解释器及其启动路径。
+///
+/// Args:
+///     project_directory: 项目根目录的绝对路径。
+///
+/// Returns:
+///     Ok((
+///         PathBuf::from("C:/Python312/python.exe"),  // 实际解释器路径
+///         Some(PathBuf::from("D:/project/.venv/Scripts/python.exe")),  // 虚拟环境入口
+///     ))
+///     Err("无法读取 Python 虚拟环境配置：...")  // 配置读取或解析失败
+pub fn resolve_development_python(
+    project_directory: &Path,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    // 非 Windows 平台直接使用虚拟环境的解释器。
+    if !cfg!(target_os = "windows") {
+        return Ok((project_directory.join(".venv/bin/python"), None));
+    }
+
+    // 从虚拟环境配置中读取实际 Python 安装目录。
+    let virtual_environment_directory = project_directory.join(".venv");
+    let configuration_path = virtual_environment_directory.join("pyvenv.cfg");
+    let configuration = std::fs::read_to_string(&configuration_path).map_err(|error| {
+        format!(
+            "无法读取 Python 虚拟环境配置 {}：{error}",
+            configuration_path.display()
+        )
+    })?;
+    let python_home = configuration
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find(|(name, _value)| name.trim() == "home")
+        .map(|(_name, value)| PathBuf::from(value.trim()))
+        .ok_or("Python 虚拟环境配置缺少 home。")?;
+
+    // 返回实际解释器和虚拟环境入口。
+    Ok((
+        python_home.join("python.exe"),
+        Some(virtual_environment_directory.join("Scripts/python.exe")),
+    ))
 }
 
 #[derive(Serialize)]
@@ -204,6 +247,12 @@ impl Supervisor {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         command.env("PYTHONUNBUFFERED", "1");
+        // 为实际解释器指定项目虚拟环境入口。
+        if let Some(executable) = &launch.virtual_environment_executable {
+            command.env("__PYVENV_LAUNCHER__", executable);
+        }
+
+        // Windows 后端进程不显示控制台窗口。
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
@@ -450,6 +499,80 @@ mod tests {
         assert!(Status::create("failed", "exited", false).retry_allowed);
     }
 
+    /// 验证 Windows 项目后端的握手及有序退出。
+    ///
+    /// Args:
+    ///     无外部参数。
+    ///
+    /// Returns:
+    ///     ()  // 后端完成 PID 校验、健康检查和退出
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn starts_project_python_and_waits_for_exit() {
+        // 读取当前项目的根目录。
+        let project_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        // 创建独立的后端测试目录。
+        let directory =
+            std::env::temp_dir().join(format!("belt-windows-supervisor-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        // 写入使用临时数据库的后端配置。
+        std::fs::write(
+            directory.join("config.yaml"),
+            "application:\n  database_path: data.sqlite3\n  evidence_directory: evidence\n\
+             camera:\n  mvs_development_directory: sdk\nocr: {}\nfrequency: {}\nmachine: {}\n\
+             io:\n  modbus_serial_port: COM8\n  io_machine_channels: {}\n",
+        )
+        .unwrap();
+        std::fs::write(directory.join("ocr.yaml"), "{}").unwrap();
+
+        // 使用桌面的同一解释器配置启动真实后端。
+        let (executable, virtual_environment_executable) =
+            resolve_development_python(&project_directory).unwrap();
+        let (exit_sender, exit_receiver) = mpsc::channel();
+        let supervisor = Supervisor::create(
+            Ok(LaunchConfig {
+                executable,
+                virtual_environment_executable,
+                arguments: vec!["-m".into(), "src.api".into(), "--desktop".into()],
+                working_directory: project_directory,
+                config_directory: directory.clone(),
+                ocr_config_path: directory.join("ocr.yaml"),
+            }),
+            Arc::new(|_| {}),
+            Arc::new(move || {
+                let _ = exit_sender.send(());
+            }),
+        );
+        supervisor.start().unwrap();
+
+        // 等待后端完成启动。
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while supervisor.status().phase == "starting" && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let status = supervisor.status();
+
+        // 请求后端退出并等待进程结束。
+        supervisor.request_exit();
+        exit_receiver.recv_timeout(Duration::from_secs(15)).unwrap();
+
+        // 检查握手和退出结果。
+        assert_eq!(status.phase, "ready", "{}", status.message);
+        assert_eq!(supervisor.status().phase, "stopped");
+        assert!(!supervisor.status().process_running);
+        assert!(supervisor.connection().is_err());
+
+        // 清理独立测试目录。
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn waits_for_cleanup_and_actual_child_exit() {
@@ -490,6 +613,7 @@ server.shutdown()
         let supervisor = Supervisor::create(
             Ok(LaunchConfig {
                 executable: PathBuf::from("/usr/bin/python3"),
+                virtual_environment_executable: None,
                 arguments: vec![directory.join("child.py").to_string_lossy().into_owned()],
                 working_directory: directory.clone(),
                 config_directory: directory.clone(),
@@ -535,6 +659,7 @@ server.shutdown()
         let supervisor = Supervisor::create(
             Ok(LaunchConfig {
                 executable: PathBuf::from("/usr/bin/python3"),
+                virtual_environment_executable: None,
                 arguments: vec![
                     "-c".into(),
                     "import sys; sys.stdin.readline(); sys.exit(2)".into(),

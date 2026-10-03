@@ -30,9 +30,19 @@ async def test_desktop_handshake_sse_and_shutdown(tmp_path, shutdown_method):
         encoding="utf-8",
     )
     token = "isolated-desktop-token-00000000000000000000"
+
+    # Windows 直接启动实际解释器，并指定当前虚拟环境入口。
+    executable_path = sys.executable
+    process_environment = os.environ.copy()
+    if os.name == "nt":
+        executable_path = sys._base_executable
+        process_environment["__PYVENV_LAUNCHER__"] = sys.executable
+
+    # 使用管道启动后端并传入独立测试配置。
     process = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "src.api", "--desktop",
+        executable_path, "-m", "src.api", "--desktop",
         cwd=Path(__file__).resolve().parents[1],
+        env=process_environment,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
