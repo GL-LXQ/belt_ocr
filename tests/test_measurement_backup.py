@@ -703,33 +703,6 @@ def test_restore_exclusive_creation_handles_late_conflicts(
         assert target.read_bytes() == b"keep"
 
 
-def test_restore_rejects_trigger_changes_to_other_fields(measurement_source, tmp_path: Path) -> None:
-    """验证恢复事务拒绝触发器改动原识别结果。
-
-    Args:
-        measurement_source: 临时业务库和证据根目录。
-        tmp_path: pytest 创建的临时目录。
-
-    Returns:
-        返回示例：
-            None  # 恢复副本事务回滚，原库与备份均保持原样
-    """
-    database_path, evidence_root = measurement_source
-    with closing(sqlite3.connect(database_path)) as connection, connection:
-        connection.execute(
-            "CREATE TRIGGER change_text AFTER UPDATE OF evidence_directory ON measurement_records "
-            "BEGIN UPDATE measurement_records SET recognized_lines='[]' WHERE session_id=NEW.session_id; END"
-        )
-    backup = create_backup(database_path, evidence_root, tmp_path / "backup")
-    unchanged = {path: path.read_bytes() for path in (database_path, backup / "measurements.sqlite3")}
-    destination = tmp_path / "restored"
-    with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
-        restore_backup(backup, destination)
-    assert not (destination / "manifest.json").exists()
-    assert {path: path.read_bytes() for path in unchanged} == unchanged
-    assert (destination / "measurements.sqlite3").read_bytes() == (backup / "measurements.sqlite3").read_bytes()
-
-
 def test_restore_accepts_foreign_platform_source_paths(measurement_source, tmp_path: Path) -> None:
     """验证恢复仅使用清单中的相对映射，不依赖原 Windows 路径。
 

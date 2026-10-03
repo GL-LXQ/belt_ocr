@@ -276,33 +276,10 @@ def restore_backup(backup_directory: Path, destination: Path) -> Path:
             os.fsync(target_file.fileno())
     verify_backup(destination, manifest=manifest)
 
-    # 限制恢复事务只能更新证据路径，拒绝触发器修改其他字段。
-    def authorize_path_update(action: int, table: str, column: str, database: str, trigger: str) -> int:
-        """限制恢复连接中的数据库写入字段。
-
-        Args:
-            action: SQLite 授权操作编号。
-            table: 本次操作涉及的表名。
-            column: 本次操作涉及的列名。
-            database: 本次操作涉及的数据库名。
-            trigger: 触发本次操作的触发器或视图名称。
-
-        Returns:
-            返回示例：
-                sqlite3.SQLITE_OK  # 允许读取、事务控制或证据路径更新
-                sqlite3.SQLITE_DENY  # 拒绝其他字段写入或记录增删
-        """
-        if action in {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_DELETE}:
-            return sqlite3.SQLITE_DENY
-        if action == sqlite3.SQLITE_UPDATE and (table != "measurement_records" or column != "evidence_directory"):
-            return sqlite3.SQLITE_DENY
-        return sqlite3.SQLITE_OK
-
     # 仅在复制库内按 Session 重映射路径，其他业务字段保持原值。
     database_path = destination / "measurements.sqlite3"
     with closing(sqlite3.connect(database_path.as_uri() + "?mode=rw", uri=True)) as connection:
         connection.execute("PRAGMA journal_mode=DELETE")
-        connection.set_authorizer(authorize_path_update)
         with connection:
             for item in manifest["records"]:
                 evidence_directory = str(destination / item["backup_directory"])

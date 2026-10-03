@@ -1511,9 +1511,6 @@ class MachineRuntime:
             session.session_id,
         )
 
-        # 检查并释放已经完成的当前测量。
-        self.release_finished_session()
-
     def save_evidence_images_and_measurement_record(
         self,
         record: MeasurementRecord,
