@@ -4,6 +4,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import Mock
@@ -69,6 +70,121 @@ def history_database(tmp_path: Path) -> tuple[Database, MeasurementRecord]:
         database,
         sample_record,
     )
+
+
+@pytest.mark.parametrize(
+    "evidence_directory",
+    [
+        "/restored snapshots/历史证据/unrelated-session",
+        r"D:\backup\evidence\different-session",
+        "legacy/../evidence//stored-directory",
+    ],
+)
+def test_record_lists_preserve_stored_evidence_directory(
+    history_database: tuple[Database, MeasurementRecord],
+    evidence_directory: str,
+) -> None:
+    """验证列表和分页原样返回数据库中的证据目录。
+
+    Args:
+        history_database: 含二十一条待复核记录的临时数据库及首条记录。
+        evidence_directory: 不按当前证据根目录和周期编号推导的已存路径。
+
+    Returns:
+        返回示例：
+            None  # Repo 列表、快照分页和 Service 均保留原始目录字符串
+    """
+    # 写入与当前配置和周期编号不同的历史证据目录。
+    database, _ = history_database
+    with closing(sqlite3.connect(database.config.database_path)) as connection, connection:
+        connection.execute(
+            "UPDATE measurement_records SET evidence_directory = ? WHERE session_id = ?",
+            (evidence_directory, "session-20"),
+        )
+
+    # 通过两个 Repo 入口和 Service 分别读取同一条记录。
+    repo = MeasurementRecordRepo(database.config.database_path)
+    service = MeasurementRecordService(repo)
+    record_lists = (
+        repo.list_records(limit=1),
+        repo.get_record_page(limit=1)["records"],
+        service.list_records(page_size=1)["records"],
+    )
+
+    # 不规范化路径，也不使用当前配置重新拼接目录。
+    for records in record_lists:
+        assert len(records) == 1
+        assert records[0]["session_id"] == "session-20"
+        assert records[0]["evidence_directory"] == evidence_directory
+
+
+@pytest.mark.parametrize("text_match_mode", ["contains", "exact"])
+def test_evidence_page_keeps_twelve_record_limit_and_combined_filters(
+    history_database: tuple[Database, MeasurementRecord],
+    text_match_mode: str,
+) -> None:
+    """验证证据列表沿用全部 AND 筛选、十二条分页和一致的记录总数。
+
+    Args:
+        history_database: 含二十一条待复核记录的临时数据库及首条记录。
+        text_match_mode: 本次查询的包含或整行精确匹配方式。
+
+    Returns:
+        返回示例：
+            None  # 两页分别返回十二条和九条，且每条保留已存证据目录
+    """
+    # 按 Service 的本地日期规则准备查询上下界。
+    database, sample_record = history_database
+    service = MeasurementRecordService(MeasurementRecordRepo(database.config.database_path))
+    selected_date = datetime.fromisoformat(sample_record.finish_time).astimezone().date()
+    start_time = datetime.combine(selected_date, time.min).astimezone(timezone.utc)
+    end_time = datetime.combine(selected_date + timedelta(days=1), time.min).astimezone(timezone.utc)
+
+    # 为每个筛选条件加入只违反该条件的独立记录。
+    excluded_records = (
+        replace(sample_record, session_id="excluded-normal", needs_review=False),
+        replace(sample_record, session_id="excluded-reviewed"),
+        replace(sample_record, session_id="excluded-machine", machine_id="2"),
+        replace(
+            sample_record,
+            session_id="excluded-before-start",
+            finish_time=(start_time - timedelta(microseconds=1)).isoformat(),
+        ),
+        replace(sample_record, session_id="excluded-at-end", finish_time=end_time.isoformat()),
+        replace(sample_record, session_id="excluded-text", recognized_lines=("NO_MATCH",)),
+        replace(sample_record, session_id="excluded-length", recognized_lines=("X2926215C", "87654321")),
+    )
+    for record in excluded_records:
+        database.write_measurement_record(record)
+    service.complete_review("excluded-reviewed")
+
+    # 查询两页，并在所有条件同时生效后应用十二条分页。
+    records = []
+    for page_number, expected_size in ((1, 12), (2, 9)):
+        result = service.list_records(
+            "pending",
+            "1",
+            page_number,
+            12,
+            selected_date,
+            selected_date,
+            text_query=" 62 15 " if text_match_mode == "contains" else "29 26215c",
+            text_match_mode=text_match_mode,
+            text_length=8,
+        )
+        assert result["page"] == page_number
+        assert result["page_size"] == 12
+        assert result["total"] == 21
+        assert result["total_pages"] == 2
+        assert len(result["records"]) == expected_size
+        records.extend(result["records"])
+
+    # 核对跨页稳定排序与每条记录自己的证据目录。
+    expected_sessions = [f"session-{record_number:02}" for record_number in reversed(range(21))]
+    assert [record["session_id"] for record in records] == expected_sessions
+    assert [record["evidence_directory"] for record in records] == [
+        str(database.config.evidence_directory / session_id) for session_id in expected_sessions
+    ]
 
 
 @pytest.mark.parametrize("write_action", ["insert", "review", "review_into_empty_result"])

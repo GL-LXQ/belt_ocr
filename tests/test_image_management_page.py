@@ -1,4 +1,4 @@
-"""离屏验证图片管理演示交互，不运行真实图片读取或视觉截图测试。"""
+"""离屏验证图片管理的隔离演示交互，不运行视觉截图测试。"""
 
 from dataclasses import replace
 from datetime import date
@@ -46,26 +46,28 @@ def image_page(qt_application: QApplication):
     qt_application.processEvents()
     yield page
     page.viewer.close()
+    page.shutdown()
     host.close()
     host.deleteLater()
     qt_application.processEvents()
 
 
 def test_preview_requires_explicit_entry_and_exit_drops_records(image_page: ImageManagementPage) -> None:
-    """验证没有后台读取入口，演示开启前不创建虚构记录。
+    """验证独立页面没有记录时保持真实空状态，演示必须明确开启。
 
     Args:
         image_page: 默认未开启演示的页面。
 
     Returns:
-        None  # 预览入口、标识、计数、禁用动作和退出状态符合 UI 阶段约定
+        None  # 预览入口、标识、计数、隔离动作和退出状态符合约定
     """
     assert not image_page.preview_enabled
     assert image_page.preview_records == ()
     assert image_page.cards == []
-    assert not image_page.filter_card.isEnabled()
-    assert not image_page.refresh_button.isEnabled()
-    assert image_page.record_count_label.text() == "真实测量数据待接入"
+    assert image_page.filter_card.isEnabled()
+    assert image_page.refresh_button.isEnabled()
+    assert image_page.record_count_label.text() == "共 0 次测量"
+    assert image_page.empty_title.text() == "暂无测量记录"
 
     # 明确点击后才产生内存记录，数量按测量统计。
     image_page.preview_button.click()
@@ -84,7 +86,7 @@ def test_preview_requires_explicit_entry_and_exit_drops_records(image_page: Imag
     assert image_page.preview_records == ()
     assert image_page.cards == []
     assert not image_page.scenario_combo.isVisible()
-    assert not image_page.filter_card.isEnabled()
+    assert image_page.filter_card.isEnabled()
     assert image_page.viewer.record is None
     assert image_page.viewer.canvas.image_item.pixmap().isNull()
     assert image_page.viewer.thumbnail_buttons == []

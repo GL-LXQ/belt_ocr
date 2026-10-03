@@ -7,19 +7,6 @@ from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 
 
-REVIEW_CAPTIONS = {
-    "normal": "正常",
-    "pending": "待复核",
-    "reviewed": "已复核",
-}
-EVIDENCE_MESSAGES = {
-    "missing_directory": ("证据目录不存在", "暂时无法读取图片列表，测量信息仍保留。"),
-    "no_jpg": ("目录中没有 JPG", "当前目录没有可展示的 JPG / JPEG 图片。"),
-    "access_denied": ("没有目录读取权限", "暂时无法读取图片列表，请检查目录访问权限。"),
-    "corrupt": ("图片无法解码", "文件仍保留在本次图片列表中，可继续查看其他图片。"),
-}
-
-
 @dataclass(frozen=True)
 class PreviewEvidenceImage:
     """保存一张虚构图片的展示参数，不引用磁盘文件。"""

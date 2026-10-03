@@ -1,7 +1,10 @@
-"""展示同一次演示测量的只读证据查看器。"""
+"""按需展示同一次测量的只读证据图片。"""
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from threading import Event
+from typing import Callable
+
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -30,7 +33,20 @@ from qfluentwidgets import (
     setCustomStyleSheet,
 )
 
-from ui.image_management_preview import EVIDENCE_MESSAGES, REVIEW_CAPTIONS, PreviewMeasurement, draw_preview_image
+from src.controller.controller import AppController
+from ui.image_evidence import (
+    EVIDENCE_MESSAGES,
+    REVIEW_CAPTIONS,
+    EvidenceDecodedImage,
+    EvidenceMeasurement,
+    EvidenceReadFailure,
+    EvidenceReadSignals,
+    EvidenceReadTask,
+    decode_evidence_image,
+    read_measurement_evidence,
+)
+from ui.image_management_preview import PreviewMeasurement, draw_preview_image
+from ui.pages.history_page import open_evidence_directory
 
 
 class EvidenceImageCanvas(QGraphicsView):
@@ -143,7 +159,9 @@ class EvidenceImageCanvas(QGraphicsView):
 
 
 class EvidenceViewer(MaskDialogBase):
-    """左图右记录的演示证据查看器。"""
+    """左图右记录的证据查看器，原图只保留当前一张。"""
+
+    record_requested = Signal(str)
 
     def __init__(self, parent: QWidget, stylesheet: str) -> None:
         """建立图片、缩略图条、测量信息和只读操作。
@@ -158,10 +176,23 @@ class EvidenceViewer(MaskDialogBase):
         super().__init__(parent)
         self.setObjectName("evidenceViewer")
         self.widget.setObjectName("evidenceViewerContent")
-        self.record: PreviewMeasurement | None = None
+        self.record: EvidenceMeasurement | PreviewMeasurement | None = None
         self.image_index = 0
         self.thumbnail_buttons: list[QToolButton] = []
-        self.setWindowTitle("测量证据 · 演示预览")
+        self.setWindowTitle("测量证据")
+
+        # 工作线程按需建立，切换图片时只保留当前请求和可见缩略图。
+        self.thread_pool: QThreadPool | None = None
+        self.read_signals: EvidenceReadSignals | None = None
+        self.read_generation = 0
+        self.cancelled = Event()
+        self.shutting_down = False
+        self.loaded_image_index: int | None = None
+        self.loaded_thumbnails: set[int] = set()
+        self.thumbnail_timer = QTimer(self)
+        self.thumbnail_timer.setSingleShot(True)
+        self.thumbnail_timer.timeout.connect(self.load_visible_images)
+        QApplication.instance().aboutToQuit.connect(self.shutdown)
 
         # 在遮罩卡片顶部显示标题、演示标识和关闭入口。
         layout = QVBoxLayout(self.widget)
@@ -169,9 +200,9 @@ class EvidenceViewer(MaskDialogBase):
         layout.setSpacing(16)
         heading = QHBoxLayout()
         heading.addWidget(SubtitleLabel("测量证据"))
-        preview_badge = QLabel("演示数据 · 非真实记录")
-        preview_badge.setObjectName("imagePreviewBadge")
-        heading.addWidget(preview_badge)
+        self.preview_badge = QLabel("演示数据 · 非真实记录")
+        self.preview_badge.setObjectName("imagePreviewBadge")
+        heading.addWidget(self.preview_badge)
         heading.addStretch()
         self.close_button = TransparentPushButton("关闭")
         self.close_button.setAccessibleName("关闭证据查看器")
@@ -288,13 +319,15 @@ class EvidenceViewer(MaskDialogBase):
         self.thumbnail_layout.setSpacing(8)
         self.thumbnail_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.thumbnail_scroll.setWidget(self.thumbnail_body)
+        self.thumbnail_scroll.horizontalScrollBar().valueChanged.connect(lambda: self.thumbnail_timer.start(0))
+        self.thumbnail_scroll.viewport().installEventFilter(self)
         self.thumbnail_group = QButtonGroup(self)
         self.thumbnail_group.setExclusive(True)
         layout.addWidget(self.thumbnail_scroll)
         return panel
 
     def build_record_panel(self) -> QScrollArea:
-        """建立完整文字、测量摘要、折叠信息和待接入操作。
+        """建立完整文字、测量摘要、折叠信息和记录操作。
 
         Args:
             无。
@@ -344,7 +377,7 @@ class EvidenceViewer(MaskDialogBase):
         self.copy_text_button.clicked.connect(self.copy_effective_text)
         layout.addWidget(self.copy_text_button)
 
-        # 默认折叠 Session 和演示路径，避免挤占主要信息。
+        # 默认折叠 Session 和目录路径，避免挤占主要信息。
         self.metadata_button = TransparentPushButton("展开记录信息 ▾")
         self.metadata_button.setCheckable(True)
         self.metadata_button.toggled.connect(self.toggle_metadata)
@@ -363,31 +396,37 @@ class EvidenceViewer(MaskDialogBase):
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         metadata_layout.addWidget(self.session_label)
-        metadata_layout.addWidget(QLabel("演示路径（未创建）"))
+        self.path_title = QLabel("证据目录")
+        metadata_layout.addWidget(self.path_title)
         metadata_layout.addWidget(self.path_label)
+        self.copy_path_button = PushButton("复制目录路径")
+        self.copy_path_button.clicked.connect(self.copy_directory_path)
+        metadata_layout.addWidget(self.copy_path_button)
         self.metadata_panel.hide()
         layout.addWidget(self.metadata_panel)
         layout.addStretch()
 
-        # 记录跳转与目录打开留待真实数据阶段接入。
-        notice = QLabel("演示记录与占位图仅存于内存。\n本阶段不读取或修改业务证据。")
-        notice.setObjectName("imagePreviewNotice")
-        notice.setWordWrap(True)
-        layout.addWidget(notice)
-        self.view_record_button = PrimaryPushButton("查看测量记录 · 待接入")
-        self.open_directory_button = PushButton("打开证据文件夹 · 待接入")
+        # 真实记录可跳转历史详情，演示保持只读隔离。
+        self.record_notice = QLabel()
+        self.record_notice.setObjectName("imagePreviewNotice")
+        self.record_notice.setWordWrap(True)
+        layout.addWidget(self.record_notice)
+        self.view_record_button = PrimaryPushButton("查看测量记录")
+        self.open_directory_button = PushButton("打开证据文件夹")
+        self.view_record_button.clicked.connect(self.request_record_detail)
+        self.open_directory_button.clicked.connect(self.open_stored_directory)
         for button in (self.view_record_button, self.open_directory_button):
             button.setEnabled(False)
-            button.setToolTip("真实图片读取和记录跳转将在 UI 确认后接入；演示没有对应业务记录或文件夹。")
+            button.setToolTip("读取真实测量详情后可用；演示没有对应业务记录或文件夹。")
             layout.addWidget(button)
         scroll.setWidget(body)
         return scroll
 
-    def open_record(self, record: PreviewMeasurement) -> None:
-        """填充一次虚构测量并显示其分组证据。
+    def open_record(self, record: EvidenceMeasurement | PreviewMeasurement) -> None:
+        """填充当前测量，并按需读取这一组的图片。
 
         Args:
-            record: 当前点击的内存演示记录。
+            record: 最新真实详情与目录列表，或明确开启的内存演示。
 
         Returns:
             None  # 摘要、文字、缩略图和首张图片已显示
@@ -395,6 +434,8 @@ class EvidenceViewer(MaskDialogBase):
         # 更新测量摘要和完整有效文字。
         self.clear_record()
         self.record = record
+        preview = isinstance(record, PreviewMeasurement)
+        self.preview_badge.setVisible(preview)
         self.machine_label.setText(record.machine_name)
         self.status_badge.setText(REVIEW_CAPTIONS[record.review_status])
         self.status_badge.setProperty("reviewStatus", record.review_status)
@@ -409,13 +450,24 @@ class EvidenceViewer(MaskDialogBase):
         self.copy_text_button.setEnabled(bool(record.effective_lines))
         self.copy_text_button.setText("复制文字")
 
-        # 每次打开都折叠定位信息，并说明路径只用于演示。
+        # 每次打开都折叠定位信息，真实路径沿用详情原值。
         self.session_label.setText(record.session_id)
-        self.path_label.setText(f"DEMO / {record.machine_id} / {record.session_id}")
+        directory = f"DEMO / {record.machine_id} / {record.session_id}" if preview else record.evidence_directory
+        self.path_label.setText(directory)
+        self.path_title.setText("演示路径（未创建）" if preview else "证据目录")
+        self.copy_path_button.setEnabled(not preview and bool(directory))
         self.metadata_button.setChecked(False)
         self.metadata_panel.hide()
         action = "前往复核" if record.review_status == "pending" else "查看测量记录"
-        self.view_record_button.setText(f"{action} · 待接入")
+        self.view_record_button.setText(f"{action} · 待接入" if preview else action)
+        self.view_record_button.setEnabled(not preview)
+        self.open_directory_button.setText("打开证据文件夹 · 待接入" if preview else "打开证据文件夹")
+        self.open_directory_button.setEnabled(not preview and bool(directory))
+        self.view_record_button.setToolTip("演示没有对应业务记录" if preview else "在历史记录中查看详情和复核")
+        self.open_directory_button.setToolTip("演示没有对应文件夹" if preview else directory)
+        self.record_notice.setText(
+            "演示记录与占位图仅存于内存。" if preview else "现存数量来自本次目录读取，不表示原始证据完整。"
+        )
 
         # 只生成当前测量的图片条。
         for image_index, image in enumerate(record.images):
@@ -425,9 +477,10 @@ class EvidenceViewer(MaskDialogBase):
             button.setCheckable(True)
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             button.setIconSize(QSize(90, 48))
-            pixmap = draw_preview_image(image)
-            button.setIcon(QIcon(pixmap) if image.readable else FluentIcon.PHOTO.icon())
-            button.setText(f"{image_index + 1:02d}" if image.readable else f"{image_index + 1:02d} · 损坏")
+            readable = preview and image.readable
+            button.setIcon(QIcon(draw_preview_image(image)) if readable else FluentIcon.PHOTO.icon())
+            damaged = preview and not readable
+            button.setText(f"{image_index + 1:02d} · 损坏" if damaged else f"{image_index + 1:02d}")
             button.setToolTip(image.filename)
             button.setAccessibleName(f"第 {image_index + 1} 张：{image.filename}")
             button.clicked.connect(lambda checked=False, index=image_index: self.select_image(index))
@@ -443,6 +496,8 @@ class EvidenceViewer(MaskDialogBase):
         self.show()
         self.close_button.setFocus()
         QTimer.singleShot(0, self.canvas.fit_image)
+        if not preview:
+            self.thumbnail_timer.start(0)
 
     def select_image(self, image_index: int) -> None:
         """切换当前组内图片并保留无法解码文件的位置。
@@ -460,7 +515,8 @@ class EvidenceViewer(MaskDialogBase):
             return
         self.image_index = image_index
         image = record.images[image_index] if record.images else None
-        readable = image is not None and image.readable
+        preview = isinstance(record, PreviewMeasurement)
+        readable = image is not None and preview and image.readable
 
         # 同步文件位置和导航边界。
         self.filename_label.setText(image.filename if image else "尚无可读取的图片列表")
@@ -473,7 +529,14 @@ class EvidenceViewer(MaskDialogBase):
             button.setEnabled(readable)
 
         # 可读图片完整适应窗口，异常图片显示明确原因。
-        if readable:
+        if image is not None and not preview:
+            self.loaded_image_index = None
+            self.canvas.set_image(QPixmap())
+            self.image_error_title.setText("正在读取图片")
+            self.image_error_body.setText(image.filename)
+            self.image_stack.setCurrentIndex(1)
+            self.zoom_label.setText("--")
+        elif readable:
             self.image_stack.setCurrentIndex(0)
             self.canvas.set_image(draw_preview_image(image))
         else:
@@ -490,6 +553,229 @@ class EvidenceViewer(MaskDialogBase):
             button = self.thumbnail_buttons[image_index]
             button.setChecked(True)
             self.thumbnail_scroll.ensureWidgetVisible(button)
+        if not preview:
+            self.cancel_reads()
+            self.thumbnail_timer.start(0)
+
+    def open_session(self, controller: AppController, session_id: str) -> None:
+        """在后台重新读取点击的测量详情和该组目录列表。
+
+        Args:
+            controller: 现有测量 Controller。
+            session_id: 卡片对应的测量编号。
+
+        Returns:
+            None  # 查看器立即显示读取提示，旧记录结果不会覆盖新选择
+        """
+        self.clear_record()
+        self.preview_badge.hide()
+        self.session_label.setText(session_id)
+        self.image_error_title.setText("正在读取测量证据")
+        self.image_error_body.setText("正在读取最新记录和该记录保存的图片列表。")
+        self.record_notice.setText("图片按当前测量归组，不合并文字相同的其他测量。")
+
+        # 先显示占位，再提交本次详情读取。
+        parent = self.parentWidget()
+        self.widget.setFixedSize(min(1260, parent.width() - 64), min(790, parent.height() - 64))
+        self.show()
+        self.close_button.setFocus()
+        cancelled = self.cancelled
+        self.start_read("group", lambda: read_measurement_evidence(controller, session_id, cancelled))
+
+    def start_read(self, identity: object, read: Callable[[], object]) -> None:
+        """将当前查看器的一次读取交给最多两个工作线程。
+
+        Args:
+            identity: group 或当前图片种类及下标。
+            read: 本次有限的详情、目录或图片读取。
+
+        Returns:
+            None  # 任务已排入当前组的有限队列，关闭后不再提交
+        """
+        if self.shutting_down:
+            return
+        if self.thread_pool is None:
+            self.thread_pool = QThreadPool(QApplication.instance())
+            self.thread_pool.setMaxThreadCount(2)
+            self.read_signals = EvidenceReadSignals(self.thread_pool)
+            self.read_signals.completed.connect(self.accept_read, Qt.ConnectionType.QueuedConnection)
+
+        # 队列只包含当前大图和当前视口中的少量缩略图。
+        task = EvidenceReadTask(self.read_generation, identity, read, self.cancelled, self.read_signals)
+        self.thread_pool.start(task)
+
+    def cancel_reads(self) -> None:
+        """取消旧代次，清空尚未运行的查看器任务。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 正在读取的有限任务完成后丢弃结果，未运行任务已移除
+        """
+        self.cancelled.set()
+        self.read_generation += 1
+        self.cancelled = Event()
+        if self.thread_pool is not None:
+            self.thread_pool.clear()
+
+    def load_visible_images(self) -> None:
+        """只加载当前原图和缩略图条视口中的图片。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 视口外图标已释放，队列最多包含当前原图和十二张缩略图
+        """
+        record = self.record
+        if not self.isVisible() or not isinstance(record, EvidenceMeasurement):
+            return
+        self.cancel_reads()
+        if not record.images:
+            return
+
+        # 根据当前滚动位置找出少量可见缩略图。
+        left = self.thumbnail_scroll.horizontalScrollBar().value()
+        right = left + self.thumbnail_scroll.viewport().width()
+        visible_indices = [
+            index for index, button in enumerate(self.thumbnail_buttons)
+            if button.x() < right and button.x() + button.width() > left
+        ][:12]
+        for index in self.loaded_thumbnails - set(visible_indices):
+            button = self.thumbnail_buttons[index]
+            button.setIcon(FluentIcon.PHOTO.icon())
+            button.setText(f"{index + 1:02d}")
+        self.loaded_thumbnails.intersection_update(visible_indices)
+
+        # 当前原图优先排入队列，不预读相邻原图。
+        if self.loaded_image_index != self.image_index:
+            image = record.images[self.image_index]
+            self.start_read(("image", self.image_index), lambda path=image.path: decode_evidence_image(path))
+        for index in visible_indices:
+            if index not in self.loaded_thumbnails:
+                path = record.images[index].path
+                self.start_read(
+                    ("thumbnail", index),
+                    lambda image_path=path: decode_evidence_image(image_path, QSize(90, 48)),
+                )
+
+    @Slot(int, object, object)
+    def accept_read(self, generation: int, identity: object, result: object) -> None:
+        """只在主线程接收当前组的结果并建立 QPixmap。
+
+        Args:
+            generation: 结果所属的查看器代次。
+            identity: group 或图片种类及下标。
+            result: 最新详情、后台 QImage 或读取错误。
+
+        Returns:
+            None  # 当前组展示已更新，旧代次和已关闭查看器的结果被忽略
+        """
+        if generation != self.read_generation or not self.isVisible() or self.shutting_down:
+            return
+        if identity == "group":
+            if isinstance(result, EvidenceMeasurement):
+                self.open_record(result)
+            else:
+                self.image_error_title.setText("测量证据读取失败")
+                message = result.message if isinstance(result, EvidenceReadFailure) else "该测量记录已不存在。"
+                self.image_error_body.setText(message)
+            return
+
+        # 大图只更新当前选择，缩略图只更新当前视口对应按钮。
+        kind, index = identity
+        if not isinstance(self.record, EvidenceMeasurement):
+            return
+        if isinstance(result, EvidenceReadFailure):
+            result = EvidenceDecodedImage(QImage(), "corrupt")
+        pixmap = QPixmap.fromImage(result.image)
+        if kind == "thumbnail":
+            button = self.thumbnail_buttons[index]
+            button.setIcon(QIcon(pixmap) if not pixmap.isNull() else FluentIcon.PHOTO.icon())
+            button.setText(f"{index + 1:02d}" if not pixmap.isNull() else f"{index + 1:02d} · 不可读")
+            self.loaded_thumbnails.add(index)
+            return
+
+        # 释放上一张原图，失败时保留实际文件名和组内位置。
+        self.loaded_image_index = index
+        readable = not pixmap.isNull()
+        for button in (self.zoom_out_button, self.zoom_in_button, self.fit_button, self.actual_size_button):
+            button.setEnabled(readable)
+        self.canvas.set_image(pixmap)
+        self.image_stack.setCurrentIndex(0 if readable else 1)
+        if not readable:
+            title, description = EVIDENCE_MESSAGES[result.state]
+            self.image_error_title.setText(title)
+            self.image_error_body.setText(f"{self.record.images[index].filename}\n{description}")
+            self.zoom_label.setText("--")
+
+    def request_record_detail(self) -> None:
+        """将真实测量编号交回主窗口的现有历史详情入口。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 已发出当前测量的跳转请求，演示不跳转
+        """
+        if isinstance(self.record, EvidenceMeasurement):
+            self.record_requested.emit(self.record.session_id)
+
+    def open_stored_directory(self) -> None:
+        """复用历史记录的文件夹打开提示。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 系统收到保存目录的打开请求，失败时显示原因和路径
+        """
+        if isinstance(self.record, EvidenceMeasurement):
+            open_evidence_directory(self.record.evidence_directory, self.widget, self.record.evidence_state)
+
+    def copy_directory_path(self) -> None:
+        """复制真实记录保存的目录，便于打开失败时手动定位。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 原样目录已复制，演示不提供业务目录
+        """
+        if isinstance(self.record, EvidenceMeasurement):
+            QApplication.clipboard().setText(self.record.evidence_directory)
+
+    def eventFilter(self, watched, event) -> bool:
+        """在缩略图视口尺寸变化后重新安排可见图读取。
+
+        Args:
+            watched: 当前接收事件的控件。
+            event: Qt 事件。
+
+        Returns:
+            False  # 尺寸事件继续交给原控件处理
+        """
+        scroll = getattr(self, "thumbnail_scroll", None)
+        if scroll is not None and watched is scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self.thumbnail_timer.start(0)
+        return super().eventFilter(watched, event)
+
+    def shutdown(self) -> None:
+        """关闭时清除未运行任务并等待正在读取的有限任务结束。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 查看器线程池已结束，不留下运行中的 QThread
+        """
+        self.shutting_down = True
+        self.clear_record()
+        if self.thread_pool is not None:
+            self.thread_pool.waitForDone()
+            self.thread_pool.deleteLater()
+            self.thread_pool = None
 
     def update_zoom_caption(self, percentage: int) -> None:
         """显示当前图片比例并更新缩放边界。
@@ -506,7 +792,7 @@ class EvidenceViewer(MaskDialogBase):
         self.zoom_in_button.setEnabled(percentage < 400)
 
     def toggle_metadata(self, expanded: bool) -> None:
-        """切换 Session 和演示路径的信息区。
+        """切换 Session 和目录路径的信息区。
 
         Args:
             expanded: 是否展开定位信息。
@@ -518,7 +804,7 @@ class EvidenceViewer(MaskDialogBase):
         self.metadata_button.setText("收起记录信息 ▴" if expanded else "展开记录信息 ▾")
 
     def copy_effective_text(self) -> None:
-        """复制本次演示测量的完整有效文字。
+        """复制本次测量的完整有效文字。
 
         Args:
             无。
@@ -551,6 +837,12 @@ class EvidenceViewer(MaskDialogBase):
         Returns:
             None  # 记录、画布、缩略图与详情字段已清空
         """
+        # 取消当前组读取并释放有限缩略图缓存。
+        self.thumbnail_timer.stop()
+        self.cancel_reads()
+        self.loaded_image_index = None
+        self.loaded_thumbnails.clear()
+
         # 清空测量引用和当前画布。
         self.record = None
         self.image_index = 0
@@ -582,6 +874,19 @@ class EvidenceViewer(MaskDialogBase):
         # 没有当前图片时禁止导航、缩放和复制。
         for button in (
             self.previous_image_button, self.next_image_button, self.zoom_out_button, self.zoom_in_button,
-            self.fit_button, self.actual_size_button, self.copy_text_button,
+            self.fit_button, self.actual_size_button, self.copy_text_button, self.copy_path_button,
+            self.view_record_button, self.open_directory_button,
         ):
             button.setEnabled(False)
+
+    def hideEvent(self, event) -> None:
+        """隐藏后释放当前图片并使所有未完成结果失效。
+
+        Args:
+            event: Qt 隐藏事件。
+
+        Returns:
+            None  # 当前测量和后台任务已清理
+        """
+        self.clear_record()
+        super().hideEvent(event)
