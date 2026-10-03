@@ -246,7 +246,10 @@ impl Supervisor {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        command.env("PYTHONUNBUFFERED", "1");
+        // 立即输出 Python 日志，并统一使用 UTF-8 编码。
+        command
+            .env("PYTHONUNBUFFERED", "1")
+            .env("PYTHONIOENCODING", "utf-8");
         // 为实际解释器指定项目虚拟环境入口。
         if let Some(executable) = &launch.virtual_environment_executable {
             command.env("__PYVENV_LAUNCHER__", executable);

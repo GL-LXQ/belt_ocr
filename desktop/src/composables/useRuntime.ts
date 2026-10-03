@@ -1,6 +1,7 @@
 import { ref, shallowRef } from 'vue'
 import { api, errorText, requestOptions } from '../lib/api'
 import { createSseParser } from '../lib/sse'
+import { writeRuntimeDiagnostic } from '../lib/runtimeDiagnostics'
 import type { Envelope, Snapshot } from '../lib/types'
 export const runtime = shallowRef<Snapshot | null>(null)
 export const connection = ref<'connecting' | 'connected' | 'reconnecting' | 'closed'>('closed')
@@ -9,11 +10,45 @@ export const lastUpdate = ref<Date | null>(null)
 export const runtimeAction = ref(false)
 let streamController: AbortController | null = null
 let generation = 0
-/** 原子更新整份快照；拒绝同一连接内倒退的事件。Args: 快照、是否重新同步。Returns: 是否更新。 */
+/**
+ * 更新完整运行快照，并记录首次收到的测量启动状态。
+ * Args:
+ *   snapshot: 后端返回的完整机器和周期快照。
+ *   reset: 是否在重新连接时允许快照编号重置。
+ * Returns:
+ *   true // 当前快照已更新
+ *   false // 当前快照编号倒退，已忽略
+ */
 export function applySnapshot(snapshot: Snapshot, reset = false) {
   if (!reset && runtime.value && snapshot.sequence < runtime.value.sequence) return false
+
+  // 保存上一份状态并更新当前完整快照和接收时间。
+  const previousSnapshot = runtime.value
   runtime.value = snapshot
   lastUpdate.value = new Date()
+
+  // 只在首次收到新周期或重新同步时记录测量状态。
+  for (const machine of snapshot.machines) {
+    const sessionId = machine.active_session_id
+    if (!sessionId) continue
+    const previousMachine = previousSnapshot?.machines.find((item) => item.id === machine.id)
+    if (!reset && previousMachine?.active_session_id === sessionId) continue
+
+    // 记录周期身份、快照编号和距后端创建测量的耗时。
+    const session = snapshot.sessions.find((item) => item.session_id === sessionId)
+    writeRuntimeDiagnostic('MEASUREMENT_STATE_RECEIVED', {
+      machine_id: machine.id,
+      session_id: sessionId,
+      sequence: snapshot.sequence,
+      status: snapshot.status,
+      resynchronized: reset,
+      cycle_closed: session?.cycle_closed ?? null,
+      measurement_started_at: session?.start_time ?? null,
+      since_measurement_start_ms: session?.start_time
+        ? Date.now() - Date.parse(session.start_time)
+        : null,
+    })
+  }
   return true
 }
 /** 重连时重新读取快照，再消费仅包含业务状态的 SSE。Args: 无。Returns: 循环退出时完成。 */

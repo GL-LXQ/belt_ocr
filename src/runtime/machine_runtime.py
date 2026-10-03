@@ -398,11 +398,12 @@ class MachineRuntime:
         # 记录测量开始。
         logger.info(
             "%s 开始新的测量 machine_id=%s session_id=%s "
-            "unfinished_ocr_tasks=%s",
+            "unfinished_ocr_tasks=%s trace=MEASUREMENT_STARTED started_at=%s",
             self.machine_config.machine_name,
             session.machine_id,
             session.session_id,
             sum(cycle.recognition_task is not None for cycle in self.cycles.values()),
+            session.start_time,
         )
 
         # 启动相机采集。
@@ -603,6 +604,16 @@ class MachineRuntime:
         match event.event_type:
             # 处理启动信号。
             case EventType.MACHINE_STARTED:
+                # 记录启动信号进入机器处理流程的时间和排队耗时。
+                logger.info(
+                    "%s 开始处理启动信号 trace=START_SIGNAL_PROCESSING "
+                    "machine_id=%s event_id=%s received_at=%s queue_wait_ms=%.1f",
+                    self.machine_config.machine_name,
+                    event.machine_id,
+                    event.event_id,
+                    event.received_at,
+                    (time.monotonic() - event.received_monotonic) * 1000,
+                )
                 await self.handle_machine_start()
                 return
 

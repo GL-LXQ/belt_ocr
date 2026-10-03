@@ -63,6 +63,8 @@ npm run tauri:dev
 
 请使用独立开发配置，所有数据库、运行库、证据与模型路径都由操作者明确核对。软件会初始化配置指定的表，不会自动复制仓库生产数据或启动监测。
 
+排查 IO 与界面启动时序时，按 `trace=` 搜索关键日志：后端记录 `IO_START_RECEIVED`、`START_SIGNAL_PROCESSING`、`MEASUREMENT_STARTED`、`MEASUREMENT_STATE_PUBLISHED`；前端开发者工具控制台记录 `MEASUREMENT_STATE_RECEIVED`、`ANIMATION_START_REQUESTED`、`ANIMATION_FIRST_FRAME`、`BELT_ROTATION_STARTED`。按 `machine_id`、`session_id` 和 `sequence` 对照同轮状态；IO 接收时尚未生成 `session_id`，按机器编号和时间对应。前端行首时间以及后端 `observed_at`、`started_at`、`published_at` 使用 UTC。动画日志同时记录暂停、页面隐藏和减少动态效果条件；展开过程为 650 毫秒，结束后下一帧才开始滚筒位移。
+
 仅需浏览器联调时，在仓库根目录开两个终端：
 
 ```powershell

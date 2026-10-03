@@ -621,9 +621,33 @@ class RuntimeHost:
         """
         if self.machine_states == machines and self.sessions == sessions:
             return
+
+        # 保存更新前每台机器的活动周期编号。
+        previous_session_ids = {
+            machine["id"]: machine["active_session_id"]
+            for machine in self.machine_states
+        }
+
+        # 更新机器与周期状态并发布完整快照。
         self.machine_states = machines
         self.sessions = sessions
         self.publish_snapshot()
+
+        # 只在新周期首次进入快照时记录发布位置。
+        for machine in machines:
+            session_id = machine["active_session_id"]
+            if session_id and previous_session_ids.get(machine["id"]) != session_id:
+                logger.info(
+                    "%s 已发布测量启动状态 trace=MEASUREMENT_STATE_PUBLISHED "
+                    "machine_id=%s session_id=%s sequence=%s client_count=%s "
+                    "published_at=%s",
+                    machine["machine_name"],
+                    machine["id"],
+                    session_id,
+                    self.sequence,
+                    len(self.clients),
+                    datetime.now(timezone.utc).isoformat(),
+                )
 
     async def shutdown(self) -> None:
         """停止监测并等待资源释放，然后结束全部 SSE 连接。

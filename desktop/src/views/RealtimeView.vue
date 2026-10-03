@@ -280,6 +280,9 @@ onMounted(refreshSummary)
             </div>
             <div class="belt-stage">
               <BeltAnimation
+                :machine-id="machine.id"
+                :session-id="machine.active_session_id"
+                :snapshot-sequence="runtime?.sequence ?? 0"
                 :capturing="motionFor(machine).capturing"
                 :frequency-listening="motionFor(machine).frequencyListening"
                 :extended="motionFor(machine).extended"

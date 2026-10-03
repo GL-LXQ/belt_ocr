@@ -512,15 +512,20 @@ class SystemRuntime:
             elif previous_state != current_state:
                 # 记录本次 DI 电平变化及即将发送的机器信号。
                 signal_name = "机器启动信号" if current_state else "机器关闭信号"
+                signal_log_step = (
+                    "IO_START_RECEIVED" if current_state else "IO_CLOSE_RECEIVED"
+                )
                 logger.info(
                     "%s DI状态变化，将发送%s machine_id=%s channel=%s "
-                    "previous=%s current=%s",
+                    "previous=%s current=%s trace=%s observed_at=%s",
                     machine.machine_config.machine_name,
                     signal_name,
                     machine_id,
                     channel,
                     previous_state,
                     current_state,
+                    signal_log_step,
+                    datetime.now(timezone.utc).isoformat(),
                 )
 
                 if current_state:

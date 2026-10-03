@@ -16,6 +16,7 @@ import {
   renderBeltSvg,
   type BeltVisualState,
 } from '../lib/belt'
+import { writeRuntimeDiagnostic } from '../lib/runtimeDiagnostics'
 
 const props = withDefaults(
   defineProps<{
@@ -23,8 +24,11 @@ const props = withDefaults(
     frequencyListening: boolean
     extended: boolean
     paused?: boolean
+    machineId?: string
+    sessionId?: string | null
+    snapshotSequence?: number
   }>(),
-  { paused: false },
+  { paused: false, machineId: '', sessionId: null, snapshotSequence: 0 },
 )
 
 // 保存每张卡片独立的材质标识和本地动画状态。
@@ -56,6 +60,36 @@ let mounted = false
 let active = true
 let reducedMotion = false
 let motionQuery: MediaQueryList | null = null
+
+// 保存当前周期的动画请求时间和首次执行标记。
+let animationRequestedAt: number | null = null
+let animationFrameStarted = false
+let beltRotationStarted = false
+
+/**
+ * 记录当前机器的动画步骤和暂停条件。
+ * Args:
+ *   trace: 动画请求、首帧或滚筒转动步骤。
+ * Returns:
+ *   undefined // 当前动画状态已交给运行诊断日志
+ */
+function logAnimationProgress(trace: string): void {
+  writeRuntimeDiagnostic(trace, {
+    machine_id: props.machineId,
+    session_id: props.sessionId,
+    sequence: props.snapshotSequence,
+    extended: props.extended,
+    capturing: props.capturing,
+    frequency_listening: props.frequencyListening,
+    paused: props.paused,
+    page_active: active,
+    page_hidden: document.hidden,
+    reduced_motion: reducedMotion,
+    extension_duration_ms: EXTENSION_DURATION_MS,
+    since_animation_request_ms:
+      animationRequestedAt === null ? null : Math.round(performance.now() - animationRequestedAt),
+  })
+}
 
 /**
  * 更新当前 SVG，并在需要运动时安排下一帧。
@@ -93,10 +127,23 @@ function updateScene(): void {
  */
 function advanceFrame(timestamp: number): void {
   frameHandle = null
+
+  // 记录当前测量首次执行浏览器动画帧的时刻。
+  if (props.extended && !animationFrameStarted) {
+    animationFrameStarted = true
+    logAnimationProgress('ANIMATION_FIRST_FRAME')
+  }
+
   // 恢复动画时从当前时刻继续，避免后台时间造成相位跳变。
   const elapsedMs = previousFrameTime === null ? 0 : timestamp - previousFrameTime
   previousFrameTime = timestamp
   const wasRunning = transition === null && props.extended
+
+  // 记录展开完成后滚筒首次发生位移的时刻。
+  if (wasRunning && elapsedMs > 0 && !beltRotationStarted) {
+    beltRotationStarted = true
+    logAnimationProgress('BELT_ROTATION_STARTED')
+  }
 
   // 使用原始六百五十毫秒缓动，并允许收缩途中重新启动。
   if (transition !== null) {
@@ -135,6 +182,12 @@ function applyMotionPreference(): void {
 watch(
   () => props.extended,
   (extended) => {
+    // 重置本轮动画计时，并记录收到启动或停止状态时的暂停条件。
+    animationRequestedAt = extended ? performance.now() : null
+    animationFrameStarted = false
+    beltRotationStarted = false
+    logAnimationProgress(extended ? 'ANIMATION_START_REQUESTED' : 'ANIMATION_STOP_REQUESTED')
+
     const target = extended ? 1 : 0
     transition = reducedMotion ? null : { from: visualState.extension, to: target, elapsedMs: 0 }
     if (reducedMotion) visualState.extension = target
@@ -166,6 +219,12 @@ onMounted(() => {
   document.addEventListener('visibilitychange', updateScene)
   if (props.extended) transition = { from: 0, to: 1, elapsedMs: 0 }
   applyMotionPreference()
+
+  // 挂载时已有活动周期，记录本轮动画的初始启动请求。
+  if (props.extended) {
+    animationRequestedAt = performance.now()
+    logAnimationProgress('ANIMATION_START_REQUESTED')
+  }
 })
 
 // 缓存页面离开时暂停动画，并保留当前展开位置与运动相位。
