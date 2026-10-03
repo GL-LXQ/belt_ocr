@@ -514,13 +514,19 @@ class AppController(QObject):
             return Result.error(str(error))
 
     def list_abnormal_events(
-        self, machine_id: str | None = None, session_id: str | None = None
+        self,
+        machine_id: str | None = None,
+        session_id: str | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> Result:
         """整理可选筛选值并读取异常事件。
 
         Args:
             machine_id: 可选机器编号。
             session_id: 可选完整周期编号。
+            start_date: 可选的本地记录开始日期。
+            end_date: 可选的本地记录结束日期，包含整天。
 
         Returns:
             Result(
@@ -539,7 +545,12 @@ class AppController(QObject):
 
         # 读取异常事件并转换预期服务故障。
         try:
-            event_data = self.abnormal_event_service.list_events(machine_id, session_id)
+            event_data = self.abnormal_event_service.list_events(
+                machine_id,
+                session_id,
+                start_date=start_date,
+                end_date=end_date,
+            )
             return Result.ok(event_data)
         except AbnormalEventServiceError as error:
             return Result.error(str(error))

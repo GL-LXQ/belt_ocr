@@ -438,7 +438,7 @@ def test_history_and_abnormal_service_errors_become_results(
     assert controller.list_abnormal_events(" 1 ", " session-1 ") == Result.error(
         "异常事件读取失败",
     )
-    abnormal_event_service.list_events.assert_called_once_with("1", "session-1")
+    abnormal_event_service.list_events.assert_called_once_with("1", "session-1", start_date=None, end_date=None)
 
 
 def test_simple_requests_forward_service_data(controller_services) -> None:

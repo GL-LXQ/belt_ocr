@@ -96,26 +96,32 @@ class AbnormalEventRepo:
             return [machine_id for (machine_id,) in rows]
 
     def list_events(
-        self, machine_id: str | None = None, session_id: str | None = None
+        self,
+        machine_id: str | None = None,
+        session_id: str | None = None,
+        start_created_at: float | None = None,
+        end_created_at: float | None = None,
     ) -> list[dict]:
-        """按机器和完整 Session ID 查询异常事件。
+        """按机器、完整 Session ID 和记录时间查询异常事件。
 
         Args:
             machine_id: 指定机器编号，None 表示全部机器。
             session_id: 完整 Session ID，None 表示全部周期。
+            start_created_at: 记录时间的 Unix 时间戳下界，包含该时刻。
+            end_created_at: 记录时间的 Unix 时间戳上界，不包含该时刻。
 
         Returns:
             返回示例：
                 [{
                     "abnormal_event_id": 5,  # 异常事件主键
-                    "created_at": 1790496570.9,  # 发生时间戳
+                    "created_at": 1790496570.9,  # 记录写入时间戳
                     "machine_id": "1",  # 机器编号
                     "session_id": "session-1",  # 周期编号
                     "reason": "OCR 识别超时",  # 异常原因描述
                     "payload_json": "{}",  # 原始事件内容
                 }]
         """
-        # 组合已填写的筛选条件并按发生时间倒序查询。
+        # 组合机器和完整周期编号的精确筛选条件。
         conditions = []
         parameters = []
         if machine_id is not None:
@@ -124,6 +130,16 @@ class AbnormalEventRepo:
         if session_id is not None:
             conditions.append("session_id = ?")
             parameters.append(session_id)
+
+        # 在排序前筛选包含下界、不包含上界的记录时间范围。
+        if start_created_at is not None:
+            conditions.append("created_at >= ?")
+            parameters.append(start_created_at)
+        if end_created_at is not None:
+            conditions.append("created_at < ?")
+            parameters.append(end_created_at)
+
+        # 按记录写入时间和主键倒序读取匹配结果。
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         query = (
             "SELECT abnormal_event_id, created_at, machine_id, session_id, "
@@ -148,7 +164,7 @@ class AbnormalEventRepo:
             返回示例：
                 {
                     "abnormal_event_id": 5,  # 异常事件主键
-                    "created_at": 1790496570.9,  # 发生时间戳
+                    "created_at": 1790496570.9,  # 记录写入时间戳
                     "machine_id": "1",  # 机器编号
                     "session_id": "session-1",  # 周期编号
                     "reason": "OCR 识别超时",  # 异常原因描述

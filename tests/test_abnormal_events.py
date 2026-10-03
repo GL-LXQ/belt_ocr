@@ -1,8 +1,11 @@
 """验证异常事件查询、中文原因和页面详情。"""
 
+import json
 import os
 import sqlite3
+import time as system_time
 from contextlib import closing
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -10,12 +13,15 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtCore import QDate, QPoint, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from repo.abnormal_event_repo import AbnormalEventRepo
 from src.controller.controller import AppController, Result
-from src.service.abnormal_event_service import AbnormalEventService
+from src.service.abnormal_event_service import AbnormalEventService, format_event_summary
 import ui.__main__ as desktop_entry
+from ui.date_range_picker import DateRangePicker
 from ui.pages.abnormal_events_page import AbnormalEventsPage, format_event_time
 
 
@@ -253,19 +259,20 @@ def test_page_filters_and_shows_full_payload(
         assert page.table.item(2, 1).text() == format_event_time(100.0)
         assert page.table.item(2, 2).text() == "OCR_TIMEOUT"
         assert page.table.item(0, 2).text() == "CUSTOM_REASON"
-        assert page.table.item(2, 3).text() == '{"session_errors": ["OCR_TIMEOUT"]}'
+        assert page.table.item(2, 3).text() == "OCR 识别超时"
         assert page.event_count_label.text() == "3 条事件"
         assert page.empty_label.isHidden()
 
-        # 切换机器立即查询，禁用的日期入口不会产生查询。
+        # 切换机器立即查询，打开日期草稿不产生查询。
         page.machine_filter.setCurrentIndex(page.machine_filter.findData("1"))
         assert page.machine_filter.currentText() == "一号皮带机"
         assert page.table.rowCount() == 2
-        assert not page.time_filter_button.isEnabled()
-        assert "待接入" in page.time_filter_button.text()
+        assert page.time_filter_button.isEnabled()
+        assert page.time_filter_button.text() == "时间范围  ▾"
         event_controller.list_abnormal_events = Mock(wraps=event_controller.list_abnormal_events)
         page.time_filter_button.click()
         event_controller.list_abnormal_events.assert_not_called()
+        page.time_filter_panel.close()
 
         # 按第二条异常的主键读取详情，显示原始周期编号与内容。
         page.table.cellWidget(1, 4).click()
@@ -284,7 +291,7 @@ def test_page_filters_and_shows_full_payload(
         page.detail_dialog.close()
         abnormal_event_service.abnormal_event_repo.insert(300.0, "1", "new-session", "测量周期超时", "{}")
         page.refresh_button.click()
-        event_controller.list_abnormal_events.assert_called_once_with("1", None)
+        event_controller.list_abnormal_events.assert_called_once_with("1", None, start_date=None, end_date=None)
         assert page.machine_filter.currentData() == "1"
         assert page.table.item(0, 2).text() == "测量周期超时"
         page.table.cellWidget(0, 4).click()
@@ -395,3 +402,374 @@ def test_page_handles_empty_results_and_name_lookup_failure(
         page.detail_dialog.close()
         page.close()
         page.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("timezone_name", "selected_date", "utc_start", "utc_end"),
+    (
+        ("UTC", date(2026, 9, 27), "2026-09-27T00:00:00+00:00", "2026-09-28T00:00:00+00:00"),
+        ("Asia/Shanghai", date(2026, 9, 27), "2026-09-26T16:00:00+00:00", "2026-09-27T16:00:00+00:00"),
+        ("America/New_York", date(2026, 3, 8), "2026-03-08T05:00:00+00:00", "2026-03-09T04:00:00+00:00"),
+        ("America/New_York", date(2026, 11, 1), "2026-11-01T04:00:00+00:00", "2026-11-02T05:00:00+00:00"),
+    ),
+)
+@pytest.mark.skipif(not hasattr(system_time, "tzset"), reason="当前系统不支持测试进程切换本地时区")
+def test_service_combines_local_record_dates_machine_and_session(
+    abnormal_event_service: AbnormalEventService,
+    event_controller: AppController,
+    monkeypatch: pytest.MonkeyPatch,
+    timezone_name: str,
+    selected_date: date,
+    utc_start: str,
+    utc_end: str,
+) -> None:
+    """验证本地日期边界、夏令时、组合筛选和同时间稳定排序。
+
+    Args:
+        abnormal_event_service: 使用临时数据库的异常事件服务。
+        event_controller: 使用该服务的真实控制器。
+        monkeypatch: pytest 提供的环境变量替换工具。
+        timezone_name: 测试进程使用的本地时区。
+        selected_date: 需要查询的本地自然日。
+        utc_start: 该自然日起点对应的 UTC 时间。
+        utc_end: 下一自然日起点对应的 UTC 时间。
+
+    Returns:
+        返回示例：
+            None  # 起点包含、终点排除，日期与机器和精确周期条件同时生效
+    """
+    # 临时切换运行时区并按已知 UTC 边界准备记录。
+    with monkeypatch.context() as timezone_patch:
+        timezone_patch.setenv("TZ", timezone_name)
+        system_time.tzset()
+        try:
+            start_timestamp = datetime.fromisoformat(utc_start).timestamp()
+            end_timestamp = datetime.fromisoformat(utc_end).timestamp()
+            middle_timestamp = (start_timestamp + end_timestamp) / 2
+            repo = abnormal_event_service.abnormal_event_repo
+            for timestamp, machine_id, session_id in (
+                (start_timestamp - 0.001, "1", "before"),
+                (start_timestamp, "1", "lower"),
+                (middle_timestamp, "1", "middle"),
+                (end_timestamp - 0.001, "1", "upper-inside"),
+                (end_timestamp, "1", "after"),
+                (middle_timestamp, "2", "other-machine"),
+                (middle_timestamp, "1", "tie"),
+            ):
+                repo.insert(timestamp, machine_id, session_id, "测量周期超时", "{}")
+
+            # 控制器保留原有空白清理，日期条件在数据库中与机器组合。
+            result = event_controller.list_abnormal_events(
+                " 1 ", " ", start_date=selected_date, end_date=selected_date
+            )
+            assert result.success
+            assert [event["session_id"] for event in result.data["events"]] == [
+                "upper-inside", "tie", "middle", "lower"
+            ]
+            all_machines = abnormal_event_service.list_events(start_date=selected_date, end_date=selected_date)
+            assert len(all_machines["events"]) == 5
+
+            # 完整周期编号继续精确匹配，SQL 参数不会被当作语句。
+            matched = abnormal_event_service.list_events("1", "middle", selected_date, selected_date)
+            assert [event["session_id"] for event in matched["events"]] == ["middle"]
+            assert abnormal_event_service.list_events("1", "midd", selected_date, selected_date)["events"] == []
+            injected_query = abnormal_event_service.list_events("1' OR 1=1 --", None, selected_date, selected_date)
+            assert injected_query["events"] == []
+
+            # 后端允许只设一侧边界，不传日期时仍返回原有全部记录。
+            lower_only = abnormal_event_service.list_events("1", start_date=selected_date)["events"]
+            assert all(event["created_at"] >= start_timestamp for event in lower_only)
+            assert lower_only[0]["session_id"] == "after"
+            upper_only = abnormal_event_service.list_events("1", end_date=selected_date)["events"]
+            assert all(event["created_at"] < end_timestamp for event in upper_only)
+            assert len(abnormal_event_service.list_events()["events"]) == 10
+        finally:
+            timezone_patch.undo()
+            system_time.tzset()
+
+
+def test_repo_applies_zero_timestamp_boundary(abnormal_event_service: AbnormalEventService) -> None:
+    """验证零时间戳作为真实边界，不被忽略。
+
+    Args:
+        abnormal_event_service: 使用临时数据库的异常事件服务。
+
+    Returns:
+        返回示例：
+            None  # 仅返回包含下界且小于上界的记录
+    """
+    repo = abnormal_event_service.abnormal_event_repo
+    repo.insert(-1.0, "1", "before-epoch", "历史记录", "{}")
+    repo.insert(0.0, "1", "at-epoch", "历史记录", "{}")
+    events = repo.list_events("1", start_created_at=0.0, end_created_at=100.0)
+    assert [event["session_id"] for event in events] == ["at-epoch"]
+
+
+@pytest.mark.parametrize(
+    ("payload_json", "expected_summary"),
+    (
+        ('{"session_errors": ["OCR_TIMEOUT", "FREQUENCY_NO_VALID_MEASUREMENT"]}', "OCR 识别超时；没有有效频率读数"),
+        ('{"session_errors": ["StopGrabbing 失败", "相机采集失败"]}', "StopGrabbing 失败；相机采集失败"),
+        ('{"session_errors": ["FUTURE_ERROR", null, 3, {}]}', "FUTURE_ERROR"),
+        ('{"message": "相机\\n断开"}', "相机 断开"),
+        ('{"event_type": "MachineClosed", "payload": null}', "事件：机器关闭"),
+        ('{"event_type": "OCRFailed", "payload": "模型执行失败"}', "事件：OCR 识别执行失败；模型执行失败"),
+        ('{"event_type": "FutureEvent", "payload": {"message": "已保存的消息"}}', "事件：FutureEvent；已保存的消息"),
+        ('{"event_type": [], "session_errors": "错误字段格式", "message": {}}', "其他事件内容，请查看原始数据"),
+        ('{"other": [1, 2, 3]}', "其他事件内容，请查看原始数据"),
+        ('["unknown", "structure"]', "其他事件内容，请查看原始数据"),
+        ("null", "其他事件内容，请查看原始数据"),
+        ("{}", "无附加信息"),
+        ('"已保存的文本"', "已保存的文本"),
+        ("not JSON", "原始内容格式异常，请查看原始数据"),
+        ("", "原始内容格式异常，请查看原始数据"),
+    ),
+)
+def test_event_summary_reads_known_fields_and_handles_unknown_payload(
+    payload_json: str,
+    expected_summary: str,
+) -> None:
+    """验证可读摘要只使用已保存内容，并容忍未知和损坏内容。
+
+    Args:
+        payload_json: 需要解析的历史或运行事件内容。
+        expected_summary: 预期的单行可读摘要。
+
+    Returns:
+        返回示例：
+            None  # 摘要符合已保存字段，未知内容不影响列表加载
+    """
+    assert format_event_summary(payload_json) == expected_summary
+
+
+def test_summary_supports_real_frequency_payload_and_preserves_raw_detail(
+    abnormal_event_service: AbnormalEventService,
+) -> None:
+    """验证真实运行事件序列化后的频率摘要和未改写的原始详情。
+
+    Args:
+        abnormal_event_service: 使用临时数据库的异常事件服务。
+
+    Returns:
+        返回示例：
+            None  # 摘要显示已保存的频率和序列号，原因和原始 JSON 完整保留
+    """
+    from database import serialize_value
+    from enums import EventType
+    from models import FrequencyMeasurement, RuntimeEvent
+
+    # 使用运行时实际数据结构生成保存的事件 JSON。
+    event = RuntimeEvent(
+        EventType.FREQUENCY_MEASURED,
+        "1",
+        SESSION_ID,
+        FrequencyMeasurement(SESSION_ID, "FM01", 0.0),
+    )
+    raw_json = json.dumps(serialize_value(event), ensure_ascii=False, indent=2)
+    event_id = abnormal_event_service.abnormal_event_repo.insert(300.0, "1", SESSION_ID, "迟到的频率读数", raw_json)
+
+    # 列表使用真实读数，不把零值当成缺失，也不改写原因和内容。
+    events = abnormal_event_service.list_events(session_id=SESSION_ID)["events"]
+    assert events[0]["payload_summary"] == "事件：收到频率读数；频率：0.0 Hz；频率仪：FM01"
+    assert events[0]["reason"] == "迟到的频率读数"
+    assert events[0]["payload_json"] == raw_json
+    assert abnormal_event_service.get_event(event_id)["event"]["payload_json"] == raw_json
+
+
+def test_summary_limits_length_without_changing_saved_payload(abnormal_event_service: AbnormalEventService) -> None:
+    """验证长摘要被截断而完整原始内容仍可读取。
+
+    Args:
+        abnormal_event_service: 使用临时数据库的异常事件服务。
+
+    Returns:
+        返回示例：
+            None  # 摘要最多八十字，列表和详情中的原始内容没有改动
+    """
+    raw_json = json.dumps({"message": "采集错误" * 100}, ensure_ascii=False, indent=2)
+    event_id = abnormal_event_service.abnormal_event_repo.insert(400.0, "1", SESSION_ID, "原因保持原值", raw_json)
+    event = abnormal_event_service.list_events()["events"][0]
+    assert len(event["payload_summary"]) == 80
+    assert event["payload_summary"].endswith("…")
+    assert event["payload_json"] == raw_json
+    assert abnormal_event_service.get_event(event_id)["event"]["payload_json"] == raw_json
+
+
+def test_page_applies_date_draft_with_machine_and_clears_only_dates(
+    qt_application: QApplication,
+    abnormal_event_service: AbnormalEventService,
+    event_controller: AppController,
+) -> None:
+    """验证单层日期草稿、组合查询、刷新保留和只清除日期。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        abnormal_event_service: 使用临时数据库的异常事件服务。
+        event_controller: 可查询真实临时记录的控制器。
+
+    Returns:
+        返回示例：
+            None  # 应用和清除各查询一次，刷新和切换机器保留已应用日期
+    """
+    # 在两日范围内、范围外及另一台机器上准备异常记录。
+    start_date = date(2026, 9, 26)
+    end_date = date(2026, 9, 27)
+    repo = abnormal_event_service.abnormal_event_repo
+    for record_date, machine_id, session_id in (
+        (start_date, "1", "range-first"),
+        (end_date, "1", "range-last"),
+        (end_date + timedelta(days=1), "1", "excluded-next"),
+        (start_date, "2", "other-machine"),
+    ):
+        timestamp = datetime.combine(record_date, time(1)).astimezone(timezone.utc).timestamp()
+        repo.insert(timestamp, machine_id, session_id, session_id, "{}")
+    page = AbnormalEventsPage(event_controller)
+    try:
+        # 先选择机器，再打开日期草稿面板。
+        page.refresh_events()
+        page.machine_filter.setCurrentIndex(page.machine_filter.findData("1"))
+        page.show()
+        qt_application.processEvents()
+        query_events = Mock(wraps=event_controller.list_abnormal_events)
+        event_controller.list_abnormal_events = query_events
+        page.time_filter_button.click()
+        panel = page.time_filter_panel
+        picker = panel.view.findChild(DateRangePicker)
+        assert panel.windowType() == Qt.WindowType.Tool
+        assert picker.start_date == QDate.currentDate()
+        assert picker.end_date == QDate.currentDate()
+
+        # 日历点击只修改草稿，同层日历保持打开。
+        picker.calendar._onDayItemClicked(QDate(start_date))
+        picker.end_button.click()
+        picker.calendar._onDayItemClicked(QDate(end_date))
+        assert panel.isVisible()
+        assert page.time_filter_panel is panel
+        assert picker.start_date == QDate(start_date)
+        assert picker.end_date == QDate(end_date)
+        assert page.selected_start_date is None
+        query_events.assert_not_called()
+
+        # 确定后只发起一次机器与日期组合查询。
+        apply_button = next(button for button in panel.view.findChildren(QPushButton) if button.text() == "确定")
+        apply_button.click()
+        query_events.assert_called_once_with("1", None, start_date=start_date, end_date=end_date)
+        assert page.time_filter_panel is None
+        assert page.table.rowCount() == 2
+        assert [page.table.item(row, 2).text() for row in range(2)] == ["range-last", "range-first"]
+        assert page.time_filter_button.text() == "2026-09-26 ～ 2026-09-27  ▾"
+
+        # 刷新记录仍使用当前机器和日期条件。
+        timestamp = datetime.combine(end_date, time(2)).astimezone(timezone.utc).timestamp()
+        repo.insert(timestamp, "1", "new-in-range", "范围内新增", "{}")
+        query_events.reset_mock()
+        page.refresh_button.click()
+        query_events.assert_called_once_with("1", None, start_date=start_date, end_date=end_date)
+        assert page.machine_filter.currentData() == "1"
+        assert page.table.rowCount() == 3
+        assert page.table.item(0, 2).text() == "范围内新增"
+
+        # 切换机器继续使用已应用日期，再切回原机器。
+        query_events.reset_mock()
+        page.machine_filter.setCurrentIndex(page.machine_filter.findData("2"))
+        query_events.assert_called_once_with("2", None, start_date=start_date, end_date=end_date)
+        assert page.table.rowCount() == 1
+        page.machine_filter.setCurrentIndex(page.machine_filter.findData("1"))
+
+        # 再打开恢复已应用草稿，清除日期不会改变机器选择。
+        page.time_filter_button.click()
+        panel = page.time_filter_panel
+        picker = panel.view.findChild(DateRangePicker)
+        assert picker.start_date == QDate(start_date)
+        assert picker.end_date == QDate(end_date)
+        query_events.reset_mock()
+        clear_button = next(button for button in panel.view.findChildren(QPushButton) if button.text() == "清除时间")
+        clear_button.click()
+        query_events.assert_called_once_with("1", None, start_date=None, end_date=None)
+        assert page.time_filter_panel is None
+        assert page.machine_filter.currentData() == "1"
+        assert page.selected_start_date is None
+        assert page.selected_end_date is None
+        assert page.time_filter_button.text() == "时间范围  ▾"
+        assert page.table.rowCount() == 6
+    finally:
+        if page.time_filter_panel is not None:
+            page.time_filter_panel.close()
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+        qt_application.processEvents()
+
+
+@pytest.mark.parametrize("dismiss_action", ("cancel", "escape", "outside", "toggle", "hide"))
+def test_page_discards_unapplied_date_draft_and_reopens_applied_range(
+    qt_application: QApplication,
+    event_controller: AppController,
+    dismiss_action: str,
+) -> None:
+    """验证日期草稿取消、重复打开和页面离开时不触发查询。
+
+    Args:
+        qt_application: 测试期间保持存活的 Qt 应用。
+        event_controller: 可查询真实临时记录的控制器。
+        dismiss_action: 关闭日期草稿的控件交互。
+
+    Returns:
+        返回示例：
+            None  # 日期草稿被丢弃，旧面板通知不会影响新面板
+    """
+    page = AbnormalEventsPage(event_controller)
+    try:
+        # 保留已应用机器与日期，再打开并修改草稿。
+        page.refresh_events()
+        page.machine_filter.setCurrentIndex(page.machine_filter.findData("1"))
+        page.apply_time_filter(date(2026, 9, 26), date(2026, 9, 27))
+        assert page.empty_label.text() == "当前筛选条件下暂无异常事件"
+        page.show()
+        qt_application.processEvents()
+        query_events = Mock(wraps=event_controller.list_abnormal_events)
+        event_controller.list_abnormal_events = query_events
+        page.time_filter_button.click()
+        panel = page.time_filter_panel
+        picker = panel.view.findChild(DateRangePicker)
+        picker.calendar._onDayItemClicked(QDate(2026, 9, 29))
+        assert picker.start_date == QDate(2026, 9, 29)
+        assert picker.end_date == QDate(2026, 9, 29)
+
+        # 使用控件事件取消草稿或离开页面。
+        if dismiss_action == "cancel":
+            cancel_button = next(button for button in panel.view.findChildren(QPushButton) if button.text() == "取消")
+            cancel_button.click()
+        elif dismiss_action == "escape":
+            QTest.keyClick(panel, Qt.Key.Key_Escape)
+        elif dismiss_action == "outside":
+            QTest.mouseClick(panel, Qt.MouseButton.LeftButton, pos=QPoint(-10, -10))
+        elif dismiss_action == "toggle":
+            page.time_filter_button.click()
+        else:
+            page.hide()
+        query_events.assert_not_called()
+        assert not panel.isVisible()
+        assert page.time_filter_panel is None
+        assert page.machine_filter.currentData() == "1"
+        assert page.selected_start_date == date(2026, 9, 26)
+        assert page.selected_end_date == date(2026, 9, 27)
+
+        # 重新打开恢复已应用日期，旧面板通知只影响旧实例。
+        page.show()
+        page.time_filter_button.click()
+        current_panel = page.time_filter_panel
+        picker = current_panel.view.findChild(DateRangePicker)
+        assert picker.start_date == QDate(2026, 9, 26)
+        assert picker.end_date == QDate(2026, 9, 27)
+        panel.closed.emit()
+        assert page.time_filter_panel is current_panel
+        assert current_panel.isVisible()
+        query_events.assert_not_called()
+    finally:
+        if page.time_filter_panel is not None:
+            page.time_filter_panel.close()
+        page.detail_dialog.close()
+        page.close()
+        page.deleteLater()
+        qt_application.processEvents()

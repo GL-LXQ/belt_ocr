@@ -1,9 +1,9 @@
 """查询异常事件并查看已保存的原始内容。"""
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -22,9 +22,12 @@ from qfluentwidgets import (
     CaptionLabel,
     ComboBox,
     FluentIcon,
+    FlyoutAnimationType,
+    FlyoutView,
     InfoBar,
     MaskDialogBase,
     PlainTextEdit,
+    PrimaryPushButton,
     PushButton,
     ScrollArea,
     SimpleCardWidget,
@@ -34,8 +37,11 @@ from qfluentwidgets import (
     TransparentPushButton,
     setCustomStyleSheet,
 )
+from qfluentwidgets.components.widgets.flyout import FlyoutAnimationManager
 
 from src.controller.controller import AppController
+from ui.date_range_picker import DateRangePicker
+from ui.pages.history_page import HistoryTimeFilterPanel
 from ui.theme import COLORS
 
 
@@ -53,7 +59,7 @@ def format_event_time(created_at: float) -> str:
 
 
 class AbnormalEventsPage(QWidget):
-    """组织异常事件机器筛选、列表和只读详情。"""
+    """组织异常事件机器与日期筛选、列表和只读详情。"""
 
     def __init__(self, controller: AppController, parent: QWidget | None = None) -> None:
         """创建异常事件页面并绑定查询操作。
@@ -71,6 +77,11 @@ class AbnormalEventsPage(QWidget):
         self.controller = controller
         self.machine_names_by_id: dict[str, str] = {}
         self.current_payload_json = ""
+
+        # 保存已应用的本地日期范围和当前草稿面板。
+        self.selected_start_date: date | None = None
+        self.selected_end_date: date | None = None
+        self.time_filter_panel: HistoryTimeFilterPanel | None = None
 
         # 创建页面标题。
         layout = QVBoxLayout(self)
@@ -95,17 +106,17 @@ class AbnormalEventsPage(QWidget):
         self.machine_filter.currentIndexChanged.connect(self.reload_events)
         filter_layout.addWidget(self.machine_filter)
 
-        # 日期筛选尚未接入，保持禁用并明确标注。
-        self.time_filter_button = PushButton(FluentIcon.CALENDAR, "时间范围 · 待接入")
+        # 使用历史页的单层日期面板编辑记录时间范围。
+        self.time_filter_button = PushButton(FluentIcon.CALENDAR, "时间范围")
         self.time_filter_button.setObjectName("abnormalTimeFilter")
-        self.time_filter_button.setAccessibleName("时间范围，待接入")
-        self.time_filter_button.setFixedSize(200, 36)
-        self.time_filter_button.setEnabled(False)
-        self.time_filter_button.setToolTip("日期查询尚未接入，目前按全部时间显示")
+        self.time_filter_button.setAccessibleName("时间筛选")
+        self.time_filter_button.setFixedSize(270, 36)
+        self.time_filter_button.clicked.connect(self.show_time_filter_flyout)
+        self.update_time_filter_button()
         filter_layout.addWidget(self.time_filter_button)
         filter_layout.addStretch()
 
-        # 刷新时继续保留已选择的机器。
+        # 刷新时继续保留已选择的机器和日期范围。
         self.refresh_button = TransparentPushButton(FluentIcon.SYNC, "刷新")
         self.refresh_button.setObjectName("abnormalRefreshButton")
         self.refresh_button.setFixedSize(88, 36)
@@ -304,6 +315,138 @@ class AbnormalEventsPage(QWidget):
             setCustomStyleSheet(widget, self.abnormal_stylesheet, self.abnormal_stylesheet)
         self.detail_dialog.hide()
 
+    def update_time_filter_button(self) -> None:
+        """在日期按钮中显示已应用的记录时间范围。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 按钮显示不限时间、单日或完整日期范围
+        """
+        # 将已应用的日期范围转换为按钮文字。
+        if self.selected_start_date is None:
+            caption = "时间范围"
+        elif self.selected_start_date == self.selected_end_date:
+            caption = f"{self.selected_start_date:%Y-%m-%d}"
+        else:
+            caption = f"{self.selected_start_date:%Y-%m-%d} ～ {self.selected_end_date:%Y-%m-%d}"
+
+        # 同步按钮文字与本地记录日期提示。
+        self.time_filter_button.setText(f"{caption}  ▾")
+        self.time_filter_button.setToolTip(f"按本地记录日期筛选：{caption}")
+
+    def apply_time_filter(self, start_date: date | None, end_date: date | None) -> None:
+        """应用日期草稿或清除时间条件并保留当前机器选择。
+
+        Args:
+            start_date: 本地开始日期，None 表示不限时间。
+            end_date: 本地结束日期，与开始日期同时设置或清除。
+
+        Returns:
+            返回示例：
+                None  # 日期条件和按钮已更新，列表只刷新一次
+        """
+        # 保存已应用的日期条件。
+        self.selected_start_date = start_date
+        self.selected_end_date = end_date
+
+        # 刷新日期提示并按机器和日期组合查询。
+        self.update_time_filter_button()
+        self.reload_events()
+
+    def show_time_filter_flyout(self) -> None:
+        """使用现有单层日历面板编辑临时日期范围。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 确定或清除时应用条件，取消和关闭时丢弃草稿
+        """
+        # 再次点击按钮时只关闭当前日期草稿面板。
+        if self.time_filter_panel is not None and self.time_filter_panel.isVisible():
+            self.time_filter_panel.close()
+            return
+
+        # 创建与历史页相同的单层日期筛选内容。
+        view = FlyoutView(title="时间筛选", content="", isClosable=False)
+        content = QWidget()
+        content.setFixedWidth(346)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(16, 10, 16, 12)
+        content_layout.setSpacing(12)
+
+        # 从已应用的日期恢复草稿，未筛选时使用今天。
+        current_date = QDate.currentDate()
+        date_range = DateRangePicker(
+            QDate(self.selected_start_date) if self.selected_start_date else current_date,
+            QDate(self.selected_end_date) if self.selected_end_date else current_date,
+            content,
+        )
+        content_layout.addWidget(date_range)
+
+        # 确定和清除日期应用查询，取消只关闭面板。
+        actions = QHBoxLayout()
+        clear_button = TransparentPushButton("清除时间")
+        cancel_button = TransparentPushButton("取消")
+        apply_button = PrimaryPushButton("确定")
+        actions.addWidget(clear_button)
+        actions.addStretch()
+        actions.addWidget(cancel_button)
+        actions.addWidget(apply_button)
+        content_layout.addLayout(actions)
+        view.addWidget(content)
+
+        # 复用非 Popup 浮层及其 Esc 和外部点击处理。
+        panel = HistoryTimeFilterPanel(view, self.time_filter_button, self.window())
+        self.time_filter_panel = panel
+
+        def clear_panel_reference() -> None:
+            """只清理对应已关闭面板的引用。
+
+            Args:
+                无外部参数。
+
+            Returns:
+                返回示例：
+                    None  # 旧面板的迟到通知不会清理新面板
+            """
+            if self.time_filter_panel is panel:
+                self.time_filter_panel = None
+
+        panel.closed.connect(clear_panel_reference)
+
+        # 沿用现有面板定位与下拉动画。
+        panel.show()
+        animation = FlyoutAnimationManager.make(FlyoutAnimationType.DROP_DOWN, panel)
+        panel.exec(animation.position(self.time_filter_button), FlyoutAnimationType.DROP_DOWN)
+
+        # 将应用、清除和取消分别连接到已有查询和关闭入口。
+        apply_button.clicked.connect(
+            lambda: self.apply_time_filter(date_range.start_date.toPython(), date_range.end_date.toPython())
+        )
+        clear_button.clicked.connect(lambda: self.apply_time_filter(None, None))
+        cancel_button.clicked.connect(panel.close)
+        apply_button.clicked.connect(panel.close)
+        clear_button.clicked.connect(panel.close)
+
+    def hideEvent(self, event) -> None:
+        """页面离开时关闭未应用的日期草稿面板。
+
+        Args:
+            event: Qt 隐藏事件。
+
+        Returns:
+            返回示例：
+                None  # 面板和应用事件过滤器已关闭，已应用条件保留
+        """
+        if self.time_filter_panel is not None:
+            self.time_filter_panel.close()
+        super().hideEvent(event)
+
     def refresh_events(self) -> None:
         """更新机器选项与名称并按当前条件重新查询异常事件。
 
@@ -342,21 +485,26 @@ class AbnormalEventsPage(QWidget):
         self.machine_filter.setCurrentIndex(max(selected_index, 0))
         self.machine_filter.blockSignals(False)
 
-        # 使用当前机器条件刷新列表。
+        # 使用当前机器和日期条件刷新列表。
         self.reload_events()
 
     def reload_events(self) -> None:
-        """按机器条件填充异常事件列表。
+        """按机器和本地记录日期填充异常事件列表。
 
         Args:
             无外部参数。
 
         Returns:
             返回示例：
-                None  # 表格显示符合机器条件的异常事件
+                None  # 表格显示符合机器和日期条件的异常事件
         """
-        # 通过现有接口读取全部周期，不传入尚未接入的日期条件。
-        result = self.controller.list_abnormal_events(self.machine_filter.currentData(), None)
+        # 通过现有接口读取机器和日期条件下的全部周期。
+        result = self.controller.list_abnormal_events(
+            self.machine_filter.currentData(),
+            None,
+            start_date=self.selected_start_date,
+            end_date=self.selected_end_date,
+        )
         if not result.success:
             self.show_load_error(result.message)
             return
@@ -366,6 +514,8 @@ class AbnormalEventsPage(QWidget):
         self.table.setRowCount(len(events))
         self.event_count_label.setText(f"{len(events)} 条事件")
         self.empty_label.setText("该机器暂无异常事件" if self.machine_filter.currentData() else "暂无异常事件")
+        if self.selected_start_date is not None:
+            self.empty_label.setText("当前筛选条件下暂无异常事件")
         self.empty_label.setVisible(not events)
 
         # 将机器名称、记录时间、原始原因和服务摘要填入表格。
