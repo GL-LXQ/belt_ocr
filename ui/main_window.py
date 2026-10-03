@@ -60,7 +60,8 @@ class MainWindow(FluentWindow):
         self.history_page = HistoryPage(controller, self)
         self.abnormal_events_page = AbnormalEventsPage(controller, self)
         self.machines_page = MachinesPage(controller, self)
-        self.images_page = ImageManagementPage(self)
+        self.images_page = ImageManagementPage(self, controller=controller)
+        self.images_page.record_requested.connect(self.show_image_record)
         self.settings_page = SystemConfigurationPage(controller, self)
         self.pages = {
             "realtime": self.realtime_page,
@@ -109,7 +110,7 @@ class MainWindow(FluentWindow):
                 self.pages[page_key], PAGES[page_key][2], PAGES[page_key][0]
             )
 
-        # 保留底部导航顺序，图片管理使用独立的只读预览页面。
+        # 保留底部导航顺序，图片管理使用独立的只读页面。
         for page_key in ("images", "settings", "logs"):
             page = self.create_placeholder_page(page_key) if page_key == "logs" else self.pages[page_key]
             self.pages[page_key] = page
@@ -260,6 +261,18 @@ class MainWindow(FluentWindow):
         """
         self.switchTo(self.pages[page_key])
 
+    def show_image_record(self, session_id: str) -> None:
+        """从图片管理切换到已有历史页并打开测量详情。
+
+        Args:
+            session_id: 图片所属的测量周期编号。
+
+        Returns:
+            None  # 历史页已打开，并沿用现有详情和人工复核入口
+        """
+        self.switch_page("history")
+        self.history_page.show_record_detail(session_id)
+
     def update_current_page(self, page_index: int):
         """在页面变化后更新标题并读取对应列表。
 
@@ -386,3 +399,7 @@ class MainWindow(FluentWindow):
                 self.controller.stop_monitoring()
             return
         super().closeEvent(event)
+
+        # 仅在监测结束且窗口确认关闭后释放图片任务。
+        if event.isAccepted():
+            self.images_page.shutdown()

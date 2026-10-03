@@ -100,6 +100,7 @@ class MeasurementRecordService:
                             "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
                             "recognized_lines": ("ABC",),  # 正式识别文字
                             "final_frequency_hz": 50.0,  # 最终频率
+                            "evidence_directory": "runtime/evidence/1",  # 已存证据目录
                             "needs_review": False,  # 是否需要人工复核
                             "reviewed_at": None,  # 人工复核时间
                             "reviewed_lines": None,  # 人工修改后的文字

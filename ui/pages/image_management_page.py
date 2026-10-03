@@ -1,11 +1,15 @@
-"""按测量分组的图片管理 UI，真实数据读取留待下一阶段接入。"""
+"""按测量分页、后台读取当前证据的图片管理页面。"""
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from threading import Event
+from typing import Callable
 
-from PySide6.QtCore import QDate, QEvent, QRect, QSize, Qt
-from PySide6.QtGui import QAction, QPainter, QPixmap
+from PySide6.QtCore import QDate, QEvent, QRect, QSize, Qt, QThreadPool, Signal, Slot
+from PySide6.QtGui import QAction, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -36,10 +40,20 @@ from qfluentwidgets import (
 from qfluentwidgets.components.widgets.flyout import FlyoutAnimationManager
 
 from ui.date_range_picker import DateRangePicker
-from ui.image_evidence_viewer import EvidenceViewer
-from ui.image_management_preview import (
+from src.controller.controller import AppController
+from ui.image_evidence import (
     EVIDENCE_MESSAGES,
     REVIEW_CAPTIONS,
+    EvidenceCardImage,
+    EvidenceMeasurement,
+    EvidenceReadFailure,
+    EvidenceReadSignals,
+    EvidenceReadTask,
+    build_evidence_measurement,
+    read_card_evidence,
+)
+from ui.image_evidence_viewer import EvidenceViewer
+from ui.image_management_preview import (
     PreviewMeasurement,
     build_preview_measurements,
     draw_preview_image,
@@ -51,11 +65,11 @@ from ui.theme import COLORS
 class EvidenceThumbnail(QLabel):
     """完整展示卡片首图或异常占位，不裁切图片。"""
 
-    def __init__(self, record: PreviewMeasurement, parent: QWidget | None = None) -> None:
+    def __init__(self, record: EvidenceMeasurement | PreviewMeasurement, parent: QWidget | None = None) -> None:
         """保存当前首图并建立目录或坏图提示。
 
         Args:
-            record: 当前测量的演示展示数据。
+            record: 当前测量展示数据，真实图片等待后台缩略图。
             parent: 所属测量卡片。
 
         Returns:
@@ -69,13 +83,30 @@ class EvidenceThumbnail(QLabel):
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         self.source_pixmap = QPixmap()
         image = record.images[0] if record.images else None
-        if image and image.readable:
+        if isinstance(record, PreviewMeasurement) and image and image.readable:
             self.source_pixmap = draw_preview_image(image)
         else:
             state = "corrupt" if image else record.evidence_state
             title = EVIDENCE_MESSAGES[state][0]
             self.setText(f"{title}\n{image.filename}" if image else title)
         self.setToolTip(image.filename if image else EVIDENCE_MESSAGES[record.evidence_state][0])
+
+    def set_evidence(self, result: EvidenceCardImage) -> None:
+        """在主线程中显示后台读取的缩略图或明确失败占位。
+
+        Args:
+            result: 当前记录的目录数量及首张可用缩略图。
+
+        Returns:
+            None  # QPixmap 只在主线程建立，异常保留实际文件名
+        """
+        self.source_pixmap = QPixmap.fromImage(result.thumbnail)
+        self.clear()
+        if result.thumbnail.isNull():
+            title = EVIDENCE_MESSAGES[result.state][0]
+            self.setText(f"{title}\n{result.filename}" if result.filename else title)
+        self.setToolTip(result.filename or EVIDENCE_MESSAGES[result.state][0])
+        self.update()
 
     def paintEvent(self, event) -> None:
         """在留白区域中等比例绘制整张图片。
@@ -101,11 +132,11 @@ class EvidenceThumbnail(QLabel):
 class MeasurementEvidenceCard(QPushButton):
     """以一次测量为单位展示首图、摘要和状态。"""
 
-    def __init__(self, record: PreviewMeasurement, parent: QWidget | None = None) -> None:
+    def __init__(self, record: EvidenceMeasurement | PreviewMeasurement, parent: QWidget | None = None) -> None:
         """建立可用鼠标或键盘打开的测量卡片。
 
         Args:
-            record: 卡片对应的内存演示测量。
+            record: 卡片对应的真实测量或明确开启的内存演示。
             parent: 所属记录网格。
 
         Returns:
@@ -119,7 +150,8 @@ class MeasurementEvidenceCard(QPushButton):
         self.setMinimumWidth(0)
         self.setFixedHeight(304)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setAccessibleName(f"演示测量 {record.session_id}，{record.machine_name}，打开证据查看器")
+        prefix = "演示测量" if isinstance(record, PreviewMeasurement) else "测量"
+        self.setAccessibleName(f"{prefix} {record.session_id}，{record.machine_name}，打开证据查看器")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 14)
         layout.setSpacing(9)
@@ -207,19 +239,23 @@ class MeasurementEvidenceCard(QPushButton):
 
 
 class ImageManagementPage(QWidget):
-    """提供显式演示入口的分组证据浏览页面。"""
+    """复用测量查询并按页读取证据，演示入口与业务数据隔离。"""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        """建立图片管理界面，不查询业务库或读取证据目录。
+    record_requested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None, *, controller: AppController | None = None) -> None:
+        """建立图片管理界面，进入页面时才提交当前页后台读取。
 
         Args:
             parent: 所属主窗口。
+            controller: 现有测量 Controller，独立演示页面可不传入。
 
         Returns:
-            None  # 页面默认显示待接入状态，演示仅由明确入口开启
+            None  # 默认使用真实记录，演示仅由明确入口开启
         """
         super().__init__(parent)
         self.setObjectName("images")
+        self.controller = controller
         self.preview_enabled = False
         self.preview_records: tuple[PreviewMeasurement, ...] = ()
         self.cards: list[MeasurementEvidenceCard] = []
@@ -228,6 +264,15 @@ class ImageManagementPage(QWidget):
         self.total_pages = 1
         self.grid_columns = 0
         self.time_filter_panel: HistoryTimeFilterPanel | None = None
+
+        # 页面只保留本次查询代次和至多两个后台读取线程。
+        self.thread_pool: QThreadPool | None = None
+        self.read_signals: EvidenceReadSignals | None = None
+        self.read_generation = 0
+        self.cancelled = Event()
+        self.shutting_down = False
+        self.query_error = False
+        QApplication.instance().aboutToQuit.connect(self.shutdown)
 
         # 保存已提交条件，输入中的文字不影响其他筛选操作。
         self.selected_text_query = ""
@@ -256,6 +301,7 @@ class ImageManagementPage(QWidget):
             if isinstance(widget, (PushButton, LineEdit, SegmentedWidget, SimpleCardWidget, QLabel)):
                 setCustomStyleSheet(widget, self.image_stylesheet, self.image_stylesheet)
         self.viewer = EvidenceViewer(self.window(), self.image_stylesheet)
+        self.viewer.record_requested.connect(self.record_requested.emit)
         self.set_preview_enabled(False)
 
     def build_heading(self, layout: QVBoxLayout) -> None:
@@ -495,16 +541,17 @@ class ImageManagementPage(QWidget):
         if self.time_filter_panel is not None:
             self.time_filter_panel.close()
 
-        # 用明确文案区分真实数据待接入和当前演示状态。
+        # 切换模式后丢弃旧请求，演示不作为读取失败的替代数据。
+        self.cancel_reads()
         self.preview_label.setText(
             "演示数据 · UI 预览｜虚构测量与绘制占位图，仅存于内存。"
-            if enabled else "UI 阶段｜真实图片读取与记录跳转待接入，可先打开演示预览。"
+            if enabled else "每页读取 12 次测量；图片来自记录保存的证据目录，现存数量不代表证据完整。"
         )
         self.preview_button.setText("退出演示" if enabled else "打开演示预览")
         self.scenario_combo.setVisible(enabled)
-        self.filter_card.setEnabled(enabled)
-        self.refresh_button.setEnabled(enabled)
-        self.refresh_button.setToolTip("仅刷新当前演示场景，保留已应用筛选" if enabled else "真实数据读取待接入")
+        self.filter_card.setEnabled(True)
+        self.refresh_button.setEnabled(True)
+        self.refresh_button.setToolTip("刷新当前演示场景" if enabled else "重新读取当前筛选和当前页")
 
         # 机器选项仅来自演示记录，不读取机器表。
         self.machine_combo.blockSignals(True)
@@ -517,7 +564,7 @@ class ImageManagementPage(QWidget):
         self.reset_filters()
 
     def reset_filters(self) -> None:
-        """清除查询草稿及全部已应用条件并恢复完整演示场景。
+        """清除查询草稿及全部已应用条件并恢复第一页。
 
         Args:
             无。
@@ -551,7 +598,7 @@ class ImageManagementPage(QWidget):
         self.render_records()
 
     def apply_text_search(self) -> None:
-        """提交文字草稿并从第一页筛选演示记录。
+        """提交文字草稿并从第一页筛选测量记录。
 
         Args:
             无。
@@ -566,7 +613,7 @@ class ImageManagementPage(QWidget):
         self.render_records()
 
     def apply_machine_filter(self) -> None:
-        """应用当前机器并从第一页展示演示记录。
+        """应用当前机器并从第一页展示测量记录。
 
         Args:
             无。
@@ -579,7 +626,7 @@ class ImageManagementPage(QWidget):
         self.render_records()
 
     def apply_status_filter(self, review_status: str | None) -> None:
-        """应用复核状态并从第一页展示演示记录。
+        """应用复核状态并从第一页展示测量记录。
 
         Args:
             review_status: None 表示全部，其他值为已有复核状态。
@@ -599,7 +646,7 @@ class ImageManagementPage(QWidget):
             end_date: 结束日期，与开始日期同时设置或清除。
 
         Returns:
-            None  # 按完成日期筛选第一页演示测量
+            None  # 按完成日期筛选第一页测量
         """
         self.selected_start_date = start_date
         self.selected_end_date = end_date
@@ -757,18 +804,17 @@ class ImageManagementPage(QWidget):
         Returns:
             None  # 当前页、空状态和按测量计数的分页已同步
         """
-        records = self.filter_preview_records() if self.preview_enabled else []
+        if not self.preview_enabled:
+            self.reload_measurements()
+            return
+        records = self.filter_preview_records()
         total = len(records)
         self.total_pages = max(1, (total + self.page_size - 1) // self.page_size)
         self.current_page = min(self.current_page, self.total_pages)
         page_start = (self.current_page - 1) * self.page_size
 
         # 删除上一页组件，不保存跨页图片缓存。
-        for card in self.cards:
-            self.grid.removeWidget(card)
-            card.hide()
-            card.deleteLater()
-        self.cards = []
+        self.clear_cards()
         for record in records[page_start:page_start + self.page_size]:
             card = MeasurementEvidenceCard(record)
             card.clicked.connect(lambda checked=False, measurement=record: self.viewer.open_record(measurement))
@@ -780,11 +826,7 @@ class ImageManagementPage(QWidget):
         self.grid_body.setVisible(bool(self.cards))
         self.empty_state.setVisible(not self.cards)
         self.empty_action.setVisible(not self.cards)
-        if not self.preview_enabled:
-            self.empty_title.setText("图片管理 UI 已就绪")
-            self.empty_body.setText("打开演示预览，查看测量分组、证据查看器与异常状态。\n真实图片读取将在视觉确认后接入。")
-            self.empty_action.setText("打开演示预览")
-        elif self.scenario_combo.currentData() == "empty":
+        if self.scenario_combo.currentData() == "empty":
             self.empty_title.setText("暂无测量记录 · 演示")
             self.empty_body.setText("测量完成并保存后，将按每次测量展示证据图片。")
             self.empty_action.setText("返回分组演示")
@@ -794,12 +836,280 @@ class ImageManagementPage(QWidget):
             self.empty_action.setText("重置筛选")
 
         # 记录数不表示图片数，更不表示原始证据完整。
-        count = f"演示：共 {total} 次测量" if self.preview_enabled else "真实测量数据待接入"
-        self.record_count_label.setText(count)
+        self.record_count_label.setText(f"演示：共 {total} 次测量")
         self.page_label.setText(f"{self.current_page} / {self.total_pages}")
         self.previous_page_button.setEnabled(self.current_page > 1)
         self.next_page_button.setEnabled(self.current_page < self.total_pages)
         self.results_scroll.verticalScrollBar().setValue(0)
+
+    def clear_cards(self) -> None:
+        """释放上一页的卡片和缩略图，不保存跨页缓存。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 当前网格为空，旧卡片已安排释放
+        """
+        for card in self.cards:
+            self.grid.removeWidget(card)
+            card.hide()
+            card.deleteLater()
+        self.cards = []
+        self.grid_columns = 0
+
+    def reload_measurements(self) -> None:
+        """后台查询同一筛选下的当前十二条记录和总数。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 查询和计数已提交后台，界面保留已应用筛选
+        """
+        self.cancel_reads()
+        self.viewer.close()
+        self.clear_cards()
+        self.query_error = False
+        self.grid_body.hide()
+        self.empty_state.show()
+        self.empty_action.hide()
+        self.previous_page_button.setEnabled(False)
+        self.next_page_button.setEnabled(False)
+
+        # 独立页面没有控制器时保持真实空状态，不自动填入演示。
+        if self.controller is None:
+            self.total_pages = 1
+            self.current_page = 1
+            self.show_empty_records()
+            self.record_count_label.setText("共 0 次测量")
+            self.page_label.setText("1 / 1")
+            return
+        self.empty_title.setText("正在读取测量记录")
+        self.empty_body.setText("后台查询当前页与总数，图片会逐张显示。")
+        self.record_count_label.setText("正在查询…")
+        if not self.isVisible() or self.shutting_down:
+            return
+
+        # 仅提交已应用条件，尚未查询的输入草稿不参与过滤。
+        parameters = {
+            "review_status": self.selected_review_status,
+            "machine_id": self.selected_machine_id,
+            "page": self.current_page,
+            "page_size": self.page_size,
+            "start_date": self.selected_start_date,
+            "end_date": self.selected_end_date,
+            "text_query": self.selected_text_query,
+            "text_match_mode": self.selected_match_mode,
+            "text_length": self.selected_text_length,
+        }
+        controller = self.controller
+        cancelled = self.cancelled
+
+        def read_page() -> tuple:
+            """顺序读取当前页及历史机器选项。
+
+            Args:
+                无。
+
+            Returns:
+                (
+                    Result(...),  # 同快照的当前页与总数
+                    Result(...),  # 历史机器选项，取消时为 None
+                )
+            """
+            result = controller.list_measurement_records(**parameters)
+            machines = None if cancelled.is_set() else controller.list_record_machines()
+            return (
+                result,
+                machines,
+            )
+
+        self.start_read("page", read_page)
+
+    def start_read(self, identity: object, read: Callable[[], object]) -> None:
+        """按需建立有限线程池并提交当前页的一次读取。
+
+        Args:
+            identity: page 或当前卡片的测量编号。
+            read: 当前页查询或单卡片目录缩略图读取。
+
+        Returns:
+            None  # 本页队列最多包含十二个卡片读取，旧队列不累积
+        """
+        if self.shutting_down:
+            return
+        if self.thread_pool is None:
+            self.thread_pool = QThreadPool(QApplication.instance())
+            self.thread_pool.setMaxThreadCount(2)
+            self.read_signals = EvidenceReadSignals(self.thread_pool)
+            self.read_signals.completed.connect(self.accept_read, Qt.ConnectionType.QueuedConnection)
+
+        # 每个任务有限执行一次，QPixmap 与控件只在结果槽中更新。
+        task = EvidenceReadTask(self.read_generation, identity, read, self.cancelled, self.read_signals)
+        self.thread_pool.start(task)
+
+    def cancel_reads(self) -> None:
+        """使上次查询和图片请求失效并移除未运行任务。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 旧代次结果不再修改当前页，运行中的读取可以自然结束
+        """
+        self.cancelled.set()
+        self.read_generation += 1
+        self.cancelled = Event()
+        if self.thread_pool is not None:
+            self.thread_pool.clear()
+
+    @Slot(int, object, object)
+    def accept_read(self, generation: int, identity: object, result: object) -> None:
+        """应用当前页后台查询或单卡片的缩略图结果。
+
+        Args:
+            generation: 发起读取时的页面代次。
+            identity: page 或对应卡片的测量编号。
+            result: 查询结果、卡片缩略图或读取错误。
+
+        Returns:
+            None  # 当前页已更新，失效代次和隐藏页面的结果被忽略
+        """
+        if generation != self.read_generation or not self.isVisible() or self.preview_enabled or self.shutting_down:
+            return
+        if identity != "page":
+            for card in self.cards:
+                if card.record.session_id == identity:
+                    if isinstance(result, EvidenceReadFailure):
+                        result = EvidenceCardImage(None, QImage(), "", "read_error")
+                    card.record = replace(card.record, image_count=result.count, evidence_state=result.state)
+                    card.image_count_label.setText(card.record.image_count_caption)
+                    card.thumbnail.set_evidence(result)
+                    break
+            return
+
+        # 页面错误只显示错误状态，不自动切到演示或显示旧记录。
+        if isinstance(result, EvidenceReadFailure):
+            self.query_error = True
+            self.show_empty_records(result.message)
+            return
+        page_result, machine_result = result
+        if not page_result.success:
+            self.query_error = True
+            self.show_empty_records(page_result.message)
+            return
+        data = page_result.data
+        self.total_pages = data["total_pages"]
+        if self.current_page > self.total_pages:
+            self.current_page = self.total_pages
+            self.reload_measurements()
+            return
+
+        # 更新历史机器选项时保留已选择的机器和文字草稿。
+        if machine_result is not None and machine_result.success:
+            self.machine_combo.blockSignals(True)
+            self.machine_combo.clear()
+            self.machine_combo.addItem("全部机器", userData=None)
+            for machine in machine_result.data["machines"]:
+                self.machine_combo.addItem(machine["machine_name"], userData=machine["machine_id"])
+            selected_index = self.machine_combo.findData(self.selected_machine_id)
+            if selected_index < 0:
+                self.machine_combo.addItem(self.selected_machine_id, userData=self.selected_machine_id)
+                selected_index = self.machine_combo.count() - 1
+            self.machine_combo.setCurrentIndex(selected_index)
+            self.machine_combo.blockSignals(False)
+
+        # 只为当前页创建卡片，目录直接来自列表投影。
+        for row in data["records"]:
+            record = build_evidence_measurement(row)
+            card = MeasurementEvidenceCard(record)
+            card.clicked.connect(lambda checked=False, session=record.session_id: self.open_measurement(session))
+            self.cards.append(card)
+            cancelled = self.cancelled
+            self.start_read(
+                record.session_id,
+                lambda directory=record.evidence_directory, token=cancelled: read_card_evidence(directory, token),
+            )
+        self.reflow_cards()
+        self.grid_body.setVisible(bool(self.cards))
+        self.empty_state.setVisible(not self.cards)
+        if not self.cards:
+            self.show_empty_records()
+
+        # 总数仍以测量为单位，复核后返回会重新读取当前筛选。
+        self.record_count_label.setText(f"共 {data['total']} 次测量")
+        self.page_label.setText(f"{self.current_page} / {self.total_pages}")
+        self.previous_page_button.setEnabled(self.current_page > 1)
+        self.next_page_button.setEnabled(self.current_page < self.total_pages)
+        self.results_scroll.verticalScrollBar().setValue(0)
+
+    def show_empty_records(self, error: str = "") -> None:
+        """区分真实空记录、筛选无结果和查询失败。
+
+        Args:
+            error: 查询失败说明，空字符串表示正常空结果。
+
+        Returns:
+            None  # 空状态提供重新查询或重置筛选入口，没有虚构测量
+        """
+        filtered = any((
+            self.selected_text_query,
+            self.selected_text_length,
+            self.selected_machine_id,
+            self.selected_review_status,
+            self.selected_start_date,
+            self.selected_end_date,
+        ))
+        self.empty_title.setText(
+            "测量记录读取失败" if error else "没有符合条件的测量" if filtered else "暂无测量记录"
+        )
+        self.empty_body.setText(error or "测量完成并保存后，将按每次测量展示证据图片。")
+        self.empty_action.setText("重试" if error else "重置筛选" if filtered else "刷新")
+        self.empty_action.show()
+        if error:
+            self.record_count_label.setText("查询失败")
+
+    def open_measurement(self, session_id: str) -> None:
+        """读取当前点击记录的最新详情并打开组内查看器。
+
+        Args:
+            session_id: 当前卡片的测量周期编号。
+
+        Returns:
+            None  # 详情与该组目录在后台重新读取
+        """
+        self.viewer.open_session(self.controller, session_id)
+
+    def showEvent(self, event) -> None:
+        """进入真实页面时刷新当前筛选，保留用户已提交条件。
+
+        Args:
+            event: Qt 显示事件。
+
+        Returns:
+            None  # 返回图片页面后能看到最新复核结果
+        """
+        super().showEvent(event)
+        if not self.preview_enabled:
+            self.render_records()
+
+    def shutdown(self) -> None:
+        """退出时停止新任务并等待正在进行的有限读取结束。
+
+        Args:
+            无。
+
+        Returns:
+            None  # 页面和查看器线程池已清理，无运行中的 QThread 被销毁
+        """
+        self.shutting_down = True
+        self.cancel_reads()
+        self.viewer.shutdown()
+        if self.thread_pool is not None:
+            self.thread_pool.waitForDone()
+            self.thread_pool.deleteLater()
+            self.thread_pool = None
 
     def reflow_cards(self) -> None:
         """按可用宽度在三列和四列之间重排当前页卡片。
@@ -822,7 +1132,7 @@ class ImageManagementPage(QWidget):
         self.grid_columns = columns
 
     def change_page(self, page_number: int) -> None:
-        """在有效页码内切换演示测量记录。
+        """在有效页码内切换当前测量记录。
 
         Args:
             page_number: 目标页码，从一开始。
@@ -835,18 +1145,18 @@ class ImageManagementPage(QWidget):
             self.render_records()
 
     def handle_empty_action(self) -> None:
-        """从空状态开启演示或恢复全部演示记录。
+        """从空状态重试当前查询或清除筛选。
 
         Args:
             无。
 
         Returns:
-            None  # 演示入口和无结果恢复入口已执行
+            None  # 查询重试或无结果恢复入口已执行
         """
-        if self.preview_enabled:
+        if self.preview_enabled or not self.query_error:
             self.reset_filters()
         else:
-            self.set_preview_enabled(True)
+            self.render_records()
 
     def eventFilter(self, watched, event) -> bool:
         """在滚动视口宽度变化后重排当前页卡片。
@@ -873,5 +1183,8 @@ class ImageManagementPage(QWidget):
         """
         if self.time_filter_panel is not None:
             self.time_filter_panel.close()
+        self.cancel_reads()
+        if not self.preview_enabled:
+            self.clear_cards()
         self.viewer.close()
         super().hideEvent(event)

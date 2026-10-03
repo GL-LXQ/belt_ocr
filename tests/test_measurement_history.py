@@ -1909,7 +1909,7 @@ def test_history_detail_limits_evidence_preview_and_opens_folder(
         page.open_evidence_directory_button.click()
         directory_open_error.assert_called_once_with(
             "证据文件夹打开失败",
-            "系统未能打开证据目录，请检查系统文件夹打开功能和访问权限。",
+            f"系统未能打开证据目录，请检查系统文件夹打开功能。\n保存的路径：{review_directory}",
             duration=-1,
             parent=page.detail_dialog.widget,
         )

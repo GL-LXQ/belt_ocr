@@ -96,6 +96,7 @@ class MeasurementRecordRepo:
                     "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
                     "recognized_lines": '["ABC"]',  # 正式识别文字 JSON
                     "final_frequency_hz": 50.0,  # 最终频率
+                    "evidence_directory": "runtime/evidence/1",  # 已存证据目录
                     "needs_review": 0,  # 是否需要人工复核
                     "reviewed_at": None,  # 人工复核时间
                     "reviewed_lines": None,  # 人工修改文字 JSON
@@ -154,6 +155,7 @@ class MeasurementRecordRepo:
                             "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
                             "recognized_lines": '["ABC"]',  # 正式识别文字 JSON
                             "final_frequency_hz": 50.0,  # 最终频率
+                            "evidence_directory": "runtime/evidence/1",  # 已存证据目录
                             "needs_review": 0,  # 是否需要人工复核
                             "reviewed_at": None,  # 人工复核时间
                             "reviewed_lines": None,  # 人工修改文字 JSON
@@ -215,6 +217,7 @@ class MeasurementRecordRepo:
                     "finish_time": "2026-09-27T08:00:00+00:00",  # 结束时间
                     "recognized_lines": '["ABC"]',  # 正式识别文字 JSON
                     "final_frequency_hz": 50.0,  # 最终频率
+                    "evidence_directory": "runtime/evidence/1",  # 已存证据目录
                     "needs_review": 0,  # 是否需要人工复核
                     "reviewed_at": None,  # 人工复核时间
                     "reviewed_lines": None,  # 人工修改文字 JSON
@@ -225,7 +228,7 @@ class MeasurementRecordRepo:
             "SELECT record.session_id, record.machine_id, "
             "COALESCE(machine.machine_name, record.machine_id) AS machine_name, "
             "record.finish_time, record.recognized_lines, "
-            "record.final_frequency_hz, record.needs_review, "
+            "record.final_frequency_hz, record.evidence_directory, record.needs_review, "
             "record.reviewed_at, record.reviewed_lines "
             "FROM measurement_records AS record "
             "LEFT JOIN machine ON CAST(machine.id AS TEXT) = record.machine_id"
