@@ -44,7 +44,7 @@ npm ci
 cd ..
 ```
 
-现场相机仍使用 **Windows 海康 MVS SDK**。另按 [PaddlePaddle 官方安装说明](https://www.paddlepaddle.org.cn/documentation/docs/zh/install/index_cn.html)，将匹配本机 Python 3.12、CPU/GPU、CUDA/CUDNN 的 PaddlePaddle 运行时安装到项目 `.venv`；它未包含在项目锁文件中。源码默认 OCR 配置是 `src/ocr/config.yaml`，当前设备为 `gpu:0`；使用 CPU 时须同时修改设备并安装匹配的 CPU 运行时。先核对模型路径、ROI、预处理与离线模型可用性；不能把依赖安装成功当作模型或硬件验证成功。
+现场相机仍使用 **Windows 海康 MVS SDK**。项目已将 CPU 版 `paddlepaddle==3.3.0` 纳入正式依赖和锁文件，`uv sync` 会从飞桨官方 CPU 源自动安装到项目 `.venv`，后续同步也会保留该依赖。源码默认 OCR 配置是 `src/ocr/config.yaml`，当前设备为 `cpu`。如需部署到 NVIDIA GPU 机器，须按 [PaddlePaddle 官方安装说明](https://www.paddlepaddle.org.cn/documentation/docs/zh/install/index_cn.html)，将依赖替换为匹配目标设备的 GPU 版、更新下载源和锁文件，并将 OCR 设备改为 `gpu:0`。先核对模型路径、ROI、预处理与离线模型可用性；不能把依赖安装成功当作模型或硬件验证成功。
 
 启动前核对 `config/config.yaml`：
 
@@ -65,7 +65,7 @@ Windows 开发版将 WebView2 的窗口缓存保存到项目 `runtime/desktop-we
 
 后端初始化指定数据库表但不会自动启动监测。在“机器管理”添加并启用机器、填写相机和频率仪编号，再到“系统配置”核对 DI 绑定，最后点击“启动监测”。机器与配置修改须等待监测完全停止；配置保存后下次启动监测生效。关闭窗口会先请求后端停止，等待全部采集、OCR、保存、审计和进程实际退出；不会按几秒倒计时强杀。后端故障或清理未完成时界面显示真实状态，旧进程仍存活时禁止重试创建第二个进程。
 
-浏览器联调、打包、部署路径及验证命令见 [运维与验证](docs/operations.md)。本地令牌不是远程账号系统，本服务不可改成公网或局域网监听。重新同步环境时需留意单独安装的 PaddlePaddle，启动现场程序避免不必要的依赖同步。
+浏览器联调、打包、部署路径及验证命令见 [运维与验证](docs/operations.md)。本地令牌不是远程账号系统，本服务不可改成公网或局域网监听。PaddlePaddle 已随项目依赖统一同步，启动现场程序避免不必要的依赖同步。
 
 ## 当前边界与运维
 

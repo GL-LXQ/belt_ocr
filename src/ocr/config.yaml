@@ -1,5 +1,5 @@
 ocr:
-  device: gpu:0
+  device: cpu
   detection_model: PP-OCRv6_medium_det
   recognition_model: PP-OCRv6_medium_rec
   detection_model_dir: null

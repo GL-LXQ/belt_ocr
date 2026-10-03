@@ -91,10 +91,10 @@ npm run dev
 
 先按 [Tauri 平台前提](https://v2.tauri.app/start/prerequisites/) 安装目标系统构建工具。PyInstaller 必须在目标 OS/架构上构建；Linux 构建成功不能证明 Windows 安装器、MVS DLL 或 GPU 原生库可用。
 
-在装好匹配 PaddlePaddle 的 Python 3.12 环境执行：
+在 Python 3.12 环境同步项目依赖并打包，默认自动安装锁定的 CPU 版 PaddlePaddle：
 
 ```powershell
-uv sync --frozen --group build --inexact
+uv sync --frozen --group build
 uv run --no-sync python scripts/build_backend.py --check
 uv run --no-sync python scripts/build_backend.py
 cd desktop
@@ -102,7 +102,7 @@ npm ci
 npm run tauri:build -- --config src-tauri/tauri.bundle.conf.json
 ```
 
-`--inexact` 保留操作者单独安装的 PaddlePaddle。`--check` 仅检查解释器与模块是否存在，不加载模型或连接硬件。脚本调用 PyInstaller 单目录模式，将可执行文件和 `_internal` 依赖整体放在 `desktop/src-tauri/backend-runtime/`；已有暂存目录不会自动覆盖，重新构建前先移走旧产物。Tauri 的发布覆盖配置把整个目录按相同资源路径打包，Rust 只启动这个固定 sidecar，不调用目标机任意 Python。基础 Tauri 配置关闭安装器打包，适合开发编译；Windows NSIS 安装器必须显式传入上述发布配置。
+PaddlePaddle 由项目依赖和锁文件管理，无需单独安装。`--check` 仅检查解释器与模块是否存在，不加载模型或连接硬件。脚本调用 PyInstaller 单目录模式，将可执行文件和 `_internal` 依赖整体放在 `desktop/src-tauri/backend-runtime/`；已有暂存目录不会自动覆盖，重新构建前先移走旧产物。Tauri 的发布覆盖配置把整个目录按相同资源路径打包，Rust 只启动这个固定 sidecar，不调用目标机任意 Python。基础 Tauri 配置关闭安装器打包，适合开发编译；Windows NSIS 安装器必须显式传入上述发布配置。
 
 开发环境未装 PaddlePaddle 时，可以加 `--development-without-ocr` 验证 API sidecar 打包；这种产物明确不能用于现场监测。正式包收集 Paddle/PaddleOCR/PaddleX 的 Python 与原生文件，但 GPU 驱动、CUDA/CUDNN、MVS Runtime、模型文件和许可证仍须按厂商要求在目标机准备与验收，不承诺自动携带所有外部依赖。当前没有已验证的 Windows 安装器或真机联调结论。
 

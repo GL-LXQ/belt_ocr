@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class OCRConfig(BaseModel):
-    device: str = "gpu:0"
+    device: str = "cpu"
     detection_model: str = "PP-OCRv6_medium_det"
     recognition_model: str = "PP-OCRv6_medium_rec"
     detection_model_dir: Optional[str] = None
