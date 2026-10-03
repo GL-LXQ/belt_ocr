@@ -1,4 +1,4 @@
-"""离屏验证系统配置预览、草稿和导航，不启动运行服务。"""
+"""隔离控制器写操作，验证系统配置读取、草稿、保存反馈和导航。"""
 
 import builtins
 from copy import deepcopy
@@ -14,6 +14,7 @@ import yaml
 import config_util
 import src.config_util as source_config_util
 from src.controller.controller import AppController, Result
+from src.service.configuration_service import ConfigurationService
 
 
 @pytest.fixture(scope="module")
@@ -117,7 +118,7 @@ def configuration_directory(tmp_path: Path, configuration_document: dict) -> Pat
 
 @pytest.fixture
 def controller(configuration_directory: Path) -> Mock:
-    """提供只有机器查询返回数据的控制器替身。
+    """提供真实只读配置入口及可独立调整校验、保存结果的控制器。
 
     Args:
         configuration_directory: 临时配置目录。
@@ -127,15 +128,26 @@ def controller(configuration_directory: Path) -> Mock:
     """
     controller = Mock(spec=AppController)
     controller.configuration_directory = configuration_directory
+    controller.configuration_service = ConfigurationService(configuration_directory)
+    controller.read_configuration.side_effect = partial(AppController.read_configuration, controller)
+    controller.validate_configuration.return_value = Result.error(
+        "OCR 等待期限无效，请修正配置后保存。", {"field": "ocr_lock_wait_timeout_ms"}
+    )
+    controller.is_monitoring_running.return_value = Result.ok({"running": False})
+    controller.save_configuration.return_value = Result.error("测试尚未设置保存结果。")
+
+    # 查询真实机器编号，未绑定机器也需要展示空白通道。
     controller.list_machines.return_value = Result.ok({
         "machines": [
             {
                 "id": 1,
                 "machine_name": "实际一号皮带机",
+                "enabled": True,
             },
             {
                 "id": 2,
                 "machine_name": "未配置通道的二号机",
+                "enabled": True,
             },
         ],
     })
@@ -186,41 +198,47 @@ def test_shell_loads_actual_values_once_without_runtime_validation(
     preview_page,
     configuration_directory: Path,
     controller: Mock,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证初次进入才读文件，并保留原始值且不执行运行校验。
+    """验证初次进入才读文件，原始值可保留并交给控制器校验。
 
     Args:
         preview_page: 尚未加载配置的页面。
         configuration_directory: 临时配置目录。
         controller: 不执行运行操作的控制器。
-        monkeypatch: pytest 提供的替换工具。
 
     Returns:
         None  # 配置只读一次，空值和超常数值完整保留
     """
-    import ui.configuration_preview as preview_module
-
     # 读取预期值并记录页面使用的唯一配置读取入口。
     expected_values = config_util.read_configuration_settings(configuration_directory)
-    reader = Mock(wraps=preview_module.read_configuration_settings)
-    monkeypatch.setattr(preview_module, "read_configuration_settings", reader)
+    reader = controller.read_configuration
     assert not preview_page.configuration_loaded
+    reader.assert_not_called()
     controller.list_machines.assert_not_called()
     assert not preview_page.save_button.isEnabled()
-    assert preview_page.save_button.text() == "保存配置 · 待接入"
+    assert preview_page.save_button.text() == "保存配置"
 
     # 页面只读取一次，不改变运行校验不接受的实际配置。
     preview_page.load_configuration_preview()
     preview_page.load_configuration_preview()
     assert preview_page.configuration_loaded
-    assert preview_page.error_card.isHidden()
+    assert not preview_page.error_card.isHidden()
+    assert preview_page.error_label.text() == controller.validate_configuration.return_value.message
     assert preview_page.baseline_values == expected_values
     assert preview_page.get_draft_values() == expected_values
     assert not preview_page.is_dirty
     assert not preview_page.undo_button.isEnabled()
-    reader.assert_called_once_with(configuration_directory)
-    assert controller.method_calls == [call.list_machines()]
+    reader.assert_called_once_with()
+    assert controller.method_calls == [
+        call.monitoring_state_changed_signal.connect(preview_page.update_draft_state),
+        call.read_configuration(),
+        call.list_machines(),
+        call.validate_configuration(expected_values),
+        call.is_monitoring_running(),
+        call.list_machines(),
+        call.validate_configuration(expected_values),
+        call.is_monitoring_running(),
+    ]
 
     # 检查数字输入未截断或钳制现有数值。
     for field_name in ("ocr_lock_wait_timeout_ms", "modbus_baudrate", "maximum_frequency_hz"):
@@ -600,13 +618,18 @@ def test_machine_di_mapping_uses_actual_ids_names_and_zero_based_channels(previe
     Returns:
         None  # 映射编辑和撤销保持机器编号到 DI 索引的方向
     """
-    # 仅展示配置中的映射，机器列表不增加未配置的行。
+    # 合并已有映射和实际机器，缺失绑定保留空白。
     preview_page.load_configuration_preview()
-    assert set(preview_page.io_editors) == {"1", "99"}
+    assert set(preview_page.io_editors) == {"1", "2", "99"}
     assert preview_page.io_editors["1"].get_value() == 0
     assert preview_page.io_editors["99"].get_value() == 12
+    assert preview_page.io_editors["2"].get_value() is None
+    assert preview_page.io_editors["2"].input.text() == ""
+    assert preview_page.get_draft_values()["io_machine_channels"] == {"1": 0, "99": 12}
+    assert not preview_page.is_dirty
     label_text = "\n".join(label.text() for label in preview_page.findChildren(QLabel))
     assert "实际一号皮带机" in label_text
+    assert "未配置通道的二号机" in label_text
     assert "99" in label_text
 
     # DI 输入按整数解析，修改草稿不改写基线嵌套字典。
@@ -648,9 +671,326 @@ def test_empty_di_mapping_does_not_fabricate_bindings(
     )
     preview_page.load_configuration_preview()
     assert preview_page.configuration_loaded
-    assert preview_page.io_editors == {}
+    assert set(preview_page.io_editors) == {"1", "2"}
+    assert all(editor.get_value() is None for editor in preview_page.io_editors.values())
+    assert all(editor.input.text() == "" for editor in preview_page.io_editors.values())
     assert preview_page.get_draft_values()["io_machine_channels"] == {}
     assert not preview_page.is_dirty
+
+
+def test_missing_di_validation_targets_blank_row_until_user_assigns_channel(preview_page, controller: Mock) -> None:
+    """验证缺失 DI 的错误定位到空白机器行，填写后才形成新绑定。
+
+    Args:
+        preview_page: 尚未加载配置的页面。
+        controller: 可调整校验结果的控制器替身。
+
+    Returns:
+        None  # 空白绑定未猜测通道，用户填写后重新校验并允许保存
+    """
+    # 缺失机器绑定的校验结果保留空白行和未修改状态。
+    controller.validate_configuration.return_value = Result.error(
+        "启用机器 2 缺少 DI 通道。", {"field": "io_machine_channels.2"}
+    )
+    preview_page.load_configuration_preview()
+    assert preview_page.validation_field == "io_machine_channels.2"
+    assert not preview_page.field_error_button.isHidden()
+    assert preview_page.io_editors["2"].get_value() is None
+    assert "2" not in preview_page.get_draft_values()["io_machine_channels"]
+    assert not preview_page.is_dirty
+    assert not preview_page.save_button.isEnabled()
+
+    # 定位动作展开高级区域，但不替用户分配通道。
+    preview_page.focus_validation_error()
+    assert preview_page.advanced_toggle.isChecked()
+    assert not preview_page.advanced_body.isHidden()
+    assert preview_page.io_editors["2"].get_value() is None
+
+    # 校验通过后保留用户填写的整数，并开启保存。
+    controller.validate_configuration.return_value = Result.ok()
+    preview_page.io_editors["2"].input.setText("4")
+    draft = preview_page.get_draft_values()
+    assert draft["io_machine_channels"] == {"1": 0, "99": 12, "2": 4}
+    assert "2" not in preview_page.baseline_values["io_machine_channels"]
+    controller.validate_configuration.assert_called_with(draft)
+    assert preview_page.is_dirty
+    assert preview_page.save_button.isEnabled()
+    assert preview_page.error_card.isHidden()
+    assert preview_page.validation_field is None
+    controller.save_configuration.assert_not_called()
+
+
+def test_reentry_adds_actual_machine_without_reloading_or_replacing_draft(preview_page, controller: Mock) -> None:
+    """验证重新进入时补充新机器行，同时保留已有普通字段和 DI 草稿。
+
+    Args:
+        preview_page: 尚未加载配置的页面。
+        controller: 可修改机器列表的控制器替身。
+
+    Returns:
+        None  # 配置只读取一次，新机器保持空白，已有草稿未丢失
+    """
+    # 在已有字段与未绑定机器上保留尚未保存的修改。
+    preview_page.load_configuration_preview()
+    preview_page.editors["ocr_lock_wait_timeout_ms"].input.setText("64")
+    preview_page.io_editors["2"].input.setText("3")
+    expected_draft = preview_page.get_draft_values()
+    previous_editors = dict(preview_page.io_editors)
+
+    # 机器列表新增一台实际机器，重新进入只追加空白输入。
+    controller.list_machines.return_value.data["machines"].append({
+        "id": 3,
+        "machine_name": "新增三号机",
+        "enabled": True,
+    })
+    preview_page.load_configuration_preview()
+    assert set(preview_page.io_editors) == {"1", "2", "3", "99"}
+    assert all(preview_page.io_editors[machine_id] is editor for machine_id, editor in previous_editors.items())
+    assert preview_page.io_editors["3"].get_value() is None
+    assert preview_page.io_editors["3"].input.text() == ""
+    assert preview_page.get_draft_values() == expected_draft
+    assert preview_page.is_dirty
+    controller.read_configuration.assert_called_once_with()
+    assert controller.list_machines.call_count == 2
+    controller.save_configuration.assert_not_called()
+
+
+def test_successful_save_updates_baseline_and_preserves_advanced_state(
+    preview_page,
+    controller: Mock,
+    configuration_directory: Path,
+) -> None:
+    """验证保存成功后采用返回基线，并保留高级区状态及新的撤销目标。
+
+    Args:
+        preview_page: 尚未加载配置的页面。
+        controller: 只返回模拟保存结果的控制器。
+        configuration_directory: 用于核对页面未直接写入的临时目录。
+
+    Returns:
+        None  # 成功清除修改状态，后续撤销回到保存后的基线
+    """
+    # 校验成功的脏草稿允许通过按钮提交。
+    original_bytes = (configuration_directory / "config.yaml").read_bytes()
+    controller.validate_configuration.return_value = Result.ok()
+    preview_page.load_configuration_preview()
+    preview_page.advanced_toggle.click()
+    preview_page.editors["ocr_lock_wait_timeout_ms"].input.setText("65")
+    preview_page.io_editors["2"].input.setText("3")
+    submitted_draft = preview_page.get_draft_values()
+    saved_settings = deepcopy(submitted_draft)
+    saved_message = "配置已保存，下次开始监测时生效。"
+    controller.save_configuration.return_value = Result.ok({"settings": saved_settings}, saved_message)
+    assert preview_page.save_button.isEnabled()
+
+    # 成功结果替换页面基线，未发出读取或运行操作。
+    preview_page.save_button.click()
+    controller.save_configuration.assert_called_once_with(submitted_draft)
+    controller.read_configuration.assert_called_once_with()
+    assert preview_page.baseline_values == saved_settings
+    assert preview_page.baseline_values is not saved_settings
+    assert preview_page.baseline_values["io_machine_channels"] is not saved_settings["io_machine_channels"]
+    assert preview_page.get_draft_values() == saved_settings
+    assert not preview_page.is_dirty
+    assert not preview_page.undo_button.isEnabled()
+    assert not preview_page.save_button.isEnabled()
+    assert preview_page.error_card.isHidden()
+    assert preview_page.status_hint.text() == saved_message
+    assert preview_page.advanced_toggle.isChecked()
+    assert not preview_page.advanced_body.isHidden()
+
+    # 后续修改撤销到新基线，页面本身始终没有写入临时配置。
+    preview_page.editors["ocr_lock_wait_timeout_ms"].input.setText("91")
+    preview_page.io_editors["2"].input.setText("6")
+    preview_page.undo_changes()
+    assert preview_page.get_draft_values() == saved_settings
+    assert not preview_page.is_dirty
+    assert (configuration_directory / "config.yaml").read_bytes() == original_bytes
+    assert {method[0] for method in controller.method_calls} == {
+        "monitoring_state_changed_signal.connect",
+        "read_configuration",
+        "list_machines",
+        "validate_configuration",
+        "is_monitoring_running",
+        "save_configuration",
+    }
+
+
+@pytest.mark.parametrize("error_field", [None, "io_machine_channels.2"])
+def test_failed_save_preserves_baseline_and_user_draft(
+    preview_page,
+    controller: Mock,
+    configuration_directory: Path,
+    error_field: str | None,
+) -> None:
+    """验证保存失败保留原基线与所有草稿，并展示后端返回的错误位置。
+
+    Args:
+        preview_page: 尚未加载配置的页面。
+        controller: 可设置失败保存结果的控制器替身。
+        configuration_directory: 用于核对配置未被写入的临时目录。
+        error_field: 后端返回的字段位置或不带字段的保存错误。
+
+    Returns:
+        None  # 保存失败不丢弃输入，错误字段可定位，撤销仍回到原基线
+    """
+    # 在校验通过后模拟提交时产生的后端错误。
+    original_bytes = (configuration_directory / "config.yaml").read_bytes()
+    controller.validate_configuration.return_value = Result.ok()
+    preview_page.load_configuration_preview()
+    baseline = deepcopy(preview_page.baseline_values)
+    preview_page.editors["ocr_lock_wait_timeout_ms"].input.setText("65")
+    preview_page.io_editors["2"].input.setText("3")
+    submitted_draft = preview_page.get_draft_values()
+    controller.save_configuration.return_value = Result.error("保存失败，请重新检查配置。", {"field": error_field})
+
+    # 保存失败只展示错误，字段和撤销基线保持不变。
+    preview_page.save_button.click()
+    controller.save_configuration.assert_called_once_with(submitted_draft)
+    assert preview_page.baseline_values == baseline
+    assert preview_page.get_draft_values() == submitted_draft
+    assert preview_page.is_dirty
+    assert preview_page.undo_button.isEnabled()
+    assert not preview_page.error_card.isHidden()
+    assert preview_page.error_label.text() == controller.save_configuration.return_value.message
+    assert preview_page.validation_field == error_field
+    assert preview_page.field_error_button.isHidden() is (error_field is None)
+    assert preview_page.status_hint.text() == "未保存，草稿已保留"
+    if error_field is not None:
+        assert preview_page.advanced_toggle.isChecked()
+    assert (configuration_directory / "config.yaml").read_bytes() == original_bytes
+
+    # 用户仍可主动撤销全部失败草稿。
+    preview_page.undo_changes()
+    assert preview_page.get_draft_values() == baseline
+    assert not preview_page.is_dirty
+    controller.read_configuration.assert_called_once_with()
+
+
+def test_monitoring_state_disables_save_until_fully_stopped(preview_page, controller: Mock) -> None:
+    """验证有效脏草稿也受监测忙碌状态限制，并随状态通知恢复保存。
+
+    Args:
+        preview_page: 尚未加载配置的页面。
+        controller: 可切换监测状态的控制器替身。
+
+    Returns:
+        None  # 忙碌期间禁止点击保存，完全停止后保留草稿并恢复保存
+    """
+    # 有效草稿在空闲状态可保存，并已连接监测状态通知。
+    controller.validate_configuration.return_value = Result.ok()
+    preview_page.load_configuration_preview()
+    preview_page.editors["ocr_lock_wait_timeout_ms"].input.setText("65")
+    draft = preview_page.get_draft_values()
+    assert preview_page.save_button.isEnabled()
+    controller.monitoring_state_changed_signal.connect.assert_called_once_with(preview_page.update_draft_state)
+    state_changed = controller.monitoring_state_changed_signal.connect.call_args.args[0]
+
+    # 启动、运行和停止清理均通过 busy 状态保持按钮禁用。
+    controller.is_monitoring_running.return_value = Result.ok({"running": True})
+    state_changed()
+    assert not preview_page.save_button.isEnabled()
+    assert preview_page.undo_button.isEnabled()
+    assert "完全停止" in preview_page.status_hint.text()
+    preview_page.save_button.click()
+    controller.save_configuration.assert_not_called()
+
+    # 完全停止后的通知恢复保存能力，不清除已有输入。
+    controller.is_monitoring_running.return_value = Result.ok({"running": False})
+    state_changed()
+    assert preview_page.save_button.isEnabled()
+    assert preview_page.get_draft_values() == draft
+    assert preview_page.is_dirty
+    controller.validate_configuration.assert_called_with(draft)
+
+
+def test_reload_preserves_user_changes_and_adopts_new_disk_baseline(
+    preview_page,
+    controller: Mock,
+    configuration_directory: Path,
+    configuration_document: dict,
+) -> None:
+    """验证主动重读采用磁盘新基线，同时保留用户实际修改的字段。
+
+    Args:
+        preview_page: 尚未加载配置的页面。
+        controller: 通过真实只读服务读取临时配置的控制器。
+        configuration_directory: 测试配置所在目录。
+        configuration_document: 可模拟外部改动的嵌套配置内容。
+
+    Returns:
+        None  # 未编辑字段跟随磁盘更新，已编辑字段和新增 DI 草稿保留
+    """
+    # 用户修改普通值、三态值、已有绑定和缺失绑定。
+    preview_page.load_configuration_preview()
+    preview_page.editors["ocr_lock_wait_timeout_ms"].input.setText("64")
+    preview_page.strobe_combo.setCurrentIndex(preview_page.strobe_combo.findData(False))
+    preview_page.io_editors["1"].input.setText("3")
+    preview_page.io_editors["2"].input.setText("4")
+
+    # 磁盘同时修改同一字段及其他未编辑字段。
+    configuration_document["ocr"]["ocr_lock_wait_timeout_ms"] = 70
+    configuration_document["camera"]["camera_gain"] = 2.5
+    configuration_document["io"]["io_machine_channels"][1] = 8
+    configuration_path = configuration_directory / "config.yaml"
+    configuration_path.write_text(yaml.safe_dump(configuration_document, allow_unicode=True), encoding="utf-8")
+    expected_baseline = config_util.read_configuration_settings(configuration_directory)
+
+    # 重读合并时用户改动优先，其他字段采用最新磁盘内容。
+    preview_page.reload_configuration()
+    draft = preview_page.get_draft_values()
+    assert preview_page.baseline_values == expected_baseline
+    assert draft["ocr_lock_wait_timeout_ms"] == 64
+    assert draft["camera_strobe_enabled"] is False
+    assert draft["camera_gain"] == 2.5
+    assert draft["io_machine_channels"] == {"1": 3, "99": 12, "2": 4}
+    assert preview_page.is_dirty
+    assert controller.read_configuration.call_count == 2
+    controller.save_configuration.assert_not_called()
+
+    # 新基线成为撤销目标，新增机器绑定恢复未填写。
+    preview_page.undo_changes()
+    assert preview_page.get_draft_values() == expected_baseline
+    assert preview_page.io_editors["2"].get_value() is None
+    assert not preview_page.is_dirty
+
+
+def test_failed_reload_preserves_loaded_baseline_and_unsaved_draft(
+    preview_page,
+    controller: Mock,
+    configuration_directory: Path,
+) -> None:
+    """验证已加载配置重读失败时保留可编辑表单和尚未保存的草稿。
+
+    Args:
+        preview_page: 尚未加载配置的页面。
+        controller: 通过真实只读服务返回文件错误的控制器。
+        configuration_directory: 用于制造损坏 YAML 的临时配置目录。
+
+    Returns:
+        None  # 读取错误没有清空草稿或基线，并暂时禁用保存
+    """
+    # 建立有效页面状态，再破坏独立测试配置文件。
+    controller.validate_configuration.return_value = Result.ok()
+    preview_page.load_configuration_preview()
+    preview_page.editors["ocr_lock_wait_timeout_ms"].input.setText("64")
+    baseline = deepcopy(preview_page.baseline_values)
+    draft = preview_page.get_draft_values()
+    (configuration_directory / "config.yaml").write_text("camera: [", encoding="utf-8")
+
+    # 页面展示真实读取错误，仍保留旧基线和当前草稿。
+    preview_page.reload_configuration()
+    assert preview_page.configuration_loaded
+    assert preview_page.form.isEnabled()
+    assert preview_page.baseline_values == baseline
+    assert preview_page.get_draft_values() == draft
+    assert preview_page.is_dirty
+    assert preview_page.undo_button.isEnabled()
+    assert not preview_page.save_button.isEnabled()
+    assert not preview_page.error_card.isHidden()
+    assert "配置文件格式或字段结构异常" in preview_page.error_label.text()
+    assert controller.read_configuration.call_count == 2
+    controller.save_configuration.assert_not_called()
 
 
 @pytest.mark.parametrize("invalid_content", [None, "camera: [", "application: {}\ncamera: {}\n"])
@@ -658,6 +998,7 @@ def test_failed_preview_retains_shell_and_can_retry(
     preview_page,
     configuration_directory: Path,
     configuration_document: dict,
+    controller: Mock,
     invalid_content: str | None,
 ) -> None:
     """验证缺失、损坏和缺少路径的文件保留错误页面并允许重试。
@@ -666,6 +1007,7 @@ def test_failed_preview_retains_shell_and_can_retry(
         preview_page: 尚未加载配置的页面。
         configuration_directory: 临时配置目录。
         configuration_document: 完整的测试配置。
+        controller: 通过只读服务返回配置结果的控制器。
         invalid_content: 损坏文件内容，空值表示移除文件。
 
     Returns:
@@ -684,6 +1026,9 @@ def test_failed_preview_retains_shell_and_can_retry(
     assert not preview_page.save_button.isEnabled()
     assert not preview_page.undo_button.isEnabled()
     assert not preview_page.is_dirty
+    controller.validate_configuration.assert_not_called()
+    controller.list_machines.assert_not_called()
+    read_error = preview_page.error_label.text()
 
     # 修复文件后通过页面重试按钮重新加载。
     configuration_path.write_text(
@@ -691,9 +1036,13 @@ def test_failed_preview_retains_shell_and_can_retry(
     )
     preview_page.retry_button.click()
     assert preview_page.configuration_loaded
-    assert preview_page.error_card.isHidden()
+    assert not preview_page.error_card.isHidden()
+    assert preview_page.error_label.text() != read_error
+    assert preview_page.error_label.text() == controller.validate_configuration.return_value.message
     assert preview_page.get_draft_values() == config_util.read_configuration_settings(configuration_directory)
     assert not preview_page.is_dirty
+    assert controller.read_configuration.call_count == 2
+    controller.validate_configuration.assert_called_once_with(preview_page.get_draft_values())
 
 
 def test_edits_undo_and_disabled_save_do_not_write_or_call_runtime(
@@ -752,11 +1101,20 @@ def test_edits_undo_and_disabled_save_do_not_write_or_call_runtime(
     preview_page.save_button.click()
     preview_page.load_configuration_preview()
 
-    # 核对文件内容、修改时间和控制器调用均未变化。
+    # 核对文件内容和修改时间未变化，控制器只执行读取及校验。
     assert configuration_path.read_bytes() == original_bytes
     assert configuration_path.stat().st_mtime_ns == original_modified_time
     assert set(configuration_directory.rglob("*")) == original_paths
-    assert controller.method_calls == []
+    controller.read_configuration.assert_not_called()
+    controller.save_configuration.assert_not_called()
+    controller.list_machines.assert_called_once_with()
+    assert controller.validate_configuration.call_count == 4
+    assert controller.is_monitoring_running.call_count == 4
+    assert {method[0] for method in controller.method_calls} == {
+        "list_machines",
+        "validate_configuration",
+        "is_monitoring_running",
+    }
 
 
 def create_inert_business_page(page_key: str, controller: Mock, parent: QWidget | None = None) -> QWidget:
@@ -792,7 +1150,6 @@ def test_main_window_navigation_reuses_settings_page_and_keeps_draft(
     Returns:
         None  # 系统配置接入导航且不重读、不保存、不调用运行服务
     """
-    import ui.configuration_preview as preview_module
     import ui.main_window as window_module
     from ui.pages.system_configuration_page import SystemConfigurationPage
 
@@ -804,8 +1161,7 @@ def test_main_window_navigation_reuses_settings_page_and_keeps_draft(
         ("MachinesPage", "machines"),
     ):
         monkeypatch.setattr(window_module, class_name, partial(create_inert_business_page, page_key))
-    reader = Mock(wraps=preview_module.read_configuration_settings)
-    monkeypatch.setattr(preview_module, "read_configuration_settings", reader)
+    reader = controller.read_configuration
     configuration_path = configuration_directory / "config.yaml"
     original_bytes = configuration_path.read_bytes()
     window = window_module.MainWindow(controller)
@@ -835,9 +1191,19 @@ def test_main_window_navigation_reuses_settings_page_and_keeps_draft(
         assert settings_page.is_dirty
         assert not settings_page.save_button.isEnabled()
         settings_page.save_button.click()
-        reader.assert_called_once_with(configuration_directory)
+        reader.assert_called_once_with()
         assert configuration_path.read_bytes() == original_bytes
-        assert controller.method_calls == [call.list_machines()]
+        assert controller.list_machines.call_count == 2
+        assert controller.validate_configuration.call_count == 3
+        assert controller.is_monitoring_running.call_count == 3
+        controller.save_configuration.assert_not_called()
+        assert {method[0] for method in controller.method_calls} == {
+            "monitoring_state_changed_signal.connect",
+            "read_configuration",
+            "list_machines",
+            "validate_configuration",
+            "is_monitoring_running",
+        }
     finally:
         window.deleteLater()
         qt_application.processEvents()

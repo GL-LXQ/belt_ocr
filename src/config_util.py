@@ -214,6 +214,25 @@ def read_configuration_settings(configuration_directory: Path) -> dict:
     with (configuration_directory / "config.yaml").open(encoding="utf-8") as config_file:
         section_settings = yaml.safe_load(config_file)
 
+    return prepare_configuration_settings(section_settings, configuration_directory)
+
+
+def prepare_configuration_settings(section_settings: dict, configuration_directory: Path) -> dict:
+    """从六段配置构造运行参数，路径只在返回值中解析。
+
+    Args:
+        section_settings: 原始 YAML 业务段落。
+        configuration_directory: 相对路径的基准目录。
+
+    Returns:
+        返回示例：
+            {
+                "database_path": Path("/config/data.sqlite3"),  # 解析后的业务库路径
+                "io_machine_channels": {  # 机器到通道的映射
+                    "1": 0,  # 一号机器的通道
+                },
+            }
+    """
     # 按固定段落顺序合并公共参数，并记录每个键的来源段落。
     settings = {}
     source_sections: dict[str, str] = {}
@@ -292,3 +311,58 @@ def load_config(configuration_directory: Path) -> AppConfig:
     # 校验运行参数后返回配置对象。
     config.validate()
     return config
+
+
+class ConfigurationValidationError(ValueError):
+    """保存配置校验错误对应的表单字段。"""
+
+    def __init__(self, message: str, field: str) -> None:
+        """记录可读提示和需要修正的字段。
+
+        Args:
+            message: 可直接展示的错误说明。
+            field: 配置键或 io_machine_channels.机器编号。
+
+        Returns:
+            返回示例：
+                None  # 错误说明和字段已记录
+        """
+        super().__init__(message)
+        self.field = field
+
+
+def validate_io_configuration(config: AppConfig, enabled_machine_ids: set[str]) -> None:
+    """校验启用机器的串口与 DI 绑定，供保存和启动共同使用。
+
+    Args:
+        config: 待校验的公共运行配置。
+        enabled_machine_ids: 实际启用机器编号集合。
+
+    Returns:
+        返回示例：
+            None  # 串口已填写，启用机器均绑定唯一的非负整数通道
+    """
+    # 拒绝未填写或空白的 IO 串口。
+    if not isinstance(config.modbus_serial_port, str) or not config.modbus_serial_port.strip():
+        raise ConfigurationValidationError("未配置 Modbus RTU 串口。", "modbus_serial_port")
+
+    # 为第一台缺少绑定的启用机器返回可定位字段。
+    channel_mapping = config.io_machine_channels
+    missing_machine_ids = enabled_machine_ids - channel_mapping.keys()
+    if missing_machine_ids:
+        missing_ids = sorted(missing_machine_ids)
+        raise ConfigurationValidationError(
+            f"启用机器未配置 DI 通道：{', '.join(missing_ids)}。",
+            f"io_machine_channels.{missing_ids[0]}",
+        )
+
+    # 逐台检查启用机器的通道为非负整数且不重复。
+    used_channels = set()
+    for machine_id in sorted(enabled_machine_ids):
+        channel = channel_mapping[machine_id]
+        field = f"io_machine_channels.{machine_id}"
+        if type(channel) is not int or channel < 0:
+            raise ConfigurationValidationError("DI 通道必须是大于等于零的整数。", field)
+        if channel in used_channels:
+            raise ConfigurationValidationError("启用机器不能绑定相同的 DI 通道。", field)
+        used_channels.add(channel)

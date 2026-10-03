@@ -1,4 +1,4 @@
-"""以分组表单展示系统配置，并在内存中编辑可撤销的预览草稿。"""
+"""以分组表单编辑系统配置草稿，校验后仅在完全停止时保存。"""
 
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
@@ -18,7 +18,6 @@ from qfluentwidgets import (
 )
 
 from src.controller.controller import AppController
-from ui.configuration_preview import read_configuration_preview
 from ui.theme import COLORS
 
 
@@ -40,7 +39,12 @@ def normalize_preview_value(value: object, value_kind: str) -> tuple:
         return ("null",)
 
     # 只在数值字段中比较有限数值，不把布尔值转换成零或一。
-    if value_kind in ("number", "integer") and isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+    if (
+        value_kind in ("number", "integer")
+        and isinstance(value, (int, float, Decimal))
+        and not isinstance(value, bool)
+        and (value_kind != "integer" or type(value) is int)
+    ):
         try:
             number = Decimal(str(value).strip())
         except InvalidOperation:
@@ -191,7 +195,7 @@ class ConfigurationValueEditor(QWidget):
 
 
 class SystemConfigurationPage(QWidget):
-    """展示配置分组、只读运行信息和不会生效的本次草稿。"""
+    """展示配置草稿与校验结果，保存后供下次开始监测读取。"""
 
     def __init__(self, controller: AppController, parent: QWidget | None = None) -> None:
         """建立页面壳体，第一次进入时再读取现有配置。
@@ -215,15 +219,18 @@ class SystemConfigurationPage(QWidget):
         self.path_copy_buttons = {}
         self.readonly_inputs = {}
         self.is_dirty = False
+        self.validation_field = None
+        self.saved_message = ""
+        self.read_error_message = ""
 
-        # 创建固定标题和明确的预览说明。
+        # 创建固定标题和保存生效范围说明。
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 4, 24, 20)
         layout.setSpacing(16)
         self.title_label = TitleLabel("系统配置", self)
         self.title_label.setObjectName("pageTitle")
         layout.addWidget(self.title_label)
-        self.preview_label = QLabel("界面预览 · 修改仅保留为本次草稿，不写入配置文件，也不影响设备。", self)
+        self.preview_label = QLabel("完全停止监测后可保存配置；保存后在下次开始监测时生效。", self)
         self.preview_label.setObjectName("settingsPreviewNotice")
         self.preview_label.setWordWrap(True)
         layout.addWidget(self.preview_label)
@@ -262,9 +269,13 @@ class SystemConfigurationPage(QWidget):
         self.error_label.setTextFormat(Qt.TextFormat.PlainText)
         self.error_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.retry_button = PushButton("重新读取")
-        self.retry_button.clicked.connect(self.load_configuration_preview)
+        self.retry_button.clicked.connect(self.reload_configuration)
         error_layout.addWidget(self.error_label)
         error_layout.addWidget(self.retry_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.field_error_button = PushButton("定位问题")
+        self.field_error_button.clicked.connect(self.focus_validation_error)
+        self.field_error_button.hide()
+        error_layout.addWidget(self.field_error_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.content_layout.addWidget(self.error_card)
         self.error_card.hide()
         self.error_label.hide()
@@ -281,6 +292,7 @@ class SystemConfigurationPage(QWidget):
         self.form.setEnabled(False)
         self.build_action_bar(layout)
         self.apply_page_style()
+        self.controller.monitoring_state_changed_signal.connect(self.update_draft_state)
 
     def build_group(self, title: str, description: str, target_layout: QVBoxLayout) -> QVBoxLayout:
         """向指定区域添加带标题、说明和圆角卡片的设置分组。
@@ -530,7 +542,7 @@ class SystemConfigurationPage(QWidget):
             self.add_editable_field(timeout_layout, key, title, description, "integer", "ms")
 
         # 绑定区只展示配置中已有的机器编号与通道，不提供机器增删。
-        self.io_layout = self.build_group("机器与 DI 绑定", "通道使用从 0 开始的整数索引，仅编辑已有绑定。", layout)
+        self.io_layout = self.build_group("机器与 DI 绑定", "通道从 0 开始；启用机器必须填写唯一通道，未绑定项不预设数值。", layout)
         self.io_hint = QLabel("尚未读取绑定信息。")
         self.io_hint.setObjectName("settingsBindingHint")
         self.io_hint.setWordWrap(True)
@@ -538,14 +550,14 @@ class SystemConfigurationPage(QWidget):
         self.io_layout.addWidget(self.io_hint)
 
     def build_action_bar(self, layout: QVBoxLayout) -> None:
-        """创建固定底栏的修改状态、撤销和待接入保存按钮。
+        """创建固定底栏的修改状态、撤销和保存按钮。
 
         Args:
             layout: 页面最外层布局。
 
         Returns:
             返回示例：
-                None  # 底栏不随表单滚动，保存始终禁用
+                None  # 底栏不随表单滚动，保存受草稿、校验和监测状态控制
         """
         # 将固定底栏与正文保持相同的最大宽度。
         self.action_bar = QFrame()
@@ -559,19 +571,20 @@ class SystemConfigurationPage(QWidget):
         labels.setSpacing(4)
         self.status_label = QLabel("尚未读取配置")
         self.status_label.setObjectName("settingsDraftStatus")
-        self.status_hint = QLabel("草稿仅在本次打开期间保留")
+        self.status_hint = QLabel("修改后保存，下次开始监测时生效")
         self.status_hint.setObjectName("settingsFieldDescription")
         labels.addWidget(self.status_label)
         labels.addWidget(self.status_hint)
         action_layout.addLayout(labels, 1)
 
-        # 撤销只恢复内存基线；保存按钮没有连接任何操作。
+        # 撤销恢复已读取或已保存的基线，保存请求交给 Controller。
         self.undo_button = PushButton("撤销修改")
         self.undo_button.setEnabled(False)
         self.undo_button.clicked.connect(self.undo_changes)
-        self.save_button = PrimaryPushButton("保存配置 · 待接入")
+        self.save_button = PrimaryPushButton("保存配置")
         self.save_button.setEnabled(False)
-        self.save_button.setToolTip("当前仅完成界面，配置校验、保存和生效逻辑尚未接入。")
+        self.save_button.setToolTip("完全停止监测且草稿校验通过后可保存。")
+        self.save_button.clicked.connect(self.save_configuration)
         action_layout.addWidget(self.undo_button)
         action_layout.addWidget(self.save_button)
         container_layout = QHBoxLayout()
@@ -591,29 +604,78 @@ class SystemConfigurationPage(QWidget):
             返回示例：
                 None  # 成功时回填实际值，失败时显示错误并保留页面壳体
         """
-        # 已有读取基线时不因切换页面而覆盖草稿。
+        # 切回页面时只补充新机器的绑定行，不覆盖既有草稿。
         if self.configuration_loaded:
+            self.build_io_bindings()
+            self.update_draft_state()
             return
-        settings, error_message = read_configuration_preview(self.controller.configuration_directory)
-        if error_message:
-            self.error_label.setText(error_message)
+        self.reload_configuration()
+
+    def reload_configuration(self) -> None:
+        """重新读取配置，并在新基线上保留尚未保存的字段修改。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 读取成功时保留原草稿修改，失败时保持现有表单
+        """
+        # 只保留相对旧基线实际修改的可编辑字段。
+        changes = {}
+        channel_changes = {}
+        if self.configuration_loaded:
+            draft = self.get_draft_values()
+            for key, editor in self.editors.items():
+                if normalize_preview_value(draft.get(key), editor.value_kind) != normalize_preview_value(
+                    self.baseline_values.get(key), editor.value_kind
+                ):
+                    changes[key] = draft.get(key)
+            if normalize_preview_value(draft.get("camera_strobe_enabled"), "text") != normalize_preview_value(
+                self.baseline_values.get("camera_strobe_enabled"), "text"
+            ):
+                changes["camera_strobe_enabled"] = draft.get("camera_strobe_enabled")
+            baseline_channels = self.baseline_values.get("io_machine_channels", {})
+            channel_changes = {
+                key: value for key, value in draft.get("io_machine_channels", {}).items()
+                if normalize_preview_value(value, "integer")
+                != normalize_preview_value(baseline_channels.get(key), "integer")
+            }
+
+        # 读取失败只展示错误，不丢弃可修正的草稿。
+        result = self.controller.read_configuration()
+        if not result.success:
+            self.read_error_message = result.message
+            self.error_label.setText(result.message)
             self.error_label.show()
             self.error_card.show()
-            self.form.setEnabled(False)
-            self.status_label.setText("配置未读取")
+            self.field_error_button.hide()
+            self.save_button.setEnabled(False)
+            if not self.configuration_loaded:
+                self.status_label.setText("配置未读取")
             return
 
-        # 保存独立基线，再回填所有输入与三态频闪选项。
-        self.baseline_values = deepcopy(settings)
+        # 更新基线后回填，空值和只读路径继续使用实际读取值。
+        self.configuration_loaded = False
+        self.baseline_values = deepcopy(result.data["settings"])
+        self.saved_message = ""
+        self.read_error_message = ""
         self.build_io_bindings()
         self.undo_changes()
+        for key, value in changes.items():
+            if key == "camera_strobe_enabled":
+                self.strobe_combo.setCurrentIndex(self.strobe_combo.findData(value))
+            else:
+                self.editors[key].set_value(value)
+        for machine_id, value in channel_changes.items():
+            self.io_editors[machine_id].set_value(value)
         self.populate_readonly_values()
         self.configuration_loaded = True
         self.form.setEnabled(True)
-        self.error_card.hide()
-        self.error_label.hide()
         self.update_draft_state()
         self.apply_page_style()
+        if changes or channel_changes:
+            self.status_hint.setText("已重新读取并保留草稿修改，请核对后保存")
 
     def build_io_bindings(self) -> None:
         """以机器实际名称展示已有的机器编号到 DI 通道映射。
@@ -625,22 +687,25 @@ class SystemConfigurationPage(QWidget):
             返回示例：
                 None  # 已有绑定可编辑，空绑定或名称读取失败时有对应说明
         """
-        # 没有绑定时保留空态，不为未绑定机器新增配置。
+        # 读取真实机器元数据，已有未知编号仍保留配置中的绑定。
         bindings = self.baseline_values.get("io_machine_channels", {})
-        if not bindings:
-            self.io_hint.setText("尚未配置机器与 DI 通道的绑定。")
-            return
         result = self.controller.list_machines()
         machines = result.data["machines"] if result.success else []
         names = {str(machine["id"]): machine["machine_name"] for machine in machines}
+        machine_ids = list(dict.fromkeys([*bindings, *names]))
 
-        # 只读取机器名称，找不到对应记录时保留配置中的机器编号。
-        self.io_hint.setText("通道索引从 0 开始，例如 0 表示第一个 DI 通道。")
+        # 空绑定也展示真实机器，缺少通道时保持空白等待现场填写。
+        self.io_hint.setText("启用机器需填写通道；索引从 0 开始，不自动分配。")
+        if not machine_ids:
+            self.io_hint.setText("暂无机器或 DI 绑定，请先在机器管理中添加实际机器。")
         if not result.success:
-            self.io_hint.setText("机器名称暂时无法读取，以下保留原机器编号。通道索引从 0 开始。")
-        for machine_id, channel in bindings.items():
+            self.io_hint.setText("机器名称暂时无法读取，以下保留原机器编号。保存前需恢复机器信息读取。")
+        for machine_id in machine_ids:
+            if machine_id in self.io_editors:
+                continue
             editor = ConfigurationValueEditor("integer")
-            editor.set_value(channel)
+            editor.set_value(bindings.get(machine_id))
+            editor.input.setPlaceholderText("待填写 DI 通道")
             editor.value_changed.connect(self.update_draft_state)
             self.io_editors[machine_id] = editor
             title = names.get(machine_id) or f"机器 #{machine_id}（名称不可用）"
@@ -706,9 +771,12 @@ class SystemConfigurationPage(QWidget):
         if "camera_strobe_enabled" in draft or strobe_value is not None:
             draft["camera_strobe_enabled"] = strobe_value
 
-        # 只替换现有绑定的通道值，不增删机器编号。
+        # 空白的新机器保持未绑定，不将其猜测为通道零。
+        bindings = draft.setdefault("io_machine_channels", {})
         for machine_id, editor in self.io_editors.items():
-            draft["io_machine_channels"][machine_id] = editor.get_value()
+            value = editor.get_value()
+            if machine_id in bindings or value is not None:
+                bindings[machine_id] = value
         return draft
 
     def update_draft_state(self) -> None:
@@ -719,7 +787,7 @@ class SystemConfigurationPage(QWidget):
 
         Returns:
             返回示例：
-                None  # dirty 状态反映当前草稿，保存按钮仍然禁用
+                None  # 保存仅在草稿有效、已修改且监测完全停止时可用
         """
         # 未成功读取时不把初始化控件变化当作用户修改。
         if not self.configuration_loaded:
@@ -739,16 +807,34 @@ class SystemConfigurationPage(QWidget):
         baseline_bindings = self.baseline_values.get("io_machine_channels", {})
         changed = changed or any(
             normalize_preview_value(editor.get_value(), "integer")
-            != normalize_preview_value(baseline_bindings[machine_id], "integer")
+            != normalize_preview_value(baseline_bindings.get(machine_id), "integer")
             for machine_id, editor in self.io_editors.items()
         )
         self.is_dirty = changed
-        self.status_label.setText("有未保存的修改 · 仅草稿" if changed else "无未保存的修改")
+        if changed:
+            self.saved_message = ""
+        self.status_label.setText("有未保存的修改" if changed else "无未保存的修改")
         self.status_label.setProperty("dirty", changed)
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
         self.undo_button.setEnabled(changed)
-        self.save_button.setEnabled(False)
+
+        # 每次输入仅校验草稿；监测线程清理完成前保持保存禁用。
+        result = self.controller.validate_configuration(draft)
+        running = self.controller.is_monitoring_running().data["running"]
+        self.validation_field = (result.data or {}).get("field") if not result.success else None
+        error_message = result.message or self.read_error_message
+        self.save_button.setEnabled(changed and result.success and not running and not self.read_error_message)
+        self.error_card.setVisible(bool(error_message))
+        self.error_label.setVisible(bool(error_message))
+        self.field_error_button.setVisible(bool(self.validation_field))
+        self.error_label.setText(error_message)
+        if running:
+            self.status_hint.setText("监测启动、运行或停止清理中，完全停止后才可保存")
+        elif not result.success or self.read_error_message:
+            self.status_hint.setText("请修正配置问题后保存，草稿已保留")
+        else:
+            self.status_hint.setText(self.saved_message or "校验通过，下次开始监测时生效")
 
     def undo_changes(self) -> None:
         """恢复本次读取的完整草稿基线，保持高级区的展开状态。
@@ -764,7 +850,7 @@ class SystemConfigurationPage(QWidget):
         for key, editor in self.editors.items():
             editor.set_value(self.baseline_values.get(key))
         for machine_id, editor in self.io_editors.items():
-            editor.set_value(self.baseline_values["io_machine_channels"][machine_id])
+            editor.set_value(self.baseline_values.get("io_machine_channels", {}).get(machine_id))
 
         # 三态之外的异常原始值也保留为独立选项，不自动变成 false。
         value = self.baseline_values.get("camera_strobe_enabled")
@@ -783,6 +869,69 @@ class SystemConfigurationPage(QWidget):
         self.strobe_combo.setCurrentIndex(matching_index)
         del blocker
         self.update_draft_state()
+
+    def save_configuration(self) -> None:
+        """提交草稿，只有成功落盘后才更新撤销基线。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 成功时清除 dirty，失败时保留输入并定位问题
+        """
+        # 后端再次校验监测状态与草稿，避免仅依赖按钮禁用。
+        if not self.configuration_loaded or not self.is_dirty:
+            return
+        result = self.controller.save_configuration(self.get_draft_values())
+        if not result.success:
+            self.error_label.setText(result.message)
+            self.error_label.show()
+            self.error_card.show()
+            self.validation_field = (result.data or {}).get("field")
+            self.field_error_button.setVisible(bool(self.validation_field))
+            self.status_hint.setText("未保存，草稿已保留")
+            self.focus_validation_error()
+            return
+
+        # 成功后保留高级展开状态，并将磁盘值作为新的撤销基线。
+        self.configuration_loaded = False
+        self.baseline_values = deepcopy(result.data["settings"])
+        self.undo_changes()
+        self.populate_readonly_values()
+        self.configuration_loaded = True
+        self.saved_message = result.message
+        self.update_draft_state()
+
+    def focus_validation_error(self) -> None:
+        """展开相关区域并定位首个可编辑的错误字段。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 对应字段已获得焦点，草稿不改变
+        """
+        # 普通字段与机器 DI 字段分别查找现有控件。
+        field = self.validation_field or ""
+        editor = self.editors.get(field)
+        if field.startswith("io_machine_channels."):
+            editor = self.io_editors.get(field.partition(".")[2])
+        widget = editor.input if editor is not None else None
+        if field == "camera_strobe_enabled":
+            widget = self.strobe_combo
+        if widget is None:
+            return
+
+        # 高级字段定位时自动展开，沿用设备的空值选项也可直接修正。
+        if self.advanced_body.isAncestorOf(widget):
+            self.advanced_toggle.setChecked(True)
+            self.toggle_advanced_settings()
+        if editor is not None and not editor.input.isEnabled() and editor.mode_combo is not None:
+            widget = editor.mode_combo
+        self.scroll_area.ensureWidgetVisible(widget)
+        widget.setFocus()
 
     def toggle_advanced_settings(self) -> None:
         """根据高级入口的选中状态展开或收起完整高级分组。

@@ -30,7 +30,7 @@ PAGES = {
     "abnormal_events": ("异常事件", "查看测量过程中的异常事件和原始信息", FluentIcon.INFO),
     "machines": ("机器管理", "管理检测机器的基本信息", FluentIcon.ROBOT),
     "images": ("图片管理", "图片管理功能尚未开放", FluentIcon.PHOTO),
-    "settings": ("系统配置", "预览现有配置并编辑本次草稿", FluentIcon.SETTING),
+    "settings": ("系统配置", "编辑系统配置，保存后下次监测生效", FluentIcon.SETTING),
     "logs": ("日志查看", "日志查看功能尚未开放", FluentIcon.DOCUMENT),
 }
 
@@ -38,7 +38,7 @@ NAVIGATION_WIDTH = 176
 
 
 class MainWindow(FluentWindow):
-    """展示监测、历史、异常、机器管理和配置预览页面。"""
+    """展示监测、历史、异常、机器管理和系统配置页面。"""
 
     def __init__(self, controller: AppController):
         """初始化窗口、页面、导航、状态和时钟。

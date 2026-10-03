@@ -10,6 +10,7 @@ from src.service.abnormal_event_service import (
     AbnormalEventService,
     AbnormalEventServiceError,
 )
+from src.service.configuration_service import ConfigurationService, ConfigurationServiceError
 from src.service.machine_service import (
     MachineDuplicateFieldError,
     MachineService,
@@ -84,6 +85,7 @@ class AppController(QObject):
     ocr_result_changed_signal = Signal(str, str, tuple)
     machine_status_changed_signal = Signal(str, str)
     monitoring_finished_signal = Signal(str)
+    monitoring_state_changed_signal = Signal()
 
     def __init__(
         self,
@@ -110,7 +112,84 @@ class AppController(QObject):
         self.measurement_record_service = measurement_record_service
         self.abnormal_event_service = abnormal_event_service
         self.configuration_directory = configuration_directory
+        self.configuration_service = ConfigurationService(configuration_directory)
         self.runtime_thread: SystemRuntimeThread | None = None
+
+    def read_configuration(self) -> Result:
+        """读取系统配置草稿，不启动设备或校验运行条件。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                Result(
+                    success=True,  # 读取成功
+                    data={  # 页面数据
+                        "settings": {},  # 实际配置字段
+                    },
+                    message="",  # 读取提示
+                )
+        """
+        try:
+            settings = self.configuration_service.read_configuration()
+            return Result.ok({"settings": settings})
+        except ConfigurationServiceError as error:
+            return Result.error(str(error), data={"field": error.field})
+
+    def validate_configuration(self, draft: dict) -> Result:
+        """使用当前机器记录校验系统配置草稿。
+
+        Args:
+            draft: 页面提交的配置草稿。
+
+        Returns:
+            返回示例：
+                Result(
+                    success=False,  # 校验失败
+                    data={  # 页面定位信息
+                        "field": "camera_gain",  # 待修正的配置字段
+                    },
+                    message="camera_gain 不能小于零。",  # 可读提示
+                )
+        """
+        # 机器记录每次查询，避免保存已删除或遗漏新启用机器的绑定。
+        try:
+            machines = self.machine_service.list_machines()["machines"]
+            self.configuration_service.validate_configuration(draft, machines)
+            return Result.ok()
+        except ConfigurationServiceError as error:
+            return Result.error(str(error), data={"field": error.field})
+        except MachineServiceError as error:
+            return Result.error(f"无法校验机器与 DI 绑定：{error}")
+
+    def save_configuration(self, draft: dict) -> Result:
+        """仅在监测线程完全清理后保存配置，供下次启动读取。
+
+        Args:
+            draft: 页面提交的配置草稿。
+
+        Returns:
+            返回示例：
+                Result(
+                    success=True,  # 配置已落盘
+                    data={  # 新的页面基线
+                        "settings": {},  # 已保存的配置字段
+                    },
+                    message="配置已保存，下次开始监测时生效。",  # 生效说明
+                )
+        """
+        # 启动中、运行中和停止清理中都持有线程，均禁止写入。
+        if self.runtime_thread is not None:
+            return Result.error("监测启动、运行或停止清理中，请等待完全停止后再保存配置。")
+        try:
+            machines = self.machine_service.list_machines()["machines"]
+            settings = self.configuration_service.save_configuration(draft, machines)
+            return Result.ok({"settings": settings}, "配置已保存，下次开始监测时生效。")
+        except ConfigurationServiceError as error:
+            return Result.error(str(error), data={"field": error.field})
+        except MachineServiceError as error:
+            return Result.error(f"无法校验机器与 DI 绑定：{error}")
 
     def list_machines(self) -> Result:
         """读取全部未删除的机器。
@@ -595,6 +674,7 @@ class AppController(QObject):
 
         # 创建当前监测线程。
         self.runtime_thread = SystemRuntimeThread(self.configuration_directory)
+        self.monitoring_state_changed_signal.emit()
 
         # 转发相机和测量状态信号。
         self.runtime_thread.camera_state_changed_signal.connect(
@@ -678,6 +758,7 @@ class AppController(QObject):
         # 安排线程对象释放并清空当前引用。
         runtime_thread.deleteLater()
         self.runtime_thread = None
+        self.monitoring_state_changed_signal.emit()
 
         # 在引用清理后通知界面监测已结束。
         self.monitoring_finished_signal.emit(failure_message)

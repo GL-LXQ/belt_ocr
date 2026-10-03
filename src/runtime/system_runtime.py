@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from camera.camera import Camera
 from camera.hikrobot_sdk import MvsError, load_mvs_sdk
-from config_util import AppConfig, MachineConfig
+from config_util import AppConfig, MachineConfig, validate_io_configuration
 from repo.machine_repo import MachineRepo
 from frequency_adapter import FrequencyAdapter
 from runtime.machine_runtime import MachineRuntime
@@ -377,27 +377,8 @@ class SystemRuntime:
             返回示例：
                 None  # 当前启用机器均已配置唯一的非负 DI 通道
         """
-        # 未配置串口时拒绝启用 IO。
-        if self.config.modbus_serial_port is None:
-            raise ValueError("未配置 Modbus RTU 串口。")
-
-        # 找出未绑定 DI 通道的启用机器。
-        enabled_machine_ids = set(self.machines)
-        channel_mapping = self.config.io_machine_channels
-        missing_machine_ids = enabled_machine_ids - channel_mapping.keys()
-        if missing_machine_ids:
-            missing_ids = ", ".join(sorted(missing_machine_ids))
-            raise ValueError(f"启用机器未配置 DI 通道：{missing_ids}。")
-
-        # 检查启用机器的通道非负且互不重复。
-        enabled_channels = [channel_mapping[machine_id] for machine_id in enabled_machine_ids]
-        if any(
-            not isinstance(channel, int) or isinstance(channel, bool) or channel < 0
-            for channel in enabled_channels
-        ):
-            raise ValueError("DI 通道必须是大于等于零的整数。")
-        if len(enabled_channels) != len(set(enabled_channels)):
-            raise ValueError("启用机器不能绑定相同的 DI 通道。")
+        # 保存与启动使用同一组串口和启用机器绑定校验。
+        validate_io_configuration(self.config, set(self.machines))
 
     async def listen_io(self) -> None:
         """持续读取 DI 状态并交给机器状态处理流程。
