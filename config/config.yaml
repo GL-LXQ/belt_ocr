@@ -43,6 +43,7 @@ frequency:
 
 # 机器周期期限与事件队列容量，现场启停状态以 Modbus DI 实际读数为准。
 machine:
+  max_inflight_cycles: 2  # 单机最多保留的未完整回收周期数
   max_cycle_open_ms: 60000  # 等待 CLOSE 的期限，毫秒
   event_queue_capacity: 128  # 单机事件队列容量
 

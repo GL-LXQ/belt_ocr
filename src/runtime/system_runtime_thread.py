@@ -31,6 +31,9 @@ class SystemRuntimeThread(QThread):
     # 机器整体状态信号，参数依次为机器编号和整体状态标识。
     machine_status_changed_signal = Signal(str, str)
 
+    # 机器积压提示，参数依次为机器编号和说明。
+    machine_warning_signal = Signal(str, str)
+
     def __init__(self, configuration_directory: Path) -> None:
         """保存配置路径并创建跨线程停止通知。
 
@@ -87,13 +90,14 @@ class SystemRuntimeThread(QThread):
         # 创建 Runtime。
         system_runtime = SystemRuntime(configuration)
         try:
-            # 启动 Runtime 并接入相机、进度、文字、周期关闭和机器整体状态信号。
+            # 启动 Runtime 并接入相机、进度、文字、周期关闭、机器状态及积压提示。
             await system_runtime.start(
                 self.camera_state_changed_signal.emit,
                 self.measurement_progress_changed_signal.emit,
                 self.ocr_result_changed_signal.emit,
                 self.cycle_closed_signal.emit,
                 self.machine_status_changed_signal.emit,
+                self.machine_warning_signal.emit,
             )
 
             # 轮询停止请求与后台故障，任一出现时结束等待。

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -40,7 +40,7 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
         refresh_selected_machine_detail=Mock(),
         connection_states={},
         cards_by_machine_id={"1": card},
-        ocr_results_by_machine_id={"1": ("session-1", ("AB",), ("AB",))},
+        ocr_results_by_machine_id={"1": ("session-1", ("AB",))},
         measurement_states_by_machine_id={
             "1": {
                 "session_id": "session-1",
@@ -106,7 +106,7 @@ def test_camera_fault_and_latest_measurement_progress_are_both_visible(
     })
 
     # 当前周期关闭后保留已缓存的 OCR。
-    assert page.ocr_results_by_machine_id["1"] == ("session-1", ("AB",), ("AB",))
+    assert page.ocr_results_by_machine_id["1"] == ("session-1", ("AB",))
     card.clear_ocr_result.assert_not_called()
     page.update_dashboard_summary.assert_not_called()
 
@@ -327,3 +327,130 @@ def test_device_overview_counts_only_backend_machine_statuses(
     page.device_overview_card.set_values.assert_called_once_with(
         4, online_count, fault_count
     )
+
+
+@pytest.mark.parametrize("stage", ["evidence_storage", "character_recognition"])
+@pytest.mark.parametrize("status", ["success", "failed"])
+def test_old_cycle_storage_refreshes_today_without_changing_latest_card(
+    monkeypatch: pytest.MonkeyPatch, stage: str, status: str,
+) -> None:
+    """确认旧轮入库刷新今日统计，旧进度、文字和关闭不影响新轮。
+
+    Args:
+        monkeypatch: pytest 属性替换工具。
+        stage: 旧轮通知阶段。
+        status: 旧轮阶段状态。
+
+    Returns:
+        返回示例：
+            None  # 只有旧轮入库成功刷新统计，最新周期卡片和动画保持原样
+    """
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
+    from ui.pages.realtime_page import RealtimePage
+
+    # 保留最新周期的文字、频率和动画状态。
+    card = Mock()
+    latest = {
+        "session_id": "new", "machine_running": True,
+        "progress_statuses": {"image_capture": "success"},
+    }
+    page = SimpleNamespace(
+        selected_machine_id="1", cards_by_machine_id={"1": card},
+        measurement_states_by_machine_id={"1": latest},
+        ocr_results_by_machine_id={"1": ("new", ("2926215C",))},
+        refresh_today_detection_summary=Mock(),
+        refresh_selected_machine_detail=Mock(),
+    )
+
+    # 旧轮数据只触发必要统计读取，不改变最新周期的缓存或卡片。
+    RealtimePage.update_measurement_progress(page, "1", "old", stage, status)
+    RealtimePage.update_ocr_result(page, "1", "old", ("2926214C",))
+    RealtimePage.update_cycle_closed(page, "1", "old")
+    assert page.refresh_today_detection_summary.call_count == int(
+        stage == "evidence_storage" and status == "success"
+    )
+    assert latest == {
+        "session_id": "new", "machine_running": True,
+        "progress_statuses": {"image_capture": "success"},
+    }
+    assert page.ocr_results_by_machine_id["1"] == ("new", ("2926215C",))
+    assert card.mock_calls == []
+    page.refresh_selected_machine_detail.assert_not_called()
+
+
+def test_capacity_warning_reaches_page_through_runtime_thread_and_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """确认后台线程的满载通知经 Controller 到达实时页提示入口。
+
+    Args:
+        monkeypatch: pytest 属性替换工具。
+
+    Returns:
+        返回示例：
+            None  # 实际 Qt 信号贯通，页面使用现有 warning 提示
+    """
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
+    from PySide6.QtTest import QSignalSpy
+    from PySide6.QtWidgets import QApplication
+    from src.controller.controller import AppController
+    from src.runtime.system_runtime_thread import SystemRuntimeThread
+    from ui.pages.realtime_page import RealtimePage
+
+    # 创建无可见窗口的 Qt 应用、真实 Controller 和后台线程。
+    application = QApplication.instance() or QApplication([])
+    controller = AppController(Mock(), Mock(), Mock(), Path("unused-config"))
+    thread = SystemRuntimeThread(Path("unused-config"))
+    thread.stop_requested.set()
+    warning = "后台处理积压，本次启动未采集，请暂停换带"
+    runtime = SimpleNamespace(failure=None, stop=AsyncMock())
+
+    async def start_runtime(*callbacks):
+        """通过 Runtime 接入的回调发出积压提示。
+
+        Args:
+            callbacks: 后台线程传入的通知入口。
+
+        Returns:
+            返回示例：
+                None  # 满载提示已发出
+        """
+        callbacks[5]("1", warning)
+
+    runtime.start = start_runtime
+    monkeypatch.setattr(
+        "src.runtime.system_runtime_thread.load_config",
+        Mock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        "src.runtime.system_runtime_thread.SystemRuntime",
+        Mock(return_value=runtime),
+    )
+    monkeypatch.setattr(
+        "src.controller.controller.SystemRuntimeThread",
+        Mock(return_value=thread),
+    )
+    show_warning = Mock()
+    monkeypatch.setattr("ui.pages.realtime_page.InfoBar.warning", show_warning)
+    page = SimpleNamespace()
+    controller.machine_warning_signal.connect(
+        lambda machine_id, message: RealtimePage.show_machine_warning(
+            page, machine_id, message
+        )
+    )
+    received = QSignalSpy(controller.machine_warning_signal)
+
+    # 启动真实 QThread，只检查信号和提示参数。
+    try:
+        assert controller.start_monitoring().success
+        assert thread.wait(2000)
+        application.processEvents()
+        assert received.count() == 1
+        assert received.at(0) == ["1", warning]
+        show_warning.assert_called_once_with("机器 1", warning, duration=-1, parent=page)
+        runtime.stop.assert_awaited_once()
+    finally:
+        thread.stop_requested.set()
+        thread.wait(2000)

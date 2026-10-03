@@ -26,6 +26,7 @@ class CaptureTask:
     timeout_ms: int  # 单次取帧超时毫秒数
     stop_requested: threading.Event = field(default_factory=threading.Event)  # 停止采集通知
     capture_finished: asyncio.Event = field(default_factory=asyncio.Event)  # 采集与停流结束通知
+    lock_released: bool = False  # 所属采集锁是否已归还
 
     def run_capture(self) -> CaptureResult:
         """循环收集全部帧，停止相机后交付整轮结果。
@@ -134,6 +135,7 @@ class Camera:
         # 分别登记现场采集与结果交付任务。
         self.current_capture: CaptureTask | None = None
         self.delivery_task: asyncio.Task | None = None
+        self.unfinished_delivery_tasks: set[asyncio.Task] = set()
 
     @property
     def available(self) -> bool:
@@ -163,7 +165,11 @@ class Camera:
         """
         return self.sdk_camera is not None and self.sdk_camera.capture_lock.locked()
 
-    def start_capture(self, session_id: str, capture_start_time: float) -> None:
+    def start_capture(
+        self,
+        session_id: str,
+        capture_start_time: float,
+    ) -> tuple[CaptureTask, asyncio.Task]:
         """启动整轮采集并安排一次性结果交付。
 
         Args:
@@ -172,7 +178,10 @@ class Camera:
 
         Returns:
             返回示例：
-                None  # 后台采集和结果交付已启动
+                (
+                    capture_task,  # 所属现场采集任务
+                    delivery_task,  # 所属结果交付任务
+                )
         """
         # 取出本机 SDK 相机对象。
         sdk_camera = self.sdk_camera
@@ -211,7 +220,11 @@ class Camera:
 
         # 登记采集引用与结束回调。
         self.current_capture = capture_task
-        self.delivery_task.add_done_callback(self.handle_capture_task_finished)
+        delivery_task = self.delivery_task
+        self.unfinished_delivery_tasks.add(delivery_task)
+        delivery_task.add_done_callback(
+            lambda task: self.handle_capture_task_finished(task, capture_task)
+        )
 
         # 记录本轮采集启动参数。
         logger.info(
@@ -224,24 +237,28 @@ class Camera:
             self.capture_window_ms,
         )
 
-    def handle_capture_task_finished(self, task: asyncio.Task) -> None:
+        return capture_task, delivery_task
+
+    def handle_capture_task_finished(
+        self,
+        task: asyncio.Task,
+        capture_task: CaptureTask,
+    ) -> None:
         """移除交付任务并报告未处理异常。
 
         Args:
             task: 已结束的采集交付任务。
+            capture_task: 该交付任务所属的现场采集。
 
         Returns:
             返回示例：
                 None  # 任务引用已移除，异常已报告
         """
-        # 清理尚未开始执行就被取消的任务，归还相机占用。
-        if self.current_capture is not None:
-            self.current_capture.sdk_camera.capture_lock.release()
-            self.current_capture.capture_finished.set()
-            self.current_capture = None
-
-        # 移除交付任务引用。
-        self.delivery_task = None
+        # 回收所属采集资源，覆盖任务尚未运行即取消的情况。
+        self.finish_capture(capture_task)
+        self.unfinished_delivery_tasks.discard(task)
+        if self.delivery_task is task:
+            self.delivery_task = None
 
         # 任务被取消时不再读取异常。
         if task.cancelled():
@@ -252,26 +269,42 @@ class Camera:
         if error is not None:
             self.on_system_failure(error)
 
-    async def inform_capture_workflow_stop(self) -> None:
-        """通知采集线程停止，并等待采集结束。
+    def finish_capture(self, capture_task: CaptureTask) -> None:
+        """归还所属采集锁并通知停流完成。
 
         Args:
-            无外部参数。
+            capture_task: 已停止或尚未执行即取消的采集任务。
 
         Returns:
             返回示例：
-                None  # 相机已停止，结果交付可能仍在排队
+                None  # 所属锁已归还一次，不清理新轮引用
         """
-        # 取出本轮采集任务，已结束时直接返回。
-        capture_task = self.current_capture
-        if capture_task is None:
-            return
+        # 所属采集锁只归还一次。
+        if not capture_task.lock_released:
+            capture_task.sdk_camera.capture_lock.release()
+            capture_task.lock_released = True
+            capture_task.capture_finished.set()
 
-        # 发出停止通知。
-        capture_task.stop_requested.set()
+        # 仅清理仍指向所属采集的现场引用。
+        if self.current_capture is capture_task:
+            self.current_capture = None
 
-        # 等待当前读取结束和相机停流完成。
-        await capture_task.capture_finished.wait()
+    async def inform_capture_workflow_stop(
+        self,
+        capture_task: CaptureTask | None,
+    ) -> None:
+        """定向停止所属采集，只等待读帧和停流完成。
+
+        Args:
+            capture_task: 需要停止的本轮采集，None 表示没有采集任务。
+
+        Returns:
+            返回示例：
+                None  # 所属采集已停流，结果交付可以继续排队
+        """
+        if capture_task is not None:
+            capture_task.stop_requested.set()
+            await capture_task.capture_finished.wait()
 
     async def capture_and_deliver_result(self, session_id: str, capture_task: CaptureTask) -> None:
         """在线程中完成采集，再发布本轮采集结果。
@@ -301,14 +334,8 @@ class Camera:
                 )
             raise
         finally:
-            # 释放相机采集锁。
-            capture_task.sdk_camera.capture_lock.release()
-
-            # 通知等待方本轮采集与停流已结束。
-            capture_task.capture_finished.set()
-
-            # 移除本轮采集引用。
-            self.current_capture = None
+            # 归还本轮锁并通知现场停流完成。
+            self.finish_capture(capture_task)
 
         # 相机采集故障交给所属机器处理。
         if capture_error is not None:
@@ -369,6 +396,9 @@ class Camera:
         if self.current_capture is not None:
             self.current_capture.stop_requested.set()
 
-        # 等待本轮结果交付结束。
-        if self.delivery_task is not None:
-            await self.delivery_task
+        # 等待所有已开始的结果交付，包括旧轮仍在排队的任务。
+        tasks = tuple(self.unfinished_delivery_tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                raise result

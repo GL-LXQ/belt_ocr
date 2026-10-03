@@ -169,6 +169,7 @@ async def test_camera_connection_failure_preserves_other_machine(
             None,
             None,
             machine_status_notification,
+            None,
         )
         assert runtime.accepting_signals
         for machine in runtime.machines.values():
@@ -223,16 +224,20 @@ def test_initialize_machines_passes_camera_state_notification(
     ocr_notification = Mock()
     cycle_closed_notification = Mock()
     machine_status_notification = Mock()
+    machine_warning_notification = Mock()
     runtime.initialize_machines(
         notify_camera_state=camera_state_notification,
         notify_ocr_result=ocr_notification,
         notify_cycle_closed=cycle_closed_notification,
         notify_machine_status=machine_status_notification,
+        notify_machine_warning=machine_warning_notification,
     )
     assert runtime.machines["1"].notify_ocr_result is ocr_notification
     assert runtime.machines["1"].notify_camera_state is camera_state_notification
     assert runtime.machines["1"].notify_cycle_closed is cycle_closed_notification
     assert runtime.machines["1"].notify_machine_status is machine_status_notification
+    assert runtime.machines["1"].notify_machine_warning is machine_warning_notification
+    assert runtime.machines["1"].config.max_inflight_cycles == 2
 
 
 def test_initialize_machines_copies_common_camera_parameters(

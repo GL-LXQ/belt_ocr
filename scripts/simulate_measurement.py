@@ -324,7 +324,7 @@ async def run_measurement_simulation(scenario: str) -> dict:
         await publish_and_wait(RuntimeEvent(
             EventType.MACHINE_STARTED, machine_config.machine_id
         ))
-        session = machine.current_session
+        session = machine.active_session
         if session is None:
             raise RuntimeError("模拟 START 未创建测量周期")
         session_id = session.session_id
@@ -379,8 +379,9 @@ async def run_measurement_simulation(scenario: str) -> dict:
         ))
 
         # 等待本轮后台保存完成后再读取正式记录。
-        if machine.result_storage_task is not None:
-            await machine.result_storage_task
+        cycle = machine.cycles.get(session_id)
+        if cycle is not None and cycle.result_storage_task is not None:
+            await cycle.result_storage_task
         if fatal_errors:
             raise fatal_errors[0]
 

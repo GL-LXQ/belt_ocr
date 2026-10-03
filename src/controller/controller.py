@@ -84,6 +84,8 @@ class AppController(QObject):
     # 最终文字信号，参数依次为机器编号、周期编号、正式识别文字。
     ocr_result_changed_signal = Signal(str, str, tuple)
     machine_status_changed_signal = Signal(str, str)
+    # 机器积压提示，参数依次为机器编号和说明。
+    machine_warning_signal = Signal(str, str)
     monitoring_finished_signal = Signal(str)
     monitoring_state_changed_signal = Signal()
 
@@ -695,6 +697,9 @@ class AppController(QObject):
         # 原样转发机器整体状态信号。
         self.runtime_thread.machine_status_changed_signal.connect(
             self.machine_status_changed_signal.emit
+        )
+        self.runtime_thread.machine_warning_signal.connect(
+            self.machine_warning_signal.emit
         )
 
         # 连接结束回调。

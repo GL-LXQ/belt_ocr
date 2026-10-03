@@ -184,3 +184,246 @@ async def test_unknown_capture_error_uses_system_failure_callback() -> None:
     await asyncio.sleep(0)
     publish_event.assert_not_awaited()
     assert isinstance(on_system_failure.call_args.args[0], RuntimeError)
+
+
+def create_test_delivery_camera(publish_event) -> Camera:
+    """建立保留真实采集锁和任务回调的测试相机。
+
+    Args:
+        publish_event: 控制交付顺序的异步事件入口。
+
+    Returns:
+        返回示例：
+            Camera(...)  # 带模拟 SDK 的测试相机
+    """
+    # 准备单帧读取和真实采集锁。
+    sdk_camera = SimpleNamespace(
+        serial="camera-1", closed=False, faulted=False,
+        received_frame_count=0, capture_lock=threading.Lock(),
+        start_grabbing=Mock(), stop_grabbing=Mock(),
+    )
+
+    def read_frame(stop_requested: threading.Event, timeout_ms: int):
+        """交付单帧后停止本轮取流。
+
+        Args:
+            stop_requested: 所属采集停止通知。
+            timeout_ms: 单次读取期限。
+
+        Returns:
+            返回示例：
+                object()  # 所属原始帧
+        """
+        sdk_camera.received_frame_count += 1
+        stop_requested.set()
+        return object()
+
+    sdk_camera.read_frame = Mock(side_effect=read_frame)
+    camera = Camera("1", "1号皮带机", 1000, 50, publish_event, Mock())
+    camera.sdk_camera = sdk_camera
+    return camera
+
+
+@pytest.mark.asyncio
+async def test_early_close_waits_for_stream_stop_not_delivery_or_old_callback() -> None:
+    """确认早 CLOSE 只等待停流，旧轮交付回调不清除新采集或释放新锁。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 停流、交付和新旧任务引用分别保持正确
+    """
+    # 让第一轮结果交付等待放行。
+    delivery_entered = asyncio.Event()
+    delivery_release = asyncio.Event()
+    first_read_entered = asyncio.Event()
+    second_read_entered = asyncio.Event()
+    stream_stop_entered = asyncio.Event()
+    stream_stop_release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    async def deliver_after_release(event):
+        """阻塞第一轮交付直到测试放行。
+
+        Args:
+            event: 所属相机结果。
+
+        Returns:
+            返回示例：
+                None  # 所属结果已交付
+        """
+        if event.session_id == "first":
+            delivery_entered.set()
+            await delivery_release.wait()
+
+    camera = create_test_delivery_camera(deliver_after_release)
+    read_number = 0
+
+    def wait_for_stop(stop_requested, timeout_ms):
+        """保持读帧等待到对应现场 CLOSE。
+
+        Args:
+            stop_requested: 所属周期停止通知。
+            timeout_ms: 单帧读取期限。
+
+        Returns:
+            返回示例：
+                None  # 本轮没有收到帧
+        """
+        nonlocal read_number
+        read_number += 1
+        entered = first_read_entered if read_number == 1 else second_read_entered
+        loop.call_soon_threadsafe(entered.set)
+        assert stop_requested.wait(5)
+        return None
+
+    def stop_after_release():
+        """等待测试放行第一轮真实停流。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 所属取流已停止
+        """
+        if read_number == 1:
+            loop.call_soon_threadsafe(stream_stop_entered.set)
+            assert stream_stop_release.wait(5)
+
+    camera.sdk_camera.read_frame.side_effect = wait_for_stop
+    camera.sdk_camera.stop_grabbing.side_effect = stop_after_release
+    first_capture, first_delivery = camera.start_capture("first", time.monotonic())
+    close_task = None
+    try:
+        # 第一轮 CLOSE 必须等待底层停流完成。
+        await asyncio.wait_for(first_read_entered.wait(), 1)
+        close_task = asyncio.create_task(
+            camera.inform_capture_workflow_stop(first_capture)
+        )
+        await asyncio.wait_for(stream_stop_entered.wait(), 1)
+        assert not close_task.done()
+        assert camera.is_capturing
+        stream_stop_release.set()
+        await asyncio.wait_for(close_task, 1)
+        await asyncio.wait_for(delivery_entered.wait(), 1)
+        assert not first_delivery.done()
+        assert not camera.is_capturing
+
+        # 新轮取流期间，旧轮完成与重复回调均不能释放新锁或清除新引用。
+        second_capture, second_delivery = camera.start_capture(
+            "second", time.monotonic()
+        )
+        await asyncio.wait_for(second_read_entered.wait(), 1)
+        delivery_release.set()
+        await first_delivery
+        camera.handle_capture_task_finished(first_delivery, first_capture)
+        assert camera.current_capture is second_capture
+        assert camera.delivery_task is second_delivery
+        assert camera.is_capturing
+        assert first_capture.lock_released
+        assert not second_capture.lock_released
+        assert not second_capture.stop_requested.is_set()
+        await camera.inform_capture_workflow_stop(second_capture)
+        await second_delivery
+        camera.on_system_failure.assert_not_called()
+    finally:
+        stream_stop_release.set()
+        delivery_release.set()
+        await camera.stop()
+        if close_task is not None:
+            await asyncio.gather(close_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_capture_cancelled_before_start_releases_its_lock_once() -> None:
+    """确认交付任务尚未运行即取消时仍归还本轮锁且不影响下次采集。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 未执行 SDK 取流，本轮锁与引用已回收，下轮正常完成
+    """
+    camera = create_test_delivery_camera(AsyncMock())
+    first_capture, first_delivery = camera.start_capture("first", time.monotonic())
+    first_delivery.cancel()
+    await asyncio.gather(first_delivery, return_exceptions=True)
+    assert first_capture.capture_finished.is_set()
+    assert first_capture.lock_released
+    assert not camera.is_capturing
+    assert camera.current_capture is None
+    assert camera.delivery_task is None
+    camera.sdk_camera.start_grabbing.assert_not_called()
+
+    # 下轮开始后重复旧回调不能归还下轮的锁。
+    second_capture, second_delivery = camera.start_capture("second", time.monotonic())
+    camera.handle_capture_task_finished(first_delivery, first_capture)
+    assert camera.is_capturing
+    assert camera.current_capture is second_capture
+    await second_delivery
+    assert not camera.unfinished_delivery_tasks
+    camera.on_system_failure.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_camera_stop_waits_for_all_cycle_deliveries() -> None:
+    """确认退出等待全部交付任务，后轮先交付也不会遗漏旧轮。
+
+    Args:
+        无外部参数。
+
+    Returns:
+        返回示例：
+            None  # 两轮交付全部完成后 stop 才返回
+    """
+    delivery_entered = {
+        session_id: asyncio.Event() for session_id in ("first", "second")
+    }
+    delivery_release = {
+        session_id: asyncio.Event() for session_id in ("first", "second")
+    }
+
+    async def deliver_after_release(event):
+        """等待所属周期的交付放行。
+
+        Args:
+            event: 带周期编号的结果事件。
+
+        Returns:
+            返回示例：
+                None  # 所属结果交付结束
+        """
+        delivery_entered[event.session_id].set()
+        await delivery_release[event.session_id].wait()
+
+    camera = create_test_delivery_camera(deliver_after_release)
+    shutdown_task = None
+    try:
+        # 两轮先完成停流，再各自等待交付。
+        _, first_delivery = camera.start_capture("first", time.monotonic())
+        await asyncio.wait_for(delivery_entered["first"].wait(), 1)
+        _, second_delivery = camera.start_capture("second", time.monotonic())
+        await asyncio.wait_for(delivery_entered["second"].wait(), 1)
+        assert len(camera.unfinished_delivery_tasks) == 2
+        shutdown_task = asyncio.create_task(camera.stop())
+        delivery_release["second"].set()
+        await second_delivery
+        assert camera.delivery_task is None
+        assert not shutdown_task.done()
+        assert first_delivery in camera.unfinished_delivery_tasks
+
+        # 旧轮交付结束后才完成退出。
+        delivery_release["first"].set()
+        await asyncio.wait_for(shutdown_task, 1)
+        assert not camera.unfinished_delivery_tasks
+        camera.on_system_failure.assert_not_called()
+    finally:
+        for release in delivery_release.values():
+            release.set()
+        await camera.stop()
+        if shutdown_task is not None:
+            await shutdown_task

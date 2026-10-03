@@ -148,3 +148,55 @@ def test_configuration_keeps_valid_numeric_values(tmp_path: Path) -> None:
 
     # 未指定的可选相机数值仍由设备决定。
     replace(configuration, camera_exposure_time_us=None, camera_gain=None).validate()
+
+
+@pytest.mark.parametrize("capacity", [1, 2, 3])
+def test_max_inflight_cycles_default_and_yaml_loading(tmp_path: Path, capacity: int):
+    """确认每机周期容量默认二且可从 machine 配置读取正整数。
+
+    Args:
+        tmp_path: 临时配置目录。
+        capacity: 合法的周期容量。
+
+    Returns:
+        返回示例：
+            None  # 默认值、读取和配置校验均正确
+    """
+    # 写入本轮临时配置，保留未指定容量时的默认值。
+    configuration = AppConfig(
+        database_path=tmp_path / "data.sqlite3",
+        evidence_directory=tmp_path / "evidence",
+        mvs_development_directory=tmp_path,
+    )
+    assert configuration.max_inflight_cycles == 2
+    configuration_text = (
+        "application:\n  database_path: data.sqlite3\n  evidence_directory: evidence\n"
+        "camera:\n  mvs_development_directory: sdk\n"
+        f"machine:\n  max_inflight_cycles: {capacity}\n"
+    )
+    (tmp_path / "config.yaml").write_text(configuration_text, encoding="utf-8")
+    loaded = load_config(tmp_path)
+    assert loaded.max_inflight_cycles == capacity
+    loaded.validate()
+
+
+@pytest.mark.parametrize("capacity", [True, False, 1.5, 2.0, 0, -1, None, "2"])
+def test_max_inflight_cycles_rejects_invalid_capacity(tmp_path: Path, capacity):
+    """确认周期容量拒绝布尔、小数和非正整数。
+
+    Args:
+        tmp_path: 临时配置目录。
+        capacity: 非法容量配置。
+
+    Returns:
+        返回示例：
+            None  # 非法容量均在创建运行时前被拒绝
+    """
+    configuration = AppConfig(
+        database_path=tmp_path / "data.sqlite3",
+        evidence_directory=tmp_path / "evidence",
+        mvs_development_directory=tmp_path,
+        max_inflight_cycles=capacity,
+    )
+    with pytest.raises(ValueError, match="max_inflight_cycles"):
+        configuration.validate()

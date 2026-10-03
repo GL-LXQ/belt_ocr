@@ -78,6 +78,7 @@ class SystemRuntime:
         notify_ocr_result: Callable[[str, str, tuple[str, ...]], None] | None = None,
         notify_cycle_closed: Callable[[str, str], None] | None = None,
         notify_machine_status: Callable[[str, str], None] | None = None,
+        notify_machine_warning: Callable[[str, str], None] | None = None,
     ) -> None:
         """在双库初始化之后读取启用机器，并逐台建立相机、频率适配器和机器运行对象。
 
@@ -86,6 +87,7 @@ class SystemRuntime:
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、正式识别文字。
             notify_camera_state: 可选相机状态通知函数，接收机器编号、状态和原因。
             notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
+            notify_machine_warning: 可选机器积压提示，接收机器编号和说明。
             notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
                 online、offline 或 fault。
 
@@ -146,6 +148,7 @@ class SystemRuntime:
                 notify_ocr_result,
                 notify_cycle_closed,
                 notify_machine_status,
+                notify_machine_warning,
             )
 
     async def start(
@@ -155,6 +158,7 @@ class SystemRuntime:
         notify_ocr_result: Callable[[str, str, tuple[str, ...]], None] | None = None,
         notify_cycle_closed: Callable[[str, str], None] | None = None,
         notify_machine_status: Callable[[str, str], None] | None = None,
+        notify_machine_warning: Callable[[str, str], None] | None = None,
     ) -> None:
         """初始化本次运行的机器状态和存储，启动监听与处理任务。
 
@@ -164,6 +168,7 @@ class SystemRuntime:
             notify_measurement_progress: 可选进度通知函数，接收机器编号、周期编号、处理阶段和阶段状态。
             notify_ocr_result: 可选文字通知函数，接收机器编号、周期编号、正式识别文字。
             notify_cycle_closed: 可选周期关闭通知函数，接收机器编号和周期编号。
+            notify_machine_warning: 可选机器积压提示，接收机器编号和说明。
             notify_machine_status: 可选机器整体状态通知函数，接收机器编号和
                 online、offline 或 fault。
 
@@ -197,6 +202,7 @@ class SystemRuntime:
                 notify_ocr_result,
                 notify_cycle_closed,
                 notify_machine_status,
+                notify_machine_warning,
             )
 
             # 记录本次运行加载的启用机器。
@@ -422,7 +428,7 @@ class SystemRuntime:
 
                 # 中断仍未收到 CLOSE 的机器周期。
                 for machine_id, machine in self.machines.items():
-                    session = machine.current_session
+                    session = machine.active_session
                     # 中断会写入关闭时间，此判断同时保证一次断线只通知一次。
                     if session is not None and session.capture_stop_time is None:
                         await self.send_signal(EventType.IO_INTERRUPTED, machine_id)
@@ -554,9 +560,11 @@ class SystemRuntime:
                 event_type,
                 machine_id,
                 session_id=(
-                    self.machines[machine_id].current_session.session_id
-                    if event_type == EventType.MACHINE_CLOSED
-                    and self.machines[machine_id].current_session is not None else None
+                    self.machines[machine_id].active_session_id
+                    if event_type in {
+                        EventType.MACHINE_CLOSED,
+                        EventType.IO_INTERRUPTED,
+                    } else None
                 ),
                 payload=payload,
                 acknowledgement=acknowledgement,
@@ -579,6 +587,9 @@ class SystemRuntime:
         """
         # 释放资源期间取消事件回执，结束本次分发。
         if self.releasing_resources:
+            machine = self.machines.get(event.machine_id)
+            if machine is not None:
+                machine.discard_event_payload(event)
             if event.acknowledgement is not None:
                 event.acknowledgement.cancel()
             return
@@ -606,6 +617,7 @@ class SystemRuntime:
         async with enqueue_lock:
             # 等待入队锁期间已开始释放资源时，取消回执并结束分发。
             if self.releasing_resources:
+                machine.discard_event_payload(event)
                 if event.acknowledgement is not None:
                     event.acknowledgement.cancel()
                 return
@@ -714,8 +726,12 @@ class SystemRuntime:
             if self.failure is not None:
                 raise self.failure
 
-            # 所有机器都没有活动周期时结束等待。
-            if not any(machine.current_session is not None for machine in self.machines.values()):
+            # 全部周期、交付和拒收审计已回收时结束等待。
+            if not any(
+                machine.cycles or machine.rejected_start_audit_task is not None
+                or machine.camera.unfinished_delivery_tasks
+                for machine in self.machines.values()
+            ):
                 return
 
             # 剩余期限不足时按超时抛出。

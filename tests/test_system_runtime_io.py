@@ -60,7 +60,7 @@ async def test_first_io_read_only_establishes_baseline(
 
     # 首份 DI 到来前，等待复位状态阻止创建新的测量周期。
     await machine.handle_machine_start()
-    assert machine.current_session is None
+    assert machine.active_session is None
     assert machine.waiting_cycle_reset
 
     async def deliver_signal(event_type: EventType, machine_id: str) -> None:
@@ -80,7 +80,7 @@ async def test_first_io_read_only_establishes_baseline(
     runtime.send_signal = AsyncMock(side_effect=deliver_signal)
     await runtime.handle_io_states([first_state])
     assert machine.waiting_cycle_reset is first_state
-    assert machine.current_session is None
+    assert machine.active_session is None
     assert runtime.io_previous_states == {0: first_state}
     runtime.send_signal.assert_not_awaited()
 
@@ -93,7 +93,7 @@ async def test_first_io_read_only_establishes_baseline(
         await runtime.handle_io_states([False])
         runtime.send_signal.assert_awaited_once_with(EventType.MACHINE_CLOSED, "1")
         assert not machine.waiting_cycle_reset
-        assert machine.current_session is None
+        assert machine.active_session is None
 
 
 @pytest.mark.asyncio
@@ -140,7 +140,7 @@ async def test_io_recovery_only_uses_first_read_as_baseline(
     machine = SimpleNamespace(
         machine_config=SimpleNamespace(machine_name="1号皮带机"),
         waiting_cycle_reset=False,
-        current_session=None,
+        active_session=None,
     )
     runtime.machines = {"1": machine}
     runtime.accepting_signals = True
@@ -184,9 +184,9 @@ async def test_io_recovery_only_uses_first_read_as_baseline(
         """
         delivered_events.append(event_type)
         if event_type == EventType.MACHINE_STARTED:
-            machine.current_session = SimpleNamespace(capture_stop_time=None)
+            machine.active_session = SimpleNamespace(capture_stop_time=None)
         elif event_type == EventType.IO_INTERRUPTED:
-            machine.current_session = None
+            machine.active_session = None
             machine.waiting_cycle_reset = True
         elif event_type == EventType.MACHINE_CLOSED:
             machine.waiting_cycle_reset = False

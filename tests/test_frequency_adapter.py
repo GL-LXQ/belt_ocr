@@ -11,7 +11,7 @@ import frequency_adapter as frequency_adapter_module
 from config_util import AppConfig, MachineConfig
 from enums import EventType, FrequencyState
 from frequency_adapter import FrequencyAdapter
-from runtime.machine_runtime import MachineRuntime
+from runtime.machine_runtime import CycleContext, MachineRuntime
 from models import MeasurementSession, RuntimeEvent
 
 
@@ -188,11 +188,11 @@ async def test_machine_collects_three_readings_before_close(
         delivered_events.append(event)
         await machine.handle_event(event)
 
-    async def stop_capture_workflow() -> None:
+    async def stop_capture_workflow(capture_task) -> None:
         """完成本轮相机采集停止通知。
 
         Args:
-            无外部参数。
+            capture_task: 所属现场采集任务。
 
         Returns:
             返回示例：
@@ -214,7 +214,8 @@ async def test_machine_collects_three_readings_before_close(
         on_system_failure=system_errors.append,
         state_changed=asyncio.Event(),
     )
-    machine.current_session = session
+    machine.cycles[session.session_id] = CycleContext(session)
+    machine.active_session_id = session.session_id
     adapter.active_session_id = session.session_id
 
     # 第四次轮询结束后关闭周期，再继续轮询并检查旧周期事件数量。

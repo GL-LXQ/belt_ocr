@@ -5,6 +5,7 @@ import json
 import logging
 import sqlite3
 import threading
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +15,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from async_utils import run_blocking_operation
-from camera.camera import Camera
+from camera.camera import Camera, CaptureTask
 from config_util import AppConfig, MachineConfig, load_config
 from camera.hikrobot_sdk import MvsError
 from database import CommitIntegrityConflictError, Database, MeasurementRecord
@@ -27,7 +28,9 @@ from enums import (
     ProgressStatus,
     SessionState,
 )
-from runtime.machine_runtime import EvidenceWriteError, ImageEncodingError, MachineRuntime
+from runtime.machine_runtime import (
+    CycleContext, EvidenceWriteError, ImageEncodingError, MachineRuntime,
+)
 from runtime.system_runtime import SystemRuntime
 from models import (
     MeasurementSession,
@@ -162,7 +165,11 @@ def create_machine(
     # 组装机器依赖并记录进度通知。
     camera = SimpleNamespace(
         sdk_camera=SimpleNamespace(encode_image=encode_image),
+        available=True,
+        is_capturing=False,
         delivery_task=None,
+        unfinished_delivery_tasks=set(),
+        stop=AsyncMock(),
         inform_capture_workflow_stop=AsyncMock(),
     )
     progress_updates = []
@@ -219,8 +226,38 @@ def create_machine(
             review_reason=review_reason,
         ),
     )
-    machine.current_session = session
+    machine.cycles[session.session_id] = CycleContext(session)
+    machine.camera.start_capture = Mock(
+        side_effect=lambda session_id, started: start_test_capture(camera, started)
+    )
     return machine, database, session, progress_updates, encoding_threads
+
+
+def start_test_capture(
+    camera: object,
+    started: float,
+) -> tuple[CaptureTask, asyncio.Future]:
+    """返回已停流且尚可交付数据的测试采集任务。
+
+    Args:
+        camera: 持有模拟交付任务的相机。
+        started: 本轮采集开始的单调时间。
+
+    Returns:
+        返回示例：
+            (
+                CaptureTask(...),  # 已停流的采集任务
+                asyncio.Future(),  # 本轮模拟交付
+            )
+    """
+    # 登记已停流的所属采集任务。
+    capture = CaptureTask(None, started, 1.0, 50)
+    capture.capture_finished.set()
+    delivery = camera.delivery_task
+    if delivery is None:
+        delivery = asyncio.get_running_loop().create_future()
+        delivery.set_result(None)
+    return capture, delivery
 
 
 async def wait_for_failure_audit(machine: MachineRuntime) -> None:
@@ -234,8 +271,11 @@ async def wait_for_failure_audit(machine: MachineRuntime) -> None:
             None  # 保存任务已结束，保存异常由机器原有故障回调记录
     """
     # 等待仍在运行的审计任务，保留回调处理保存异常。
-    if machine.failure_audit_task is not None:
-        await asyncio.gather(machine.failure_audit_task, return_exceptions=True)
+    audit_tasks = [
+        cycle.failure_audit_task for cycle in tuple(machine.cycles.values())
+        if cycle.failure_audit_task is not None
+    ]
+    await asyncio.gather(*audit_tasks, return_exceptions=True)
 
 
 def read_abnormal_events(database: Database) -> list[tuple]:
@@ -319,7 +359,8 @@ async def test_faulted_machine_release_notifies_offline(tmp_path: Path) -> None:
     machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
     machine.initialized = True
     machine.machine_failure_reason = "相机采集失败"
-    machine.current_session = None
+    machine.cycles.clear()
+    machine.active_session_id = None
     machine.camera.stop = AsyncMock()
     machine_status_notification = Mock()
     machine.notify_machine_status = machine_status_notification
@@ -350,7 +391,8 @@ async def test_unavailable_camera_start_notifies_offline(tmp_path: Path) -> None
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
     machine.initialized = True
-    machine.current_session = None
+    machine.cycles.clear()
+    machine.active_session_id = None
     machine.camera.available = False
     machine.camera.is_capturing = False
     machine_status_notification = Mock()
@@ -360,7 +402,7 @@ async def test_unavailable_camera_start_notifies_offline(tmp_path: Path) -> None
     try:
         await machine.handle_machine_start()
         machine_status_notification.assert_called_once_with("1", "offline")
-        assert machine.current_session is None
+        assert machine.active_session is None
         assert machine.waiting_cycle_reset
         assert machine.machine_failure_reason is None
     finally:
@@ -424,6 +466,7 @@ async def test_late_frequency_after_close_is_audited(
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.ocr_state = OCRState.WAITING
     session.ocr_result = None
     machine.frequency_adapter.active_session_id = session.session_id
@@ -442,7 +485,7 @@ async def test_late_frequency_after_close_is_audited(
         await machine.handle_machine_close()
         assert session.frequency_state == frequency_state
         assert machine.frequency_adapter.active_session_id is None
-        assert machine.current_session is session
+        assert session.session_id in machine.cycles
 
         # 保存频率采集结束时的明细和最终结果。
         accepted_frequencies = list(session.measurement_frequencies)
@@ -491,6 +534,7 @@ async def test_finalize_saves_images_before_record(
     machine, database, session, progress_updates, encoding_threads = create_machine(
         tmp_path, (frame,)
     )
+    cycle = machine.cycles[session.session_id]
 
     # 使用早于结算日的本地开始时间检查日期目录。
     session.start_time = datetime(2024, 9, 22, 12).astimezone().isoformat()
@@ -519,11 +563,13 @@ async def test_finalize_saves_images_before_record(
 
     database.write_measurement_record = write_record_after_image
     await machine.try_finalize(session)
-    await machine.result_storage_task
+    await cycle.result_storage_task
 
     # 核对保存状态、后台线程和数据库内容。
     assert session.state == SessionState.COMMITTED
-    assert machine.current_session is None
+    assert machine.active_session is None
+    assert cycle.result_storage_task is None
+    assert session.session_id not in machine.cycles
     assert len(encoding_threads) == 1
     assert encoding_threads[0] != event_loop_thread
     assert progress_updates[-1][2:] == (
@@ -574,8 +620,9 @@ async def test_finalize_saves_all_review_frames(tmp_path: Path) -> None:
     machine, database, session, _, _ = create_machine(
         tmp_path, (), (first_frame, second_frame), "没有最终文字"
     )
+    cycle = machine.cycles[session.session_id]
     await machine.try_finalize(session)
-    await machine.result_storage_task
+    await cycle.result_storage_task
 
     # 核对两张图片和合并后的复核原因。
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
@@ -610,6 +657,7 @@ async def test_finalize_preserves_reliable_text_for_review(tmp_path: Path) -> No
     machine, database, session, _, _ = create_machine(
         tmp_path, (evidence_frame,), (evidence_frame,), "没有可靠的 20 位文字"
     )
+    cycle = machine.cycles[session.session_id]
     session.ocr_result = OCRResult(
         recognized_lines=("123",),
         selected_frames=(evidence_frame,),
@@ -620,7 +668,7 @@ async def test_finalize_preserves_reliable_text_for_review(tmp_path: Path) -> No
 
     # 结算后读取测量记录。
     await machine.try_finalize(session)
-    await machine.result_storage_task
+    await cycle.result_storage_task
     with sqlite3.connect(database.config.database_path) as connection:
         record = connection.execute(
             "SELECT recognized_lines, needs_review, review_reason "
@@ -650,22 +698,24 @@ async def test_shutdown_preserves_committed_session(tmp_path: Path) -> None:
     # 建立测量周期并保留已结束的采集交付任务引用。
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    cycle = machine.cycles[session.session_id]
     delivery_task = asyncio.create_task(asyncio.sleep(0))
     machine.camera.delivery_task = delivery_task
     machine.camera.stop = AsyncMock()
     await delivery_task
+    cycle.capture_result_pending = True
 
     # 保存测量记录并确认周期仍由机器持有。
     await machine.try_finalize(session)
-    await machine.result_storage_task
+    await cycle.result_storage_task
     assert session.state == SessionState.COMMITTED
-    assert machine.current_session is session
+    assert session.session_id in machine.cycles
 
     # 执行退出清理并核对成功状态和异常事件。
     await machine.release_resources("程序退出超时")
     assert session.state == SessionState.COMMITTED
     assert session.errors == []
-    assert machine.current_session is None
+    assert machine.active_session is None
     assert read_abnormal_events(database) == []
     with sqlite3.connect(database.config.database_path) as connection:
         saved_record = connection.execute(
@@ -695,7 +745,7 @@ async def test_shutdown_fails_unfinished_session(tmp_path: Path) -> None:
     await machine.release_resources("程序退出超时")
     assert session.state == SessionState.FAILED
     assert session.errors == ["程序退出超时"]
-    assert machine.current_session is None
+    assert machine.active_session is None
     events = read_abnormal_events(database)
     assert len(events) == 1
     assert events[0][2] == "程序退出超时"
@@ -715,6 +765,7 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
     first_frame = create_frame("session-1", "frame-1", b"image-one")
     second_frame = create_frame("session-1", "frame-2", b"image-two")
     machine, database, session, progress_updates, _ = create_machine(tmp_path, (first_frame, second_frame))
+    cycle = machine.cycles[session.session_id]
 
     def encode_image(camera_frame: object) -> bytes:
         """首帧正常编码，第二帧返回 MVS 编码错误。
@@ -746,11 +797,11 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
 
     # 执行本轮保存并核对失败审计和证据清理。
     await machine.try_finalize(session)
-    await machine.result_storage_task
+    await cycle.result_storage_task
     await wait_for_failure_audit(machine)
     assert session.state == SessionState.FAILED
     assert session.errors == ["SaveImageEx3 编码失败", "证据图片编码失败"]
-    assert machine.current_session is None
+    assert machine.active_session is None
     abnormal_events = read_abnormal_events(database)
     assert len(abnormal_events) == 1
     assert abnormal_events[0][2] == "证据图片编码失败"
@@ -766,7 +817,7 @@ async def test_mvs_encoding_failure_only_fails_current_session(tmp_path: Path) -
     assert camera.available
     assert machine.machine_failure_reason is None
     assert not machine.waiting_cycle_reset
-    assert machine.current_session is None
+    assert machine.active_session is None
     machine.on_system_failure.assert_not_called()
     assert progress_updates[-1][2:] == (ProgressStage.EVIDENCE_STORAGE, ProgressStatus.FAILED)
 
@@ -787,6 +838,7 @@ async def test_unknown_encoding_failure_removes_new_images(tmp_path: Path) -> No
     machine, database, session, _, _ = create_machine(
         tmp_path, (first_frame, second_frame)
     )
+    cycle = machine.cycles[session.session_id]
 
     def encode_first_image(camera_frame: object) -> bytes:
         """编码首帧并让第二帧失败。
@@ -805,7 +857,7 @@ async def test_unknown_encoding_failure_removes_new_images(tmp_path: Path) -> No
     machine.camera.sdk_camera.encode_image = encode_first_image
     with pytest.raises(ImageEncodingError):
         await machine.try_finalize(session)
-        await machine.result_storage_task
+        await cycle.result_storage_task
 
     # 核对新图片与数据库均未留下结果。
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
@@ -837,13 +889,14 @@ async def test_image_write_failure_skips_database(
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    cycle = machine.cycles[session.session_id]
     write_error = OSError("图片写入失败")
     monkeypatch.setattr(
         "runtime.machine_runtime.save_evidence_image",
         Mock(side_effect=write_error),
     )
     await machine.try_finalize(session)
-    await machine.result_storage_task
+    await cycle.result_storage_task
     await wait_for_failure_audit(machine)
 
     # 核对失败状态和数据库内容。
@@ -883,6 +936,7 @@ async def test_unknown_image_write_error_is_not_database_failure(
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    cycle = machine.cycles[session.session_id]
     unknown_error = error_type("未知图片保存错误")
     monkeypatch.setattr(
         "runtime.machine_runtime.save_evidence_image",
@@ -892,7 +946,7 @@ async def test_unknown_image_write_error_is_not_database_failure(
     # 执行图片保存并核对未知异常保持原样上抛。
     with pytest.raises(error_type, match="未知图片保存错误") as captured_error:
         await machine.try_finalize(session)
-        await machine.result_storage_task
+        await cycle.result_storage_task
     assert captured_error.value is unknown_error
     assert "测量结果入库失败" not in session.errors
     assert "证据图片保存失败" not in session.errors
@@ -914,10 +968,11 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, progress_updates, _ = create_machine(tmp_path, (frame,))
+    cycle = machine.cycles[session.session_id]
     write_error = sqlite3.OperationalError("database is locked")
     database.write_measurement_record = Mock(side_effect=write_error)
     await machine.try_finalize(session)
-    await machine.result_storage_task
+    await cycle.result_storage_task
     await wait_for_failure_audit(machine)
 
     # 核对本轮失败状态与已保存的图片。
@@ -926,7 +981,7 @@ async def test_database_failure_keeps_saved_images(tmp_path: Path) -> None:
     assert "证据图片保存失败" not in session.errors
     assert read_abnormal_events(database)[0][2] == "测量结果入库失败"
     machine.on_system_failure.assert_called_once_with(write_error)
-    assert machine.current_session is None
+    assert machine.active_session is None
     expected_directory = tmp_path / f"evidence/{TEST_LOCAL_START_DATE}/1/session-1"
     assert (expected_directory / "frame-1.jpg").read_bytes() == b"image-one"
     assert progress_updates[-1][2:] == (
@@ -948,6 +1003,7 @@ async def test_database_conflict_keeps_conflict_reason(tmp_path: Path) -> None:
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    cycle = machine.cycles[session.session_id]
     existing_record = MeasurementRecord(
         machine_id=session.machine_id,
         session_id=session.session_id,
@@ -964,7 +1020,7 @@ async def test_database_conflict_keeps_conflict_reason(tmp_path: Path) -> None:
 
     # 执行数据库提交并核对冲突分类。
     await machine.try_finalize(session)
-    await machine.result_storage_task
+    await cycle.result_storage_task
     await wait_for_failure_audit(machine)
     assert session.state == SessionState.FAILED
     assert "测量记录提交冲突" in session.errors
@@ -1002,13 +1058,14 @@ async def test_unknown_database_value_error_is_not_commit_conflict(
     """
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    cycle = machine.cycles[session.session_id]
     unknown_error = ValueError("未知数据库错误")
     database.write_measurement_record = Mock(side_effect=unknown_error)
 
     # 执行数据库提交并核对未知异常保持原样上抛。
     with pytest.raises(ValueError, match="未知数据库错误") as captured_error:
         await machine.try_finalize(session)
-        await machine.result_storage_task
+        await cycle.result_storage_task
     assert captured_error.value is unknown_error
     assert "测量记录提交冲突" not in session.errors
     assert "DATABASE_WRITE_FAILED" not in session.errors
@@ -1119,6 +1176,7 @@ async def test_empty_capture_fails_and_waits_for_close(tmp_path: Path) -> None:
     camera_state_notification = Mock()
     machine.notify_camera_state = camera_state_notification
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.ocr_state = OCRState.WAITING
     session.ocr_result = None
 
@@ -1132,7 +1190,7 @@ async def test_empty_capture_fails_and_waits_for_close(tmp_path: Path) -> None:
 
     # 核对失败状态、异常记录和当前周期身份。
     assert session.state == SessionState.FAILED
-    assert machine.current_session is session
+    assert machine.active_session is session
     assert [update[2:] for update in progress_updates] == [
         (ProgressStage.IMAGE_CAPTURE, ProgressStatus.FAILED),
     ]
@@ -1144,7 +1202,7 @@ async def test_empty_capture_fails_and_waits_for_close(tmp_path: Path) -> None:
 
     # 收到真实关闭后释放失败周期。
     await machine.handle_machine_close()
-    assert machine.current_session is None
+    assert machine.active_session is None
 
 
 @pytest.mark.asyncio
@@ -1165,6 +1223,7 @@ async def test_cycle_close_notifies_once_for_current_session(
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.ocr_state = OCRState.WAITING
     session.ocr_result = None
     notification = Mock()
@@ -1183,7 +1242,8 @@ async def test_cycle_close_notifies_once_for_current_session(
 
     # 重复关闭和空闲关闭不再发送通知。
     await machine.handle_machine_close(interrupted=interrupted)
-    machine.current_session = None
+    machine.cycles.clear()
+    machine.active_session_id = None
     await machine.handle_machine_close()
     notification.assert_called_once_with("1", "session-1")
 
@@ -1203,7 +1263,8 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     machine, database, _, progress_updates, _ = create_machine(tmp_path, (evidence_frame,))
     camera_state_notification = Mock()
     machine.notify_camera_state = camera_state_notification
-    machine.current_session = None
+    machine.cycles.clear()
+    machine.active_session_id = None
     machine_status_notification = Mock()
     machine.notify_machine_status = machine_status_notification
     sdk_camera = SimpleNamespace(
@@ -1240,7 +1301,7 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
 
     # 启动采集并处理相机交付的故障事件。
     await machine.handle_machine_start()
-    session = machine.current_session
+    session = machine.active_session
     assert session is not None
     delivery_task = camera.delivery_task
     await delivery_task
@@ -1253,7 +1314,7 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     # 核对本轮失败记录及相机可用状态。
     assert session.state == SessionState.FAILED
     assert session.errors == ["GetImageBuffer 失败", "相机采集失败"]
-    assert machine.current_session is session
+    assert machine.active_session is session
     assert not camera.available
     assert not camera.is_capturing
     assert machine.machine_failure_reason == "相机采集失败"
@@ -1270,10 +1331,10 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
 
     # 现场关闭后即使相机恢复可用，本机仍不再受理 START。
     await machine.handle_machine_close()
-    assert machine.current_session is None
+    assert machine.active_session is None
     sdk_camera.faulted = False
     await machine.handle_machine_start()
-    assert machine.current_session is None
+    assert machine.active_session is None
     assert machine.machine_failure_reason == "相机采集失败"
 
     # 另一台机器仍能正常创建自己的测量周期。
@@ -1285,17 +1346,22 @@ async def test_capture_failure_is_audited_and_blocks_new_session(tmp_path: Path)
     other_machine.machine_config = MachineConfig(
         "2", "2号皮带机", "camera-2", "meter-2"
     )
-    other_machine.current_session = None
+    other_machine.cycles.clear()
+    other_machine.active_session_id = None
     other_machine.initialized = True
     other_machine.camera.available = True
     other_machine.camera.is_capturing = False
-    other_machine.camera.start_capture = Mock()
+    other_machine.camera.start_capture = Mock(
+        side_effect=lambda session_id, started: start_test_capture(
+            machine.camera, started
+        )
+    )
     other_machine.camera.stop = AsyncMock()
     other_machine.camera.delivery_task = asyncio.get_running_loop().create_future()
     try:
         await other_machine.handle_machine_start()
-        assert other_machine.current_session is not None
-        assert other_machine.current_session.machine_id == "2"
+        assert other_machine.active_session is not None
+        assert other_machine.active_session.machine_id == "2"
         assert other_machine.machine_failure_reason is None
     finally:
         # 清理另一台机器的测试资源。
@@ -1328,6 +1394,7 @@ async def test_late_capture_failure_notifies_without_repeating_session_failure(
     machine.camera.available = True
     machine.camera.is_capturing = False
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.ocr_state = OCRState.RUNNING
     session.ocr_result = None
 
@@ -1354,16 +1421,16 @@ async def test_late_capture_failure_notifies_without_repeating_session_failure(
     camera_state_notification.assert_called_once_with("1", "相机故障", "StopGrabbing 失败")
     assert session.errors == ["OCR 识别超时"]
     assert session.state == SessionState.FAILED
-    assert machine.current_session is session
+    assert machine.active_session is session
     assert machine.machine_failure_reason == "相机采集失败"
     assert read_abnormal_events(database) == abnormal_events
     assert progress_updates == progress_before_capture_failure
 
     # 真实 CLOSE 释放周期，本机故障继续阻止下一次 START。
     await machine.handle_machine_close()
-    assert machine.current_session is None
+    assert machine.active_session is None
     await machine.handle_machine_start()
-    assert machine.current_session is None
+    assert machine.active_session is None
 
 
 @pytest.mark.asyncio
@@ -1379,7 +1446,8 @@ async def test_busy_camera_does_not_mark_device_faulted(tmp_path: Path) -> None:
     """
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, _, _, _, _ = create_machine(tmp_path, (evidence_frame,))
-    machine.current_session = None
+    machine.cycles.clear()
+    machine.active_session_id = None
     capture_lock = threading.Lock()
     capture_lock.acquire()
     sdk_camera = SimpleNamespace(closed=False, faulted=False, capture_lock=capture_lock)
@@ -1395,7 +1463,7 @@ async def test_busy_camera_does_not_mark_device_faulted(tmp_path: Path) -> None:
     # 采集锁占用时尝试启动新周期。
     try:
         await machine.handle_machine_start()
-        assert machine.current_session is None
+        assert machine.active_session is None
         assert machine.waiting_cycle_reset
         assert not sdk_camera.faulted
         assert machine.overall_status == MachineOverallStatus.ONLINE
@@ -1429,7 +1497,7 @@ async def test_capture_failure_after_close_releases_session(tmp_path: Path) -> N
     ))
     await wait_for_failure_audit(machine)
     assert session.state == SessionState.FAILED
-    assert machine.current_session is None
+    assert machine.active_session is None
     assert machine.machine_failure_reason == "相机采集失败"
     assert read_abnormal_events(database)[0][2] == "相机采集失败"
 
@@ -1448,6 +1516,7 @@ async def test_ocr_execution_error_fails_and_is_audited(tmp_path: Path) -> None:
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.ocr_state = OCRState.RUNNING
     session.ocr_result = None
     recognizer = TextRecognizer()
@@ -1466,7 +1535,7 @@ async def test_ocr_execution_error_fails_and_is_audited(tmp_path: Path) -> None:
 
     # 核对执行异常、失败状态和异常事件。
     assert session.state == SessionState.FAILED
-    assert machine.current_session is session
+    assert machine.active_session is session
     assert "模型执行失败" in session.errors
     assert "OCR 识别执行失败" in session.errors
     events = read_abnormal_events(database)
@@ -1490,6 +1559,7 @@ async def test_preparation_error_fails_only_current_session(tmp_path: Path) -> N
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.ocr_state = OCRState.RUNNING
     session.ocr_result = None
     recognizer = TextRecognizer()
@@ -1527,7 +1597,9 @@ async def test_no_qualified_frames_complete_without_ocr_lock(tmp_path: Path) -> 
     # 建立运行中的周期并让其他任务占用共享资源。
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    cycle = machine.cycles[session.session_id]
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.ocr_state = OCRState.RUNNING
     session.ocr_result = None
     recognizer = TextRecognizer()
@@ -1560,7 +1632,7 @@ async def test_no_qualified_frames_complete_without_ocr_lock(tmp_path: Path) -> 
         recognizer.acquire_ocr_access.assert_not_called()
         recognizer.recognize_qualified_frames.assert_not_called()
         recognizer.recognize_images.assert_not_called()
-        assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+        assert EventType.OCR_TIMEOUT not in cycle.deadline_tasks
         assert recognizer._processing_lock.locked()
         assert not resource_holder_task.done()
     finally:
@@ -1584,6 +1656,7 @@ async def test_invalid_session_after_preparation_skips_ocr(tmp_path: Path) -> No
     # 建立会在预处理期间失效的测量周期。
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    cycle = machine.cycles[session.session_id]
     recognizer = TextRecognizer()
 
     def prepare_frames(
@@ -1621,7 +1694,7 @@ async def test_invalid_session_after_preparation_skips_ocr(tmp_path: Path) -> No
     recognizer.prepare_frames_for_ocr.assert_called_once()
     recognizer.acquire_ocr_access.assert_not_called()
     recognizer.recognize_qualified_frames.assert_not_called()
-    assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+    assert EventType.OCR_TIMEOUT not in cycle.deadline_tasks
     machine.publish_event.assert_not_awaited()
     database.close()
 
@@ -1642,7 +1715,8 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
     # 建立可启动周期的机器和阻塞的 OCR 执行入口。
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
-    machine.current_session = None
+    machine.cycles.clear()
+    machine.active_session_id = None
     machine.config = replace(
         machine.config,
         ocr_lock_wait_timeout_ms=1000,
@@ -1650,7 +1724,11 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
     )
     machine.camera.available = True
     machine.camera.is_capturing = False
-    machine.camera.start_capture = Mock()
+    machine.camera.start_capture = Mock(
+        side_effect=lambda session_id, started: start_test_capture(
+            machine.camera, started
+        )
+    )
     machine.camera.stop = AsyncMock()
     machine.camera.delivery_task = asyncio.get_running_loop().create_future()
     resource_acquired = asyncio.Event()
@@ -1715,9 +1793,10 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
     try:
         # START 只创建整轮周期期限。
         await machine.handle_machine_start()
-        session = machine.current_session
+        session = machine.active_session
         assert session is not None
-        assert set(machine.deadline_tasks) == {EventType.CYCLE_TIMEOUT}
+        cycle = machine.cycles[session.session_id]
+        assert set(cycle.deadline_tasks) == {EventType.CYCLE_TIMEOUT}
 
         # 采集完成后让 OCR 排队超过处理期限。
         capture_result = CaptureResult(
@@ -1726,10 +1805,10 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
         await machine.handle_event(RuntimeEvent(
             EventType.CAPTURE_COMPLETED, "1", session.session_id, capture_result
         ))
-        recognition_task = machine.current_recognition_task
+        recognition_task = cycle.recognition_task
         assert recognition_task is not None
         await asyncio.sleep(0.3)
-        assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+        assert EventType.OCR_TIMEOUT not in cycle.deadline_tasks
         assert session.state == SessionState.RUNNING
         assert not published_events
         machine.text_recognizer.prepare_frames_for_ocr.assert_called_once_with(
@@ -1744,7 +1823,7 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
         resource_release.set()
         await resource_holder_task
         assert await asyncio.to_thread(processing_started.wait, 5)
-        assert EventType.OCR_TIMEOUT in machine.deadline_tasks
+        assert EventType.OCR_TIMEOUT in cycle.deadline_tasks
         assert session.state == SessionState.RUNNING
 
         # OCR 在期限内完成后不再发布超时事件。
@@ -1753,7 +1832,7 @@ async def test_ocr_timeout_starts_after_shared_resource_and_cancels_on_completio
         await asyncio.sleep(0.3)
         assert published_events == [EventType.OCR_COMPLETED]
         assert session.ocr_state == OCRState.COMPLETED
-        assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+        assert EventType.OCR_TIMEOUT not in cycle.deadline_tasks
         assert session.state == SessionState.RUNNING
     finally:
         # 放行资源和识别任务并清理测试库。
@@ -1780,7 +1859,9 @@ async def test_ocr_processing_timeout_fails_current_session(tmp_path: Path) -> N
     # 建立等待 OCR 的周期和阻塞的识别入口。
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    cycle = machine.cycles[session.session_id]
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.ocr_state = OCRState.WAITING
     session.ocr_result = None
     machine.config = replace(machine.config, ocr_result_timeout_ms=40)
@@ -1850,10 +1931,10 @@ async def test_ocr_processing_timeout_fails_current_session(tmp_path: Path) -> N
         await machine.handle_event(RuntimeEvent(
             EventType.CAPTURE_COMPLETED, "1", session.session_id, capture_result
         ))
-        recognition_task = machine.current_recognition_task
+        recognition_task = cycle.recognition_task
         assert recognition_task is not None
         assert await asyncio.to_thread(processing_started.wait, 5)
-        assert EventType.OCR_TIMEOUT in machine.deadline_tasks
+        assert EventType.OCR_TIMEOUT in cycle.deadline_tasks
 
         # 保持 OCR 阻塞直到处理期限到期。
         await asyncio.wait_for(timeout_handled.wait(), timeout=5)
@@ -1863,8 +1944,8 @@ async def test_ocr_processing_timeout_fails_current_session(tmp_path: Path) -> N
         assert machine.machine_failure_reason is None
         assert machine.overall_status == MachineOverallStatus.ONLINE
         machine_status_notification.assert_not_called()
-        assert machine.current_session is session
-        assert machine.current_recognition_task is None
+        assert machine.active_session is session
+        assert cycle.recognition_task is recognition_task
         assert not recognition_task.done()
 
         # 旧识别完成后不发布迟到结果。
@@ -1894,6 +1975,7 @@ async def test_invalid_session_waiting_for_ocr_resource_skips_timeout_and_infere
     # 建立等待共享资源的 OCR 任务。
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    cycle = machine.cycles[session.session_id]
     recognizer = TextRecognizer()
     recognizer.prepare_frames_for_ocr = Mock(
         return_value=((evidence_frame,), (evidence_frame,))
@@ -1924,7 +2006,7 @@ async def test_invalid_session_waiting_for_ocr_resource_skips_timeout_and_infere
         await recognition_task
 
         # 核对失效周期没有启动 OCR 期限和识别。
-        assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+        assert EventType.OCR_TIMEOUT not in cycle.deadline_tasks
         machine.text_recognizer.recognize_qualified_frames.assert_not_called()
         machine.publish_event.assert_not_awaited()
     finally:
@@ -1953,7 +2035,9 @@ async def test_consecutive_ocr_lock_wait_timeouts_are_recorded_per_session(
     machine, database, first_session, progress_updates, _ = create_machine(
         tmp_path, (evidence_frame,)
     )
+    cycle = machine.cycles[first_session.session_id]
     first_session.capture_stop_time = None
+    machine.active_session_id = first_session.session_id
     first_session.ocr_state = OCRState.WAITING
     first_session.ocr_result = None
     machine.config = replace(machine.config, ocr_lock_wait_timeout_ms=50)
@@ -1971,7 +2055,11 @@ async def test_consecutive_ocr_lock_wait_timeouts_are_recorded_per_session(
     await resource_acquired.wait()
     machine.camera.available = True
     machine.camera.is_capturing = False
-    machine.camera.start_capture = Mock()
+    machine.camera.start_capture = Mock(
+        side_effect=lambda session_id, started: start_test_capture(
+            machine.camera, started
+        )
+    )
     machine.camera.stop = AsyncMock()
     pending_events: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
 
@@ -1994,15 +2082,16 @@ async def test_consecutive_ocr_lock_wait_timeouts_are_recorded_per_session(
     try:
         for cycle_number in (1, 2):
             # 采集完成后等待共享资源超时。
-            session = machine.current_session
+            session = machine.active_session
             assert session is not None
+            cycle = machine.cycles[session.session_id]
             await machine.handle_event(RuntimeEvent(
                 EventType.CAPTURE_COMPLETED,
                 session.machine_id,
                 session.session_id,
                 capture_result,
             ))
-            recognition_task = machine.current_recognition_task
+            recognition_task = cycle.recognition_task
             assert recognition_task is not None
             timeout_event = await asyncio.wait_for(pending_events.get(), timeout=5)
             assert timeout_event.event_type == EventType.OCR_LOCK_WAIT_TIMEOUT
@@ -2015,7 +2104,7 @@ async def test_consecutive_ocr_lock_wait_timeouts_are_recorded_per_session(
             assert session.ocr_state == OCRState.FAILED
             assert session.state == SessionState.FAILED
             assert session.errors == ["OCR 识别资源等待超时"]
-            assert machine.current_session is session
+            assert machine.active_session is session
             assert machine.machine_failure_reason is None
             assert (
                 session.machine_id,
@@ -2037,16 +2126,16 @@ async def test_consecutive_ocr_lock_wait_timeouts_are_recorded_per_session(
             assert measurement_count == 0
             assert not resource_holder_task.done()
             machine.text_recognizer.recognize_qualified_frames.assert_not_called()
-            assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+            assert EventType.OCR_TIMEOUT not in cycle.deadline_tasks
 
             # 真实 CLOSE 释放本轮，再创建下一轮周期。
             await machine.handle_machine_close()
-            assert machine.current_session is None
+            assert machine.active_session is None
             machine.camera.delivery_task = asyncio.get_running_loop().create_future()
             machine.camera.delivery_task.set_result(None)
             await machine.handle_machine_start()
-            assert machine.current_session is not None
-            assert machine.current_session.session_id != session.session_id
+            assert machine.active_session is not None
+            assert machine.active_session.session_id != session.session_id
             machine.camera.delivery_task = None
 
         # 核对两条异常分别属于前两轮，第三轮已正常受理。
@@ -2055,7 +2144,7 @@ async def test_consecutive_ocr_lock_wait_timeouts_are_recorded_per_session(
             first_session.session_id,
             session.session_id,
         ]
-        assert machine.current_session is not None
+        assert machine.active_session is not None
     finally:
         # 放行资源拥有者并清理机器资源。
         resource_release.set()
@@ -2081,6 +2170,7 @@ async def test_cancelled_ocr_resource_wait_does_not_release_current_owner(
     # 建立被其他任务占用的共享资源。
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    cycle = machine.cycles[session.session_id]
     recognizer = TextRecognizer()
     recognizer.prepare_frames_for_ocr = Mock(
         return_value=((evidence_frame,), (evidence_frame,))
@@ -2114,7 +2204,7 @@ async def test_cancelled_ocr_resource_wait_does_not_release_current_owner(
         with pytest.raises(OCRResourceWaitTimeoutError):
             async with recognizer.acquire_ocr_access(0.01):
                 pytest.fail("原任务仍占用资源时不应进入")
-        assert EventType.OCR_TIMEOUT not in machine.deadline_tasks
+        assert EventType.OCR_TIMEOUT not in cycle.deadline_tasks
         machine.text_recognizer.recognize_qualified_frames.assert_not_called()
         machine.publish_event.assert_not_awaited()
     finally:
@@ -2133,7 +2223,7 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
     tmp_path: Path,
     failure_event_type: EventType,
 ) -> None:
-    """确认旧 OCR 收尾时释放失败周期并保留新周期的任务引用。
+    """确认旧 OCR 收尾时保留失败周期资源且不清理新周期任务。
 
     Args:
         tmp_path: pytest 提供的临时目录。
@@ -2141,12 +2231,14 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
 
     Returns:
         返回示例：
-            None  # 失败周期已释放，新周期与任务引用保持有效
+            None  # 现场占用已解除，旧线程结束后才回收后台上下文
     """
     # 建立等待 OCR 的旧周期和两轮可控的阻塞识别。
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, old_session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    cycle = machine.cycles[old_session.session_id]
     old_session.capture_stop_time = None
+    machine.active_session_id = old_session.session_id
     old_session.ocr_state = OCRState.WAITING
     old_session.ocr_result = None
     old_started = threading.Event()
@@ -2192,7 +2284,11 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
     machine.publish_event = AsyncMock()
     machine.camera.available = True
     machine.camera.is_capturing = False
-    machine.camera.start_capture = Mock()
+    machine.camera.start_capture = Mock(
+        side_effect=lambda session_id, started: start_test_capture(
+            machine.camera, started
+        )
+    )
     machine.camera.stop = AsyncMock()
     capture_result = CaptureResult(frames=(evidence_frame.camera_frame,), statistics={})
 
@@ -2201,7 +2297,7 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
         await machine.handle_event(RuntimeEvent(
             EventType.CAPTURE_COMPLETED, "1", old_session.session_id, capture_result
         ))
-        old_task = machine.current_recognition_task
+        old_task = cycle.recognition_task
         assert old_task is not None
         assert await asyncio.to_thread(old_started.wait, 5)
         await machine.handle_event(RuntimeEvent(
@@ -2209,25 +2305,26 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
         ))
         await wait_for_failure_audit(machine)
         assert old_session.state == SessionState.FAILED
-        assert machine.current_session is old_session
-        assert machine.current_recognition_task is None
-        assert old_task in machine.unfinished_recognition_tasks
+        assert machine.active_session is old_session
+        assert cycle.recognition_task is old_task
+        assert old_session.session_id in machine.cycles
         assert not old_task.done()
 
-        # 真实 CLOSE 释放旧周期，下一次 START 建立新周期。
+        # 真实 CLOSE 解除现场占用，旧线程收尾期间建立新周期。
         await machine.handle_machine_close()
-        assert machine.current_session is None
+        assert machine.active_session is None
         machine.camera.delivery_task = asyncio.get_running_loop().create_future()
         await machine.handle_machine_start()
-        new_session = machine.current_session
+        new_session = machine.active_session
         assert new_session is not None
         assert new_session is not old_session
         await machine.handle_event(RuntimeEvent(
             EventType.CAPTURE_COMPLETED, "1", new_session.session_id, capture_result
         ))
-        new_task = machine.current_recognition_task
+        new_cycle = machine.cycles[new_session.session_id]
+        new_task = new_cycle.recognition_task
         assert new_task is not None
-        assert new_task in machine.unfinished_recognition_tasks
+        assert machine.cycles[new_session.session_id].recognition_task is new_task
         await asyncio.sleep(0.05)
         assert not new_started.is_set()
 
@@ -2236,18 +2333,17 @@ async def test_ocr_failure_close_releases_session_while_old_task_finishes(
         await asyncio.gather(old_task, return_exceptions=True)
         assert await asyncio.to_thread(new_started.wait, 5)
         await asyncio.sleep(0)
-        assert old_task not in machine.unfinished_recognition_tasks
-        assert machine.current_session is new_session
-        assert machine.current_recognition_task is new_task
-        assert new_task in machine.unfinished_recognition_tasks
+        assert old_session.session_id not in machine.cycles
+        assert machine.active_session is new_session
+        assert machine.cycles[new_session.session_id].recognition_task is new_task
         machine.publish_event.assert_not_awaited()
 
         # 旧周期的迟到事件不进入新周期。
         await machine.handle_event(RuntimeEvent(
             EventType.OCR_COMPLETED, "1", old_session.session_id, old_result
         ))
-        assert machine.current_session is new_session
-        assert machine.current_recognition_task is new_task
+        assert machine.active_session is new_session
+        assert machine.cycles[new_session.session_id].recognition_task is new_task
         assert new_session.ocr_result is None
     finally:
         # 放行阻塞识别并清理本机任务和测试库。
@@ -2277,11 +2373,16 @@ async def test_old_ocr_unknown_error_reports_system_failure_without_clearing_new
     # 建立已关闭的新周期和仍在执行的新 OCR 任务。
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, new_session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    cycle = machine.cycles[new_session.session_id]
     new_session.state = SessionState.FAILED
     new_task = asyncio.create_task(asyncio.Event().wait())
-    machine.current_recognition_task = new_task
-    machine.unfinished_recognition_tasks.add(new_task)
-    new_task.add_done_callback(machine.handle_recognition_task_finished)
+    cycle.recognition_task = new_task
+    machine.active_session_id = new_session.session_id
+    new_task.add_done_callback(
+        lambda task: machine.handle_recognition_task_finished(
+            task, new_session.session_id
+        )
+    )
     unknown_error = RuntimeError("旧 OCR 未知异常")
 
     async def raise_old_error() -> None:
@@ -2299,17 +2400,23 @@ async def test_old_ocr_unknown_error_reports_system_failure_without_clearing_new
     try:
         # 令旧任务完成并执行其回调。
         old_task = asyncio.create_task(raise_old_error())
-        machine.unfinished_recognition_tasks.add(old_task)
-        old_task.add_done_callback(machine.handle_recognition_task_finished)
+        old_session = replace(new_session, session_id="old-session")
+        machine.cycles[old_session.session_id] = CycleContext(
+            old_session, recognition_task=old_task
+        )
+        old_task.add_done_callback(
+            lambda task: machine.handle_recognition_task_finished(
+                task, old_session.session_id
+            )
+        )
         await asyncio.gather(old_task, return_exceptions=True)
         await asyncio.sleep(0)
 
         # 核对未知异常与新周期隔离。
         machine.on_system_failure.assert_called_once_with(unknown_error)
-        assert old_task not in machine.unfinished_recognition_tasks
-        assert new_task in machine.unfinished_recognition_tasks
-        assert machine.current_recognition_task is new_task
-        assert machine.current_session is new_session
+        assert "old-session" not in machine.cycles
+        assert machine.cycles[new_session.session_id].recognition_task is new_task
+        assert machine.active_session is new_session
     finally:
         # 取消新任务并关闭测试库。
         new_task.cancel()
@@ -2331,7 +2438,8 @@ async def test_shutdown_waits_for_detached_ocr_task(tmp_path: Path) -> None:
     # 建立没有活动周期但仍有旧 OCR 任务的机器。
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, _, _, _ = create_machine(tmp_path, (evidence_frame,))
-    machine.current_session = None
+    machine.cycles.clear()
+    machine.active_session_id = None
     machine.camera.stop = AsyncMock()
     recognizer = TextRecognizer()
     machine.text_recognizer = recognizer
@@ -2368,8 +2476,20 @@ async def test_shutdown_waits_for_detached_ocr_task(tmp_path: Path) -> None:
 
     # 启动已解绑的旧任务并发起退出。
     old_task = asyncio.create_task(run_old_ocr())
-    machine.unfinished_recognition_tasks.add(old_task)
-    old_task.add_done_callback(machine.handle_recognition_task_finished)
+    old_session = MeasurementSession(
+        session_id="old-session", machine_id="1", camera_serial="camera-1",
+        frequency_meter_serial="meter-1", capture_id="capture-old",
+        start_time=TEST_SESSION_START_TIME, capture_start_time=0.0,
+        capture_stop_time=1.0, state=SessionState.FAILED,
+    )
+    machine.cycles[old_session.session_id] = CycleContext(
+        old_session, recognition_task=old_task
+    )
+    old_task.add_done_callback(
+        lambda task: machine.handle_recognition_task_finished(
+            task, old_session.session_id
+        )
+    )
     shutdown_task: asyncio.Task[None] | None = None
     try:
         assert await asyncio.to_thread(operation_started.wait, 5)
@@ -2383,7 +2503,7 @@ async def test_shutdown_waits_for_detached_ocr_task(tmp_path: Path) -> None:
         await shutdown_task
         await asyncio.sleep(0)
         assert old_task.done()
-        assert not machine.unfinished_recognition_tasks
+        assert not machine.cycles
         async with recognizer.acquire_ocr_access(0.1):
             pass
     finally:
@@ -2412,6 +2532,7 @@ async def test_unknown_ocr_error_reaches_system_failure_callback(
     """
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
+    cycle = machine.cycles[session.session_id]
     session.ocr_state = OCRState.WAITING
     session.ocr_result = None
     error = error_type("未知识别错误")
@@ -2428,7 +2549,7 @@ async def test_unknown_ocr_error_reaches_system_failure_callback(
     await machine.handle_event(RuntimeEvent(
         EventType.CAPTURE_COMPLETED, "1", session.session_id, capture_result
     ))
-    current_recognition_task = machine.current_recognition_task
+    current_recognition_task = cycle.recognition_task
     assert current_recognition_task is not None
 
     # 等待原始异常离开任务并核对完成回调的交付结果。
@@ -2437,7 +2558,7 @@ async def test_unknown_ocr_error_reaches_system_failure_callback(
     assert captured_error.value is error
     machine.on_system_failure.assert_called_once_with(error)
     machine.publish_event.assert_not_awaited()
-    assert machine.current_recognition_task is None
+    assert cycle.recognition_task is None
     async with recognizer.acquire_ocr_access(0.1):
         pass
     assert session.ocr_state == OCRState.RUNNING
@@ -2458,6 +2579,7 @@ async def test_cycle_timeout_fails_and_is_audited(tmp_path: Path) -> None:
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.ocr_state = OCRState.WAITING
     session.ocr_result = None
 
@@ -2496,6 +2618,7 @@ async def test_audit_failure_does_not_block_session_cleanup(
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     audit_error = sqlite3.OperationalError("运行库写入失败")
     database.save_abnormal_event = Mock(side_effect=audit_error)
 
@@ -2521,13 +2644,13 @@ async def test_audit_failure_does_not_block_session_cleanup(
     # 执行失败收尾并等待现场关闭。
     await machine.handle_session_failure(session, "此次相机没有采集到任何帧")
     await wait_for_failure_audit(machine)
-    assert machine.current_session is session
+    assert machine.active_session is session
     await machine.handle_machine_close()
 
     # 核对审计写入只尝试一次且周期已释放。
     database.save_abnormal_event.assert_called_once()
     assert "1号皮带机 保存测量失败记录时发生异常" in caplog.text
-    assert machine.current_session is None
+    assert machine.active_session is None
 
     # 核对系统故障在收尾完成后收到审计异常。
     machine.on_system_failure.assert_called_once_with(audit_error)
@@ -2557,6 +2680,7 @@ async def test_storage_failure_keeps_root_cause_when_audit_also_fails(
     # 同时设置证据图片写入故障和异常事件写入故障。
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    cycle = machine.cycles[session.session_id]
     write_error = OSError("图片写入失败")
     monkeypatch.setattr(
         "runtime.machine_runtime.save_evidence_image",
@@ -2568,13 +2692,13 @@ async def test_storage_failure_keeps_root_cause_when_audit_also_fails(
 
     # 执行本轮结算。
     await machine.try_finalize(session)
-    await machine.result_storage_task
+    await cycle.result_storage_task
     await wait_for_failure_audit(machine)
 
     # 核对本轮已完整失败收尾并释放周期。
     assert session.state == SessionState.FAILED
     assert session.errors.count("证据图片保存失败") == 1
-    assert machine.current_session is None
+    assert machine.active_session is None
     assert machine.frequency_adapter.active_session_id is None
 
     # 核对审计写入只尝试一次且失败已记录日志。
@@ -2603,6 +2727,7 @@ async def test_io_interruption_fails_open_session(tmp_path: Path) -> None:
     evidence_frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(tmp_path, (evidence_frame,))
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.ocr_state = OCRState.WAITING
 
     # 交付 IO 中断事件并检查本轮失败收尾。
@@ -2611,7 +2736,7 @@ async def test_io_interruption_fails_open_session(tmp_path: Path) -> None:
     assert session.state == SessionState.FAILED
     assert "IO 通信中断" in session.errors
     assert session.capture_stop_time is not None
-    assert machine.current_session is None
+    assert machine.active_session is None
     assert machine.waiting_cycle_reset
 
     # 核对异常事件中的周期身份和失败原因。
@@ -2638,7 +2763,7 @@ async def test_io_interruption_preserves_closed_session(tmp_path: Path) -> None:
     # 交付 IO 中断事件并检查已关闭周期状态。
     await machine.handle_event(RuntimeEvent(EventType.IO_INTERRUPTED, "1"))
     assert session.state == SessionState.RUNNING
-    assert machine.current_session is session
+    assert session.session_id in machine.cycles
     assert machine.waiting_cycle_reset
     assert read_abnormal_events(database) == []
 
@@ -2660,7 +2785,8 @@ async def test_failed_session_releases_when_delivery_task_finishes(tmp_path: Pat
     camera.available = True
     camera.is_capturing = False
     camera.stop = AsyncMock()
-    machine.current_session = None
+    machine.cycles.clear()
+    machine.active_session_id = None
     machine.initialized = True
 
     # 采集交付任务由测试放行结束。
@@ -2678,7 +2804,7 @@ async def test_failed_session_releases_when_delivery_task_finishes(tmp_path: Pat
         """
         camera.delivery_task = None
 
-    def start_capture(session_id: str, capture_start_time: float) -> None:
+    def start_capture(session_id: str, capture_start_time: float) -> tuple:
         """建立等待放行的采集交付任务。
 
         Args:
@@ -2691,12 +2817,13 @@ async def test_failed_session_releases_when_delivery_task_finishes(tmp_path: Pat
         """
         camera.delivery_task = asyncio.create_task(delivery_released.wait())
         camera.delivery_task.add_done_callback(clear_delivery_task)
+        return start_test_capture(camera, capture_start_time)
 
     camera.start_capture = start_capture
 
     # 受理 START 后交付任务仍在运行，IO 中断先把本轮结算为失败。
     await machine.handle_machine_start()
-    session = machine.current_session
+    session = machine.active_session
     assert session is not None
     delivery_task = camera.delivery_task
     await machine.handle_event(RuntimeEvent(EventType.IO_INTERRUPTED, "1"))
@@ -2704,7 +2831,7 @@ async def test_failed_session_releases_when_delivery_task_finishes(tmp_path: Pat
     assert session.state == SessionState.FAILED
     assert session.errors == ["IO 通信中断"]
     assert len(read_abnormal_events(database)) == 1
-    assert machine.current_session is session
+    assert session.session_id in machine.cycles
 
     # 同轮采集故障在交付结束前到达，只登记机器故障，本轮不重复结算。
     await machine.handle_event(RuntimeEvent(
@@ -2715,24 +2842,26 @@ async def test_failed_session_releases_when_delivery_task_finishes(tmp_path: Pat
     assert [(row[0], row[1], row[2]) for row in read_abnormal_events(database)] == [
         ("1", session.session_id, "IO 通信中断"),
     ]
-    assert machine.current_session is session
+    assert session.session_id in machine.cycles
 
     # 放行交付任务，相机清空引用后机器的交付回调完成释放。
     delivery_released.set()
     await asyncio.gather(delivery_task, return_exceptions=True)
     await asyncio.sleep(0)
     assert camera.delivery_task is None
-    assert machine.current_session is None
+    assert machine.active_session is None
     assert machine.machine_failure_reason == "相机采集失败"
 
     # 机器故障登记继续阻止下一轮 START。
     await machine.handle_machine_start()
-    assert machine.current_session is None
+    assert machine.active_session is None
     database.close()
 
 
 @pytest.mark.asyncio
-async def test_machine_failure_does_not_release_failed_session_itself(tmp_path: Path) -> None:
+async def test_machine_failure_does_not_repeat_failed_session_settlement(
+    tmp_path: Path,
+) -> None:
     """确认机器故障收尾只登记故障，不负责释放已满足条件的失败周期。
 
     Args:
@@ -2751,18 +2880,16 @@ async def test_machine_failure_does_not_release_failed_session_itself(tmp_path: 
     machine.camera.delivery_task = None
 
     # 同轮采集故障交给已失败的周期，只登记机器故障。
-    await machine.handle_event(RuntimeEvent(
-        EventType.CAPTURE_FAILED, "1", session.session_id, "GetImageBuffer 失败"
-    ))
+    await machine.handle_machine_failure(session, "相机采集失败")
     assert machine.machine_failure_reason == "相机采集失败"
     assert session.errors == ["IO 通信中断"]
     assert read_abnormal_events(database) == []
 
     # 真实受理 START 时相机的交付结束回调会再次尝试释放，本测试绕过该回调。
     # 机器故障处理没有释放周期，显式调用释放才清空当前周期。
-    assert machine.current_session is session
-    machine.release_finished_session()
-    assert machine.current_session is None
+    assert session.session_id in machine.cycles
+    machine.release_finished_session(session.session_id)
+    assert machine.active_session is None
     database.close()
 
 
@@ -2779,10 +2906,12 @@ async def test_ocr_notification_precedes_close_and_survives_release(tmp_path: Pa
     """
     frame = create_frame("session-1", "frame-1", b"image")
     machine, database, session, progress_updates, _ = create_machine(tmp_path, (frame,))
+    cycle = machine.cycles[session.session_id]
     result = session.ocr_result
     session.ocr_result = None
     session.ocr_state = OCRState.RUNNING
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     notification = Mock()
     machine.notify_ocr_result = notification
 
@@ -2803,10 +2932,10 @@ async def test_ocr_notification_precedes_close_and_survives_release(tmp_path: Pa
     # 重复结果被忽略，CLOSE 后正常提交并释放周期。
     await machine.handle_event(RuntimeEvent(EventType.OCR_COMPLETED, "1", session.session_id, result))
     await machine.handle_machine_close()
-    await machine.result_storage_task
+    await cycle.result_storage_task
     assert session.state == SessionState.COMMITTED
     assert session.ocr_result is None
-    assert machine.current_session is None
+    assert machine.active_session is None
     assert notification.call_count == 1
 
     # 正式入库文字与当前周期通知文字保持一致。
@@ -2838,6 +2967,7 @@ def create_storage_runtime(temporary_directory: Path, shutdown_timeout_ms: int =
     frame = create_frame("session-1", "frame-1", b"image-one")
     machine, database, session, _, _ = create_machine(temporary_directory, (frame,))
     session.capture_stop_time = None
+    machine.active_session_id = session.session_id
     session.measurement_frequencies = [FrequencyMeasurement(session.session_id, "meter-1", 50.0)]
     machine.camera.stop = AsyncMock()
 
@@ -2866,10 +2996,11 @@ async def test_slow_storage_does_not_block_other_machine_io(tmp_path: Path) -> N
 
     Returns:
         返回示例：
-            None  # 保存阻塞期间另一台机器完成启停，本机没有提前开始下一轮
+            None  # 保存阻塞期间其他机器正常启停，本机可受理下一轮
     """
     # 让首台机器在保存证据前等待测试放行。
     runtime, machine, session = create_storage_runtime(tmp_path, shutdown_timeout_ms=20)
+    cycle = machine.cycles[session.session_id]
     runtime.config = replace(runtime.config, io_machine_channels={"1": 0, "2": 1}, modbus_poll_interval_ms=1)
     storage_started = asyncio.Event()
     release_storage = threading.Event()
@@ -2901,6 +3032,10 @@ async def test_slow_storage_does_not_block_other_machine_io(tmp_path: Path) -> N
         start_capture=Mock(),
         inform_capture_workflow_stop=AsyncMock(),
         stop=AsyncMock(),
+    )
+    other_camera.unfinished_delivery_tasks = set()
+    other_camera.start_capture.side_effect = (
+        lambda session_id, started: start_test_capture(other_camera, started)
     )
     other_camera.delivery_task.set_result(None)
 
@@ -2952,24 +3087,30 @@ async def test_slow_storage_does_not_block_other_machine_io(tmp_path: Path) -> N
         assert storage_started.is_set()
         assert not release_storage.is_set()
         other_camera.start_capture.assert_called_once()
-        assert other_machine.current_session.capture_stop_time is not None
+        assert other_machine.active_session is None
+        other_session = next(iter(other_machine.cycles.values())).session
+        assert other_session.capture_stop_time is not None
         assert session.state == SessionState.SAVING_RESULT
-        assert machine.current_session is session
+        assert session.session_id in machine.cycles
+        assert machine.active_session is None
         assert session.final_frequency.value_hz == 50.0
 
-        # 本机保存期间的新启动不会创建另一周期或重复保存。
+        # 本机保存期间的新启动立即采集，旧轮仍只保存一次。
         await asyncio.wait_for(runtime.handle_start("1"), timeout=1)
+        assert machine.active_session is not None
+        assert machine.active_session.session_id != session.session_id
         await runtime.handle_close("1")
         await machine.try_finalize(session)
-        assert machine.current_session is session
+        assert session.session_id in machine.cycles
+        assert machine.active_session is None
         machine.save_evidence_images_and_measurement_record.assert_called_once()
 
         # 放行保存后，首台机器完成入库并释放原周期。
-        storage_task = machine.result_storage_task
+        storage_task = cycle.result_storage_task
         release_storage.set()
         await asyncio.wait_for(storage_task, timeout=1)
         assert session.state == SessionState.COMMITTED
-        assert machine.current_session is None
+        assert machine.active_session is None
         assert runtime.failure is None
         with sqlite3.connect(runtime.config.database_path) as connection:
             assert connection.execute("SELECT COUNT(*) FROM measurement_records").fetchone()[0] == 1
@@ -2994,6 +3135,7 @@ async def test_shutdown_waits_for_result_storage(tmp_path: Path, shutdown_timeou
             None  # 结果完整入库后才关闭驱动和数据库，成功周期未改为失败
     """
     runtime, machine, session = create_storage_runtime(tmp_path, shutdown_timeout_ms)
+    cycle = machine.cycles[session.session_id]
     storage_started = asyncio.Event()
     release_storage = threading.Event()
     loop = asyncio.get_running_loop()
@@ -3032,8 +3174,8 @@ async def test_shutdown_waits_for_result_storage(tmp_path: Path, shutdown_timeou
         await asyncio.wait_for(shutdown_task, timeout=1)
         assert session.state == SessionState.COMMITTED
         assert session.errors == []
-        assert machine.result_storage_task is None
-        assert machine.current_session is None
+        assert cycle.result_storage_task is None
+        assert machine.active_session is None
         assert runtime.failure is None
         runtime.camera_sdk.close.assert_called_once()
         with sqlite3.connect(runtime.config.database_path) as connection:
@@ -3061,6 +3203,7 @@ async def test_background_storage_error_reaches_system_shutdown(tmp_path: Path, 
             None  # 原始故障已上报，当前测量和系统资源已清理
     """
     runtime, machine, session = create_storage_runtime(tmp_path)
+    cycle = machine.cycles[session.session_id]
     storage_error = error_type("测试结果保存失败")
     runtime.database.write_measurement_record = Mock(side_effect=storage_error)
     try:
@@ -3076,8 +3219,8 @@ async def test_background_storage_error_reaches_system_shutdown(tmp_path: Path, 
         assert runtime.failure_event.is_set()
         assert not runtime.accepting_signals
         assert session.state == SessionState.FAILED
-        assert machine.current_session is None
-        assert machine.result_storage_task is None
+        assert machine.active_session is None
+        assert cycle.result_storage_task is None
         assert not runtime.worker_tasks
         runtime.camera_sdk.close.assert_called_once()
     finally:
@@ -3126,10 +3269,11 @@ async def test_locked_failure_audit_does_not_block_other_machine_io(tmp_path: Pa
 
     Returns:
         返回示例：
-            None  # 写锁未释放时其他机器已启停，本机保留唯一失败周期和审计任务
+            None  # 写锁未释放时仍可受理下一轮，旧轮只保留一份审计
     """
     # 建立等待采集结果的首台机器，并占住运行库写锁。
     runtime, machine, session = create_storage_runtime(tmp_path)
+    cycle = machine.cycles[session.session_id]
     runtime.config = replace(runtime.config, io_machine_channels={"1": 0, "2": 1})
     runtime.io_previous_states = {0: True, 1: False}
     session.ocr_state = OCRState.WAITING
@@ -3146,6 +3290,10 @@ async def test_locked_failure_audit_does_not_block_other_machine_io(tmp_path: Pa
         start_capture=Mock(),
         inform_capture_workflow_stop=AsyncMock(),
         stop=AsyncMock(),
+    )
+    other_camera.unfinished_delivery_tasks = set()
+    other_camera.start_capture.side_effect = (
+        lambda session_id, started: start_test_capture(other_camera, started)
     )
     other_camera.delivery_task.set_result(None)
     other_closed = Mock()
@@ -3170,7 +3318,7 @@ async def test_locked_failure_audit_does_not_block_other_machine_io(tmp_path: Pa
             EventType.CAPTURE_COMPLETED, "1", session.session_id, CaptureResult(frames=(), statistics={})
         ))
         await asyncio.wait_for(audit_started.wait(), timeout=1)
-        audit_task = machine.failure_audit_task
+        audit_task = cycle.failure_audit_task
         assert audit_task is not None
         assert not audit_task.done()
         assert read_abnormal_events(runtime.database) == []
@@ -3180,25 +3328,31 @@ async def test_locked_failure_audit_does_not_block_other_machine_io(tmp_path: Pa
         await asyncio.wait_for(runtime.handle_io_states([False, False]), timeout=0.25)
         other_camera.start_capture.assert_called_once()
         other_closed.assert_called_once()
-        assert other_machine.current_session.capture_stop_time is not None
-        assert machine.current_session is session
+        assert other_machine.active_session is None
+        other_session = next(iter(other_machine.cycles.values())).session
+        assert other_session.capture_stop_time is not None
+        assert session.session_id in machine.cycles
+        assert machine.active_session is None
         assert session.state == SessionState.FAILED
         assert session.capture_stop_time is not None
         assert not audit_task.done()
 
-        # 首台机器仍保留失败周期，重复事件不再创建测量或另一审计任务。
+        # 首台机器受理下一周期，旧轮重复结算不再创建审计任务。
         await runtime.handle_start("1")
+        assert machine.active_session is not None
+        assert machine.active_session.session_id != session.session_id
         await runtime.handle_close("1")
         await machine.try_finalize(session)
-        assert machine.current_session is session
-        assert machine.failure_audit_task is audit_task
+        assert session.session_id in machine.cycles
+        assert machine.active_session is None
+        assert cycle.failure_audit_task is audit_task
         runtime.database.save_abnormal_event.assert_called_once()
 
         # 放开真实写锁后提交审计并释放首台机器的周期。
         lock.rollback()
         await asyncio.wait_for(audit_task, timeout=1)
-        assert machine.failure_audit_task is None
-        assert machine.current_session is None
+        assert cycle.failure_audit_task is None
+        assert machine.active_session is None
         assert runtime.failure is None
         assert read_abnormal_events(runtime.database)[0][:3] == ("1", session.session_id, "本轮未采集到图像")
     finally:
@@ -3223,6 +3377,7 @@ async def test_shutdown_waits_for_failure_audit(tmp_path: Path, shutdown_timeout
     """
     # 阻塞退出时产生的失败记录写入。
     runtime, machine, session = create_storage_runtime(tmp_path, shutdown_timeout_ms)
+    cycle = machine.cycles[session.session_id]
     audit_started = record_audit_started(runtime.database)
     runtime.database.close = Mock(wraps=runtime.database.close)
     lock = sqlite3.connect(runtime.config.recovery_path)
@@ -3234,8 +3389,9 @@ async def test_shutdown_waits_for_failure_audit(tmp_path: Path, shutdown_timeout
         await asyncio.sleep(0.03)
         assert not shutdown_task.done()
         assert session.state == SessionState.FAILED
-        assert machine.current_session is session
-        assert machine.failure_audit_task is not None
+        assert session.session_id in machine.cycles
+        assert machine.active_session is None
+        assert cycle.failure_audit_task is not None
         runtime.camera_sdk.close.assert_not_called()
         runtime.database.close.assert_not_called()
         assert read_abnormal_events(runtime.database) == []
@@ -3243,8 +3399,8 @@ async def test_shutdown_waits_for_failure_audit(tmp_path: Path, shutdown_timeout
         # 写锁释放后才完成退出和数据库关闭。
         lock.rollback()
         await asyncio.wait_for(shutdown_task, timeout=1)
-        assert machine.failure_audit_task is None
-        assert machine.current_session is None
+        assert cycle.failure_audit_task is None
+        assert machine.active_session is None
         assert runtime.failure is None
         assert not runtime.worker_tasks
         runtime.camera_sdk.close.assert_called_once()
@@ -3275,6 +3431,7 @@ async def test_cancelled_failure_audit_drains_write_and_preserves_root_error(
     """
     # 用真实写锁阻塞已开始的审计事务。
     runtime, machine, session = create_storage_runtime(tmp_path)
+    cycle = machine.cycles[session.session_id]
     audit_started = record_audit_started(runtime.database)
     runtime.database.close = Mock(wraps=runtime.database.close)
     root_error = sqlite3.OperationalError("原始测量入库失败") if has_root_error else None
@@ -3283,7 +3440,7 @@ async def test_cancelled_failure_audit_drains_write_and_preserves_root_error(
     try:
         await machine.handle_session_failure(session, "测试失败", system_error=root_error)
         await asyncio.wait_for(audit_started.wait(), timeout=1)
-        audit_task = machine.failure_audit_task
+        audit_task = cycle.failure_audit_task
 
         # 连续取消不提前结束正在执行的数据库线程。
         audit_task.cancel()
@@ -3291,7 +3448,7 @@ async def test_cancelled_failure_audit_drains_write_and_preserves_root_error(
         audit_task.cancel()
         await asyncio.sleep(0.03)
         assert not audit_task.done()
-        assert machine.current_session is session
+        assert machine.active_session is session
         assert runtime.failure is None
         runtime.database.close.assert_not_called()
 
@@ -3300,8 +3457,8 @@ async def test_cancelled_failure_audit_drains_write_and_preserves_root_error(
         await asyncio.gather(audit_task, return_exceptions=True)
         await asyncio.wait_for(runtime.stop(), timeout=1)
         assert audit_task.cancelled()
-        assert machine.failure_audit_task is None
-        assert machine.current_session is None
+        assert cycle.failure_audit_task is None
+        assert machine.active_session is None
         assert read_abnormal_events(runtime.database)[0][:3] == ("1", session.session_id, "测试失败")
         if has_root_error:
             assert runtime.failure is root_error
@@ -3313,3 +3470,941 @@ async def test_cancelled_failure_audit_drains_write_and_preserves_root_error(
         lock.rollback()
         lock.close()
         await runtime.stop()
+
+
+def create_background_runtime(temporary_directory: Path):
+    """建立使用真实周期主流程和可立即停流相机的测试系统。
+
+    Args:
+        temporary_directory: 临时数据库和证据根目录。
+
+    Returns:
+        返回示例：
+            (
+                SystemRuntime(...),  # 真实事件队列及退出流程
+                MachineRuntime(...),  # 没有活动周期的测试机器
+            )
+    """
+    # 复用临时数据库和机器事件监听。
+    runtime, machine, _ = create_storage_runtime(temporary_directory, 20)
+    machine.cycles.clear()
+    machine.active_session_id = None
+    machine.initialized = True
+    machine.notify_machine_warning = Mock()
+
+    # 模拟每次采集一帧并停止读帧，保留真实采集锁和交付任务。
+    sdk_camera = SimpleNamespace(
+        serial="camera-1", closed=False, faulted=False,
+        capture_lock=threading.Lock(), received_frame_count=0,
+        start_grabbing=Mock(), stop_grabbing=Mock(),
+        encode_image=lambda frame: frame.image_bytes,
+    )
+
+    def read_frame(stop_requested: threading.Event, timeout_ms: int):
+        """返回属于本次取流的原始帧字节。
+
+        Args:
+            stop_requested: 本轮现场采集停止通知。
+            timeout_ms: 单次读帧期限。
+
+        Returns:
+            返回示例：
+                SimpleNamespace(image_bytes=b"capture-1")  # 所属帧字节
+        """
+        sdk_camera.received_frame_count += 1
+        stop_requested.set()
+        return SimpleNamespace(
+            image_bytes=f"capture-{sdk_camera.received_frame_count}".encode(),
+        )
+
+    sdk_camera.read_frame = Mock(side_effect=read_frame)
+    machine.camera = Camera("1", "1号皮带机", 1000, 50,
+                            runtime.publish_event, runtime.handle_system_failure)
+    machine.camera.sdk_camera = sdk_camera
+
+    # 根据所属 Session 封装证据，使用真实 OCR 共享锁。
+    recognizer = TextRecognizer()
+
+    def prepare_frames(session_id, capture_id, camera_serial, frames):
+        """将原始帧封装为所属周期的识别和证据输入。
+
+        Args:
+            session_id: 所属周期编号。
+            capture_id: 所属采集编号。
+            camera_serial: 所属相机编号。
+            frames: 所属原始帧。
+
+        Returns:
+            返回示例：
+                (
+                    (MeasurementFrame(...),),  # 全部证据帧
+                    (MeasurementFrame(...),),  # 合格识别帧
+                )
+        """
+        frame = create_frame(session_id, f"frame-{session_id}", frames[0].image_bytes)
+        return (frame,), (frame,)
+
+    def recognize_frames(session_id, measurement_frames, qualified_frames):
+        """返回可区分不同周期的文字和证据。
+
+        Args:
+            session_id: 所属周期编号。
+            measurement_frames: 本轮全部帧。
+            qualified_frames: 本轮合格帧。
+
+        Returns:
+            返回示例：
+                OCRResult(...)  # 同一周期的文字及证据帧对应关系
+        """
+        # 根据本轮帧标记生成对应的测试编号。
+        frame_bytes = qualified_frames[0].camera_frame.image_bytes
+        capture_number = frame_bytes.decode().split("-")[-1]
+        return OCRResult(
+            recognized_lines=(f"292621{capture_number}C",),
+            selected_frames=qualified_frames,
+            line_frame_ids=((qualified_frames[0].frame_id,),),
+            review_frames=(), review_reason=None,
+        )
+
+    recognizer.prepare_frames_for_ocr = Mock(side_effect=prepare_frames)
+    recognizer.recognize_qualified_frames = Mock(side_effect=recognize_frames)
+    machine.text_recognizer = recognizer
+    return runtime, machine
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "background_stage",
+    ["resource", "recognition", "storage", "audit"],
+)
+async def test_close_accepts_next_capture_during_background_stage(
+    tmp_path: Path, background_stage: str,
+) -> None:
+    """确认旧轮处于各后台阶段时，CLOSE 后下一轮当场完成采集。
+
+    Args:
+        tmp_path: 临时数据库和证据目录。
+        background_stage: 受控阻塞的后台阶段。
+
+    Returns:
+        返回示例：
+            None  # 旧轮保留后台任务，第二轮完成取流且归属正确
+    """
+    # 用事件控制旧轮资源等待、识别、保存或失败审计。
+    runtime, machine = create_background_runtime(tmp_path)
+    loop = asyncio.get_running_loop()
+    background_entered = asyncio.Event()
+    release_thread = threading.Event()
+    resource_release = asyncio.Event()
+    resource_acquired = asyncio.Event()
+    waiter_entered = asyncio.Event()
+    resource_holder = None
+    first_session_id = None
+    original_recognize = machine.text_recognizer.recognize_qualified_frames.side_effect
+    original_save = machine.save_evidence_images_and_measurement_record
+    original_audit = runtime.database.save_abnormal_event
+
+    def recognize_after_release(session_id, measurement_frames, qualified_frames):
+        """等待旧轮识别放行并返回所属结果。
+
+        Args:
+            session_id: 所属周期编号。
+            measurement_frames: 本轮全部帧。
+            qualified_frames: 本轮合格帧。
+
+        Returns:
+            返回示例：
+                OCRResult(...)  # 本轮识别结果
+        """
+        if background_stage == "recognition" and session_id == first_session_id:
+            loop.call_soon_threadsafe(background_entered.set)
+            assert release_thread.wait(5)
+        return original_recognize(session_id, measurement_frames, qualified_frames)
+
+    def save_after_release(record, frames):
+        """阻塞旧轮保存后执行真实临时文件和数据库写入。
+
+        Args:
+            record: 所属测量记录。
+            frames: 所属证据帧。
+
+        Returns:
+            返回示例：
+                None  # 本轮结果已保存
+        """
+        if record.session_id == first_session_id:
+            loop.call_soon_threadsafe(background_entered.set)
+            assert release_thread.wait(5)
+        original_save(record, frames)
+
+    def audit_after_release(reason, *arguments, **keyword_arguments):
+        """阻塞旧轮失败审计后写入临时运行库。
+
+        Args:
+            reason: 失败原因。
+            arguments: 审计位置参数。
+            keyword_arguments: 含所属周期编号的审计参数。
+
+        Returns:
+            返回示例：
+                None  # 本轮失败审计已保存
+        """
+        if keyword_arguments.get("session_id") == first_session_id:
+            loop.call_soon_threadsafe(background_entered.set)
+            assert release_thread.wait(5)
+        original_audit(reason, *arguments, **keyword_arguments)
+
+    if background_stage in {"resource", "audit"}:
+        resource_holder = asyncio.create_task(hold_ocr_processing_resource(
+            machine.text_recognizer, resource_acquired, resource_release,
+        ))
+        await resource_acquired.wait()
+    original_acquire = machine.text_recognizer.acquire_ocr_access
+
+    @asynccontextmanager
+    async def acquire_and_notify(timeout_seconds):
+        """记录本轮实际申请共享识别资源的时刻。
+
+        Args:
+            timeout_seconds: 共享锁等待期限。
+
+        Returns:
+            返回示例：
+                yield None  # 已取得共享 OCR 资源
+        """
+        waiter_entered.set()
+        async with original_acquire(timeout_seconds):
+            yield
+
+    machine.text_recognizer.acquire_ocr_access = acquire_and_notify
+    machine.text_recognizer.recognize_qualified_frames.side_effect = (
+        recognize_after_release
+    )
+    if background_stage == "storage":
+        machine.save_evidence_images_and_measurement_record = save_after_release
+    if background_stage == "audit":
+        runtime.database.save_abnormal_event = audit_after_release
+
+    try:
+        # 受理第一轮，等待相机实际取流和帧交付结束。
+        await runtime.handle_start("1")
+        first = machine.active_session
+        first_session_id = first.session_id
+        first_cycle = machine.cycles[first_session_id]
+        await first_cycle.delivery_task
+        await machine.wait_until_event_queue_drained()
+        assert first_cycle.capture_task.duration_seconds == 1.0
+        if background_stage == "resource":
+            await asyncio.wait_for(waiter_entered.wait(), 1)
+        if background_stage == "recognition":
+            await asyncio.wait_for(background_entered.wait(), 1)
+        if background_stage == "audit":
+            await machine.handle_event(RuntimeEvent(
+                EventType.OCR_FAILED, "1", first_session_id, "本轮 OCR 执行失败",
+            ))
+            await asyncio.wait_for(background_entered.wait(), 1)
+        if background_stage == "storage":
+            recognized = asyncio.Event()
+            machine.notify_ocr_result = lambda *arguments: recognized.set()
+            if first.ocr_state != OCRState.COMPLETED:
+                await asyncio.wait_for(recognized.wait(), 1)
+
+        # CLOSE 解除现场占用，后台上下文继续保留。
+        await runtime.handle_close("1")
+        if background_stage == "storage":
+            await asyncio.wait_for(background_entered.wait(), 1)
+        assert machine.active_session_id is None
+        assert first_session_id in machine.cycles
+        if background_stage == "resource":
+            assert first_cycle.recognition_task is not None
+            assert not first_cycle.recognition_task.done()
+
+        # 第二轮 START 立即受理，并在旧轮放行前完成实际采集。
+        await runtime.handle_start("1")
+        second = machine.active_session
+        assert second is not None and second.session_id != first_session_id
+        second_cycle = machine.cycles[second.session_id]
+        await second_cycle.delivery_task
+        await machine.wait_until_event_queue_drained()
+        assert second_cycle.capture_task.capture_finished.is_set()
+        assert second.capture_summary["retained_frame_count"] == 1
+        assert machine.camera.sdk_camera.start_grabbing.call_count == 2
+        assert len(machine.cycles) == 2
+        assert first_session_id in machine.cycles
+        assert not release_thread.is_set()
+        assert machine.frequency_adapter.active_session_id == second.session_id
+        assert runtime.failure is None
+    finally:
+        # 放行所有受控线程和共享资源，等待真实退出收尾。
+        release_thread.set()
+        resource_release.set()
+        if resource_holder is not None:
+            await resource_holder
+        await runtime.stop()
+        assert not machine.cycles
+
+
+@pytest.mark.asyncio
+async def test_interleaved_cycles_save_distinct_results_once(tmp_path: Path) -> None:
+    """确认后轮先入库时，两轮文字、频率、证据仍各自保存一次。
+
+    Args:
+        tmp_path: 临时数据库和证据目录。
+
+    Returns:
+        返回示例：
+            None  # 两条记录及证据分别归属各自 Session，没有重复提交
+    """
+    # 阻塞第一轮保存，允许第二轮先完成。
+    runtime, machine = create_background_runtime(tmp_path)
+    loop = asyncio.get_running_loop()
+    first_storage_started = asyncio.Event()
+    first_storage_release = threading.Event()
+    original_save = machine.save_evidence_images_and_measurement_record
+    saved_session_ids = []
+    first_session_id = None
+    recognition_notifications = asyncio.Queue()
+    machine.notify_ocr_result = (
+        lambda *arguments: recognition_notifications.put_nowait(arguments)
+    )
+
+    def save_in_controlled_order(record, frames):
+        """按测试放行顺序写入每轮完整结果。
+
+        Args:
+            record: 所属周期的正式记录。
+            frames: 所属证据帧。
+
+        Returns:
+            返回示例：
+                None  # 所属周期的结果已保存
+        """
+        if record.session_id == first_session_id:
+            loop.call_soon_threadsafe(first_storage_started.set)
+            assert first_storage_release.wait(5)
+        original_save(record, frames)
+        saved_session_ids.append(record.session_id)
+
+    machine.save_evidence_images_and_measurement_record = save_in_controlled_order
+    try:
+        # 第一轮形成结果并开始后台保存。
+        await runtime.handle_start("1")
+        first = machine.active_session
+        first_session_id = first.session_id
+        first_cycle = machine.cycles[first_session_id]
+        first_notification = await asyncio.wait_for(recognition_notifications.get(), 1)
+        assert first_notification[1] == first_session_id
+        await machine.handle_event(RuntimeEvent(
+            EventType.FREQUENCY_MEASURED, "1", first_session_id,
+            FrequencyMeasurement(first_session_id, "meter-1", 41.0),
+        ))
+        await runtime.handle_close("1")
+        await asyncio.wait_for(first_storage_started.wait(), 1)
+        first_storage_task = first_cycle.result_storage_task
+
+        # 第二轮完成采集、文字识别和频率接收。
+        await runtime.handle_start("1")
+        second = machine.active_session
+        second_cycle = machine.cycles[second.session_id]
+        second_notification = await asyncio.wait_for(recognition_notifications.get(), 1)
+        assert second_notification[1] == second.session_id
+        await machine.handle_event(RuntimeEvent(
+            EventType.FREQUENCY_MEASURED, "1", second.session_id,
+            FrequencyMeasurement(second.session_id, "meter-1", 42.0),
+        ))
+
+        # 旧 CLOSE、旧频率、旧结果和重复结算均不影响新轮或另建保存任务。
+        await machine.handle_event(RuntimeEvent(
+            EventType.MACHINE_CLOSED, "1", first_session_id,
+        ))
+        await machine.handle_event(RuntimeEvent(
+            EventType.FREQUENCY_MEASURED, "1", first_session_id,
+            FrequencyMeasurement(first_session_id, "meter-1", 99.0),
+        ))
+        await machine.handle_event(RuntimeEvent(
+            EventType.OCR_COMPLETED, "1", first_session_id, None,
+        ))
+        await machine.try_finalize(first)
+        assert first_cycle.result_storage_task is first_storage_task
+        assert machine.active_session is second
+        assert machine.frequency_adapter.active_session_id == second.session_id
+        assert [
+            reading.value_hz for reading in second.measurement_frequencies
+        ] == [42.0]
+
+        # 后轮先提交，旧轮再提交，完成回调各自回收所属上下文。
+        await runtime.handle_close("1")
+        await second_cycle.result_storage_task
+        first_storage_release.set()
+        await first_storage_task
+        machine.handle_result_storage_finished(first_storage_task, first_session_id)
+        await runtime.wait_until_idle(1)
+        assert saved_session_ids == [second.session_id, first_session_id]
+        assert not machine.cycles
+        with sqlite3.connect(runtime.config.database_path) as connection:
+            rows = connection.execute(
+                "SELECT session_id, recognized_lines, final_frequency_hz, "
+                "measurement_frequencies, evidence_directory FROM measurement_records"
+            ).fetchall()
+        assert len(rows) == 2
+        for session, frequency, image_bytes, recognized_line in (
+            (first, 41.0, b"capture-1", "2926211C"),
+            (second, 42.0, b"capture-2", "2926212C"),
+        ):
+            row = next(row for row in rows if row[0] == session.session_id)
+            assert json.loads(row[1]) == [recognized_line]
+            assert row[2] == frequency
+            assert json.loads(row[3]) == [{
+                "session_id": session.session_id,
+                "frequency_meter_serial": "meter-1",
+                "value_hz": frequency,
+            }]
+            directory = Path(row[4])
+            assert directory.name == session.session_id
+            image_path = directory / f"frame-{session.session_id}.jpg"
+            assert image_path.read_bytes() == image_bytes
+        assert runtime.failure is None
+    finally:
+        first_storage_release.set()
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "frame_event_type",
+    [EventType.CAPTURE_COMPLETED, EventType.OCR_COMPLETED],
+)
+async def test_capacity_waits_for_queued_frames_and_bounds_refusal_audit(
+    tmp_path: Path, frame_event_type: EventType,
+) -> None:
+    """确认失败轮的排队帧占用容量，拒收不补拍且审计任务有界。
+
+    Args:
+        tmp_path: 临时数据库和证据目录。
+        frame_event_type: 带未消费帧的采集或识别事件。
+
+    Returns:
+        返回示例：
+            None  # 帧丢弃后恢复名额，真实 CLOSE 后才能再次启动
+    """
+    # 保留已失败但帧尚未消费的周期和另一后台周期。
+    frame = create_frame("session-1", "frame-1", b"old-frame")
+    machine, database, first, _, _ = create_machine(tmp_path, (frame,))
+    first.state = SessionState.FAILED
+    first_cycle = machine.cycles[first.session_id]
+    first_cycle.capture_result_pending = frame_event_type == EventType.CAPTURE_COMPLETED
+    first_cycle.ocr_result_pending = frame_event_type == EventType.OCR_COMPLETED
+    delivery_task = asyncio.get_running_loop().create_future()
+    delivery_task.set_result(None)
+    first_cycle.delivery_task = delivery_task
+    second = replace(first, session_id="session-2", state=SessionState.RUNNING)
+    machine.cycles[second.session_id] = CycleContext(second)
+    payload = (
+        CaptureResult((frame,), {})
+        if frame_event_type == EventType.CAPTURE_COMPLETED else first.ocr_result
+    )
+    machine.queue.put_nowait(RuntimeEvent(
+        frame_event_type, "1", first.session_id, payload,
+    ))
+    machine.notify_machine_warning = Mock()
+    audit_started = asyncio.Event()
+    audit_release = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_audit = database.save_abnormal_event
+
+    def save_refusal_after_release(reason, *arguments, **keyword_arguments):
+        """阻塞拒收审计后写入临时运行库。
+
+        Args:
+            reason: 拒收或周期失败原因。
+            arguments: 审计位置参数。
+            keyword_arguments: 机器、容量和占用数量等审计参数。
+
+        Returns:
+            返回示例：
+                None  # 对应异常事件已保存
+        """
+        if "后台处理积压" in reason:
+            loop.call_soon_threadsafe(audit_started.set)
+            assert audit_release.wait(5)
+        original_audit(reason, *arguments, **keyword_arguments)
+
+    database.save_abnormal_event = Mock(side_effect=save_refusal_after_release)
+    try:
+        # 两次物理启动都拒收，慢审计期间只有一个拒收任务。
+        await machine.handle_machine_start()
+        await asyncio.wait_for(audit_started.wait(), 1)
+        refusal_task = machine.rejected_start_audit_task
+        await machine.handle_machine_close()
+        await machine.handle_machine_start()
+        assert machine.rejected_start_audit_task is refusal_task
+        database.save_abnormal_event.assert_called_once()
+        machine.camera.start_capture.assert_not_called()
+        assert len(machine.cycles) == 2
+        assert machine.machine_failure_reason is None
+        assert machine.notify_machine_warning.call_args.args == (
+            "1", "后台处理积压，本次启动未采集，请暂停换带",
+        )
+
+        # 交付任务即使已结束，尚未消费的帧仍阻止容量回收。
+        machine.release_finished_session(first.session_id)
+        assert first.session_id in machine.cycles
+        machine.discard_pending_events()
+        assert first.session_id in machine.cycles
+        machine.handle_delivery_finished(delivery_task, first.session_id)
+        assert first_cycle.delivery_task is None
+        assert first.session_id not in machine.cycles
+        await machine.handle_machine_start()
+        machine.camera.start_capture.assert_not_called()
+
+        # 真实 CLOSE 复位后只采集新的 START，不补拍被拒收皮带。
+        await machine.handle_machine_close()
+        await machine.handle_machine_start()
+        assert machine.active_session is not None
+        assert machine.active_session.session_id not in {
+            first.session_id, second.session_id,
+        }
+        machine.camera.start_capture.assert_called_once()
+        audit_release.set()
+        await refusal_task
+        rows = read_abnormal_events(database)
+        assert rows[0][0] == "1"
+        assert json.loads(rows[0][3]) == {"capacity": 2, "occupied": 2}
+        machine.on_system_failure.assert_not_called()
+    finally:
+        audit_release.set()
+        await machine.release_resources("测试结束")
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_ocr_thread_keeps_capacity_until_actual_finish(tmp_path: Path):
+    """确认失败 OCR 的底层线程仍占用名额，线程真正结束后才恢复启动。
+
+    Args:
+        tmp_path: 临时数据库和证据目录。
+
+    Returns:
+        返回示例：
+            None  # cancel 不提前释放线程、共享锁或周期容量
+    """
+    # 启动已 CLOSE 旧轮的阻塞识别线程。
+    frame = create_frame("session-1", "frame-1", b"image-one")
+    machine, database, first, _, _ = create_machine(tmp_path, (frame,))
+    first.ocr_state = OCRState.WAITING
+    first.ocr_result = None
+    thread_started = asyncio.Event()
+    thread_release = threading.Event()
+    loop = asyncio.get_running_loop()
+    recognizer = TextRecognizer()
+    recognizer.prepare_frames_for_ocr = Mock(return_value=((frame,), (frame,)))
+
+    def recognize_after_release(*arguments):
+        """等待放行旧识别线程。
+
+        Args:
+            arguments: 旧轮识别输入。
+
+        Returns:
+            返回示例：
+                None  # 旧线程已结束，结果随取消丢弃
+        """
+        loop.call_soon_threadsafe(thread_started.set)
+        assert thread_release.wait(5)
+
+    recognizer.recognize_qualified_frames = recognize_after_release
+    machine.text_recognizer = recognizer
+    try:
+        await machine.handle_event(RuntimeEvent(
+            EventType.CAPTURE_COMPLETED, "1", first.session_id,
+            CaptureResult((frame.camera_frame,), {}),
+        ))
+        await asyncio.wait_for(thread_started.wait(), 1)
+        old_task = machine.cycles[first.session_id].recognition_task
+        await machine.handle_event(RuntimeEvent(
+            EventType.OCR_TIMEOUT, "1", first.session_id,
+        ))
+        await wait_for_failure_audit(machine)
+        assert not old_task.done()
+        assert first.session_id in machine.cycles
+
+        # 第二轮后台尚未结算，第三轮必须明确拒收。
+        second = replace(first, session_id="second", state=SessionState.RUNNING,
+                         ocr_state=OCRState.WAITING, errors=[])
+        machine.cycles[second.session_id] = CycleContext(second)
+        machine.notify_machine_warning = Mock()
+        await machine.handle_machine_start()
+        machine.camera.start_capture.assert_not_called()
+        assert machine.waiting_cycle_reset
+        machine.notify_machine_warning.assert_called_once()
+
+        # 底层线程完成之前不能进入共享引擎，完成之后才归还容量。
+        with pytest.raises(OCRResourceWaitTimeoutError):
+            async with recognizer.acquire_ocr_access(0.01):
+                pytest.fail("旧线程仍在识别")
+        thread_release.set()
+        await asyncio.gather(old_task, return_exceptions=True)
+        assert first.session_id not in machine.cycles
+        await machine.handle_machine_close()
+        await machine.handle_machine_start()
+        machine.camera.start_capture.assert_called_once()
+        assert machine.active_session.session_id != second.session_id
+    finally:
+        thread_release.set()
+        await machine.release_resources("测试结束")
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_multiple_background_storage_recognition_and_audit(
+    tmp_path: Path,
+):
+    """确认停止监测等待多轮保存、识别线程和审计全部结束才关闭资源。
+
+    Args:
+        tmp_path: 临时数据库和证据目录。
+
+    Returns:
+        返回示例：
+            None  # 正式结果完整保存，各失败轮只审计一次，驱动最后关闭
+    """
+    # 准备三轮可分别放行的后台任务。
+    runtime, machine = create_background_runtime(tmp_path)
+    machine.config = replace(machine.config, max_inflight_cycles=3)
+    loop = asyncio.get_running_loop()
+    storage_started = asyncio.Event()
+    recognition_started = asyncio.Event()
+    audit_started = asyncio.Event()
+    storage_release = threading.Event()
+    recognition_release = threading.Event()
+    audit_release = threading.Event()
+    recognized = asyncio.Queue()
+    machine.notify_ocr_result = lambda *arguments: recognized.put_nowait(arguments)
+    original_save = machine.save_evidence_images_and_measurement_record
+    original_recognize = machine.text_recognizer.recognize_qualified_frames.side_effect
+    original_audit = runtime.database.save_abnormal_event
+    storage_session_id = None
+    recognition_session_id = None
+    audit_session_id = None
+    shutdown_task = None
+    runtime.database.close = Mock(wraps=runtime.database.close)
+
+    def save_after_release(record, frames):
+        """等待正式保存放行再写入临时数据。
+
+        Args:
+            record: 所属记录。
+            frames: 所属证据帧。
+
+        Returns:
+            返回示例：
+                None  # 正式结果已写入
+        """
+        if record.session_id == storage_session_id:
+            loop.call_soon_threadsafe(storage_started.set)
+            assert storage_release.wait(5)
+        original_save(record, frames)
+
+    def recognize_after_release(session_id, measurement_frames, qualified_frames):
+        """等待第二轮实际识别线程放行。
+
+        Args:
+            session_id: 所属周期。
+            measurement_frames: 全部本轮帧。
+            qualified_frames: 本轮合格帧。
+
+        Returns:
+            返回示例：
+                OCRResult(...)  # 本轮识别结果
+        """
+        if session_id == recognition_session_id:
+            loop.call_soon_threadsafe(recognition_started.set)
+            assert recognition_release.wait(5)
+        return original_recognize(session_id, measurement_frames, qualified_frames)
+
+    def audit_after_release(reason, *arguments, **keyword_arguments):
+        """等待第三轮审计放行再写入临时运行库。
+
+        Args:
+            reason: 本轮失败原因。
+            arguments: 审计位置参数。
+            keyword_arguments: 所属周期等审计信息。
+
+        Returns:
+            返回示例：
+                None  # 本轮审计已保存
+        """
+        if keyword_arguments.get("session_id") == audit_session_id:
+            loop.call_soon_threadsafe(audit_started.set)
+            assert audit_release.wait(5)
+        original_audit(reason, *arguments, **keyword_arguments)
+
+    machine.save_evidence_images_and_measurement_record = save_after_release
+    machine.text_recognizer.recognize_qualified_frames.side_effect = (
+        recognize_after_release
+    )
+    runtime.database.save_abnormal_event = Mock(side_effect=audit_after_release)
+    try:
+        # 第一轮已 CLOSE，后台保存等待放行。
+        await runtime.handle_start("1")
+        storage_session = machine.active_session
+        storage_session_id = storage_session.session_id
+        await asyncio.wait_for(recognized.get(), 1)
+        await runtime.handle_close("1")
+        await asyncio.wait_for(storage_started.wait(), 1)
+        storage_task = machine.cycles[storage_session_id].result_storage_task
+
+        # 第二轮已 CLOSE，底层识别线程继续持有引擎。
+        await runtime.handle_start("1")
+        recognition_session = machine.active_session
+        recognition_session_id = recognition_session.session_id
+        await asyncio.wait_for(recognition_started.wait(), 1)
+        await runtime.handle_close("1")
+        recognition_task = machine.cycles[recognition_session_id].recognition_task
+
+        # 第三轮已 CLOSE，失败审计继续等待。
+        await runtime.handle_start("1")
+        audit_session = machine.active_session
+        audit_session_id = audit_session.session_id
+        await runtime.handle_close("1")
+        await machine.handle_session_failure(audit_session, "第三轮测试失败")
+        await asyncio.wait_for(audit_started.wait(), 1)
+        audit_task = machine.cycles[audit_session_id].failure_audit_task
+        assert machine.active_session_id is None
+        assert len(machine.cycles) == 3
+
+        # 退出不取消已开始保存或审计，仍等待阻塞的实际识别线程。
+        shutdown_task = asyncio.create_task(runtime.stop())
+        storage_release.set()
+        await storage_task
+        audit_release.set()
+        await audit_task
+        assert not shutdown_task.done()
+        assert not recognition_task.done()
+        runtime.camera_sdk.close.assert_not_called()
+        runtime.database.close.assert_not_called()
+        recognition_release.set()
+        await asyncio.wait_for(shutdown_task, 1)
+
+        # 正式成功轮不重复失败，失败审计与 Session 分别对应。
+        assert storage_session.state == SessionState.COMMITTED
+        assert recognition_session.state == SessionState.FAILED
+        assert audit_session.state == SessionState.FAILED
+        assert not machine.cycles
+        assert runtime.failure is None
+        runtime.camera_sdk.close.assert_called_once()
+        runtime.database.close.assert_called_once()
+        audit_rows = read_abnormal_events(runtime.database)
+        assert sorted(row[1] for row in audit_rows) == sorted([
+            recognition_session_id, audit_session_id,
+        ])
+        with sqlite3.connect(runtime.config.database_path) as connection:
+            saved_rows = connection.execute(
+                "SELECT session_id FROM measurement_records"
+            ).fetchall()
+            assert saved_rows == [
+                (storage_session_id,),
+            ]
+    finally:
+        storage_release.set()
+        recognition_release.set()
+        audit_release.set()
+        await runtime.stop()
+        if shutdown_task is not None:
+            await shutdown_task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [sqlite3.OperationalError, ValueError])
+async def test_old_storage_failure_stops_new_cycle_and_preserves_root_cause(
+    tmp_path: Path, error_type: type[Exception],
+):
+    """确认旧轮系统级保存故障仍停止新轮且保留原始根因。
+
+    Args:
+        tmp_path: 临时数据库和证据目录。
+        error_type: 数据库或未分类保存异常类型。
+
+    Returns:
+        返回示例：
+            None  # 新轮已停止，所有任务已回收，后续清理故障不覆盖根因
+    """
+    # 阻塞旧轮保存到新轮完成采集之后再抛出根因。
+    runtime, machine = create_background_runtime(tmp_path)
+    loop = asyncio.get_running_loop()
+    storage_started = asyncio.Event()
+    storage_release = threading.Event()
+    recognized = asyncio.Queue()
+    machine.notify_ocr_result = lambda *arguments: recognized.put_nowait(arguments)
+    root_error = error_type("旧轮保存原始故障")
+
+    def fail_after_release(record, frames):
+        """等待放行后抛出旧轮保存根因。
+
+        Args:
+            record: 旧轮测量记录。
+            frames: 旧轮证据帧。
+
+        Returns:
+            返回示例：
+                None  # 实际抛出原始异常
+        """
+        loop.call_soon_threadsafe(storage_started.set)
+        assert storage_release.wait(5)
+        raise root_error
+
+    machine.save_evidence_images_and_measurement_record = fail_after_release
+    try:
+        await runtime.handle_start("1")
+        old = machine.active_session
+        await asyncio.wait_for(recognized.get(), 1)
+        await runtime.handle_close("1")
+        await asyncio.wait_for(storage_started.wait(), 1)
+        await runtime.handle_start("1")
+        new = machine.active_session
+        assert (await asyncio.wait_for(recognized.get(), 1))[1] == new.session_id
+        assert new.capture_summary["retained_frame_count"] == 1
+        runtime.database.save_abnormal_event = Mock(side_effect=RuntimeError("随后审计故障"))
+        storage_release.set()
+        with pytest.raises(error_type) as captured:
+            await asyncio.wait_for(runtime.wait_for_failure(), 1)
+        await runtime.stop()
+        assert captured.value is root_error
+        assert runtime.failure is root_error
+        assert old.state == SessionState.FAILED
+        assert new.state == SessionState.FAILED
+        assert not machine.cycles
+        assert not machine.camera.unfinished_delivery_tasks
+        assert not runtime.worker_tasks
+        runtime.camera_sdk.close.assert_called_once()
+    finally:
+        storage_release.set()
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_event_type",
+    [EventType.OCR_LOCK_WAIT_TIMEOUT, EventType.OCR_TIMEOUT, EventType.OCR_FAILED],
+)
+async def test_old_ordinary_failure_and_duplicate_events_leave_new_cycle_untouched(
+    tmp_path: Path,
+    failure_event_type: EventType,
+):
+    """确认旧轮普通超时与重复事件只失败旧轮，不中断新轮现场采集。
+
+    Args:
+        tmp_path: 临时数据库和证据目录。
+        failure_event_type: 旧轮普通识别失败或超时事件。
+
+    Returns:
+        返回示例：
+            None  # 新轮现场、频率和识别状态保持有效，旧轮只审计一次
+    """
+    frame = create_frame("session-1", "frame-1", b"old-image")
+    machine, database, old, _, _ = create_machine(tmp_path, (frame,))
+    old.ocr_state = OCRState.RUNNING
+    old.ocr_result = None
+    try:
+        # 在旧轮尚未识别完成时，受理下一轮现场 START。
+        await machine.handle_machine_start()
+        new = machine.active_session
+        new_cycle = machine.cycles[new.session_id]
+        machine.notify_cycle_closed = Mock()
+        machine.notify_camera_state = Mock()
+        await machine.handle_event(RuntimeEvent(
+            failure_event_type, "1", old.session_id, "旧轮错误",
+        ))
+        await wait_for_failure_audit(machine)
+        original_errors = tuple(old.errors)
+
+        # 重复超时、旧 CLOSE 和旧 IO 中断均不触碰新轮。
+        for event_type in (
+            EventType.OCR_LOCK_WAIT_TIMEOUT, EventType.OCR_FAILED,
+            EventType.OCR_TIMEOUT, EventType.CYCLE_TIMEOUT,
+            EventType.MACHINE_CLOSED, EventType.IO_INTERRUPTED,
+            EventType.CAPTURE_FAILED,
+        ):
+            await machine.handle_event(RuntimeEvent(
+                event_type, "1", old.session_id, "旧轮错误",
+            ))
+        assert old.state == SessionState.FAILED
+        assert tuple(old.errors) == original_errors
+        assert len(read_abnormal_events(database)) == 1
+        assert machine.active_session is new
+        assert new.state == SessionState.RUNNING
+        assert new.ocr_state == OCRState.WAITING
+        assert new.frequency_state == FrequencyState.RUNNING
+        assert new.errors == []
+        assert machine.frequency_adapter.active_session_id == new.session_id
+        assert not machine.waiting_cycle_reset
+        assert not new_cycle.capture_task.stop_requested.is_set()
+        machine.camera.inform_capture_workflow_stop.assert_not_awaited()
+        machine.notify_cycle_closed.assert_not_called()
+        machine.notify_camera_state.assert_not_called()
+        machine.on_system_failure.assert_not_called()
+    finally:
+        await machine.release_resources("测试结束")
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_ocr_enqueue_discards_undelivered_frame_payload(tmp_path: Path):
+    """确认识别帧尚未入队时取消交付，实际任务结束后可回收容量。
+
+    Args:
+        tmp_path: 临时数据库和证据目录。
+
+    Returns:
+        返回示例：
+            None  # 取消交付没有留下待消费帧标志或周期名额
+    """
+    # 用真实有界分发入口阻塞 OCR 结果入队。
+    frame = create_frame("session-1", "frame-1", b"old-image")
+    machine, database, session, _, _ = create_machine(tmp_path, (frame,))
+    cycle = machine.cycles[session.session_id]
+    runtime = SystemRuntime(machine.config)
+    runtime.machines = {"1": machine}
+    machine.queue = asyncio.Queue(1)
+    machine.queue.put_nowait(RuntimeEvent(EventType.MACHINE_STARTED, "1"))
+    enqueue_started = asyncio.Event()
+    recognizer = TextRecognizer()
+    recognizer.prepare_frames_for_ocr = Mock(return_value=((frame,), ()))
+    machine.text_recognizer = recognizer
+
+    async def publish_result(event):
+        """通知识别结果已开始排队并沿真实入口交付。
+
+        Args:
+            event: 含本轮证据帧的 OCR 结果事件。
+
+        Returns:
+            返回示例：
+                None  # 结果已入队或入队等待被取消
+        """
+        enqueue_started.set()
+        await runtime.publish_event(event)
+
+    machine.publish_event = publish_result
+    cycle.recognition_task = asyncio.create_task(
+        machine.run_ocr_pipeline(session, (frame,))
+    )
+    cycle.recognition_task.add_done_callback(
+        lambda task: machine.handle_recognition_task_finished(task, session.session_id)
+    )
+    recognition_task = cycle.recognition_task
+    try:
+        await asyncio.wait_for(enqueue_started.wait(), 1)
+        assert cycle.ocr_result_pending
+        assert not recognition_task.done()
+        await machine.handle_session_failure(session, "排队期间周期失败")
+        await asyncio.gather(recognition_task, return_exceptions=True)
+        await wait_for_failure_audit(machine)
+        assert recognition_task.cancelled()
+        assert not cycle.ocr_result_pending
+        assert session.session_id not in machine.cycles
+        assert machine.queue.qsize() == 1
+        machine.on_system_failure.assert_not_called()
+    finally:
+        await machine.release_resources("测试结束")
+        database.close()

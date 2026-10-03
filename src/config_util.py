@@ -46,6 +46,7 @@ class AppConfig:
     ocr_lock_wait_timeout_ms: int = 10000  # 等待共享 OCR 处理资源的期限，毫秒
     ocr_result_timeout_ms: int = 30000  # OCR 处理期限，毫秒
     max_cycle_open_ms: int = 60000  # 周期关闭期限，毫秒
+    max_inflight_cycles: int = 2  # 单机未完整回收周期容量
     event_queue_capacity: int = 128  # 单机事件队列容量
     shutdown_timeout_ms: int = 10000  # 退出收尾期限，毫秒
     recovery_database_path: Path | None = None  # 运行库路径覆盖值
@@ -90,6 +91,10 @@ class AppConfig:
             返回示例：
                 None  # 配置符合运行要求，非法配置抛出 ValueError
         """
+        # 单机周期容量只接受正整数。
+        if type(self.max_inflight_cycles) is not int or self.max_inflight_cycles <= 0:
+            raise ValueError("max_inflight_cycles 必须是正整数。")
+
         # 列出必须为正数的期限、间隔和容量参数名。
         positive_parameters = (
             "capture_window_ms", "camera_timeout_ms",

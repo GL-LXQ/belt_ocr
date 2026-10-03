@@ -1116,6 +1116,7 @@ class RealtimePage(QWidget):
         self.controller.machine_status_changed_signal.connect(
             self.update_machine_status
         )
+        self.controller.machine_warning_signal.connect(self.show_machine_warning)
         self.controller.monitoring_finished_signal.connect(self.finish_monitoring)
 
         # 读取机器并建立卡片。
@@ -1534,6 +1535,19 @@ class RealtimePage(QWidget):
         if machine_id == self.selected_machine_id:
             self.refresh_selected_machine_detail()
 
+    def show_machine_warning(self, machine_id: str, message: str) -> None:
+        """展示机器积压拒收提示。
+
+        Args:
+            machine_id: 发生拒收的机器编号。
+            message: 后台发送的现场提示。
+
+        Returns:
+            返回示例：
+                None  # 提示已展示，当前周期与动画保持不变
+        """
+        InfoBar.warning(f"机器 {machine_id}", message, duration=-1, parent=self)
+
     def update_measurement_progress(
         self, machine_id: str, session_id: str, stage: str, status: str
     ):
@@ -1549,6 +1563,10 @@ class RealtimePage(QWidget):
             返回示例：
                 None  # 当前周期的进度和动画状态已更新
         """
+        # 任意周期正式入库后刷新统计，再隔离旧周期的卡片更新。
+        if stage == "evidence_storage" and status == "success":
+            self.refresh_today_detection_summary()
+
         # 正式受理新周期时切换页面缓存并清空上一轮文字。
         measurement_state = self.measurement_states_by_machine_id.get(machine_id)
         is_session_start = stage == "session_start" and status == "success"
@@ -1570,10 +1588,6 @@ class RealtimePage(QWidget):
         progress_statuses = measurement_state["progress_statuses"]
         progress_statuses[stage] = status
         progress_failed = "failed" in progress_statuses.values()
-
-        # 证据入库成功后重新读取正式检测统计。
-        if stage == "evidence_storage" and status == "success":
-            self.refresh_today_detection_summary()
 
         # 找到对应机器的卡片。
         card = self.cards_by_machine_id.get(machine_id)
