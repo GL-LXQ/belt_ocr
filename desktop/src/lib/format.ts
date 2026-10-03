@@ -57,3 +57,19 @@ export const stageLabels: Record<string, string> = {
   character_recognition: '字符识别',
   evidence_storage: '证据入库',
 }
+
+/**
+ * 按 20、8、3、2 位展示完整 OCR 分类文字。
+ * Args:
+ *   recognizedLines: 后端已规范化的正式识别文字。
+ * Returns:
+ *   '20  --\n8  --\n3  --\n2  --' // 每类首行带位数，同类后续结果缩进显示
+ */
+export function formatOcrResultText(recognizedLines: string[]) {
+  return [20, 8, 3, 2]
+    .map((length) => {
+      const lines = recognizedLines.filter((line) => line.length === length)
+      return `${length}  ${lines.length ? lines.join('\n    ') : '--'}`
+    })
+    .join('\n')
+}

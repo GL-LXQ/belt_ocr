@@ -29,6 +29,7 @@ import {
 import type { BackendStatus, Snapshot } from './lib/types'
 const route = useRoute()
 const ready = ref(false)
+const realtimeLayout = computed(() => ready.value && route.path === '/')
 const loading = ref(true)
 const startupError = ref('')
 const mobileMenu = ref(false)
@@ -149,7 +150,7 @@ onBeforeUnmount(() => {
       aria-label="关闭导航"
       @click="mobileMenu = false"
     ></button>
-    <div class="workspace">
+    <div class="workspace" :class="{ 'realtime-workspace': realtimeLayout }">
       <header class="topbar">
         <div class="breadcrumb">
           <button
@@ -168,8 +169,9 @@ onBeforeUnmount(() => {
       <main id="main-content" class="main-content">
         <div class="page-heading">
           <div>
-            <p class="eyebrow">{{ route.meta.eyebrow }}</p>
+            <p v-if="!realtimeLayout" class="eyebrow">{{ route.meta.eyebrow }}</p>
             <h1>{{ route.meta.title }}</h1>
+            <p v-if="realtimeLayout" class="page-description">查看当前机器的检测状态</p>
           </div>
           <span class="workspace-chip"
             ><span class="status-dot" :class="{ online: runtime?.running }"></span
@@ -221,3 +223,47 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 仅压缩实时页的外层留白，其余页面继续使用原布局。 */
+.realtime-workspace {
+  height: 100dvh;
+  min-height: 0;
+}
+.realtime-workspace .topbar {
+  height: 48px;
+  flex: none;
+  padding: 0 24px;
+}
+.realtime-workspace .main-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-width: none;
+  padding: 12px 24px 20px;
+}
+.realtime-workspace .page-heading {
+  flex: none;
+  margin-bottom: 12px;
+}
+.realtime-workspace .page-description {
+  margin-top: 4px;
+}
+.realtime-workspace .workspace-footer {
+  display: none;
+}
+@media (max-width: 1050px) {
+  .realtime-workspace {
+    height: auto;
+    min-height: 100dvh;
+  }
+}
+@media (max-width: 680px) {
+  .realtime-workspace .main-content {
+    padding: 16px;
+  }
+  .realtime-workspace .topbar {
+    padding: 0 16px;
+  }
+}
+</style>

@@ -922,6 +922,313 @@ describe('图片页面工作流', () => {
   })
 })
 
+/**
+ * 创建用于实时排版和选择测试的机器快照。
+ * Args:
+ *   无外部参数。
+ * Returns:
+ *   Snapshot // 包含两台启用机器、一台停用机器和独立周期结果
+ */
+function createLayoutSnapshot(): Snapshot {
+  return {
+    status: 'stopped',
+    running: false,
+    failure: '',
+    started_at: null,
+    sequence: 10,
+    machines: [
+      {
+        ...machine,
+        id: '1',
+        camera_state: '相机已连接',
+        camera_error: '',
+        status: 'online',
+        warning: '',
+        active_session_id: null,
+        waiting_cycle_reset: false,
+        inflight_count: 0,
+      },
+      {
+        ...machine,
+        id: '2',
+        machine_name: '二号机',
+        camera_serial: 'CAM-2',
+        frequency_meter_serial: 'FREQ-2',
+        camera_state: '连接失败',
+        camera_error: '相机连接中断',
+        status: 'fault',
+        warning: '',
+        active_session_id: null,
+        waiting_cycle_reset: false,
+        inflight_count: 0,
+      },
+      {
+        ...machine,
+        id: '3',
+        machine_name: '停用机器',
+        enabled: false,
+        camera_state: '未连接',
+        camera_error: '',
+        status: 'online',
+        warning: '',
+        active_session_id: null,
+        waiting_cycle_reset: false,
+        inflight_count: 0,
+      },
+    ],
+    sessions: [
+      {
+        machine_id: '1',
+        session_id: 'first-cycle',
+        state: 'COMMITTED',
+        cycle_closed: true,
+        stages: {
+          session_start: 'success',
+          image_capture: 'success',
+          frequency_collection: 'success',
+          character_recognition: 'success',
+          evidence_storage: 'success',
+        },
+        recognized_lines: ['ABCDEFGHIJKLMNOPQRST', '1234567A', '1234568A', '123', '45'],
+        final_frequency_hz: 52.5,
+        start_time: null,
+        finish_time: null,
+        errors: [],
+      },
+      {
+        machine_id: '2',
+        session_id: 'second-cycle',
+        state: 'FAILED',
+        cycle_closed: true,
+        stages: { session_start: 'success', image_capture: 'failed' },
+        recognized_lines: ['9876543B'],
+        final_frequency_hz: null,
+        start_time: null,
+        finish_time: null,
+        errors: ['采集失败'],
+      },
+    ],
+  }
+}
+
+describe('实时页面排版与刷新', () => {
+  it('按原分组组织两张总览、机器卡片和右侧详情，选择时整组更新', async () => {
+    runtime.value = createLayoutSnapshot()
+    respond = () => createResponse({ recognition_count: 24, pending_review_count: 3 })
+    const wrapper = mountPage(RealtimeView)
+    await flushPromises()
+
+    // 总览保留三项设备指标和两项今日指标。
+    const summaries = wrapper.findAll('.metrics-grid > article')
+    expect(summaries).toHaveLength(2)
+    expect(summaries.map((summary) => summary.get('h2').text())).toEqual(['设备总览', '今日检测'])
+    expect(summaries[0].findAll('dt').map((item) => item.text())).toEqual([
+      '总机器',
+      '在线机器',
+      '故障机器',
+    ])
+    expect(summaries[0].findAll('dd').map((item) => item.text())).toEqual(['2', '1', '1'])
+    expect(summaries[1].findAll('dd').map((item) => item.text())).toEqual(['24', '3'])
+    expect(wrapper.find('.operation-bar').exists()).toBe(false)
+
+    // 操作栏、机器列表和详情是同一工作区内的独立区域。
+    expect(wrapper.findAll('.machine-section-heading button').map((item) => item.text())).toEqual([
+      '刷新',
+      '停止监测',
+      '启动监测',
+    ])
+    expect(wrapper.find('.machine-workspace > .machine-scroll > .machine-grid').exists()).toBe(true)
+    expect(wrapper.find('.machine-workspace > .detail-scroll > .session-detail').exists()).toBe(
+      true,
+    )
+    const cards = wrapper.findAll('.machine-card')
+    expect(cards).toHaveLength(3)
+    expect(cards[0].get('.camera-status').text()).toBe('相机已连接')
+    expect(cards[0].get('.machine-metrics').text()).toContain('52.5 Hz')
+    expect(cards[0].get('.machine-ocr-summary code').text()).toBe('ABCDEFGHIJKLMNOPQRST')
+
+    // 详情按元数据、频率、分类识别和五步进度排列。
+    const detail = wrapper.get('.session-detail')
+    const sectionOrder = Array.from(detail.element.children).map((child) => child.className)
+    expect(sectionOrder.slice(0, 6)).toEqual([
+      'section-heading compact',
+      'machine-attributes',
+      'detail-frequency',
+      'detail-ocr',
+      'detail-progress',
+      'detail-stats',
+    ])
+    expect(detail.findAll('.machine-attributes dt').map((item) => item.text())).toEqual([
+      '相机序列号',
+      '频率仪序列号',
+      '本轮流程',
+      '相机状态',
+    ])
+    expect(detail.get('.ocr-result').text()).toBe(
+      '20  ABCDEFGHIJKLMNOPQRST\n8  1234567A\n    1234568A\n3  123\n2  45',
+    )
+    expect(detail.findAll('.stage-list li')).toHaveLength(5)
+    expect(detail.get('.stage-list li').attributes('aria-label')).toBe('本轮启动：已完成')
+    expect(detail.findAll('.detail-stats dd').map((item) => item.text())).toEqual(['—', '—', '—'])
+
+    // 切换机器后不保留上一台机器的结果或状态。
+    await cards[1].trigger('click')
+    expect(cards[1].attributes('aria-pressed')).toBe('true')
+    expect(detail.get('h2').text()).toBe('二号机')
+    expect(detail.text()).toContain('CAM-2')
+    expect(detail.text()).toContain('FREQ-2')
+    expect(detail.text()).toContain('second-cycle')
+    expect(detail.get('.ocr-result').text()).toBe('20  --\n8  9876543B\n3  --\n2  --')
+    expect(detail.text()).not.toContain('ABCDEFGHIJKLMNOPQRST')
+    expect(detail.get('.notice').text()).toContain('相机连接中断')
+    expect(detail.findAll('.stage-list li')[1].attributes('aria-label')).toBe('图像采集：失败')
+  })
+
+  it('刷新并行读取快照与统计，迟到的旧快照不能覆盖 SSE 新状态', async () => {
+    runtime.value = createLayoutSnapshot()
+    const delayedState = createDeferredResponse()
+    let summaryCount = 0
+    respond = (url) => {
+      if (url.pathname === '/api/v1/state') return delayedState.promise
+      if (url.pathname === '/api/v1/records/summary')
+        return createResponse({ recognition_count: ++summaryCount, pending_review_count: 0 })
+      throw new Error(`未配置接口：${url.pathname}`)
+    }
+    const wrapper = mountPage(RealtimeView)
+    await flushPromises()
+    await getButton(wrapper, '刷新').trigger('click')
+    expect(getButton(wrapper, '刷新').attributes('disabled')).toBeDefined()
+    await flushPromises()
+    expect(summaryCount).toBe(2)
+    runtime.value = {
+      ...runtime.value,
+      sequence: 12,
+      machines: runtime.value.machines.map((item) => ({ ...item, machine_name: '实时新名称' })),
+    }
+    delayedState.resolve(createResponse({ ...createLayoutSnapshot(), sequence: 11 }))
+    await flushPromises()
+    expect(runtime.value.sequence).toBe(12)
+    expect(wrapper.get('.session-detail h2').text()).toBe('实时新名称')
+    expect(getButton(wrapper, '刷新').attributes('disabled')).toBeUndefined()
+  })
+
+  it('快照立即应用，统计仍在读取时禁用刷新，离页后不写入保留的旧结果', async () => {
+    runtime.value = createLayoutSnapshot()
+    const delayedState = createDeferredResponse()
+    const delayedSummary = createDeferredResponse()
+    let summaryCount = 0
+    respond = (url) => {
+      if (url.pathname === '/api/v1/state') return delayedState.promise
+      if (url.pathname === '/api/v1/records/summary') {
+        summaryCount++
+        return summaryCount === 1
+          ? createResponse({ recognition_count: 1, pending_review_count: 0 })
+          : delayedSummary.promise
+      }
+      throw new Error(`未配置接口：${url.pathname}`)
+    }
+    const showRealtime = ref(true)
+    const host = defineComponent({
+      components: { RealtimeView },
+      setup: () => ({ showRealtime }),
+      template: '<KeepAlive><RealtimeView v-if="showRealtime" /></KeepAlive>',
+    })
+    const wrapper = mountPage(host)
+    await flushPromises()
+    await getButton(wrapper, '刷新').trigger('click')
+
+    // 快照完成时立即更新机器，不等待较慢的统计接口。
+    delayedState.resolve(createResponse({ ...createLayoutSnapshot(), sequence: 11 }))
+    await flushPromises()
+    expect(runtime.value.sequence).toBe(11)
+    expect(getButton(wrapper, '刷新').attributes('disabled')).toBeDefined()
+
+    // 页面离开后，旧读取不能覆盖其他连接重建的低序号快照。
+    showRealtime.value = false
+    await nextTick()
+    runtime.value = { ...createLayoutSnapshot(), sequence: 1 }
+    delayedSummary.resolve(createResponse({ recognition_count: 999, pending_review_count: 999 }))
+    await flushPromises()
+    expect(runtime.value.sequence).toBe(1)
+  })
+
+  it('刷新途中断线再重连时丢弃旧服务返回的高序号快照', async () => {
+    runtime.value = createLayoutSnapshot()
+    const delayedState = createDeferredResponse()
+    respond = (url) =>
+      url.pathname === '/api/v1/state'
+        ? delayedState.promise
+        : createResponse({ recognition_count: 1, pending_review_count: 0 })
+    const wrapper = mountPage(RealtimeView)
+    await flushPromises()
+    await getButton(wrapper, '刷新').trigger('click')
+    connection.value = 'reconnecting'
+    connection.value = 'connected'
+    runtime.value = { ...createLayoutSnapshot(), sequence: 1 }
+    delayedState.resolve(createResponse({ ...createLayoutSnapshot(), sequence: 100 }))
+    await flushPromises()
+    expect(runtime.value.sequence).toBe(1)
+    expect(getButton(wrapper, '刷新').attributes('disabled')).toBeUndefined()
+  })
+
+  it('统计刷新失败时明确提示，不把旧数字当成本次成功读取', async () => {
+    runtime.value = createLayoutSnapshot()
+    let summaryCount = 0
+    respond = (url) => {
+      if (url.pathname === '/api/v1/state') return createResponse(createLayoutSnapshot())
+      if (url.pathname === '/api/v1/records/summary') {
+        summaryCount++
+        return summaryCount === 1
+          ? createResponse({ recognition_count: 24, pending_review_count: 3 })
+          : createFailure('今日统计读取失败', 503)
+      }
+      throw new Error(`未配置接口：${url.pathname}`)
+    }
+    const wrapper = mountPage(RealtimeView)
+    await flushPromises()
+    await getButton(wrapper, '刷新').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toContain('今日统计读取失败')
+    expect(
+      wrapper
+        .findAll('.metrics-grid > article')[1]
+        .findAll('dd')
+        .map((item) => item.text()),
+    ).toEqual(['24', '3'])
+    expect(getButton(wrapper, '刷新').attributes('disabled')).toBeUndefined()
+  })
+
+  it('刷新失败保留当前展示并报告错误，断线时禁用刷新', async () => {
+    runtime.value = createLayoutSnapshot()
+    respond = (url) =>
+      url.pathname === '/api/v1/state'
+        ? createFailure('快照读取失败', 503)
+        : createResponse({ recognition_count: 1, pending_review_count: 0 })
+    const wrapper = mountPage(RealtimeView)
+    await flushPromises()
+    await getButton(wrapper, '刷新').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toContain('快照读取失败')
+    expect(wrapper.get('.session-detail h2').text()).toBe('一号机')
+    connection.value = 'reconnecting'
+    await nextTick()
+    expect(getButton(wrapper, '刷新').attributes('disabled')).toBeDefined()
+  })
+
+  it('无机器时保留总览、操作栏和详情占位', async () => {
+    runtime.value = { ...createLayoutSnapshot(), machines: [], sessions: [] }
+    respond = () => createResponse({ recognition_count: 0, pending_review_count: 0 })
+    const wrapper = mountPage(RealtimeView)
+    await flushPromises()
+    expect(wrapper.findAll('.metrics-grid > article')).toHaveLength(2)
+    expect(wrapper.findAll('.machine-section-heading button')).toHaveLength(3)
+    expect(wrapper.get('.machine-scroll').text()).toContain('尚未配置机器')
+    expect(wrapper.get('.session-detail h2').text()).toBe('未选择机器')
+    expect(wrapper.get('.ocr-result').text()).toBe('20  --\n8  --\n3  --\n2  --')
+    expect(wrapper.find('.session-id').exists()).toBe(false)
+  })
+})
+
 describe('实时页面工作流', () => {
   it('新周期不泄露旧结果，断线阻止控制并暂停本地动画', async () => {
     const snapshot: Snapshot = {
