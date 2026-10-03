@@ -21,7 +21,7 @@ from repo.abnormal_event_repo import AbnormalEventRepo
 from src.controller.controller import AppController, Result
 from src.service.abnormal_event_service import AbnormalEventService, format_event_summary
 import ui.__main__ as desktop_entry
-from ui.date_range_picker import DateRangePicker
+from ui.date_range_picker import DateRangeFilterPanel, DateRangePicker
 from ui.pages.abnormal_events_page import AbnormalEventsPage, format_event_time
 
 
@@ -635,6 +635,7 @@ def test_page_applies_date_draft_with_machine_and_clears_only_dates(
         page.time_filter_button.click()
         panel = page.time_filter_panel
         picker = panel.view.findChild(DateRangePicker)
+        assert isinstance(panel, DateRangeFilterPanel)
         assert panel.windowType() == Qt.WindowType.Tool
         assert picker.start_date == QDate.currentDate()
         assert picker.end_date == QDate.currentDate()

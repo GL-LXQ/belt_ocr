@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QRunnable, QSize, Qt, Signal
 from PySide6.QtGui import QImage, QImageReader
 
 from src.controller.controller import AppController
+from ui.evidence_order import build_evidence_image_sort_key
 
 
 REVIEW_CAPTIONS = {
@@ -247,8 +248,8 @@ def list_evidence_images(evidence_directory: str, cancelled: Event) -> EvidenceL
     except OSError:
         return EvidenceListing((), "read_error")
 
-    # 排序只影响组内显示，不推断文件数量或采集完整性。
-    images.sort(key=lambda image: (image.filename.casefold(), image.filename))
+    # 同采集编号按帧编号排序，其他名称使用共享词法顺序。
+    images.sort(key=lambda image: build_evidence_image_sort_key(image.path))
     return EvidenceListing(tuple(images), "available" if images else "no_jpg")
 
 

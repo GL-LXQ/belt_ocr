@@ -37,7 +37,7 @@ from src.service.measurement_record_service import (
 )
 from src.service.machine_service import MachineService
 from ui.main_window import MainWindow
-from ui.date_range_picker import DateRangePicker, InlineCalendarView
+from ui.date_range_picker import DateRangeFilterPanel, DateRangePicker, InlineCalendarView
 from ui.pages.history_page import (
     HistoryPage,
     format_history_time,
@@ -2057,6 +2057,7 @@ def test_history_toolbar_opens_filter_without_querying_or_sorting(
         QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)
         panel = page.time_filter_panel
         assert panel.isVisible()
+        assert isinstance(panel, DateRangeFilterPanel)
         assert panel.windowType() == Qt.WindowType.Tool
         assert panel.view.findChild(DateRangePicker).start_date == QDate.currentDate()
         QTest.mouseClick(page.time_filter_button, Qt.MouseButton.LeftButton)

@@ -39,7 +39,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets.components.widgets.flyout import FlyoutAnimationManager
 
-from ui.date_range_picker import DateRangePicker
+from ui.date_range_picker import DateRangeFilterPanel, DateRangePicker
 from src.controller.controller import AppController
 from ui.image_evidence import (
     EVIDENCE_MESSAGES,
@@ -58,7 +58,6 @@ from ui.image_management_preview import (
     build_preview_measurements,
     draw_preview_image,
 )
-from ui.pages.history_page import HistoryTimeFilterPanel
 from ui.theme import COLORS
 
 
@@ -263,7 +262,7 @@ class ImageManagementPage(QWidget):
         self.page_size = 12
         self.total_pages = 1
         self.grid_columns = 0
-        self.time_filter_panel: HistoryTimeFilterPanel | None = None
+        self.time_filter_panel: DateRangeFilterPanel | None = None
 
         # 页面只保留本次查询代次和至多两个后台读取线程。
         self.thread_pool: QThreadPool | None = None
@@ -712,7 +711,7 @@ class ImageManagementPage(QWidget):
         actions.addWidget(apply_button)
         layout.addLayout(actions)
         view.addWidget(content)
-        panel = HistoryTimeFilterPanel(view, self.time_filter_button, self.window())
+        panel = DateRangeFilterPanel(view, self.time_filter_button, self.window())
         self.time_filter_panel = panel
 
         def clear_panel_reference() -> None:

@@ -5,11 +5,11 @@ from datetime import date
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton, QVBoxLayout, QWidget
 
-from ui.date_range_picker import DateRangePicker
+from ui.date_range_picker import DateRangeFilterPanel, DateRangePicker
 from ui.image_management_preview import build_preview_measurements
 from ui.pages.image_management_page import ImageManagementPage
 
@@ -298,12 +298,12 @@ def test_evidence_exceptions_keep_measurement_and_filename(
         assert viewer.actual_size_button.isEnabled()
 
 
-@pytest.mark.parametrize("dismiss_action", ("cancel", "escape", "toggle", "hide"))
+@pytest.mark.parametrize("dismiss_action", ("cancel", "escape", "outside", "toggle", "hide"))
 def test_date_drafts_are_discarded_without_changing_applied_filters(
     image_page: ImageManagementPage,
     dismiss_action: str,
 ) -> None:
-    """验证单层日期的取消、Esc、重复点击和页面离开。
+    """验证单层日期的取消、Esc、外部点击、重复点击和页面离开。
 
     Args:
         image_page: 默认未开启演示的页面。
@@ -318,6 +318,8 @@ def test_date_drafts_are_discarded_without_changing_applied_filters(
     image_page.render_records = Mock(wraps=original_render)
     image_page.time_filter_button.click()
     panel = image_page.time_filter_panel
+    assert isinstance(panel, DateRangeFilterPanel)
+    assert panel.windowType() == Qt.WindowType.Tool
     picker = panel.view.findChild(DateRangePicker)
     picker.calendar._onDayItemClicked(QDate(2026, 9, 29))
     assert picker.start_date == picker.end_date == QDate(2026, 9, 29)
@@ -325,6 +327,8 @@ def test_date_drafts_are_discarded_without_changing_applied_filters(
         next(button for button in panel.view.findChildren(QPushButton) if button.text() == "取消").click()
     elif dismiss_action == "escape":
         QTest.keyClick(panel, Qt.Key.Key_Escape)
+    elif dismiss_action == "outside":
+        QTest.mouseClick(panel, Qt.MouseButton.LeftButton, pos=QPoint(-10, -10))
     elif dismiss_action == "toggle":
         image_page.time_filter_button.click()
     else:

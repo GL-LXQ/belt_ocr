@@ -1,9 +1,84 @@
-"""在同一日历中编辑开始日期和结束日期。"""
+"""提供共享日期筛选浮层，并在同一日历中编辑日期范围。"""
 
-from PySide6.QtCore import QDate
-from PySide6.QtWidgets import QVBoxLayout, QWidget
-from qfluentwidgets import SegmentedWidget
+from PySide6.QtCore import QDate, QEvent, Qt
+from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from qfluentwidgets import Flyout, FlyoutView, SegmentedWidget
 from qfluentwidgets.components.date_time.fast_calendar_view import FastCalendarView
+
+
+class DateRangeFilterPanel(Flyout):
+    """供各页面日期范围筛选共用的非 Popup 浮层。"""
+
+    def __init__(self, view: FlyoutView, trigger_button: QWidget, parent: QWidget) -> None:
+        """建立浮层并保存用于开关切换的按钮。
+
+        Args:
+            view: 日期草稿和操作按钮所在的内容视图。
+            trigger_button: 打开时间筛选的按钮。
+            parent: 所属主窗口。
+
+        Returns:
+            返回示例：
+                None  # 浮层使用 Tool 窗口类型
+        """
+        super().__init__(view, parent)
+        self.trigger_button = trigger_button
+        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+
+    def showEvent(self, event) -> None:
+        """显示期间安装点击和按键过滤器。
+
+        Args:
+            event: Qt 显示事件。
+
+        Returns:
+            返回示例：
+                None  # 应用事件过滤器已安装
+        """
+        super().showEvent(event)
+        QApplication.instance().installEventFilter(self)
+
+    def hideEvent(self, event) -> None:
+        """隐藏时移除应用事件过滤器。
+
+        Args:
+            event: Qt 隐藏事件。
+
+        Returns:
+            返回示例：
+                None  # 应用事件过滤器已移除
+        """
+        QApplication.instance().removeEventFilter(self)
+        super().hideEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:
+        """处理 Esc 和面板及触发按钮之外的点击。
+
+        Args:
+            watched: 接收事件的对象。
+            event: Qt 输入事件。
+
+        Returns:
+            返回示例：
+                True  # Esc 已关闭面板并消费事件
+                False  # 其它事件继续交给目标控件
+        """
+        if self.isVisible():
+            # Esc 关闭草稿面板并停止传递该按键。
+            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                self.close()
+                return True
+
+            # 外部点击关闭面板，触发按钮交给页面执行开关切换。
+            if event.type() == QEvent.MouseButtonPress:
+                global_position = event.globalPosition().toPoint()
+                inside_panel = self.rect().contains(self.mapFromGlobal(global_position))
+                inside_button = self.trigger_button.rect().contains(
+                    self.trigger_button.mapFromGlobal(global_position)
+                )
+                if not inside_panel and not inside_button:
+                    self.close()
+        return super().eventFilter(watched, event)
 
 
 class InlineCalendarView(FastCalendarView):

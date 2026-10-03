@@ -40,8 +40,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.widgets.flyout import FlyoutAnimationManager
 
 from src.controller.controller import AppController
-from ui.date_range_picker import DateRangePicker
-from ui.pages.history_page import HistoryTimeFilterPanel
+from ui.date_range_picker import DateRangeFilterPanel, DateRangePicker
 from ui.theme import COLORS
 
 
@@ -81,7 +80,7 @@ class AbnormalEventsPage(QWidget):
         # 保存已应用的本地日期范围和当前草稿面板。
         self.selected_start_date: date | None = None
         self.selected_end_date: date | None = None
-        self.time_filter_panel: HistoryTimeFilterPanel | None = None
+        self.time_filter_panel: DateRangeFilterPanel | None = None
 
         # 创建页面标题。
         layout = QVBoxLayout(self)
@@ -401,7 +400,7 @@ class AbnormalEventsPage(QWidget):
         view.addWidget(content)
 
         # 复用非 Popup 浮层及其 Esc 和外部点击处理。
-        panel = HistoryTimeFilterPanel(view, self.time_filter_button, self.window())
+        panel = DateRangeFilterPanel(view, self.time_filter_button, self.window())
         self.time_filter_panel = panel
 
         def clear_panel_reference() -> None:

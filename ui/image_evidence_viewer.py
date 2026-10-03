@@ -46,7 +46,7 @@ from ui.image_evidence import (
     read_measurement_evidence,
 )
 from ui.image_management_preview import PreviewMeasurement, draw_preview_image
-from ui.pages.history_page import open_evidence_directory
+from ui.evidence_directory import open_evidence_directory
 
 
 class EvidenceImageCanvas(QGraphicsView):

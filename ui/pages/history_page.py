@@ -3,11 +3,10 @@
 from datetime import date, datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontInfo, QIcon, QPixmap
+from PySide6.QtCore import QDate, QSize, Qt, QTimer
+from PySide6.QtGui import QAction, QColor, QFont, QFontInfo, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -47,7 +46,9 @@ from qfluentwidgets import (
 from qfluentwidgets.components.widgets.flyout import FlyoutAnimationManager
 
 from src.controller.controller import AppController
-from ui.date_range_picker import DateRangePicker
+from ui.date_range_picker import DateRangeFilterPanel, DateRangePicker
+from ui.evidence_directory import open_evidence_directory
+from ui.evidence_order import build_evidence_image_sort_key
 from ui.theme import COLORS
 
 
@@ -78,121 +79,6 @@ def format_history_frequency(frequency: float | None) -> str:
     return "--" if frequency is None else f"{frequency:.1f} Hz"
 
 
-def open_evidence_directory(directory: str | Path, parent: QWidget, evidence_state: str | None = None) -> bool:
-    """沿用已读取的目录状态并请求系统文件管理器打开。
-
-    Args:
-        directory: 测量记录保存的证据目录路径。
-        parent: 打开失败提示所属的控件。
-        evidence_state: 后台目录读取的状态；None 表示沿用历史页现有可用目录。
-
-    Returns:
-        返回示例：
-            True  # 系统已接受打开请求，不代表文件管理器已完成显示
-            False  # 目录不可访问或系统拒绝请求，已显示原始路径
-    """
-    # 沿用后台目录状态，不在主线程重新访问磁盘。
-    saved_path = str(directory)
-    if not saved_path:
-        failure_message = "该记录未保存证据目录路径。"
-    elif evidence_state == "missing_directory":
-        failure_message = "证据目录不存在或已不是文件夹。"
-    elif evidence_state == "access_denied":
-        failure_message = "没有权限访问证据目录。"
-    elif evidence_state == "read_error":
-        failure_message = "访问证据目录失败，请刷新后重试。"
-    else:
-        # 系统打开请求仍在主线程执行。
-        directory_url = QUrl.fromLocalFile(saved_path)
-        if QDesktopServices.openUrl(directory_url):
-            return True
-        failure_message = "系统未能打开证据目录，请检查系统文件夹打开功能。"
-
-    # 在失败提示中保留路径，供操作者核对实际保存位置。
-    InfoBar.error(
-        "证据文件夹打开失败",
-        f"{failure_message}\n保存的路径：{saved_path or '（空）'}",
-        duration=-1,
-        parent=parent,
-    )
-    return False
-
-
-class HistoryTimeFilterPanel(Flyout):
-    """仅供历史时间筛选使用的非 Popup 浮层。"""
-
-    def __init__(self, view: FlyoutView, trigger_button: QWidget, parent: QWidget) -> None:
-        """建立浮层并保存用于开关切换的按钮。
-
-        Args:
-            view: 日期草稿和操作按钮所在的内容视图。
-            trigger_button: 打开时间筛选的按钮。
-            parent: 所属主窗口。
-
-        Returns:
-            返回示例：
-                None  # 浮层使用 Tool 窗口类型
-        """
-        super().__init__(view, parent)
-        self.trigger_button = trigger_button
-        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
-
-    def showEvent(self, event) -> None:
-        """显示期间安装点击和按键过滤器。
-
-        Args:
-            event: Qt 显示事件。
-
-        Returns:
-            返回示例：
-                None  # 应用事件过滤器已安装
-        """
-        super().showEvent(event)
-        QApplication.instance().installEventFilter(self)
-
-    def hideEvent(self, event) -> None:
-        """隐藏时移除应用事件过滤器。
-
-        Args:
-            event: Qt 隐藏事件。
-
-        Returns:
-            返回示例：
-                None  # 应用事件过滤器已移除
-        """
-        QApplication.instance().removeEventFilter(self)
-        super().hideEvent(event)
-
-    def eventFilter(self, watched, event) -> bool:
-        """处理 Esc 和面板及触发按钮之外的点击。
-
-        Args:
-            watched: 接收事件的对象。
-            event: Qt 输入事件。
-
-        Returns:
-            返回示例：
-                True  # Esc 已关闭面板并消费事件
-                False  # 其它事件继续交给目标控件
-        """
-        if self.isVisible():
-            # Esc 关闭草稿面板并停止传递该按键。
-            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
-                self.close()
-                return True
-
-            # 外部点击关闭面板，触发按钮交给页面执行开关切换。
-            if event.type() == QEvent.MouseButtonPress:
-                global_position = event.globalPosition().toPoint()
-                inside_panel = self.rect().contains(self.mapFromGlobal(global_position))
-                inside_button = self.trigger_button.rect().contains(
-                    self.trigger_button.mapFromGlobal(global_position)
-                )
-                if not inside_panel and not inside_button:
-                    self.close()
-        return super().eventFilter(watched, event)
-
-
 class HistoryPage(QWidget):
     """组织测量历史筛选、表格、详情和人工复核。"""
 
@@ -219,7 +105,7 @@ class HistoryPage(QWidget):
         self.record_machines = []
         self.selected_start_date: date | None = None
         self.selected_end_date: date | None = None
-        self.time_filter_panel: HistoryTimeFilterPanel | None = None
+        self.time_filter_panel: DateRangeFilterPanel | None = None
 
         # 保存已提交的文字查询条件。
         self.selected_text_query: str | None = None
@@ -1034,7 +920,7 @@ class HistoryPage(QWidget):
         view.addWidget(content)
 
         # 保存当前面板，并仅清理对应实例的引用。
-        panel = HistoryTimeFilterPanel(view, self.time_filter_button, self.window())
+        panel = DateRangeFilterPanel(view, self.time_filter_button, self.window())
         self.time_filter_panel = panel
 
         def clear_panel_reference() -> None:
@@ -1370,9 +1256,9 @@ class HistoryPage(QWidget):
             self.current_evidence_directory is not None
         )
 
-        # 读取记录目录当前层按文件名排序的 JPG 文件。
+        # 读取记录目录当前层的 JPG 文件，并应用共享帧顺序。
         image_paths = (
-            sorted(directory.glob("*.jpg"))
+            sorted(directory.glob("*.jpg"), key=build_evidence_image_sort_key)
             if self.current_evidence_directory is not None
             else []
         )

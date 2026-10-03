@@ -26,9 +26,9 @@ from src.repo.measurement_record_repo import MeasurementRecordRepo
 from src.service.abnormal_event_service import AbnormalEventService
 from src.service.machine_service import MachineService
 from src.service.measurement_record_service import MeasurementRecordService
+from ui import evidence_directory
 from ui import image_evidence
 from ui.main_window import MainWindow
-from ui.pages import history_page as history_page_module
 from ui.pages.image_management_page import ImageManagementPage
 
 
@@ -454,6 +454,51 @@ def test_real_reviewed_text_overrides_ocr_even_when_empty(
     assert page.empty_title.text() == "没有符合条件的测量"
 
 
+def test_history_previews_card_cover_and_viewer_share_frame_order(real_main_window: MainWindow) -> None:
+    """验证历史前四张、图片封面和查看器均沿用同一采集组的数值帧顺序。
+
+    Args:
+        real_main_window: 仅连接临时业务库的完整主窗口。
+
+    Returns:
+        None  # 历史前四帧与查看器前四帧一致，卡片封面为第一张可用帧
+    """
+    window = real_main_window
+    directory = insert_record(window.controller, "numeric-frame-order")
+    capture_id = "11111111111141118111111111111111"
+
+    # 按乱序写入六张合成图片，不使用文件写入时间作为顺序。
+    for frame_number in (10, 2, 100, 11, 1, 3):
+        save_jpeg(directory / f"{capture_id}-{frame_number}.jpg", QSize(64, 48))
+    expected = [f"{capture_id}-{frame_number}.jpg" for frame_number in (1, 2, 3, 10, 11, 100)]
+
+    # 真实卡片按共享顺序选择封面，查看器重新读取同一目录。
+    window.show()
+    window.switch_page("images")
+    page = window.images_page
+    wait_for_records(page, 1, 1)
+    assert page.cards[0].thumbnail.toolTip() == expected[0]
+    page.cards[0].click()
+    viewer = page.viewer
+    wait_for_result(lambda: viewer.record is not None and viewer.loaded_image_index == 0)
+    assert [image.filename for image in viewer.record.images] == expected
+    assert [button.toolTip() for button in viewer.thumbnail_buttons] == expected
+
+    # 逐张前进验证查看器导航保持数值帧顺序。
+    for image_index, filename in enumerate(expected):
+        if image_index:
+            viewer.next_image_button.click()
+            wait_for_result(lambda: viewer.loaded_image_index == image_index)
+        assert viewer.filename_label.text() == filename
+
+    # 从查看器进入已有历史详情，只预览相同顺序的前四张。
+    viewer.view_record_button.click()
+    history = window.history_page
+    wait_for_result(lambda: history.detail_dialog.isVisible() and window.current_page_key == "history")
+    assert history.evidence_grid.count() == 4
+    assert [history.evidence_grid.itemAt(index).widget().toolTip() for index in range(4)] == expected[:4]
+
+
 def test_card_click_reads_fresh_detail_and_corrupt_first_image_can_navigate(
     real_image_page: ImageManagementPage,
     tmp_path: Path,
@@ -499,7 +544,7 @@ def test_card_click_reads_fresh_detail_and_corrupt_first_image_can_navigate(
     opener = Mock(return_value=True)
     monkeypatch.setattr(page.controller, "get_measurement_record", detail_reader)
     monkeypatch.setattr(image_evidence.os, "scandir", scanner)
-    monkeypatch.setattr(history_page_module.QDesktopServices, "openUrl", opener)
+    monkeypatch.setattr(evidence_directory.QDesktopServices, "openUrl", opener)
     page.cards[0].click()
     viewer = page.viewer
     wait_for_result(lambda: viewer.record is not None and viewer.loaded_image_index == 0)

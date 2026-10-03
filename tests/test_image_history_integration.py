@@ -3,6 +3,8 @@
 from pathlib import Path
 from unittest.mock import Mock, call
 import os
+import subprocess
+import sys
 
 import pytest
 from PySide6.QtCore import Signal
@@ -11,8 +13,46 @@ from PySide6.QtWidgets import QApplication, QWidget
 from qfluentwidgets import FluentWindow
 
 from src.controller.controller import Result
+from ui import evidence_directory
 from ui import main_window as main_window_module
 from ui.pages import history_page as history_page_module
+
+
+def test_shared_ui_imports_do_not_load_history_page() -> None:
+    """验证共享组件和图片、异常入口可独立加载，不再导入历史业务页。
+
+    Args:
+        无。
+
+    Returns:
+        None  # 新进程成功导入共享组件及调用方，历史业务模块未被加载
+    """
+    script = """
+import importlib
+import sys
+
+# 沿用项目 pytest 配置中的 src 模块路径。
+sys.path.insert(0, "src")
+
+for module_name in (
+    "ui.date_range_picker",
+    "ui.evidence_directory",
+    "ui.evidence_order",
+    "ui.pages.abnormal_events_page",
+    "ui.pages.image_management_page",
+    "ui.image_evidence_viewer",
+):
+    importlib.import_module(module_name)
+    assert "ui.pages.history_page" not in sys.modules, module_name
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 class IntegrationImagesPage(QWidget):
@@ -68,8 +108,8 @@ def directory_actions(qt_application: QApplication, monkeypatch: pytest.MonkeyPa
     parent = QWidget()
     opener = Mock(return_value=True)
     error = Mock()
-    monkeypatch.setattr(history_page_module.QDesktopServices, "openUrl", opener)
-    monkeypatch.setattr(history_page_module.InfoBar, "error", error)
+    monkeypatch.setattr(evidence_directory.QDesktopServices, "openUrl", opener)
+    monkeypatch.setattr(evidence_directory.InfoBar, "error", error)
     yield parent, opener, error
     parent.deleteLater()
 
@@ -136,7 +176,7 @@ def test_directory_opener_preserves_saved_path(
     with monkeypatch.context() as context:
         context.setattr(os, "scandir", directory_scan)
         context.setattr(Path, "stat", directory_stat)
-        assert history_page_module.open_evidence_directory(directory, parent, "available")
+        assert evidence_directory.open_evidence_directory(directory, parent, "available")
     directory_scan.assert_not_called()
     directory_stat.assert_not_called()
     opener.assert_called_once()
@@ -161,7 +201,7 @@ def test_directory_opener_reports_missing_saved_path(tmp_path: Path, directory_a
     if directory_kind == "file":
         directory.write_text("not a directory", encoding="utf-8")
     saved_path = "" if directory_kind == "empty" else str(directory)
-    assert not history_page_module.open_evidence_directory(saved_path, parent, "missing_directory")
+    assert not evidence_directory.open_evidence_directory(saved_path, parent, "missing_directory")
     opener.assert_not_called()
     error.assert_called_once()
     assert f"保存的路径：{saved_path or '（空）'}" in error.call_args.args[1]
@@ -194,7 +234,7 @@ def test_directory_opener_reports_access_error(
         None  # 已报告对应错误，未请求系统打开目录
     """
     parent, opener, error = directory_actions
-    assert not history_page_module.open_evidence_directory(tmp_path, parent, evidence_state)
+    assert not evidence_directory.open_evidence_directory(tmp_path, parent, evidence_state)
     opener.assert_not_called()
     error.assert_called_once_with(
         "证据文件夹打开失败",
@@ -216,7 +256,7 @@ def test_directory_opener_reports_system_rejection(tmp_path: Path, directory_act
     """
     parent, opener, error = directory_actions
     opener.return_value = False
-    assert not history_page_module.open_evidence_directory(tmp_path, parent)
+    assert not evidence_directory.open_evidence_directory(tmp_path, parent)
     error.assert_called_once_with(
         "证据文件夹打开失败",
         f"系统未能打开证据目录，请检查系统文件夹打开功能。\n保存的路径：{tmp_path}",
