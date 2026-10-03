@@ -6,6 +6,7 @@ ocr:
   recognition_model_dir: null
   engine: null
   enable_hpi: false
+  enable_mkldnn: false
   recognition_batch_size: 8
   text_det_limit_side_len: 1000
   text_det_limit_type: max

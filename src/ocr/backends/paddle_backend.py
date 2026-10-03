@@ -16,7 +16,7 @@ class PaddleOCRBackend:
             from paddleocr import PaddleOCR
         except ImportError as exc:
             raise RuntimeError(
-                "未安装 PaddleOCR/PaddlePaddle。请先按 README 安装 GPU 版 PaddlePaddle 和 paddleocr。"
+                "未安装 PaddleOCR/PaddlePaddle。请在项目根目录运行 uv sync。"
             ) from exc
 
         kwargs: dict[str, Any] = {
@@ -28,6 +28,7 @@ class PaddleOCRBackend:
             "use_textline_orientation": False,
             "device": cfg.device,
             "enable_hpi": cfg.enable_hpi,
+            "enable_mkldnn": cfg.enable_mkldnn,
         }
         if cfg.detection_model_dir:
             kwargs["text_detection_model_dir"] = cfg.detection_model_dir

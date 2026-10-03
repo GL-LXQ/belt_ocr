@@ -44,7 +44,7 @@ npm ci
 cd ..
 ```
 
-现场相机仍使用 **Windows 海康 MVS SDK**。项目已将 CPU 版 `paddlepaddle==3.3.0` 纳入正式依赖和锁文件，`uv sync` 会从飞桨官方 CPU 源自动安装到项目 `.venv`，后续同步也会保留该依赖。源码默认 OCR 配置是 `src/ocr/config.yaml`，当前设备为 `cpu`。如需部署到 NVIDIA GPU 机器，须按 [PaddlePaddle 官方安装说明](https://www.paddlepaddle.org.cn/documentation/docs/zh/install/index_cn.html)，将依赖替换为匹配目标设备的 GPU 版、更新下载源和锁文件，并将 OCR 设备改为 `gpu:0`。先核对模型路径、ROI、预处理与离线模型可用性；不能把依赖安装成功当作模型或硬件验证成功。
+现场相机仍使用 **Windows 海康 MVS SDK**。项目已将 CPU 版 `paddlepaddle==3.3.0` 纳入正式依赖和锁文件，`uv sync` 会从飞桨官方 CPU 源自动安装到项目 `.venv`，后续同步也会保留该依赖。源码默认 OCR 配置是 `src/ocr/config.yaml`，当前设备为 `cpu`，`enable_mkldnn: false` 关闭 oneDNN 加速，避开 PaddlePaddle 3.3.0 实际推理时的 PIR 属性转换异常；CPU 处理期限需根据单轮图片数量和实际耗时设置。如需部署到 NVIDIA GPU 机器，须按 [PaddlePaddle 官方安装说明](https://www.paddlepaddle.org.cn/documentation/docs/zh/install/index_cn.html)，将依赖替换为匹配目标设备的 GPU 版、更新下载源和锁文件，并将 OCR 设备改为 `gpu:0`。先核对模型路径、ROI、预处理与离线模型可用性；不能把依赖安装成功当作模型或硬件验证成功。
 
 启动前核对 `config/config.yaml`：
 

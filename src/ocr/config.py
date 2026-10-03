@@ -15,6 +15,7 @@ class OCRConfig(BaseModel):
     recognition_model_dir: Optional[str] = None
     engine: Optional[str] = None
     enable_hpi: bool = False
+    enable_mkldnn: bool = False
     recognition_batch_size: int = 8
     text_det_limit_side_len: Optional[int] = 2560
     text_det_limit_type: Optional[str] = "max"
