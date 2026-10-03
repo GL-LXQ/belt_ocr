@@ -139,6 +139,7 @@ class MachineRuntime:
         self.active_session_id: str | None = None
         self.cycles: dict[str, CycleContext] = {}
         self.waiting_cycle_reset = False
+        self.pending_reset_session_id: str | None = None  # 等待真实 CLOSE 复位的中断周期
 
         # 登记机器故障、启动状态和有界拒收审计任务。
         self.machine_failure_reason: str | None = None
@@ -321,6 +322,9 @@ class MachineRuntime:
             )
             return
 
+        # 新现场启动或拒收不再接受旧轮的复位 CLOSE。
+        self.pending_reset_session_id = None
+
         # 相机不可用或仍在采集时，不能开始新的测量。
         if not self.camera.available or self.camera.is_capturing:
             # 相机不可用时同步机器整体状态。
@@ -454,9 +458,12 @@ class MachineRuntime:
             返回示例：
                 None  # 本轮相机和频率采集已结束，OCR 与结果保存按各自状态继续处理
         """
-        # 已关闭或未知周期的 CLOSE 不影响当前现场周期。
+        # CLOSE 只匹配现场周期或仍等待复位的中断周期。
         if close_event is not None and close_event.session_id is not None:
-            if close_event.session_id != self.active_session_id:
+            expected_session_id = self.active_session_id
+            if not interrupted and expected_session_id is None and self.waiting_cycle_reset:
+                expected_session_id = self.pending_reset_session_id
+            if close_event.session_id != expected_session_id:
                 return
 
         # 获取当前测量。
@@ -466,12 +473,14 @@ class MachineRuntime:
         if session is None:
             if not interrupted:
                 self.waiting_cycle_reset = False
+                self.pending_reset_session_id = None
             return
 
         # 当前测量已经处理过关闭信号时，不再重复结束频率采集。
         if session.capture_stop_time is not None:
             if not interrupted:
                 self.waiting_cycle_reset = False
+                self.pending_reset_session_id = None
             return
 
         # 记录本轮开始关闭；正常关闭不带失败原因。
@@ -496,6 +505,7 @@ class MachineRuntime:
 
         # 异常中断后，等待现场真正关闭后再允许开始下一轮测量。
         self.waiting_cycle_reset = interrupted
+        self.pending_reset_session_id = session.session_id if interrupted else None
 
         # 停止把后续频率读数归到本轮测量。
         if self.frequency_adapter.active_session_id == session.session_id:
@@ -619,6 +629,8 @@ class MachineRuntime:
 
                 # IO 通信恢复后，需要重新确认现场状态才能开始下一轮测量。
                 self.waiting_cycle_reset = True
+                if session is None:
+                    self.pending_reset_session_id = None
                 return
 
         # 没有 Session ID 的频率读数无法确定属于哪次测量，只记录异常。

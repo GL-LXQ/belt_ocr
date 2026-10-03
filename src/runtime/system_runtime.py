@@ -472,6 +472,9 @@ class SystemRuntime:
             # 首次有效状态只更新机器复位标志。
             if previous_state is None:
                 machine.waiting_cycle_reset = current_state
+                # OPEN 基线保留尚在停流的现场周期归属。
+                if not current_state or machine.active_session is None:
+                    machine.pending_reset_session_id = None
 
                 # 记录本机 DI 初始状态。
                 logger.info(

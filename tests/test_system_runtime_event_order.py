@@ -501,3 +501,235 @@ async def test_io_interruption_targets_only_active_cycle(event_runtime: SystemRu
     assert old.errors == []
     assert machine.cycles[old.session_id].session is old
     machine.camera.inform_capture_workflow_stop.assert_awaited_once_with(None)
+
+
+@pytest.fixture
+def reset_runtime(event_runtime: SystemRuntime) -> SystemRuntime:
+    """建立保留真实信号队列、可立即停流的单机复位测试环境。
+
+    Args:
+        event_runtime: 没有连接外部设备的真实系统运行时。
+
+    Returns:
+        返回示例：
+            SystemRuntime(...)  # 旧轮占用现场，新轮采集由测试相机接收
+    """
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from camera.camera import CaptureTask
+
+    # 固定单机 DI 基线，并允许超时和 CLOSE 同时等待消费。
+    machine = event_runtime.machines["1"]
+    event_runtime.machines = {"1": machine}
+    event_runtime.config = replace(event_runtime.config, io_machine_channels={"1": 0})
+    event_runtime.io_previous_states = {0: True}
+    event_runtime.accepting_signals = True
+    machine.queue = asyncio.Queue(128)
+
+    # 登记现场旧轮，保留真实失败审计与上下文回收流程。
+    session = MeasurementSession(
+        session_id="old", machine_id="1", camera_serial="camera-1",
+        frequency_meter_serial="meter-1", capture_id="capture-1",
+        start_time="2026-10-03T00:00:00+00:00", capture_start_time=0.0,
+    )
+    machine.cycles[session.session_id] = CycleContext(session)
+    machine.active_session_id = session.session_id
+    machine.frequency_adapter.active_session_id = session.session_id
+
+    def start_capture(session_id: str, capture_start_time: float):
+        """接收新轮采集并返回已停流的测试任务。
+
+        Args:
+            session_id: 新轮周期编号。
+            capture_start_time: 新轮采集开始时间。
+
+        Returns:
+            返回示例：
+                (
+                    CaptureTask(...),  # 已完成现场停流
+                    Future(...),  # 已结束的相机交付
+                )
+        """
+        capture = CaptureTask(None, capture_start_time, 1.0, 50)
+        capture.capture_finished.set()
+        delivery = asyncio.get_running_loop().create_future()
+        delivery.set_result(None)
+        return capture, delivery
+
+    # 只替换设备边界，不替换机器事件、周期或复位处理。
+    machine.camera = SimpleNamespace(
+        available=True, is_capturing=False, unfinished_delivery_tasks=set(),
+        start_capture=Mock(side_effect=start_capture),
+        inform_capture_workflow_stop=AsyncMock(), stop=AsyncMock(),
+    )
+    return event_runtime
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_mode", ["immediate", "delayed", "reconnected"])
+@pytest.mark.parametrize("interruption", [EventType.CYCLE_TIMEOUT, EventType.IO_INTERRUPTED])
+async def test_queued_physical_close_resets_interrupted_cycle(
+    reset_runtime: SystemRuntime, stop_mode: str, interruption: EventType,
+) -> None:
+    """确认中断后的同轮真实 CLOSE 解除复位等待并受理下一次 DI 启动。
+
+    Args:
+        reset_runtime: 使用真实 DI 入口及 FIFO 的单机运行时。
+        stop_mode: 立即停流、延迟停流或停流期间重新建立 IO 基线。
+        interruption: 先于真实 CLOSE 排队的周期中断事件。
+
+    Returns:
+        返回示例：
+            None  # 旧轮只失败一次，后续真实 START 已创建新轮采集
+    """
+    # 用明确的入队和停流通知控制两种事件交错。
+    runtime = reset_runtime
+    machine = runtime.machines["1"]
+    old = machine.active_session
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+    close_queued = asyncio.Event()
+    original_publish = runtime.publish_event
+    delayed_stop = stop_mode != "immediate"
+    listener = None
+    closing = None
+
+    async def stop_after_release(capture_task):
+        """等待测试放行后完成本轮停流。
+
+        Args:
+            capture_task: 需要停流的所属采集任务。
+
+        Returns:
+            返回示例：
+                None  # 停流等待已结束
+        """
+        stop_entered.set()
+        await release_stop.wait()
+
+    async def publish_and_notify(event):
+        """保留真实事件路由并通知 CLOSE 已入队。
+
+        Args:
+            event: 待入队的机器事件。
+
+        Returns:
+            返回示例：
+                None  # 事件已入队，CLOSE 仍携带入队时的旧轮编号
+        """
+        await original_publish(event)
+        if event.event_type == EventType.MACHINE_CLOSED:
+            assert event.session_id == old.session_id
+            close_queued.set()
+
+    runtime.publish_event = publish_and_notify
+    if delayed_stop:
+        machine.camera.inform_capture_workflow_stop.side_effect = stop_after_release
+    try:
+        # 即时停流时先排入两事件；延迟停流时在中断处理期间排入 CLOSE。
+        await runtime.publish_event(RuntimeEvent(interruption, "1", old.session_id))
+        if delayed_stop:
+            listener = asyncio.create_task(machine.listen_events())
+            await asyncio.wait_for(stop_entered.wait(), 1)
+        if stop_mode == "reconnected":
+            # 停流期间重新读到 OPEN，下一次下降沿仍属于尚未释放的现场轮。
+            runtime.io_previous_states.clear()
+            await runtime.handle_io_states([True])
+        closing = asyncio.create_task(runtime.handle_io_states([False]))
+        await asyncio.wait_for(close_queued.wait(), 1)
+        assert machine.queue.qsize() == (1 if delayed_stop else 2)
+        if listener is None:
+            listener = asyncio.create_task(machine.listen_events())
+        release_stop.set()
+        await asyncio.wait_for(closing, 1)
+
+        # 真实下降沿完成复位，旧轮审计及回收不会改变复位结果。
+        assert machine.active_session_id is None
+        assert not machine.waiting_cycle_reset
+        await runtime.wait_until_idle(1)
+        assert not machine.cycles
+        assert len(old.errors) == 1
+        runtime.database.save_abnormal_event.assert_called_once()
+
+        # 下一个真实上升沿立即创建新轮，不需要额外 CLOSE。
+        await runtime.handle_io_states([True])
+        assert machine.active_session_id != old.session_id
+        assert machine.active_session_id is not None
+        machine.camera.start_capture.assert_called_once()
+        assert runtime.io_previous_states == {0: True}
+        assert runtime.failure is None
+    finally:
+        release_stop.set()
+        if closing is not None and not closing.done():
+            closing.cancel()
+        if listener is not None:
+            listener.cancel()
+        await asyncio.gather(*(task for task in (closing, listener) if task is not None), return_exceptions=True)
+        await machine.release_resources("测试结束")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_state", ["active", "capacity", "camera", "io_baseline", "io_interruption"])
+async def test_old_close_does_not_reset_new_physical_cycle(
+    reset_runtime: SystemRuntime, new_state: str,
+) -> None:
+    """确认旧轮 CLOSE 不关闭新轮或解除新一轮的拒收与 IO 复位等待。
+
+    Args:
+        reset_runtime: 可接受新轮采集的单机运行时。
+        new_state: 旧轮复位后建立的新现场状态。
+
+    Returns:
+        返回示例：
+            None  # 旧 CLOSE 被隔离，无周期编号的真实 CLOSE 仍能正常复位
+    """
+    from dataclasses import replace
+
+    # 中断旧轮并等待其上下文回收，复位归属仍须保留。
+    runtime = reset_runtime
+    machine = runtime.machines["1"]
+    old = machine.active_session
+    old_close = RuntimeEvent(EventType.MACHINE_CLOSED, "1", old.session_id)
+    try:
+        await machine.handle_event(RuntimeEvent(EventType.CYCLE_TIMEOUT, "1", old.session_id))
+        await runtime.wait_until_idle(1)
+        assert not machine.cycles
+        assert machine.waiting_cycle_reset
+        if new_state not in {"io_baseline", "io_interruption"}:
+            await machine.handle_event(old_close)
+            assert not machine.waiting_cycle_reset
+
+        # 分别建立新轮现场占用、容量拒收、相机拒收和重连初始 OPEN。
+        if new_state == "capacity":
+            machine.config = replace(machine.config, max_inflight_cycles=1)
+            machine.cycles["background"] = CycleContext(replace(old, session_id="background"))
+        elif new_state == "camera":
+            machine.camera.available = False
+        elif new_state == "io_baseline":
+            runtime.io_previous_states.clear()
+            await runtime.handle_io_states([True])
+        elif new_state == "io_interruption":
+            await machine.handle_event(RuntimeEvent(EventType.IO_INTERRUPTED, "1"))
+        if new_state not in {"io_baseline", "io_interruption"}:
+            await machine.handle_machine_start()
+        current = machine.active_session
+        assert machine.waiting_cycle_reset is (new_state != "active")
+        stop_count = machine.camera.inform_capture_workflow_stop.await_count
+
+        # 重复旧 CLOSE 保留新现场状态，不触发新轮停流。
+        await machine.handle_event(old_close)
+        assert machine.active_session is current
+        assert machine.waiting_cycle_reset is (new_state != "active")
+        assert machine.camera.inform_capture_workflow_stop.await_count == stop_count
+        if new_state == "active":
+            assert current.capture_stop_time is None
+            assert machine.frequency_adapter.active_session_id == current.session_id
+        else:
+            await machine.handle_machine_start()
+            machine.camera.start_capture.assert_not_called()
+
+            # 无所属周期的真实 CLOSE 仍可解除当前拒收或基线复位等待。
+            await machine.handle_event(RuntimeEvent(EventType.MACHINE_CLOSED, "1"))
+            assert not machine.waiting_cycle_reset
+    finally:
+        await machine.release_resources("测试结束")

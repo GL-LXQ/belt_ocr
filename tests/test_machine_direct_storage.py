@@ -4056,6 +4056,81 @@ async def test_cancelled_ocr_thread_keeps_capacity_until_actual_finish(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_shutdown_completes_queued_ocr_during_grace_period(tmp_path: Path) -> None:
+    """确认已 CLOSE 的周期在退出等待期间仍可完成识别和正式保存。
+
+    Args:
+        tmp_path: 临时数据库和证据目录。
+
+    Returns:
+        返回示例：
+            None  # 退出等待期间完成的识别正常提交，不生成失败审计
+    """
+    # 占用识别资源，保留尚未完成 OCR 的已关闭周期。
+    runtime, machine = create_background_runtime(tmp_path)
+    runtime.config = replace(runtime.config, shutdown_timeout_ms=5000)
+    resource_acquired = asyncio.Event()
+    resource_release = asyncio.Event()
+    resource_task = asyncio.create_task(hold_ocr_processing_resource(
+        machine.text_recognizer, resource_acquired, resource_release,
+    ))
+
+    # 记录真实退出流程开始等待周期结算的时刻。
+    drain_started = asyncio.Event()
+    original_wait_until_idle = runtime.wait_until_idle
+    shutdown_task = None
+
+    async def record_drain_started(timeout_seconds: float) -> None:
+        """通知测试退出等待已开始并继续执行真实结算等待。
+
+        Args:
+            timeout_seconds: 本次退出等待的最长秒数。
+
+        Returns:
+            返回示例：
+                None  # 全部周期已结算
+        """
+        drain_started.set()
+        await original_wait_until_idle(timeout_seconds)
+
+    runtime.wait_until_idle = record_drain_started
+    try:
+        await asyncio.wait_for(resource_acquired.wait(), 1)
+        await runtime.handle_start("1")
+        session = machine.active_session
+        session.measurement_frequencies = [FrequencyMeasurement(session.session_id, "meter-1", 50.0)]
+        await runtime.handle_close("1")
+
+        # 退出已进入正常等待阶段时才归还识别资源。
+        shutdown_task = asyncio.create_task(runtime.stop())
+        await asyncio.wait_for(drain_started.wait(), 1)
+        assert session.state == SessionState.RUNNING
+        assert not runtime.releasing_resources
+        assert not shutdown_task.done()
+        runtime.camera_sdk.close.assert_not_called()
+        resource_release.set()
+        await asyncio.wait_for(shutdown_task, 1)
+
+        # 核对正常提交的结果和完整资源回收。
+        assert session.state == SessionState.COMMITTED
+        assert session.errors == []
+        assert not machine.cycles
+        assert runtime.failure is None
+        runtime.camera_sdk.close.assert_called_once()
+        assert read_abnormal_events(runtime.database) == []
+        with sqlite3.connect(runtime.config.database_path) as connection:
+            saved_rows = connection.execute("SELECT session_id FROM measurement_records").fetchall()
+            assert saved_rows == [(session.session_id,)]
+    finally:
+        # 断言失败时也归还识别资源并等待系统退出。
+        resource_release.set()
+        await resource_task
+        await runtime.stop()
+        if shutdown_task is not None:
+            await shutdown_task
+
+
+@pytest.mark.asyncio
 async def test_shutdown_drains_multiple_background_storage_recognition_and_audit(
     tmp_path: Path,
 ):
@@ -4075,6 +4150,7 @@ async def test_shutdown_drains_multiple_background_storage_recognition_and_audit
     storage_started = asyncio.Event()
     recognition_started = asyncio.Event()
     audit_started = asyncio.Event()
+    resource_release_started = asyncio.Event()
     storage_release = threading.Event()
     recognition_release = threading.Event()
     audit_release = threading.Event()
@@ -4083,6 +4159,7 @@ async def test_shutdown_drains_multiple_background_storage_recognition_and_audit
     original_save = machine.save_evidence_images_and_measurement_record
     original_recognize = machine.text_recognizer.recognize_qualified_frames.side_effect
     original_audit = runtime.database.save_abnormal_event
+    original_camera_stop = machine.camera.stop
     storage_session_id = None
     recognition_session_id = None
     audit_session_id = None
@@ -4139,6 +4216,20 @@ async def test_shutdown_drains_multiple_background_storage_recognition_and_audit
             assert audit_release.wait(5)
         original_audit(reason, *arguments, **keyword_arguments)
 
+    async def stop_camera_and_record_release() -> None:
+        """完成退出停流并通知测试已进入资源释放阶段。
+
+        Args:
+            无外部参数。
+
+        Returns:
+            返回示例：
+                None  # 相机交付已结束，退出流程继续取消识别任务
+        """
+        await original_camera_stop()
+        resource_release_started.set()
+
+    machine.camera.stop = stop_camera_and_record_release
     machine.save_evidence_images_and_measurement_record = save_after_release
     machine.text_recognizer.recognize_qualified_frames.side_effect = (
         recognize_after_release
@@ -4179,6 +4270,8 @@ async def test_shutdown_drains_multiple_background_storage_recognition_and_audit
         await storage_task
         audit_release.set()
         await audit_task
+        await asyncio.wait_for(resource_release_started.wait(), 1)
+        assert runtime.releasing_resources
         assert not shutdown_task.done()
         assert not recognition_task.done()
         runtime.camera_sdk.close.assert_not_called()
@@ -4188,6 +4281,7 @@ async def test_shutdown_drains_multiple_background_storage_recognition_and_audit
 
         # 正式成功轮不重复失败，失败审计与 Session 分别对应。
         assert storage_session.state == SessionState.COMMITTED
+        assert recognition_task.cancelled()
         assert recognition_session.state == SessionState.FAILED
         assert audit_session.state == SessionState.FAILED
         assert not machine.cycles
